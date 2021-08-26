@@ -45,13 +45,18 @@ macro( build_arrow )
     add_library( arrow SHARED IMPORTED )
     set_target_properties( arrow
             PROPERTIES
-            IMPORTED_GLOBAL                 TRUE
-            IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.so
-            INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
+                IMPORTED_GLOBAL                 TRUE
+                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.so
+                INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies(arrow arrow_ep)
 endmacro()
 
 build_arrow()
+
+install( FILES  ${INSTALL_DIR}/lib/libarrow.so
+                ${INSTALL_DIR}/lib/libarrow.so.500
+                ${INSTALL_DIR}/lib/libarrow.so.500.0.0
+        DESTINATION lib )
 
 get_target_property( var arrow INTERFACE_INCLUDE_DIRECTORIES )
 message( STATUS ${var} )

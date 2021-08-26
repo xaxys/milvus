@@ -113,10 +113,15 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
         bitset = std::move(expr_ret);
     }
 
-    if (bitset.kind() != arrow::Datum::NONE) {
-        if (auto bitmask = segment->generate_timestamp_mask(timestamp_); bitmask) {
+    if (auto bitmask = segment->generate_timestamp_mask(timestamp_); bitmask) {
+        if (bitset.kind() != arrow::Datum::NONE) {
             bitset = cp::And(bitset, bitmask).ValueOrDie();
+        } else {
+            bitset = std::move(bitmask);
         }
+    }
+
+    if (bitset.kind() != arrow::Datum::NONE) {
         bitset = cp::Invert(bitset).ValueOrDie();
         const uint8_t* data = bitset.array()->GetValuesSafe<uint8_t>(1, 0);
         view = BitsetView(data, bitset.length());

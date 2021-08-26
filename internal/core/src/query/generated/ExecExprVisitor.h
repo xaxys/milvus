@@ -53,6 +53,9 @@ class ExecExprVisitor : public ExprVisitor {
     void
     visit(ArithExpr& expr) override;
 
+    void
+    visit(CastExpr& expr) override;
+
  public:
     using RetType = arrow::Datum;
     using Bitmask = std::deque<std::vector<bool>>;

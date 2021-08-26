@@ -321,7 +321,7 @@ ExecExprVisitor::visit(BinaryRangeExpr& expr) {
         default:
             PanicInfo("unsupported datatype");
     }
-    Assert(res.length() == row_count_);
+    Assert(res.is_scalar() || res.length() == row_count_);
     ret_ = std::move(res);
 }
 
@@ -339,7 +339,7 @@ ExecExprVisitor::visit(CompareExpr& expr) {
         {CompareOp::LessThan, "less"},
     };
     RetType res = cp::CallFunction(op_name.at(op), {left_res, right_res}).ValueOrDie();
-    Assert(res.length() == row_count_);
+    Assert(res.is_scalar() || res.length() == row_count_);
     ret_ = std::move(res);
 }
 
@@ -522,7 +522,7 @@ ExecExprVisitor::visit(ArithExpr& expr) {
         {ArithOp::BitXor, "bit_wise_xor"},
     };
     RetType res = cp::CallFunction(op_name.at(op), {left_res, right_res}).ValueOrDie();
-    Assert(res.length() == row_count_);
+    Assert(res.is_scalar() || res.length() == row_count_);
     ret_ = std::move(res);
 }
 
@@ -568,6 +568,19 @@ ExecExprVisitor::visit(ValueExpr& expr) {
         default:
             PanicInfo("unsupported datatype");
     }
+    ret_ = std::move(res);
+}
+
+void
+ExecExprVisitor::visit(CastExpr& expr) {
+    auto child_res = call_child(*expr.child_);
+    static const std::map<DataType, std::shared_ptr<arrow::DataType>> type_name = {
+        {DataType::BOOL, arrow::boolean()},   {DataType::INT8, arrow::int8()},   {DataType::INT16, arrow::int16()},
+        {DataType::INT32, arrow::int32()},    {DataType::INT64, arrow::int64()}, {DataType::FLOAT, arrow::float32()},
+        {DataType::DOUBLE, arrow::float64()},
+    };
+    RetType res = cp::Cast(child_res, cp::CastOptions::Unsafe(type_name.at(expr.data_type_))).ValueOrDie();
+    Assert(res.is_scalar() || res.length() == row_count_);
     ret_ = std::move(res);
 }
 }  // namespace milvus::query

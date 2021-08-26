@@ -169,4 +169,10 @@ struct ArithExpr : BinaryExprBase {
     void
     accept(ExprVisitor&) override;
 };
+
+struct CastExpr : UnaryExprBase {
+ public:
+    void
+    accept(ExprVisitor&) override;
+};
 }  // namespace milvus::query

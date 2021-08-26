@@ -611,7 +611,7 @@ TEST(Expr, TestArith) {
         {"BitXor", [](int64_t a, int16_t b) { return (a ^ b) >= b * b; }},
     };
 
-    // (age1 op age2) >= (age2 ** 2)
+    // (age1 op age2) >= ((int64)(age2) ** 2)
     auto string_tpl = R"(
 vector_anns: <
   field_id: 2021
@@ -641,11 +641,16 @@ vector_anns: <
       right: <
         arith_expr: <
           left: <
-            column_expr: <
-              column_info: <
-                field_id: 1080
-                data_type: Int16
+            cast_expr: <
+              child: <
+                column_expr: <
+                  column_info: <
+                    field_id: 1080
+                    data_type: Int16
+                  >
+                >
               >
+              data_type: Int64
             >
           >
           right: <

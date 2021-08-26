@@ -132,7 +132,11 @@ ShowExprVisitor::visit(TermExpr& expr) {
         }
     }();
 
-    Json res{{"expr_type", "Term"}, {"data_type", datatype_name(expr.data_type_)}, {"terms", std::move(terms)}};
+    Json res{
+        {"expr_type", "Term"},
+        {"data_type", datatype_name(expr.data_type_)},
+        {"terms", std::move(terms)},
+    };
 
     ret_ = combine(std::move(res), expr);
 }
@@ -144,10 +148,12 @@ UnaryRangeExtract(const UnaryRangeExpr& expr_raw) {
     using proto::plan::CompareOp_Name;
     auto expr = dynamic_cast<const UnaryRangeExprImpl<T>*>(&expr_raw);
     Assert(expr);
-    Json res{{"expr_type", "UnaryRange"},
-             {"data_type", datatype_name(expr->data_type_)},
-             {"op", CompareOp_Name(static_cast<CompareOp>(expr->op_type_))},
-             {"value", expr->value_}};
+    Json res{
+        {"expr_type", "UnaryRange"},
+        {"data_type", datatype_name(expr->data_type_)},
+        {"op", CompareOp_Name(static_cast<CompareOp>(expr->op_type_))},
+        {"value", expr->value_},
+    };
     return res;
 }
 
@@ -188,12 +194,14 @@ static Json
 RangeExtract(const BinaryRangeExpr& expr_raw) {
     auto expr = dynamic_cast<const BinaryRangeExprImpl<T>*>(&expr_raw);
     Assert(expr);
-    Json res{{"expr_type", "BinaryRange"},
-             {"data_type", datatype_name(expr->data_type_)},
-             {"lower_inclusive", expr->lower_inclusive_},
-             {"upper_inclusive", expr->upper_inclusive_},
-             {"lower_value", expr->lower_value_},
-             {"upper_value", expr->upper_value_}};
+    Json res{
+        {"expr_type", "BinaryRange"},
+        {"data_type", datatype_name(expr->data_type_)},
+        {"lower_inclusive", expr->lower_inclusive_},
+        {"upper_inclusive", expr->upper_inclusive_},
+        {"lower_value", expr->lower_value_},
+        {"upper_value", expr->upper_value_},
+    };
     return res;
 }
 
@@ -235,9 +243,11 @@ ShowExprVisitor::visit(CompareExpr& expr) {
     using proto::plan::CompareOp_Name;
     Assert(!ret_.has_value());
 
-    Json res{{"expr_type", "Compare"},
-             {"data_type", datatype_name(expr.data_type_)},
-             {"op", CompareOp_Name(static_cast<CompareOp>(expr.op_type_))}};
+    Json res{
+        {"expr_type", "Compare"},
+        {"data_type", datatype_name(expr.data_type_)},
+        {"op", CompareOp_Name(static_cast<CompareOp>(expr.op_type_))},
+    };
     ret_ = combine(std::move(res), expr);
 }
 
@@ -245,9 +255,11 @@ void
 ShowExprVisitor::visit(ColumnExpr& expr) {
     Assert(!ret_.has_value());
     Assert(!datatype_is_vector(expr.data_type_));
-    Json res{{"expr_type", "Column"},
-             {"data_type", datatype_name(expr.data_type_)},
-             {"field_offset", expr.field_offset_.get()}};
+    Json res{
+        {"expr_type", "Column"},
+        {"data_type", datatype_name(expr.data_type_)},
+        {"field_offset", expr.field_offset_.get()},
+    };
     ret_ = res;
 }
 
@@ -267,7 +279,11 @@ static Json
 ValueExtract(const ValueExpr& expr_raw) {
     auto expr = dynamic_cast<const ValueExprImpl<T>*>(&expr_raw);
     Assert(expr);
-    Json res{{"expr_type", "Value"}, {"data_type", datatype_name(expr->data_type_)}, {"value", expr->value_}};
+    Json res{
+        {"expr_type", "Value"},
+        {"data_type", datatype_name(expr->data_type_)},
+        {"value", expr->value_},
+    };
     return res;
 }
 
@@ -301,5 +317,15 @@ ShowExprVisitor::visit(ValueExpr& expr) {
             PanicInfo("unsupported type");
     }
     ret_ = std::move(res);
+}
+
+void
+ShowExprVisitor::visit(CastExpr& expr) {
+    Assert(!ret_.has_value());
+    Json res{
+        {"expr_type", "Cast"},
+        {"data_type", datatype_name(expr.data_type_)},
+    };
+    ret_ = combine(std::move(res), expr);
 }
 }  // namespace milvus::query

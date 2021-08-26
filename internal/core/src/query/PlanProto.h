@@ -54,6 +54,9 @@ class ProtoParser {
     ParseValueExpr(const proto::plan::ValueExpr& expr_pb);
 
     ExprPtr
+    ParseCastExpr(const proto::plan::CastExpr& expr_pb);
+
+    ExprPtr
     ParseExpr(const proto::plan::Expr& expr_pb);
 
     std::unique_ptr<VectorPlanNode>

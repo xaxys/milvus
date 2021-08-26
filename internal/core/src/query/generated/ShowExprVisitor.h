@@ -46,6 +46,9 @@ class ShowExprVisitor : public ExprVisitor {
     void
     visit(ArithExpr& expr) override;
 
+    void
+    visit(CastExpr& expr) override;
+
  public:
     using RetType = Json;
 

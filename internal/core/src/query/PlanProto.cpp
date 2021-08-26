@@ -301,9 +301,7 @@ ProtoParser::ParseColumnExpr(const proto::plan::ColumnExpr& expr_pb) {
     auto result = std::make_unique<ColumnExpr>();
     auto& column_info = expr_pb.column_info();
     result->field_offset_ = schema.get_offset(FieldId(column_info.field_id()));
-    ;
     result->data_type_ = schema[result->field_offset_].get_data_type();
-    ;
     Assert(result->data_type_ == static_cast<DataType>(column_info.data_type()));
     return result;
 }
@@ -319,6 +317,12 @@ ProtoParser::ParseArithExpr(const proto::plan::ArithExpr& expr_pb) {
     return result;
 }
 
+template <typename T, typename U>
+static bool
+in_limits(const U& value) {
+    return value <= std::numeric_limits<T>::max() && value >= std::numeric_limits<T>::lowest();
+}
+
 ExprPtr
 ProtoParser::ParseValueExpr(const planpb::ValueExpr& expr_pb) {
     using pgv = planpb::GenericValue::ValCase;
@@ -331,20 +335,58 @@ ProtoParser::ParseValueExpr(const planpb::ValueExpr& expr_pb) {
             return result;
         }
         case pgv::kInt64Val: {
-            auto result = std::make_unique<ValueExprImpl<int64_t>>();
-            result->value_ = static_cast<int64_t>(value_proto.int64_val());
-            result->data_type_ = DataType::INT64;
-            return result;
+            auto value = static_cast<int64_t>(value_proto.int64_val());
+            if (in_limits<int8_t>(value)) {
+                auto result = std::make_unique<ValueExprImpl<int8_t>>();
+                result->value_ = value;
+                result->data_type_ = DataType::INT8;
+                return result;
+            }
+            if (in_limits<int16_t>(value)) {
+                auto result = std::make_unique<ValueExprImpl<int16_t>>();
+                result->value_ = value;
+                result->data_type_ = DataType::INT16;
+                return result;
+            }
+            if (in_limits<int32_t>(value)) {
+                auto result = std::make_unique<ValueExprImpl<int32_t>>();
+                result->value_ = value;
+                result->data_type_ = DataType::INT32;
+                return result;
+            }
+            {
+                auto result = std::make_unique<ValueExprImpl<int64_t>>();
+                result->value_ = value;
+                result->data_type_ = DataType::INT64;
+                return result;
+            }
         }
         case pgv::kFloatVal: {
-            auto result = std::make_unique<ValueExprImpl<double>>();
-            result->value_ = static_cast<double>(value_proto.float_val());
-            result->data_type_ = DataType::DOUBLE;
-            return result;
+            auto value = static_cast<double>(value_proto.float_val());
+            if (in_limits<float>(value)) {
+                auto result = std::make_unique<ValueExprImpl<float>>();
+                result->value_ = value;
+                result->data_type_ = DataType::FLOAT;
+                return result;
+            }
+            {
+                auto result = std::make_unique<ValueExprImpl<double>>();
+                result->value_ = value;
+                result->data_type_ = DataType::DOUBLE;
+                return result;
+            }
         }
         case proto::plan::GenericValue::VAL_NOT_SET:
             PanicInfo("value not set");
     }
+}
+
+ExprPtr
+ProtoParser::ParseCastExpr(const planpb::CastExpr& expr_pb) {
+    auto result = std::make_unique<CastExpr>();
+    result->child_ = ParseExpr(expr_pb.child());
+    result->data_type_ = static_cast<DataType>(expr_pb.data_type());
+    return result;
 }
 
 ExprPtr
@@ -377,6 +419,9 @@ ProtoParser::ParseExpr(const proto::plan::Expr& expr_pb) {
         }
         case ppe::kColumnExpr: {
             return ParseColumnExpr(expr_pb.column_expr());
+        }
+        case ppe::kCastExpr: {
+            return ParseCastExpr(expr_pb.cast_expr());
         }
         default:
             PanicInfo("unsupported expr proto node");

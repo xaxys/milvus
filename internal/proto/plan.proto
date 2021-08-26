@@ -66,6 +66,11 @@ message ColumnExpr {
   ColumnInfo column_info = 1;
 }
 
+message CastExpr {
+  Expr child = 1;
+  schema.DataType data_type = 2;
+}
+
 message ArithExpr {
   Expr left = 1;
   Expr right = 2;
@@ -119,6 +124,7 @@ message Expr {
     ArithExpr arith_expr = 7;
     ValueExpr value_expr = 8;
     ColumnExpr column_expr = 9;
+    CastExpr cast_expr = 10;
   };
 }
 

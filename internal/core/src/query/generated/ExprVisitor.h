@@ -45,5 +45,8 @@ class ExprVisitor {
 
     virtual void
     visit(ArithExpr&) = 0;
+
+    virtual void
+    visit(CastExpr&) = 0;
 };
 }  // namespace milvus::query

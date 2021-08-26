@@ -60,4 +60,9 @@ ArithExpr::accept(ExprVisitor& visitor) {
     visitor.visit(*this);
 }
 
+void
+CastExpr::accept(ExprVisitor& visitor) {
+    visitor.visit(*this);
+}
+
 }  // namespace milvus::query

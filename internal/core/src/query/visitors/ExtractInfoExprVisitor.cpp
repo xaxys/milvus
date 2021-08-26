@@ -83,4 +83,10 @@ void
 ExtractInfoExprVisitor::visit(ColumnExpr& expr) {
     plan_info_.add_involved_field(expr.field_offset_);
 }
+
+void
+ExtractInfoExprVisitor::visit(CastExpr& expr) {
+    visit_child(expr);
+}
+
 }  // namespace milvus::query
