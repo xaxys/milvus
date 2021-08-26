@@ -477,9 +477,10 @@ SegmentGrowingImpl::get_active_count(Timestamp ts) const {
     return *iter;
 }
 
-void
-SegmentGrowingImpl::mask_with_timestamps(boost::dynamic_bitset<>& bitset_chunk, Timestamp timestamp) const {
+std::shared_ptr<arrow::Array>
+SegmentGrowingImpl::generate_timestamp_mask(Timestamp timestamp) const {
     // DO NOTHING
+    return nullptr;
 }
 
 }  // namespace milvus::segcore

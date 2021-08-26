@@ -20,10 +20,16 @@ class ExprVisitor {
 
  public:
     virtual void
-    visit(LogicalUnaryExpr&) = 0;
+    visit(ColumnExpr&) = 0;
 
     virtual void
-    visit(LogicalBinaryExpr&) = 0;
+    visit(ValueExpr&) = 0;
+
+    virtual void
+    visit(UnaryLogicalExpr&) = 0;
+
+    virtual void
+    visit(BinaryLogicalExpr&) = 0;
 
     virtual void
     visit(TermExpr&) = 0;
@@ -36,5 +42,8 @@ class ExprVisitor {
 
     virtual void
     visit(CompareExpr&) = 0;
+
+    virtual void
+    visit(ArithExpr&) = 0;
 };
 }  // namespace milvus::query

@@ -11,6 +11,8 @@
 
 #include <gtest/gtest.h>
 #include "query/deprecated/ParserDeprecated.h"
+#include <google/protobuf/text_format.h>
+#include "query/PlanProto.h"
 #include "query/Expr.h"
 #include "query/PlanNode.h"
 #include "query/generated/ExprVisitor.h"
@@ -22,6 +24,7 @@
 #include "utils/tools.h"
 #include <regex>
 #include <boost/format.hpp>
+#include "pb/plan.pb.h"
 #include "segcore/SegmentGrowingImpl.h"
 using namespace milvus;
 
@@ -315,11 +318,14 @@ TEST(Expr, TestRange) {
         dsl_string.replace(loc, 4, clause);
         auto plan = CreatePlan(*schema, dsl_string);
         auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
-        EXPECT_EQ(final.size(), N * num_iters);
+        EXPECT_EQ(final.length(), N * num_iters);
 
+        Assert(final.is_array());
+        Assert(final.type()->Equals(arrow::BooleanType()));
+        const auto& array = final.array_as<arrow::BooleanArray>();
         for (int i = 0; i < N * num_iters; ++i) {
-            auto ans = final[i];
-
+            Assert(array->IsValid(i));
+            auto ans = array->GetView(i);
             auto val = age_col[i];
             auto ref = ref_func(val);
             ASSERT_EQ(ans, ref) << clause << "@" << i << "!!" << val;
@@ -397,11 +403,13 @@ TEST(Expr, TestTerm) {
         dsl_string.replace(loc, 4, clause);
         auto plan = CreatePlan(*schema, dsl_string);
         auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
-        EXPECT_EQ(final.size(), N * num_iters);
+        EXPECT_EQ(final.length(), N * num_iters);
 
+        Assert(final.is_array());
+        Assert(final.type()->Equals(arrow::BooleanType()));
+        const auto& array = final.array_as<arrow::BooleanArray>();
         for (int i = 0; i < N * num_iters; ++i) {
-            auto ans = final[i];
-
+            auto ans = array->GetView(i);
             auto val = age_col[i];
             auto ref = ref_func(val);
             ASSERT_EQ(ans, ref) << clause << "@" << i << "!!" << val;
@@ -497,10 +505,13 @@ TEST(Expr, TestSimpleDsl) {
         // std::cout << dsl.dump(2);
         auto plan = CreatePlan(*schema, dsl.dump());
         auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
-        EXPECT_EQ(final.size(), N * num_iters);
+        EXPECT_EQ(final.length(), N * num_iters);
 
+        Assert(final.is_array());
+        Assert(final.type()->Equals(arrow::BooleanType()));
+        const auto& array = final.array_as<arrow::BooleanArray>();
         for (int i = 0; i < N * num_iters; ++i) {
-            bool ans = final[i];
+            auto ans = array->GetView(i);
             auto val = age_col[i];
             auto ref = ref_func(val);
             ASSERT_EQ(ans, ref) << clause << "@" << i << "!!" << val;
@@ -571,10 +582,131 @@ TEST(Expr, TestCompare) {
         auto plan = CreatePlan(*schema, dsl_string);
         // std::cout << ShowPlanNodeVisitor().call_child(*plan->plan_node_) << std::endl;
         auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
-        EXPECT_EQ(final.size(), N * num_iters);
+        EXPECT_EQ(final.length(), N * num_iters);
 
+        Assert(final.is_array());
+        Assert(final.type()->Equals(arrow::BooleanType()));
+        const auto& array = final.array_as<arrow::BooleanArray>();
         for (int i = 0; i < N * num_iters; ++i) {
-            auto ans = final[i];
+            auto ans = array->GetView(i);
+
+            auto val1 = age1_col[i];
+            auto val2 = age2_col[i];
+            auto ref = ref_func(val1, val2);
+            ASSERT_EQ(ans, ref) << clause << "@" << i << "!!" << boost::format("[%1%, %2%]") % val1 % val2;
+        }
+    }
+}
+
+TEST(Expr, TestArith) {
+    using namespace milvus::query;
+    using namespace milvus::segcore;
+    std::vector<std::tuple<std::string, std::function<bool(int64_t, int16_t)>>> testcases = {
+        {"Add", [](int64_t a, int16_t b) { return (a + b) >= b * b; }},
+        {"Subtract", [](int64_t a, int16_t b) { return (a - b) >= b * b; }},
+        {"Multiply", [](int64_t a, int16_t b) { return (a * b) >= b * b; }},
+        {"Divide", [](int64_t a, int16_t b) { return (a / b) >= b * b; }},
+        {"BitAnd", [](int64_t a, int16_t b) { return (a & b) >= b * b; }},
+        {"BitOr", [](int64_t a, int16_t b) { return (a | b) >= b * b; }},
+        {"BitXor", [](int64_t a, int16_t b) { return (a ^ b) >= b * b; }},
+    };
+
+    // (age1 op age2) >= (age2 ** 2)
+    auto string_tpl = R"(
+vector_anns: <
+  field_id: 2021
+  predicates: <
+    compare_expr: <
+      left: <
+        arith_expr: <
+          left: <
+            column_expr: <
+              column_info: <
+                field_id: 1070
+                data_type: Int64
+              >
+            >
+          >
+          right: <
+            column_expr: <
+              column_info: <
+                field_id: 1080
+                data_type: Int16
+              >
+            >
+          >
+          op: %1%
+        >
+      >
+      right: <
+        arith_expr: <
+          left: <
+            column_expr: <
+              column_info: <
+                field_id: 1080
+                data_type: Int16
+              >
+            >
+          >
+          right: <
+            value_expr: <
+              value: <
+                int64_val: 2
+              >
+            >
+          >
+          op: Power
+        >
+      >
+      op: GreaterEqual
+    >
+  >
+  query_info: <
+    topk: 10
+    metric_type: "L2"
+    search_params: "{\"nprobe\": 10}"
+  >
+  placeholder_tag: "$0"
+>
+)";
+
+    auto schema = std::make_shared<Schema>();
+    schema->AddField(FieldName("fakevec"), FieldId(2021), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
+    schema->AddField(FieldName("age1"), FieldId(1070), DataType::INT64);
+    schema->AddField(FieldName("age2"), FieldId(1080), DataType::INT16);
+
+    auto seg = CreateGrowingSegment(schema);
+    int N = 10000;
+    std::vector<int64_t> age1_col;
+    std::vector<int16_t> age2_col;
+    int num_iters = 100;
+    for (int iter = 0; iter < num_iters; ++iter) {
+        auto raw_data = DataGen(schema, N, iter);
+        auto new_age1_col = raw_data.get_col<int64_t>(1);
+        auto new_age2_col = raw_data.get_col<int16_t>(2);
+        age1_col.insert(age1_col.end(), new_age1_col.begin(), new_age1_col.end());
+        age2_col.insert(age2_col.end(), new_age2_col.begin(), new_age2_col.end());
+        seg->PreInsert(N);
+        seg->Insert(iter * N, N, raw_data.row_ids_.data(), raw_data.timestamps_.data(), raw_data.raw_);
+    }
+
+    auto seg_promote = dynamic_cast<SegmentGrowingImpl*>(seg.get());
+    ExecExprVisitor visitor(*seg_promote, seg_promote->get_row_count(), MAX_TIMESTAMP);
+    for (auto [clause, ref_func] : testcases) {
+        auto proto_text = boost::str(boost::format(string_tpl) % clause);
+        proto::plan::PlanNode node_proto;
+        google::protobuf::TextFormat::ParseFromString(proto_text, &node_proto);
+        // std::cout << node_proto.DebugString();
+        auto plan = ProtoParser(*schema).CreatePlan(node_proto);
+        // std::cout << ShowPlanNodeVisitor().call_child(*plan->plan_node_) << std::endl;
+        auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
+        EXPECT_EQ(final.length(), N * num_iters);
+
+        Assert(final.is_array());
+        Assert(final.type()->Equals(arrow::BooleanType()));
+        const auto& array = final.array_as<arrow::BooleanArray>();
+        for (int i = 0; i < N * num_iters; ++i) {
+            auto ans = array->GetView(i);
 
             auto val1 = age1_col[i];
             auto val2 = age2_col[i];

@@ -52,7 +52,7 @@ StructuredIndexFlat<T>::In(const size_t n, const T* values) {
     for (size_t i = 0; i < n; ++i) {
         for (const auto& index : data_) {
             if (index->a_ == *(values + i)) {
-                bitset->set(index->idx_);
+                bitset->at(index->idx_) = true;
             }
         }
     }
@@ -65,12 +65,11 @@ StructuredIndexFlat<T>::NotIn(const size_t n, const T* values) {
     if (!is_built_) {
         build();
     }
-    TargetBitmapPtr bitset = std::make_unique<TargetBitmap>(data_.size());
-    bitset->set();
+    TargetBitmapPtr bitset = std::make_unique<TargetBitmap>(data_.size(), true);
     for (size_t i = 0; i < n; ++i) {
         for (const auto& index : data_) {
             if (index->a_ == *(values + i)) {
-                bitset->reset(index->idx_);
+                bitset->at(index->idx_) = false;
             }
         }
     }
@@ -90,22 +89,22 @@ StructuredIndexFlat<T>::Range(const T value, const OperatorType op) {
         switch (op) {
             case OperatorType::LT:
                 if (lb < IndexStructure<T>(value)) {
-                    bitset->set(lb->idx_);
+                    bitset->at(lb->idx_) = true;
                 }
                 break;
             case OperatorType::LE:
                 if (lb <= IndexStructure<T>(value)) {
-                    bitset->set(lb->idx_);
+                    bitset->at(lb->idx_) = true;
                 }
                 break;
             case OperatorType::GT:
                 if (lb > IndexStructure<T>(value)) {
-                    bitset->set(lb->idx_);
+                    bitset->at(lb->idx_) = true;
                 }
                 break;
             case OperatorType::GE:
                 if (lb >= IndexStructure<T>(value)) {
-                    bitset->set(lb->idx_);
+                    bitset->at(lb->idx_) = true;
                 }
                 break;
             default:
@@ -131,19 +130,19 @@ StructuredIndexFlat<T>::Range(T lower_bound_value, bool lb_inclusive, T upper_bo
     for (; lb < ub; ++lb) {
         if (lb_inclusive && ub_inclusive) {
             if (lb >= IndexStructure<T>(lower_bound_value) && lb <= IndexStructure<T>(upper_bound_value)) {
-                bitset->set(lb->idx_);
+                bitset->at(lb->idx_) = true;
             }
         } else if (lb_inclusive && !ub_inclusive) {
             if (lb >= IndexStructure<T>(lower_bound_value) && lb < IndexStructure<T>(upper_bound_value)) {
-                bitset->set(lb->idx_);
+                bitset->at(lb->idx_) = true;
             }
         } else if (!lb_inclusive && ub_inclusive) {
             if (lb > IndexStructure<T>(lower_bound_value) && lb <= IndexStructure<T>(upper_bound_value)) {
-                bitset->set(lb->idx_);
+                bitset->at(lb->idx_) = true;
             }
         } else {
             if (lb > IndexStructure<T>(lower_bound_value) && lb < IndexStructure<T>(upper_bound_value)) {
-                bitset->set(lb->idx_);
+                bitset->at(lb->idx_) = true;
             }
         }
     }

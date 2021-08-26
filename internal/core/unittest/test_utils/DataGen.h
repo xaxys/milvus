@@ -156,9 +156,17 @@ DataGen(SchemaPtr schema, int64_t N, uint64_t seed = 42) {
                 break;
             }
             case engine::DataType::INT32: {
-                vector<int> data(N);
+                vector<int32_t> data(N);
                 for (auto& x : data) {
                     x = er() % (2 * N);
+                }
+                insert_cols(data);
+                break;
+            }
+            case engine::DataType::INT16: {
+                vector<int16_t> data(N);
+                for (auto& x : data) {
+                    while (!x) x = er() % (2 * N);
                 }
                 insert_cols(data);
                 break;

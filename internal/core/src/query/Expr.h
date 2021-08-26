@@ -21,8 +21,45 @@
 namespace milvus::query {
 class ExprVisitor;
 
+enum class CompareOp {
+    InvalidCompareOp = 0,
+    GreaterThan = 1,
+    GreaterEqual = 2,
+    LessThan = 3,
+    LessEqual = 4,
+    Equal = 5,
+    NotEqual = 6,
+};
+
+enum class ArithOp {
+    InvalidArithOp = 0,
+    Add = 1,
+    Subtract = 2,
+    Multiply = 3,
+    Divide = 4,
+    Modulo = 5,
+    Power = 6,
+    BitAnd = 7,
+    BitOr = 8,
+    BitXor = 9,
+};
+
+enum class UnaryLogicalOp {
+    InvalidUnaryOp = 0,
+    LogicalNot = 1,
+};
+
+enum class BinaryLogicalOp {
+    InvalidBinaryOp = 0,
+    LogicalAnd = 1,
+    LogicalOr = 2,
+    LogicalXor = 3,
+};
+
 // Base of all Exprs
 struct Expr {
+    DataType data_type_ = DataType::NONE;
+
  public:
     virtual ~Expr() = default;
     virtual void
@@ -40,29 +77,41 @@ struct UnaryExprBase : Expr {
     ExprPtr child_;
 };
 
-struct LogicalUnaryExpr : UnaryExprBase {
-    enum class OpType { Invalid = 0, LogicalNot = 1 };
-    OpType op_type_;
-
- public:
-    void
-    accept(ExprVisitor&) override;
-};
-
-struct LogicalBinaryExpr : BinaryExprBase {
-    // Note: bitA - bitB == bitA & ~bitB, alias to LogicalMinus
-    enum class OpType { Invalid = 0, LogicalAnd = 1, LogicalOr = 2, LogicalXor = 3, LogicalMinus = 4 };
-    OpType op_type_;
-
- public:
-    void
-    accept(ExprVisitor&) override;
-};
-
-struct TermExpr : Expr {
+struct ColumnExpr : Expr {
     FieldOffset field_offset_;
-    DataType data_type_ = DataType::NONE;
 
+ public:
+    void
+    accept(ExprVisitor&) override;
+};
+
+struct ValueExpr : Expr {
+ protected:
+    // prevent accidential instantiation
+    ValueExpr() = default;
+
+ public:
+    void
+    accept(ExprVisitor&) override;
+};
+
+struct UnaryLogicalExpr : UnaryExprBase {
+    UnaryLogicalOp op_type_;
+
+ public:
+    void
+    accept(ExprVisitor&) override;
+};
+
+struct BinaryLogicalExpr : BinaryExprBase {
+    BinaryLogicalOp op_type_;
+
+ public:
+    void
+    accept(ExprVisitor&) override;
+};
+
+struct TermExpr : UnaryExprBase {
  protected:
     // prevent accidential instantiation
     TermExpr() = default;
@@ -72,27 +121,16 @@ struct TermExpr : Expr {
     accept(ExprVisitor&) override;
 };
 
-enum class OpType {
-    Invalid = 0,
-    GreaterThan = 1,
-    GreaterEqual = 2,
-    LessThan = 3,
-    LessEqual = 4,
-    Equal = 5,
-    NotEqual = 6,
-};
-
-static const std::map<std::string, OpType> mapping_ = {
+// deprecated
+static const std::map<std::string, CompareOp> mapping_ = {
     // op_name -> op
-    {"lt", OpType::LessThan},    {"le", OpType::LessEqual},    {"lte", OpType::LessEqual},
-    {"gt", OpType::GreaterThan}, {"ge", OpType::GreaterEqual}, {"gte", OpType::GreaterEqual},
-    {"eq", OpType::Equal},       {"ne", OpType::NotEqual},
+    {"lt", CompareOp::LessThan},    {"le", CompareOp::LessEqual},    {"lte", CompareOp::LessEqual},
+    {"gt", CompareOp::GreaterThan}, {"ge", CompareOp::GreaterEqual}, {"gte", CompareOp::GreaterEqual},
+    {"eq", CompareOp::Equal},       {"ne", CompareOp::NotEqual},
 };
 
-struct UnaryRangeExpr : Expr {
-    FieldOffset field_offset_;
-    DataType data_type_ = DataType::NONE;
-    OpType op_type_;
+struct UnaryRangeExpr : UnaryExprBase {
+    CompareOp op_type_;
 
  protected:
     // prevent accidential instantiation
@@ -103,9 +141,7 @@ struct UnaryRangeExpr : Expr {
     accept(ExprVisitor&) override;
 };
 
-struct BinaryRangeExpr : Expr {
-    FieldOffset field_offset_;
-    DataType data_type_ = DataType::NONE;
+struct BinaryRangeExpr : UnaryExprBase {
     bool lower_inclusive_;
     bool upper_inclusive_;
 
@@ -118,12 +154,16 @@ struct BinaryRangeExpr : Expr {
     accept(ExprVisitor&) override;
 };
 
-struct CompareExpr : Expr {
-    FieldOffset left_field_offset_;
-    FieldOffset right_field_offset_;
-    DataType left_data_type_;
-    DataType right_data_type_;
-    OpType op_type_;
+struct CompareExpr : BinaryExprBase {
+    CompareOp op_type_;
+
+ public:
+    void
+    accept(ExprVisitor&) override;
+};
+
+struct ArithExpr : BinaryExprBase {
+    ArithOp op_type_;
 
  public:
     void

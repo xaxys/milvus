@@ -108,7 +108,7 @@ StructuredIndexSort<T>::In(const size_t n, const T* values) {
                 LOG_KNOWHERE_ERROR_ << "error happens in StructuredIndexSort<T>::In, experted value is: "
                                     << *(values + i) << ", but real value is: " << lb->a_;
             }
-            bitset->set(lb->idx_);
+            bitset->at(lb->idx_) = true;
         }
     }
     return bitset;
@@ -120,8 +120,7 @@ StructuredIndexSort<T>::NotIn(const size_t n, const T* values) {
     if (!is_built_) {
         build();
     }
-    TargetBitmapPtr bitset = std::make_unique<TargetBitmap>(data_.size());
-    bitset->set();
+    TargetBitmapPtr bitset = std::make_unique<TargetBitmap>(data_.size(), true);
     for (size_t i = 0; i < n; ++i) {
         auto lb = std::lower_bound(data_.begin(), data_.end(), IndexStructure<T>(*(values + i)));
         auto ub = std::upper_bound(data_.begin(), data_.end(), IndexStructure<T>(*(values + i)));
@@ -130,7 +129,7 @@ StructuredIndexSort<T>::NotIn(const size_t n, const T* values) {
                 LOG_KNOWHERE_ERROR_ << "error happens in StructuredIndexSort<T>::NotIn, experted value is: "
                                     << *(values + i) << ", but real value is: " << lb->a_;
             }
-            bitset->reset(lb->idx_);
+            bitset->at(lb->idx_) = false;
         }
     }
     return bitset;
@@ -162,7 +161,7 @@ StructuredIndexSort<T>::Range(const T value, const OperatorType op) {
             KNOWHERE_THROW_MSG("Invalid OperatorType:" + std::to_string((int)op) + "!");
     }
     for (; lb < ub; ++lb) {
-        bitset->set(lb->idx_);
+        bitset->at(lb->idx_) = true;
     }
     return bitset;
 }
@@ -191,7 +190,7 @@ StructuredIndexSort<T>::Range(T lower_bound_value, bool lb_inclusive, T upper_bo
         ub = std::lower_bound(data_.begin(), data_.end(), IndexStructure<T>(upper_bound_value));
     }
     for (; lb < ub; ++lb) {
-        bitset->set(lb->idx_);
+        bitset->at(lb->idx_) = true;
     }
     return bitset;
 }

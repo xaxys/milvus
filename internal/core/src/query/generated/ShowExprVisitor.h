@@ -20,10 +20,16 @@ namespace milvus::query {
 class ShowExprVisitor : public ExprVisitor {
  public:
     void
-    visit(LogicalUnaryExpr& expr) override;
+    visit(ColumnExpr& expr) override;
 
     void
-    visit(LogicalBinaryExpr& expr) override;
+    visit(ValueExpr& expr) override;
+
+    void
+    visit(UnaryLogicalExpr& expr) override;
+
+    void
+    visit(BinaryLogicalExpr& expr) override;
 
     void
     visit(TermExpr& expr) override;
@@ -36,6 +42,9 @@ class ShowExprVisitor : public ExprVisitor {
 
     void
     visit(CompareExpr& expr) override;
+
+    void
+    visit(ArithExpr& expr) override;
 
  public:
     using RetType = Json;

@@ -12,7 +12,7 @@
 #pragma once
 #include <common/Schema.h>
 #include <vector>
-#include <boost/dynamic_bitset.hpp>
+#include <arrow/api.h>
 #include <utility>
 
 namespace milvus::segcore {
@@ -31,11 +31,11 @@ class TimestampIndex {
     std::pair<int64_t, int64_t>
     get_active_range(Timestamp query_timestamp) const;
 
-    static boost::dynamic_bitset<>
-    GenerateBitset(Timestamp query_timestamp,
-                   std::pair<int64_t, int64_t> active_range,
-                   const Timestamp* timestamps,
-                   int64_t size);
+    static std::shared_ptr<arrow::Array>
+    GenerateBitmask(Timestamp query_timestamp,
+                    std::pair<int64_t, int64_t> active_range,
+                    const Timestamp* timestamps,
+                    int64_t size);
 
  private:
     // numSlice

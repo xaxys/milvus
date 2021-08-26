@@ -19,10 +19,16 @@ namespace milvus::query {
 class ExtractInfoExprVisitor : public ExprVisitor {
  public:
     void
-    visit(LogicalUnaryExpr& expr) override;
+    visit(ColumnExpr& expr) override;
 
     void
-    visit(LogicalBinaryExpr& expr) override;
+    visit(ValueExpr& expr) override;
+
+    void
+    visit(UnaryLogicalExpr& expr) override;
+
+    void
+    visit(BinaryLogicalExpr& expr) override;
 
     void
     visit(TermExpr& expr) override;
@@ -36,8 +42,22 @@ class ExtractInfoExprVisitor : public ExprVisitor {
     void
     visit(CompareExpr& expr) override;
 
+    void
+    visit(ArithExpr& expr) override;
+
  public:
     explicit ExtractInfoExprVisitor(ExtractedPlanInfo& plan_info) : plan_info_(plan_info) {
+    }
+
+    void
+    visit_child(UnaryExprBase& expr) {
+        expr.child_->accept(*this);
+    }
+
+    void
+    visit_child(BinaryExprBase& expr) {
+        expr.left_->accept(*this);
+        expr.right_->accept(*this);
     }
 
  private:

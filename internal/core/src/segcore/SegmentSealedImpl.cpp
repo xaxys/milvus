@@ -468,22 +468,23 @@ SegmentSealedImpl::LoadSegmentMeta(const proto::segcore::LoadSegmentMeta& segmen
     timestamp_index_.set_length_meta(std::move(slice_lengths));
     PanicInfo("unimplemented");
 }
+
 int64_t
 SegmentSealedImpl::get_active_count(Timestamp ts) const {
     // TODO optimize here to reduce expr search range
     return this->get_row_count();
 }
-void
-SegmentSealedImpl::mask_with_timestamps(boost::dynamic_bitset<>& bitset_chunk, Timestamp timestamp) const {
+
+std::shared_ptr<arrow::Array>
+SegmentSealedImpl::generate_timestamp_mask(Timestamp timestamp) const {
     // TODO change the
     Assert(this->timestamps_.size() == get_row_count());
     auto range = timestamp_index_.get_active_range(timestamp);
     if (range.first == range.second && range.first == this->timestamps_.size()) {
         // just skip
-        return;
+        return nullptr;
     }
-    auto mask = TimestampIndex::GenerateBitset(timestamp, range, this->timestamps_.data(), this->timestamps_.size());
-    bitset_chunk &= mask;
+    return TimestampIndex::GenerateBitmask(timestamp, range, this->timestamps_.data(), this->timestamps_.size());
 }
 
 SegmentSealedPtr

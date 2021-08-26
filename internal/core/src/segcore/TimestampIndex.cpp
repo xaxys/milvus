@@ -59,21 +59,22 @@ TimestampIndex::get_active_range(Timestamp query_timestamp) const {
     Assert(0 <= block_id && block_id < lengths_.size());
     return {start_locs_[block_id], start_locs_[block_id + 1]};
 }
-boost::dynamic_bitset<>
-TimestampIndex::GenerateBitset(Timestamp query_timestamp,
-                               std::pair<int64_t, int64_t> active_range,
-                               const Timestamp* timestamps,
-                               int64_t size) {
+
+std::shared_ptr<arrow::Array>
+TimestampIndex::GenerateBitmask(Timestamp query_timestamp,
+                                std::pair<int64_t, int64_t> active_range,
+                                const Timestamp* timestamps,
+                                int64_t size) {
     auto [beg, end] = active_range;
     Assert(beg < end);
-    boost::dynamic_bitset<> bitset;
-    bitset.reserve(size);
-    bitset.resize(beg, true);
-    bitset.resize(size, false);
+    arrow::BooleanBuilder builder;
+    builder.Reserve(size);
+    builder.AppendValues(beg, true);
     for (int64_t i = beg; i < end; ++i) {
-        bitset[i] = timestamps[i] <= query_timestamp;
+        builder.Append(timestamps[i] <= query_timestamp);
     }
-    return bitset;
+    builder.AppendValues(size - end, false);
+    return builder.Finish().ValueOrDie();
 }
 
 std::vector<int64_t>

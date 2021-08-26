@@ -58,34 +58,33 @@ class ShowExprNodeVisitor : ExprVisitor {
 #endif
 
 void
-ShowExprVisitor::visit(LogicalUnaryExpr& expr) {
+ShowExprVisitor::visit(UnaryLogicalExpr& expr) {
     Assert(!ret_.has_value());
-    using OpType = LogicalUnaryExpr::OpType;
 
     // TODO: use magic_enum if available
-    Assert(expr.op_type_ == OpType::LogicalNot);
+    Assert(expr.op_type_ == UnaryLogicalOp::LogicalNot);
     auto op_name = "LogicalNot";
 
     Json extra{
-        {"expr_type", "BoolUnary"},
+        {"expr_type", "UnaryLogical"},
+        {"data_type", datatype_name(expr.data_type_)},
         {"op", op_name},
     };
-    ret_ = this->combine(std::move(extra), expr);
+    ret_ = combine(std::move(extra), expr);
 }
 
 void
-ShowExprVisitor::visit(LogicalBinaryExpr& expr) {
+ShowExprVisitor::visit(BinaryLogicalExpr& expr) {
     Assert(!ret_.has_value());
-    using OpType = LogicalBinaryExpr::OpType;
 
     // TODO: use magic_enum if available
-    auto op_name = [](OpType op) {
+    auto op_name = [](BinaryLogicalOp op) {
         switch (op) {
-            case OpType::LogicalAnd:
+            case BinaryLogicalOp::LogicalAnd:
                 return "LogicalAnd";
-            case OpType::LogicalOr:
+            case BinaryLogicalOp::LogicalOr:
                 return "LogicalOr";
-            case OpType::LogicalXor:
+            case BinaryLogicalOp::LogicalXor:
                 return "LogicalXor";
             default:
                 PanicInfo("unsupported op");
@@ -93,10 +92,11 @@ ShowExprVisitor::visit(LogicalBinaryExpr& expr) {
     }(expr.op_type_);
 
     Json extra{
-        {"expr_type", "BoolBinary"},
+        {"expr_type", "BinaryLogical"},
+        {"data_type", datatype_name(expr.data_type_)},
         {"op", op_name},
     };
-    ret_ = this->combine(std::move(extra), expr);
+    ret_ = combine(std::move(extra), expr);
 }
 
 template <typename T>
@@ -110,9 +110,9 @@ TermExtract(const TermExpr& expr_raw) {
 void
 ShowExprVisitor::visit(TermExpr& expr) {
     Assert(!ret_.has_value());
-    Assert(datatype_is_vector(expr.data_type_) == false);
+    Assert(!datatype_is_vector(expr.child_->data_type_));
     auto terms = [&] {
-        switch (expr.data_type_) {
+        switch (expr.child_->data_type_) {
             case DataType::BOOL:
                 return TermExtract<bool>(expr);
             case DataType::INT8:
@@ -132,25 +132,21 @@ ShowExprVisitor::visit(TermExpr& expr) {
         }
     }();
 
-    Json res{{"expr_type", "Term"},
-             {"field_offset", expr.field_offset_.get()},
-             {"data_type", datatype_name(expr.data_type_)},
-             {"terms", std::move(terms)}};
+    Json res{{"expr_type", "Term"}, {"data_type", datatype_name(expr.data_type_)}, {"terms", std::move(terms)}};
 
-    ret_ = res;
+    ret_ = combine(std::move(res), expr);
 }
 
 template <typename T>
 static Json
 UnaryRangeExtract(const UnaryRangeExpr& expr_raw) {
-    using proto::plan::OpType;
-    using proto::plan::OpType_Name;
+    using proto::plan::CompareOp;
+    using proto::plan::CompareOp_Name;
     auto expr = dynamic_cast<const UnaryRangeExprImpl<T>*>(&expr_raw);
     Assert(expr);
     Json res{{"expr_type", "UnaryRange"},
-             {"field_offset", expr->field_offset_.get()},
              {"data_type", datatype_name(expr->data_type_)},
-             {"op", OpType_Name(static_cast<OpType>(expr->op_type_))},
+             {"op", CompareOp_Name(static_cast<CompareOp>(expr->op_type_))},
              {"value", expr->value_}};
     return res;
 }
@@ -158,43 +154,41 @@ UnaryRangeExtract(const UnaryRangeExpr& expr_raw) {
 void
 ShowExprVisitor::visit(UnaryRangeExpr& expr) {
     Assert(!ret_.has_value());
-    Assert(datatype_is_vector(expr.data_type_) == false);
-    switch (expr.data_type_) {
+    Json res;
+    switch (expr.child_->data_type_) {
         case DataType::BOOL:
-            ret_ = UnaryRangeExtract<bool>(expr);
-            return;
+            res = UnaryRangeExtract<bool>(expr);
+            break;
         case DataType::INT8:
-            ret_ = UnaryRangeExtract<int8_t>(expr);
-            return;
+            res = UnaryRangeExtract<int8_t>(expr);
+            break;
         case DataType::INT16:
-            ret_ = UnaryRangeExtract<int16_t>(expr);
-            return;
+            res = UnaryRangeExtract<int16_t>(expr);
+            break;
         case DataType::INT32:
-            ret_ = UnaryRangeExtract<int32_t>(expr);
-            return;
+            res = UnaryRangeExtract<int32_t>(expr);
+            break;
         case DataType::INT64:
-            ret_ = UnaryRangeExtract<int64_t>(expr);
-            return;
+            res = UnaryRangeExtract<int64_t>(expr);
+            break;
         case DataType::DOUBLE:
-            ret_ = UnaryRangeExtract<double>(expr);
-            return;
+            res = UnaryRangeExtract<double>(expr);
+            break;
         case DataType::FLOAT:
-            ret_ = UnaryRangeExtract<float>(expr);
-            return;
+            res = UnaryRangeExtract<float>(expr);
+            break;
         default:
             PanicInfo("unsupported type");
     }
+    ret_ = combine(std::move(res), expr);
 }
 
 template <typename T>
 static Json
-BinaryRangeExtract(const BinaryRangeExpr& expr_raw) {
-    using proto::plan::OpType;
-    using proto::plan::OpType_Name;
+RangeExtract(const BinaryRangeExpr& expr_raw) {
     auto expr = dynamic_cast<const BinaryRangeExprImpl<T>*>(&expr_raw);
     Assert(expr);
     Json res{{"expr_type", "BinaryRange"},
-             {"field_offset", expr->field_offset_.get()},
              {"data_type", datatype_name(expr->data_type_)},
              {"lower_inclusive", expr->lower_inclusive_},
              {"upper_inclusive", expr->upper_inclusive_},
@@ -206,46 +200,106 @@ BinaryRangeExtract(const BinaryRangeExpr& expr_raw) {
 void
 ShowExprVisitor::visit(BinaryRangeExpr& expr) {
     Assert(!ret_.has_value());
-    Assert(datatype_is_vector(expr.data_type_) == false);
-    switch (expr.data_type_) {
+    Json res;
+    switch (expr.child_->data_type_) {
         case DataType::BOOL:
-            ret_ = BinaryRangeExtract<bool>(expr);
-            return;
+            res = RangeExtract<bool>(expr);
+            break;
         case DataType::INT8:
-            ret_ = BinaryRangeExtract<int8_t>(expr);
-            return;
+            res = RangeExtract<int8_t>(expr);
+            break;
         case DataType::INT16:
-            ret_ = BinaryRangeExtract<int16_t>(expr);
-            return;
+            res = RangeExtract<int16_t>(expr);
+            break;
         case DataType::INT32:
-            ret_ = BinaryRangeExtract<int32_t>(expr);
-            return;
+            res = RangeExtract<int32_t>(expr);
+            break;
         case DataType::INT64:
-            ret_ = BinaryRangeExtract<int64_t>(expr);
-            return;
+            res = RangeExtract<int64_t>(expr);
+            break;
         case DataType::DOUBLE:
-            ret_ = BinaryRangeExtract<double>(expr);
-            return;
+            res = RangeExtract<double>(expr);
+            break;
         case DataType::FLOAT:
-            ret_ = BinaryRangeExtract<float>(expr);
-            return;
+            res = RangeExtract<float>(expr);
+            break;
         default:
             PanicInfo("unsupported type");
     }
+    ret_ = combine(std::move(res), expr);
 }
 
 void
 ShowExprVisitor::visit(CompareExpr& expr) {
-    using proto::plan::OpType;
-    using proto::plan::OpType_Name;
+    using proto::plan::CompareOp;
+    using proto::plan::CompareOp_Name;
     Assert(!ret_.has_value());
 
     Json res{{"expr_type", "Compare"},
-             {"left_field_offset", expr.left_field_offset_.get()},
-             {"left_data_type", datatype_name(expr.left_data_type_)},
-             {"right_field_offset", expr.right_field_offset_.get()},
-             {"right_data_type", datatype_name(expr.right_data_type_)},
-             {"op", OpType_Name(static_cast<OpType>(expr.op_type_))}};
+             {"data_type", datatype_name(expr.data_type_)},
+             {"op", CompareOp_Name(static_cast<CompareOp>(expr.op_type_))}};
+    ret_ = combine(std::move(res), expr);
+}
+
+void
+ShowExprVisitor::visit(ColumnExpr& expr) {
+    Assert(!ret_.has_value());
+    Assert(!datatype_is_vector(expr.data_type_));
+    Json res{{"expr_type", "Column"},
+             {"data_type", datatype_name(expr.data_type_)},
+             {"field_offset", expr.field_offset_.get()}};
     ret_ = res;
+}
+
+void
+ShowExprVisitor::visit(ArithExpr& expr) {
+    using proto::plan::ArithOp;
+    using proto::plan::ArithOp_Name;
+    Assert(!ret_.has_value());
+    Json res{{"expr_type", "Arith"},
+             {"data_type", datatype_name(expr.data_type_)},
+             {"op", ArithOp_Name(static_cast<ArithOp>(expr.op_type_))}};
+    ret_ = combine(std::move(res), expr);
+}
+
+template <typename T>
+static Json
+ValueExtract(const ValueExpr& expr_raw) {
+    auto expr = dynamic_cast<const ValueExprImpl<T>*>(&expr_raw);
+    Assert(expr);
+    Json res{{"expr_type", "Value"}, {"data_type", datatype_name(expr->data_type_)}, {"value", expr->value_}};
+    return res;
+}
+
+void
+ShowExprVisitor::visit(ValueExpr& expr) {
+    Assert(!ret_.has_value());
+    Json res;
+    switch (expr.data_type_) {
+        case DataType::BOOL:
+            res = ValueExtract<bool>(expr);
+            break;
+        case DataType::INT8:
+            res = ValueExtract<int8_t>(expr);
+            break;
+        case DataType::INT16:
+            res = ValueExtract<int16_t>(expr);
+            break;
+        case DataType::INT32:
+            res = ValueExtract<int32_t>(expr);
+            break;
+        case DataType::INT64:
+            res = ValueExtract<int64_t>(expr);
+            break;
+        case DataType::DOUBLE:
+            res = ValueExtract<double>(expr);
+            break;
+        case DataType::FLOAT:
+            res = ValueExtract<float>(expr);
+            break;
+        default:
+            PanicInfo("unsupported type");
+    }
+    ret_ = std::move(res);
 }
 }  // namespace milvus::query

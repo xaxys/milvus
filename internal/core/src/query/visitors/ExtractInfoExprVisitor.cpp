@@ -22,6 +22,17 @@ class ExtractInfoExprVisitor : ExprVisitor {
     explicit ExtractInfoExprVisitor(ExtractedPlanInfo& plan_info) : plan_info_(plan_info) {
     }
 
+    void
+    visit_child(UnaryExprBase& expr) {
+        expr.child_->accept(*this);
+    }
+
+    void
+    visit_child(BinaryExprBase& expr) {
+        expr.left_->accept(*this);
+        expr.right_->accept(*this);
+    }
+
  private:
     ExtractedPlanInfo& plan_info_;
 };
@@ -29,35 +40,47 @@ class ExtractInfoExprVisitor : ExprVisitor {
 #endif
 
 void
-ExtractInfoExprVisitor::visit(LogicalUnaryExpr& expr) {
-    expr.child_->accept(*this);
+ExtractInfoExprVisitor::visit(UnaryLogicalExpr& expr) {
+    visit_child(expr);
 }
 
 void
-ExtractInfoExprVisitor::visit(LogicalBinaryExpr& expr) {
-    expr.left_->accept(*this);
-    expr.right_->accept(*this);
+ExtractInfoExprVisitor::visit(BinaryLogicalExpr& expr) {
+    visit_child(expr);
 }
 
 void
 ExtractInfoExprVisitor::visit(TermExpr& expr) {
-    plan_info_.add_involved_field(expr.field_offset_);
+    visit_child(expr);
 }
 
 void
 ExtractInfoExprVisitor::visit(UnaryRangeExpr& expr) {
-    plan_info_.add_involved_field(expr.field_offset_);
+    visit_child(expr);
 }
 
 void
 ExtractInfoExprVisitor::visit(BinaryRangeExpr& expr) {
-    plan_info_.add_involved_field(expr.field_offset_);
+    visit_child(expr);
 }
 
 void
 ExtractInfoExprVisitor::visit(CompareExpr& expr) {
-    plan_info_.add_involved_field(expr.left_field_offset_);
-    plan_info_.add_involved_field(expr.right_field_offset_);
+    visit_child(expr);
 }
 
+void
+ExtractInfoExprVisitor::visit(ArithExpr& expr) {
+    visit_child(expr);
+}
+
+void
+ExtractInfoExprVisitor::visit(ValueExpr& expr) {
+    return;
+}
+
+void
+ExtractInfoExprVisitor::visit(ColumnExpr& expr) {
+    plan_info_.add_involved_field(expr.field_offset_);
+}
 }  // namespace milvus::query

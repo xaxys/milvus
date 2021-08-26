@@ -18,7 +18,6 @@
 #include "query/generated/ExecExprVisitor.h"
 #include "query/SearchOnGrowing.h"
 #include "query/SearchOnSealed.h"
-#include "boost_ext/dynamic_bitset_ext.hpp"
 
 namespace milvus::query {
 
@@ -62,6 +61,8 @@ class ExecPlanNodeVisitor : PlanNodeVisitor {
 }  // namespace impl
 #endif
 
+namespace cp = ::arrow::compute;
+
 static SearchResult
 empty_search_result(int64_t num_queries, int64_t topk, MetricType metric_type) {
     SearchResult final_result;
@@ -85,7 +86,7 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
     auto src_data = ph.get_blob<EmbeddedType<VectorType>>();
     auto num_queries = ph.num_of_queries_;
 
-    boost::dynamic_bitset<> bitset_holder;
+    arrow::Datum bitset;
     BitsetView view;
     // TODO: add API to unify row_count
     // auto row_count = segment->get_row_count();
@@ -98,15 +99,27 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
     }
 
     if (node.predicate_.has_value()) {
-        ExecExprVisitor::RetType expr_ret =
-            ExecExprVisitor(*segment, active_count, timestamp_).call_child(*node.predicate_.value());
-        bitset_holder = std::move(expr_ret);
+        auto expr_ret = ExecExprVisitor(*segment, active_count, timestamp_).call_child(*node.predicate_.value());
+        if (!expr_ret.type()->Equals(arrow::BooleanType())) {
+            expr_ret = cp::CallFunction("equal", {expr_ret, arrow::Datum(0)}).ValueOrDie();
+        }
+        // BinaryRangeExpr may return arrow::BooleanScalar(false) in case like "3 < a < 2"
+        if (expr_ret.is_scalar()) {
+            arrow::BooleanBuilder builder;
+            builder.AppendValues(active_count, expr_ret.scalar_as<arrow::BooleanScalar>().value);
+            expr_ret = builder.Finish().ValueOrDie();
+        }
+        Assert(expr_ret.is_array());
+        bitset = std::move(expr_ret);
     }
-    segment->mask_with_timestamps(bitset_holder, timestamp_);
 
-    if (!bitset_holder.empty()) {
-        bitset_holder.flip();
-        view = BitsetView((uint8_t*)boost_ext::get_data(bitset_holder), bitset_holder.size());
+    if (bitset.kind() != arrow::Datum::NONE) {
+        if (auto bitmask = segment->generate_timestamp_mask(timestamp_); bitmask) {
+            bitset = cp::And(bitset, bitmask).ValueOrDie();
+        }
+        bitset = cp::Invert(bitset).ValueOrDie();
+        const uint8_t* data = bitset.array()->GetValuesSafe<uint8_t>(1, 0);
+        view = BitsetView(data, bitset.length());
     }
 
     segment->vector_search(active_count, node.search_info_, src_data, num_queries, MAX_TIMESTAMP, view, ret);

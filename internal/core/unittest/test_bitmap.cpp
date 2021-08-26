@@ -24,14 +24,21 @@ TEST(Bitmap, Naive) {
     auto vec = raw_data.get_col<float>(0);
     auto sort_index = std::make_shared<knowhere::scalar::StructuredIndexSort<float>>();
     sort_index->Build(N, vec.data());
+    auto bit_count = [](const auto& container) {
+        int64_t count = 0;
+        for (const auto& bit : container) {
+            count += bit;
+        }
+        return count;
+    };
     {
         auto res = sort_index->Range(0, knowhere::scalar::OperatorType::LT);
-        double count = res->count();
+        double count = bit_count(*res);
         ASSERT_NEAR(count / N, 0.5, 0.01);
     }
     {
         auto res = sort_index->Range(-1, false, 1, true);
-        double count = res->count();
+        double count = bit_count(*res);
         ASSERT_NEAR(count / N, 0.682, 0.01);
     }
 }

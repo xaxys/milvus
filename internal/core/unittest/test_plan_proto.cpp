@@ -80,9 +80,13 @@ vector_anns: <
   field_id: 201
   predicates: <
     unary_range_expr: <
-      column_info: <
-        field_id: %1%
-        data_type: %2%
+      child: <
+        column_expr: <
+          column_info: <
+            field_id: %1%
+            data_type: %2%
+          >
+        >
       >
       op: GreaterThan
       value: <
@@ -161,9 +165,13 @@ vector_anns: <
   field_id: 201
   predicates: <
     term_expr: <
-      column_info: <
-        field_id: %1%
-        data_type: %2%
+      child: <
+        column_expr: <
+          column_info: <
+            field_id: %1%
+            data_type: %2%
+          >
+        >
       >
       values: <
         %3%: 1
@@ -229,7 +237,7 @@ vector_anns: <
     plan->check_identical(*ref_plan);
 }
 
-TEST(PlanProtoTest, NotExpr) {
+TEST(PlanProtoXTest, NotExpr) {
     auto schema = getStandardSchema();
     // xxx.query(predicates = "not (int64field > 3)", topk = 10, ...)
     auto data_type = spb::DataType::Int64;
@@ -247,13 +255,17 @@ TEST(PlanProtoTest, NotExpr) {
 vector_anns: <
   field_id: 201
   predicates: <
-    unary_expr: <
+    unary_logical_expr: <
       op: Not
       child: <
         unary_range_expr: <
-          column_info: <
-            field_id: %1%
-            data_type: %2%
+          child: <
+            column_expr: <
+              column_info: <
+                field_id: %1%
+                data_type: %2%
+              >
+            >
           >
           op: GreaterThan
           value: <
@@ -320,7 +332,7 @@ vector_anns: <
     plan->check_identical(*ref_plan);
 }
 
-TEST(PlanProtoTest, AndOrExpr) {
+TEST(PlanProtoXTest, AndOrExpr) {
     auto schema = getStandardSchema();
     // xxx.query(predicates = "(int64field < 3) && (int64field > 2 || int64field == 1)", topk = 10, ...)
     auto data_type = spb::DataType::Int64;
@@ -338,13 +350,17 @@ TEST(PlanProtoTest, AndOrExpr) {
 vector_anns: <
   field_id: 201
   predicates: <
-    binary_expr: <
+    binary_logical_expr: <
       op: LogicalAnd
       left: <
         unary_range_expr: <
-          column_info: <
-            field_id: 105
-            data_type: Int64
+          child: <
+            column_expr: <
+              column_info: <
+                field_id: 105
+                data_type: Int64
+              >
+            >
           >
           op: LessThan
           value: <
@@ -353,13 +369,17 @@ vector_anns: <
         >
       >
       right: <
-        binary_expr: <
+        binary_logical_expr: <
           op: LogicalOr
           left: <
             unary_range_expr: <
-              column_info: <
-                field_id: 105
-                data_type: Int64
+              child: <
+                column_expr: <
+                  column_info: <
+                    field_id: 105
+                    data_type: Int64
+                  >
+                >
               >
               op: GreaterThan
               value: <
@@ -369,9 +389,13 @@ vector_anns: <
           >
           right: <
             unary_range_expr: <
-              column_info: <
-                field_id: 105
-                data_type: Int64
+              child: <
+                column_expr: <
+                  column_info: <
+                    field_id: 105
+                    data_type: Int64
+                  >
+                >
               >
               op: Equal
               value: <
@@ -470,13 +494,21 @@ vector_anns: <
   field_id: 201
   predicates: <
     compare_expr: <
-      left_column_info: <
-        field_id: 128
-        data_type: Int64
+      left: <
+        column_expr: <
+          column_info: <
+            field_id: 128
+            data_type: Int64
+          >
+        >
       >
-      right_column_info: <
-        field_id: %1%
-        data_type: %2%
+      right: <
+        column_expr: <
+          column_info: <
+            field_id: %1%
+            data_type: %2%
+          >
+        >
       >
       op: LessThan
     >
@@ -532,4 +564,83 @@ vector_anns: <
 
     auto ref_plan = CreatePlan(*schema, dsl_text);
     plan->check_identical(*ref_plan);
+}
+
+TEST_P(PlanProtoTest, ArithExpr) {
+    auto schema = getStandardSchema();
+    schema->AddField(FieldName("age1"), FieldId(128), DataType::INT64);
+    // xxx.query(predicates = "int64field < int64field", topk = 10, ...)
+    auto data_type = std::get<0>(GetParam());
+    auto field_id = 100 + (int)data_type;
+    auto data_type_str = spb::DataType_Name(data_type);
+    auto field_name = data_type_str + "Field";
+
+    // (age1 + xxxField) / 3 >= 11037.0
+    auto fmt1 = boost::format(R"(
+vector_anns: <
+  field_id: 201
+  predicates: <
+    compare_expr: <
+      left: <
+        arith_expr: <
+          left: <
+            arith_expr: <
+              left: <
+                column_expr: <
+                  column_info: <
+                    field_id: 128
+                    data_type: Int64
+                  >
+                >
+              >
+              right: <
+                column_expr: <
+                  column_info: <
+                    field_id: %1%
+                    data_type: %2%
+                  >
+                >
+              >
+              op: Add
+            >
+          >
+          right: <
+            value_expr: <
+              value: <
+                int64_val: 3
+              >
+            >
+          >
+          op: Divide
+        >
+      >
+      right: <
+        value_expr: <
+          value: <
+            float_val: 11037.0
+          >
+        >
+      >
+      op: GreaterEqual
+    >
+  >
+  query_info: <
+    topk: 10
+    metric_type: "L2"
+    search_params: "{\"nprobe\": 10}"
+  >
+  placeholder_tag: "$0"
+>
+)") % field_id % data_type_str;
+
+    auto proto_text = fmt1.str();
+    planpb::PlanNode node_proto;
+    google::protobuf::TextFormat::ParseFromString(proto_text, &node_proto);
+    // std::cout << node_proto.DebugString();
+    auto plan = ProtoParser(*schema).CreatePlan(node_proto);
+
+    ShowPlanNodeVisitor visitor;
+    auto json = visitor.call_child(*plan->plan_node_);
+    // std::cout << json.dump(2);
+    auto extra_info = plan->extra_info_opt_.value();
 }

@@ -13,10 +13,12 @@
 // Generated File
 // DO NOT EDIT
 #include <optional>
+#include <arrow/api.h>
+#include <arrow/compute/api.h>
 #include <boost/dynamic_bitset.hpp>
-#include <boost/variant.hpp>
 #include <utility>
 #include <deque>
+#include <boost_ext/dynamic_bitset_ext.hpp>
 #include "segcore/SegmentGrowingImpl.h"
 #include "query/ExprImpl.h"
 #include "ExprVisitor.h"
@@ -25,10 +27,16 @@ namespace milvus::query {
 class ExecExprVisitor : public ExprVisitor {
  public:
     void
-    visit(LogicalUnaryExpr& expr) override;
+    visit(ColumnExpr& expr) override;
 
     void
-    visit(LogicalBinaryExpr& expr) override;
+    visit(ValueExpr& expr) override;
+
+    void
+    visit(UnaryLogicalExpr& expr) override;
+
+    void
+    visit(BinaryLogicalExpr& expr) override;
 
     void
     visit(TermExpr& expr) override;
@@ -42,8 +50,12 @@ class ExecExprVisitor : public ExprVisitor {
     void
     visit(CompareExpr& expr) override;
 
+    void
+    visit(ArithExpr& expr) override;
+
  public:
-    using RetType = boost::dynamic_bitset<>;
+    using RetType = arrow::Datum;
+    using Bitmask = std::deque<std::vector<bool>>;
     ExecExprVisitor(const segcore::SegmentInternalInterface& segment, int64_t row_count, Timestamp timestamp)
         : segment_(segment), row_count_(row_count), timestamp_(timestamp) {
     }
@@ -58,9 +70,9 @@ class ExecExprVisitor : public ExprVisitor {
     }
 
  public:
-    template <typename T, typename IndexFunc, typename ElementFunc>
+    template <typename T, typename IndexFunc>
     auto
-    ExecRangeVisitorImpl(FieldOffset field_offset, IndexFunc func, ElementFunc element_func) -> RetType;
+    GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc func) -> Bitmask;
 
     template <typename T>
     auto
@@ -74,9 +86,12 @@ class ExecExprVisitor : public ExprVisitor {
     auto
     ExecTermVisitorImpl(TermExpr& expr_raw) -> RetType;
 
-    template <typename CmpFunc>
     auto
-    ExecCompareExprDispatcher(CompareExpr& expr, CmpFunc cmp_func) -> RetType;
+    BuildFieldArray(const FieldOffset& offset, std::optional<Bitmask> bitmask = std::nullopt) -> RetType;
+
+    template <typename T, typename Builder>
+    void
+    ExtractFieldData(const FieldOffset& offset, Builder& builder, std::optional<Bitmask>& bitmask);
 
  private:
     const segcore::SegmentInternalInterface& segment_;

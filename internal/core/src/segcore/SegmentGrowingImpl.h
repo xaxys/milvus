@@ -163,8 +163,8 @@ class SegmentGrowingImpl : public SegmentGrowing {
           indexing_record_(*schema_, segcore_config_) {
     }
 
-    void
-    mask_with_timestamps(boost::dynamic_bitset<>& bitset_chunk, Timestamp timestamp) const override;
+    std::shared_ptr<arrow::Array>
+    generate_timestamp_mask(Timestamp timestamp) const override;
 
     void
     vector_search(int64_t vec_count,

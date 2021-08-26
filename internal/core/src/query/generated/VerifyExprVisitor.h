@@ -13,10 +13,12 @@
 // Generated File
 // DO NOT EDIT
 #include <optional>
+#include <arrow/api.h>
+#include <arrow/compute/api.h>
 #include <boost/dynamic_bitset.hpp>
-#include <boost/variant.hpp>
 #include <utility>
 #include <deque>
+#include <boost_ext/dynamic_bitset_ext.hpp>
 #include "segcore/SegmentGrowingImpl.h"
 #include "query/ExprImpl.h"
 #include "ExprVisitor.h"
@@ -25,10 +27,16 @@ namespace milvus::query {
 class VerifyExprVisitor : public ExprVisitor {
  public:
     void
-    visit(LogicalUnaryExpr& expr) override;
+    visit(ColumnExpr& expr) override;
 
     void
-    visit(LogicalBinaryExpr& expr) override;
+    visit(ValueExpr& expr) override;
+
+    void
+    visit(UnaryLogicalExpr& expr) override;
+
+    void
+    visit(BinaryLogicalExpr& expr) override;
 
     void
     visit(TermExpr& expr) override;
@@ -41,6 +49,9 @@ class VerifyExprVisitor : public ExprVisitor {
 
     void
     visit(CompareExpr& expr) override;
+
+    void
+    visit(ArithExpr& expr) override;
 
  public:
 };

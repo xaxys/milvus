@@ -16,12 +16,22 @@
 
 namespace milvus::query {
 void
-LogicalUnaryExpr::accept(ExprVisitor& visitor) {
+ColumnExpr::accept(ExprVisitor& visitor) {
     visitor.visit(*this);
 }
 
 void
-LogicalBinaryExpr::accept(ExprVisitor& visitor) {
+ValueExpr::accept(ExprVisitor& visitor) {
+    visitor.visit(*this);
+}
+
+void
+UnaryLogicalExpr::accept(ExprVisitor& visitor) {
+    visitor.visit(*this);
+}
+
+void
+BinaryLogicalExpr::accept(ExprVisitor& visitor) {
     visitor.visit(*this);
 }
 
@@ -42,6 +52,11 @@ BinaryRangeExpr::accept(ExprVisitor& visitor) {
 
 void
 CompareExpr::accept(ExprVisitor& visitor) {
+    visitor.visit(*this);
+}
+
+void
+ArithExpr::accept(ExprVisitor& visitor) {
     visitor.visit(*this);
 }
 

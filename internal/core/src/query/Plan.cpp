@@ -104,21 +104,26 @@ Parser::ParseCompareNode(const Json& out_body) {
     auto body = out_iter.value();
     Assert(body.is_array());
     Assert(body.size() == 2);
-    auto expr = std::make_unique<CompareExpr>();
-    expr->op_type_ = mapping_.at(op_name);
 
     auto& item0 = body[0];
     Assert(item0.is_string());
+    auto left = std::make_unique<ColumnExpr>();
     auto left_field_name = FieldName(item0.get<std::string>());
-    expr->left_data_type_ = schema[left_field_name].get_data_type();
-    expr->left_field_offset_ = schema.get_offset(left_field_name);
+    left->data_type_ = schema[left_field_name].get_data_type();
+    left->field_offset_ = schema.get_offset(left_field_name);
 
     auto& item1 = body[1];
     Assert(item1.is_string());
+    auto right = std::make_unique<ColumnExpr>();
     auto right_field_name = FieldName(item1.get<std::string>());
-    expr->right_data_type_ = schema[right_field_name].get_data_type();
-    expr->right_field_offset_ = schema.get_offset(right_field_name);
+    right->data_type_ = schema[right_field_name].get_data_type();
+    right->field_offset_ = schema.get_offset(right_field_name);
 
+    auto expr = std::make_unique<CompareExpr>();
+    expr->op_type_ = mapping_.at(op_name);
+    expr->data_type_ = DataType::BOOL;
+    expr->left_ = std::move(left);
+    expr->right_ = std::move(right);
     return expr;
 }
 
@@ -255,8 +260,11 @@ Parser::ParseTermNodeImpl(const FieldName& field_name, const Json& body) {
     Assert(body.is_object());
     auto values = body["values"];
 
-    expr->field_offset_ = field_offset;
-    expr->data_type_ = data_type;
+    auto child = std::make_unique<ColumnExpr>();
+    child->field_offset_ = field_offset;
+    child->data_type_ = data_type;
+    expr->child_ = std::move(child);
+    expr->data_type_ = DataType::BOOL;
     for (auto& value : values) {
         if constexpr (std::is_same_v<T, bool>) {
             Assert(value.is_boolean());
@@ -293,9 +301,13 @@ Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
             static_assert(always_false<T>, "unsupported type");
             __builtin_unreachable();
         }
+        auto child = std::make_unique<ColumnExpr>();
+        child->field_offset_ = schema.get_offset(field_name);
+        child->data_type_ = schema[field_name].get_data_type();
+
         auto expr = std::make_unique<UnaryRangeExprImpl<T>>();
-        expr->data_type_ = schema[field_name].get_data_type();
-        expr->field_offset_ = schema.get_offset(field_name);
+        expr->child_ = std::move(child);
+        expr->data_type_ = DataType::BOOL;
         expr->op_type_ = mapping_.at(op_name);
         expr->value_ = item.value();
         return expr;
@@ -321,15 +333,15 @@ Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
             }
             auto op = mapping_.at(op_name);
             switch (op) {
-                case OpType::GreaterEqual:
+                case CompareOp::GreaterEqual:
                     lower_inclusive = true;
-                case OpType::GreaterThan:
+                case CompareOp::GreaterThan:
                     lower_value = item.value();
                     has_lower_value = true;
                     break;
-                case OpType::LessEqual:
+                case CompareOp::LessEqual:
                     upper_inclusive = true;
-                case OpType::LessThan:
+                case CompareOp::LessThan:
                     upper_value = item.value();
                     has_upper_value = true;
                     break;
@@ -338,9 +350,13 @@ Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
             }
         }
         AssertInfo(has_lower_value && has_upper_value, "illegal binary-range node");
+        auto child = std::make_unique<ColumnExpr>();
+        child->field_offset_ = schema.get_offset(field_name);
+        child->data_type_ = schema[field_name].get_data_type();
+
         auto expr = std::make_unique<BinaryRangeExprImpl<T>>();
-        expr->data_type_ = schema[field_name].get_data_type();
-        expr->field_offset_ = schema.get_offset(field_name);
+        expr->data_type_ = DataType::BOOL;
+        expr->child_ = std::move(child);
         expr->lower_inclusive_ = lower_inclusive;
         expr->upper_inclusive_ = upper_inclusive;
         expr->lower_value_ = lower_value;
@@ -489,9 +505,9 @@ ExprPtr
 Parser::ParseMustNode(const Json& body) {
     auto item_list = ParseItemList(body);
     auto merger = [](ExprPtr left, ExprPtr right) {
-        using OpType = LogicalBinaryExpr::OpType;
-        auto res = std::make_unique<LogicalBinaryExpr>();
-        res->op_type_ = OpType::LogicalAnd;
+        auto res = std::make_unique<BinaryLogicalExpr>();
+        res->op_type_ = BinaryLogicalOp::LogicalAnd;
+        res->data_type_ = DataType::BOOL;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
         return res;
@@ -504,9 +520,9 @@ Parser::ParseShouldNode(const Json& body) {
     auto item_list = ParseItemList(body);
     Assert(item_list.size() >= 1);
     auto merger = [](ExprPtr left, ExprPtr right) {
-        using OpType = LogicalBinaryExpr::OpType;
-        auto res = std::make_unique<LogicalBinaryExpr>();
-        res->op_type_ = OpType::LogicalOr;
+        auto res = std::make_unique<BinaryLogicalExpr>();
+        res->op_type_ = BinaryLogicalOp::LogicalOr;
+        res->data_type_ = DataType::BOOL;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
         return res;
@@ -519,18 +535,18 @@ Parser::ParseMustNotNode(const Json& body) {
     auto item_list = ParseItemList(body);
     Assert(item_list.size() >= 1);
     auto merger = [](ExprPtr left, ExprPtr right) {
-        using OpType = LogicalBinaryExpr::OpType;
-        auto res = std::make_unique<LogicalBinaryExpr>();
-        res->op_type_ = OpType::LogicalAnd;
+        auto res = std::make_unique<BinaryLogicalExpr>();
+        res->op_type_ = BinaryLogicalOp::LogicalAnd;
+        res->data_type_ = DataType::BOOL;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
         return res;
     };
     auto subtree = ConstructTree(merger, std::move(item_list));
 
-    using OpType = LogicalUnaryExpr::OpType;
-    auto res = std::make_unique<LogicalUnaryExpr>();
-    res->op_type_ = OpType::LogicalNot;
+    auto res = std::make_unique<UnaryLogicalExpr>();
+    res->op_type_ = UnaryLogicalOp::LogicalNot;
+    res->data_type_ = DataType::BOOL;
     res->child_ = std::move(subtree);
 
     return res;

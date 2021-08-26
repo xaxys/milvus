@@ -25,6 +25,7 @@
 #include <vector>
 #include <utility>
 #include <string>
+#include <arrow/api.h>
 
 namespace milvus::segcore {
 
@@ -109,8 +110,8 @@ class SegmentInternalInterface : public SegmentInterface {
     virtual int64_t
     num_chunk_index(FieldOffset field_offset) const = 0;
 
-    virtual void
-    mask_with_timestamps(boost::dynamic_bitset<>& bitset_chunk, Timestamp timestamp) const = 0;
+    virtual std::shared_ptr<arrow::Array>
+    generate_timestamp_mask(Timestamp timestamp) const = 0;
 
     // count of chunks
     virtual int64_t

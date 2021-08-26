@@ -39,10 +39,19 @@ class ProtoParser {
     ParseTermExpr(const proto::plan::TermExpr& expr_pb);
 
     ExprPtr
-    ParseUnaryExpr(const proto::plan::UnaryExpr& expr_pb);
+    ParseUnaryLogicalExpr(const proto::plan::UnaryLogicalExpr& expr_pb);
 
     ExprPtr
-    ParseBinaryExpr(const proto::plan::BinaryExpr& expr_pb);
+    ParseBinaryLogicalExpr(const proto::plan::BinaryLogicalExpr& expr_pb);
+
+    ExprPtr
+    ParseColumnExpr(const proto::plan::ColumnExpr& expr_pb);
+
+    ExprPtr
+    ParseArithExpr(const proto::plan::ArithExpr& expr_pb);
+
+    ExprPtr
+    ParseValueExpr(const proto::plan::ValueExpr& expr_pb);
 
     ExprPtr
     ParseExpr(const proto::plan::Expr& expr_pb);

@@ -59,7 +59,7 @@ struct IndexStructure {
     T a_;
     size_t idx_;
 };
-using TargetBitmap = boost::dynamic_bitset<>;
+using TargetBitmap = std::vector<bool>;
 using TargetBitmapPtr = std::unique_ptr<TargetBitmap>;
 
 template <typename T>
