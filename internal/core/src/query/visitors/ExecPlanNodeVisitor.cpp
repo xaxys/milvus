@@ -103,7 +103,6 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
         if (!expr_ret.type()->Equals(arrow::BooleanType())) {
             expr_ret = cp::CallFunction("equal", {expr_ret, arrow::Datum(0)}).ValueOrDie();
         }
-        // BinaryRangeExpr may return arrow::BooleanScalar(false) in case like "3 < a < 2"
         if (expr_ret.is_scalar()) {
             arrow::BooleanBuilder builder;
             builder.AppendValues(active_count, expr_ret.scalar_as<arrow::BooleanScalar>().value);
@@ -129,7 +128,7 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
 
     segment->vector_search(active_count, node.search_info_, src_data, num_queries, MAX_TIMESTAMP, view, ret);
 
-    ret_ = ret;
+    ret_ = std::move(ret);
 }
 
 void

@@ -140,6 +140,15 @@ ExecExprVisitor::GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc index_f
     return bitmasks;
 }
 
+static ExecExprVisitor::ArrayPtr
+BuildBitmasksArray(const ExecExprVisitor::Bitmasks& bitmasks) {
+    arrow::BooleanBuilder builder;
+    for (const auto& bitmask : bitmasks) {
+        builder.AppendValues(bitmask);
+    }
+    return builder.Finish().ValueOrDie();
+}
+
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "Simplify"
 template <typename T>
@@ -200,16 +209,15 @@ ExecExprVisitor::ExecUnaryRangeVisitorDispatcher(UnaryRangeExpr& expr_raw) -> Re
             }
         }
         child_res = BuildFieldArray(field_offset, bitmasks.size());
-        arrow::BooleanBuilder builder;
-        for (const auto& bitmask : bitmasks) builder.AppendValues(bitmask);
-        index_res = builder.Finish().ValueOrDie();
+        index_res = BuildBitmasksArray(bitmasks);
     } else {
         child_res = call_child(*expr.child_);
     }
     auto scalar = arrow::Datum(val);
     auto res = cp::CallFunction(op_name.at(op), {child_res, scalar}).ValueOrDie();
-    if (index_res) res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
-    Assert(res.is_scalar() || res.length() == row_count_);
+    if (index_res->length() != 0) {
+        res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
+    }
     return res;
 }
 #pragma clang diagnostic pop
@@ -236,9 +244,7 @@ ExecExprVisitor::ExecBinaryRangeVisitorDispatcher(BinaryRangeExpr& expr_raw) -> 
         auto index_func = [=](Index* index) { return index->Range(val1, lower_inclusive, val2, upper_inclusive); };
         auto bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
         child_res = BuildFieldArray(field_offset, bitmasks.size());
-        arrow::BooleanBuilder builder;
-        for (const auto& bitmask : bitmasks) builder.AppendValues(bitmask);
-        index_res = builder.Finish().ValueOrDie();
+        index_res = BuildBitmasksArray(bitmasks);
     } else {
         child_res = call_child(*expr.child_);
     }
@@ -249,8 +255,9 @@ ExecExprVisitor::ExecBinaryRangeVisitorDispatcher(BinaryRangeExpr& expr_raw) -> 
     auto res1 = cp::CallFunction(op_name1, {child_res, scalar1}).ValueOrDie();
     auto res2 = cp::CallFunction(op_name2, {child_res, scalar2}).ValueOrDie();
     auto res = cp::And(res1, res2).ValueOrDie();
-    if (index_res) res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
-    Assert(res.is_scalar() || res.length() == row_count_);
+    if (index_res->length() != 0) {
+        res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
+    }
     return res;
 }
 #pragma clang diagnostic pop
@@ -290,7 +297,7 @@ ExecExprVisitor::visit(UnaryRangeExpr& expr) {
         default:
             PanicInfo("unsupported datatype");
     }
-    Assert(res.length() == row_count_);
+    Assert(res.is_scalar() || res.length() == row_count_);
     ret_ = std::move(res);
 }
 
