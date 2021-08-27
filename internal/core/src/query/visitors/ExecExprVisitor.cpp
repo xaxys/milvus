@@ -28,7 +28,8 @@ namespace impl {
 class ExecExprVisitor : ExprVisitor {
  public:
     using RetType = arrow::Datum;
-    using Bitmask = std::deque<std::vector<bool>>;
+    using Bitmasks = std::deque<std::vector<bool>>;
+    using ArrayPtr = std::shared_ptr<arrow::Array>;
     ExecExprVisitor(const segcore::SegmentInternalInterface& segment, int64_t row_count, Timestamp timestamp)
         : segment_(segment), row_count_(row_count), timestamp_(timestamp) {
     }
@@ -45,7 +46,7 @@ class ExecExprVisitor : ExprVisitor {
  public:
     template <typename T, typename IndexFunc>
     auto
-    GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc func) -> Bitmask;
+    GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc func) -> Bitmasks;
 
     template <typename T>
     auto
@@ -60,11 +61,11 @@ class ExecExprVisitor : ExprVisitor {
     ExecTermVisitorImpl(TermExpr& expr_raw) -> RetType;
 
     auto
-    BuildFieldArray(const FieldOffset& offset, std::optional<Bitmask> bitmask = std::nullopt) -> RetType;
+    BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset = 0) -> RetType;
 
     template <typename T, typename Builder>
     void
-    ExtractFieldData(const FieldOffset& offset, Builder& builder, std::optional<Bitmask>& bitmask);
+    ExtractFieldData(const FieldOffset& offset, Builder& builder, int64_t chunk_offset);
 
  private:
     const segcore::SegmentInternalInterface& segment_;
@@ -90,7 +91,7 @@ ExecExprVisitor::visit(UnaryLogicalExpr& expr) {
             PanicInfo("Invalid Unary Op");
         }
     }
-    Assert(res.length() == row_count_);
+    Assert(res.is_scalar() || res.length() == row_count_);
     ret_ = std::move(res);
 }
 
@@ -116,17 +117,17 @@ ExecExprVisitor::visit(BinaryLogicalExpr& expr) {
             PanicInfo("Invalid Binary Op");
         }
     }
-    Assert(res.length() == row_count_);
+    Assert(res.is_scalar() || res.length() == row_count_);
     ret_ = std::move(res);
 }
 
 template <typename T, typename IndexFunc>
 auto
-ExecExprVisitor::GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc index_func) -> Bitmask {
+ExecExprVisitor::GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc index_func) -> Bitmasks {
     auto indexing_barrier = segment_.num_chunk_index(field_offset);
     auto size_per_chunk = segment_.size_per_chunk();
     auto num_chunk = upper_div(row_count_, size_per_chunk);
-    Bitmask bitmask;
+    Bitmasks bitmasks;
     using Index = knowhere::scalar::StructuredIndex<T>;
     for (auto chunk_id = 0; chunk_id < indexing_barrier; ++chunk_id) {
         const Index& indexing = segment_.chunk_scalar_index<T>(field_offset, chunk_id);
@@ -134,13 +135,9 @@ ExecExprVisitor::GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc index_f
         // This is a dirty workaround
         auto data = index_func(const_cast<Index*>(&indexing));
         Assert(data->size() == size_per_chunk);
-        bitmask.emplace_back(std::move(*data));
+        bitmasks.emplace_back(std::move(*data));
     }
-    for (auto chunk_id = indexing_barrier; chunk_id < num_chunk; ++chunk_id) {
-        auto size = chunk_id == num_chunk - 1 ? row_count_ - chunk_id * size_per_chunk : size_per_chunk;
-        bitmask.emplace_back(std::vector<bool>(size, true));
-    }
-    return bitmask;
+    return bitmasks;
 }
 
 #pragma clang diagnostic push
@@ -160,54 +157,60 @@ ExecExprVisitor::ExecUnaryRangeVisitorDispatcher(UnaryRangeExpr& expr_raw) -> Re
         {CompareOp::LessThan, "less"},
     };
     RetType child_res;
+    ArrayPtr index_res;
     if (const auto child = dynamic_cast<ColumnExpr*>(expr.child_.get()); child) {
         // get bitmask from index
         using Index = knowhere::scalar::StructuredIndex<T>;
         using Operator = knowhere::scalar::OperatorType;
         auto field_offset = child->field_offset_;
-        Bitmask bitmask;
+        Bitmasks bitmasks;
         switch (op) {
             case CompareOp::Equal: {
                 auto index_func = [val](Index* index) { return index->In(1, &val); };
-                bitmask = GetBitmaskFromIndex<T>(field_offset, index_func);
+                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
                 break;
             }
             case CompareOp::NotEqual: {
                 auto index_func = [val](Index* index) { return index->NotIn(1, &val); };
-                bitmask = GetBitmaskFromIndex<T>(field_offset, index_func);
+                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
                 break;
             }
             case CompareOp::GreaterEqual: {
                 auto index_func = [val](Index* index) { return index->Range(val, Operator::GE); };
-                bitmask = GetBitmaskFromIndex<T>(field_offset, index_func);
+                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
                 break;
             }
             case CompareOp::GreaterThan: {
                 auto index_func = [val](Index* index) { return index->Range(val, Operator::GT); };
-                bitmask = GetBitmaskFromIndex<T>(field_offset, index_func);
+                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
                 break;
             }
             case CompareOp::LessEqual: {
                 auto index_func = [val](Index* index) { return index->Range(val, Operator::LE); };
-                bitmask = GetBitmaskFromIndex<T>(field_offset, index_func);
+                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
                 break;
             }
             case CompareOp::LessThan: {
                 auto index_func = [val](Index* index) { return index->Range(val, Operator::LT); };
-                bitmask = GetBitmaskFromIndex<T>(field_offset, index_func);
+                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
                 break;
             }
             default: {
                 PanicInfo("unsupported range node");
             }
         }
-        child_res = BuildFieldArray(field_offset, std::move(bitmask));
+        child_res = BuildFieldArray(field_offset, bitmasks.size());
+        arrow::BooleanBuilder builder;
+        for (const auto& bitmask : bitmasks) builder.AppendValues(bitmask);
+        index_res = builder.Finish().ValueOrDie();
     } else {
         child_res = call_child(*expr.child_);
     }
     auto scalar = arrow::Datum(val);
-    auto final_res = cp::CallFunction(op_name.at(op), {child_res, scalar}).ValueOrDie();
-    return cp::FillNull(final_res, arrow::Datum(false)).ValueOrDie();
+    auto res = cp::CallFunction(op_name.at(op), {child_res, scalar}).ValueOrDie();
+    if (index_res) res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
+    Assert(res.is_scalar() || res.length() == row_count_);
+    return res;
 }
 #pragma clang diagnostic pop
 
@@ -222,17 +225,20 @@ ExecExprVisitor::ExecBinaryRangeVisitorDispatcher(BinaryRangeExpr& expr_raw) -> 
     T val1 = expr.lower_value_;
     T val2 = expr.upper_value_;
     RetType child_res;
+    ArrayPtr index_res;
     if (val1 > val2 || (val1 == val2 && !(lower_inclusive && upper_inclusive))) {
         return arrow::Datum(false);
     }
     if (const auto child = dynamic_cast<ColumnExpr*>(expr.child_.get()); child) {
         // get bitmask from index
         using Index = knowhere::scalar::StructuredIndex<T>;
-        using Operator = knowhere::scalar::OperatorType;
         auto field_offset = child->field_offset_;
         auto index_func = [=](Index* index) { return index->Range(val1, lower_inclusive, val2, upper_inclusive); };
-        auto bitmask = GetBitmaskFromIndex<T>(field_offset, index_func);
-        child_res = BuildFieldArray(field_offset, std::move(bitmask));
+        auto bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+        child_res = BuildFieldArray(field_offset, bitmasks.size());
+        arrow::BooleanBuilder builder;
+        for (const auto& bitmask : bitmasks) builder.AppendValues(bitmask);
+        index_res = builder.Finish().ValueOrDie();
     } else {
         child_res = call_child(*expr.child_);
     }
@@ -242,8 +248,10 @@ ExecExprVisitor::ExecBinaryRangeVisitorDispatcher(BinaryRangeExpr& expr_raw) -> 
     std::string op_name2 = upper_inclusive ? "less_equal" : "less";
     auto res1 = cp::CallFunction(op_name1, {child_res, scalar1}).ValueOrDie();
     auto res2 = cp::CallFunction(op_name2, {child_res, scalar2}).ValueOrDie();
-    auto final_res = cp::And(res1, res2).ValueOrDie();
-    return cp::FillNull(final_res, arrow::Datum(false)).ValueOrDie();
+    auto res = cp::And(res1, res2).ValueOrDie();
+    if (index_res) res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
+    Assert(res.is_scalar() || res.length() == row_count_);
+    return res;
 }
 #pragma clang diagnostic pop
 
@@ -424,69 +432,60 @@ ExecExprVisitor::visit(TermExpr& expr) {
 
 template <typename T, typename Builder>
 void
-ExecExprVisitor::ExtractFieldData(const FieldOffset& offset, Builder& builder, std::optional<Bitmask>& bitmask) {
+ExecExprVisitor::ExtractFieldData(const FieldOffset& offset, Builder& builder, int64_t chunk_offset) {
     auto size_per_chunk = segment_.size_per_chunk();
     auto num_chunk = upper_div(row_count_, size_per_chunk);
-    auto num_bitmasks = bitmask ? bitmask->size() : 0;
-    for (int64_t chunk_id = 0; chunk_id < num_bitmasks; ++chunk_id) {
+    for (int64_t chunk_id = chunk_offset; chunk_id < num_chunk; ++chunk_id) {
         auto size = chunk_id == num_chunk - 1 ? row_count_ - chunk_id * size_per_chunk : size_per_chunk;
-        auto data = segment_.chunk_data<T>(offset, chunk_id).data();
-        auto validity = bitmask->at(chunk_id);
-        Assert(validity.size() == size);
-        builder.AppendValues(data, size, validity);
-    }
-    for (int64_t chunk_id = num_bitmasks; chunk_id < num_chunk; ++chunk_id) {
-        auto size = chunk_id == num_chunk - 1 ? row_count_ - chunk_id * size_per_chunk : size_per_chunk;
-        auto chunk_offset = chunk_id * size_per_chunk;
         auto data = segment_.chunk_data<T>(offset, chunk_id).data();
         builder.AppendValues(data, size);
     }
 }
 
 auto
-ExecExprVisitor::BuildFieldArray(const FieldOffset& offset, std::optional<Bitmask> bitmask) -> RetType {
+ExecExprVisitor::BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset) -> RetType {
     auto data_type = segment_.get_schema()[offset].get_data_type();
     RetType res;
     switch (data_type) {
         case DataType::BOOL: {
             auto builder = arrow::BooleanBuilder();
-            ExtractFieldData<uint8_t>(offset, builder, bitmask);
+            ExtractFieldData<uint8_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
             break;
         }
         case DataType::INT8: {
             auto builder = arrow::Int8Builder();
-            ExtractFieldData<int8_t>(offset, builder, bitmask);
+            ExtractFieldData<int8_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
             break;
         }
         case DataType::INT16: {
             auto builder = arrow::Int16Builder();
-            ExtractFieldData<int16_t>(offset, builder, bitmask);
+            ExtractFieldData<int16_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
             break;
         }
         case DataType::INT32: {
             auto builder = arrow::Int32Builder();
-            ExtractFieldData<int32_t>(offset, builder, bitmask);
+            ExtractFieldData<int32_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
             break;
         }
         case DataType::INT64: {
             auto builder = arrow::Int64Builder();
-            ExtractFieldData<int64_t>(offset, builder, bitmask);
+            ExtractFieldData<int64_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
             break;
         }
         case DataType::FLOAT: {
             auto builder = arrow::FloatBuilder();
-            ExtractFieldData<float>(offset, builder, bitmask);
+            ExtractFieldData<float>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
             break;
         }
         case DataType::DOUBLE: {
             auto builder = arrow::DoubleBuilder();
-            ExtractFieldData<double>(offset, builder, bitmask);
+            ExtractFieldData<double>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
             break;
         }

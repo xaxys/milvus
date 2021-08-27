@@ -58,7 +58,8 @@ class ExecExprVisitor : public ExprVisitor {
 
  public:
     using RetType = arrow::Datum;
-    using Bitmask = std::deque<std::vector<bool>>;
+    using Bitmasks = std::deque<std::vector<bool>>;
+    using ArrayPtr = std::shared_ptr<arrow::Array>;
     ExecExprVisitor(const segcore::SegmentInternalInterface& segment, int64_t row_count, Timestamp timestamp)
         : segment_(segment), row_count_(row_count), timestamp_(timestamp) {
     }
@@ -75,7 +76,7 @@ class ExecExprVisitor : public ExprVisitor {
  public:
     template <typename T, typename IndexFunc>
     auto
-    GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc func) -> Bitmask;
+    GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc func) -> Bitmasks;
 
     template <typename T>
     auto
@@ -90,11 +91,11 @@ class ExecExprVisitor : public ExprVisitor {
     ExecTermVisitorImpl(TermExpr& expr_raw) -> RetType;
 
     auto
-    BuildFieldArray(const FieldOffset& offset, std::optional<Bitmask> bitmask = std::nullopt) -> RetType;
+    BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset = 0) -> RetType;
 
     template <typename T, typename Builder>
     void
-    ExtractFieldData(const FieldOffset& offset, Builder& builder, std::optional<Bitmask>& bitmask);
+    ExtractFieldData(const FieldOffset& offset, Builder& builder, int64_t chunk_offset);
 
  private:
     const segcore::SegmentInternalInterface& segment_;
