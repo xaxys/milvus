@@ -104,12 +104,14 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
             expr_ret = cp::CallFunction("equal", {expr_ret, arrow::Datum(0)}).ValueOrDie();
         }
         if (expr_ret.is_scalar()) {
-            arrow::BooleanBuilder builder;
-            builder.AppendValues(active_count, expr_ret.scalar_as<arrow::BooleanScalar>().value);
-            expr_ret = builder.Finish().ValueOrDie();
+            if (!expr_ret.scalar_as<arrow::BooleanScalar>().value) {
+                ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.metric_type_);
+                return;
+            }
+        } else {
+            Assert(expr_ret.is_array());
+            bitset = std::move(expr_ret);
         }
-        Assert(expr_ret.is_array());
-        bitset = std::move(expr_ret);
     }
 
     if (auto bitmask = segment->generate_timestamp_mask(timestamp_); bitmask) {
