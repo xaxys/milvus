@@ -51,7 +51,10 @@ class ExecExprVisitor : public ExprVisitor {
     visit(CompareExpr& expr) override;
 
     void
-    visit(ArithExpr& expr) override;
+    visit(UnaryArithExpr& expr) override;
+
+    void
+    visit(BinaryArithExpr& expr) override;
 
     void
     visit(CastExpr& expr) override;

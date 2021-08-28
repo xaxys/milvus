@@ -43,7 +43,12 @@ VerifyExprVisitor::visit(CompareExpr& expr) {
 }
 
 void
-VerifyExprVisitor::visit(ArithExpr& expr) {
+VerifyExprVisitor::visit(UnaryArithExpr& expr) {
+    // TODO
+}
+
+void
+VerifyExprVisitor::visit(BinaryArithExpr& expr) {
     // TODO
 }
 

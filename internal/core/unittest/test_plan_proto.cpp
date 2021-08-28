@@ -582,9 +582,9 @@ vector_anns: <
   predicates: <
     compare_expr: <
       left: <
-        arith_expr: <
+        binary_arith_expr: <
           left: <
-            arith_expr: <
+            binary_arith_expr: <
               left: <
                 column_expr: <
                   column_info: <

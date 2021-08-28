@@ -512,20 +512,33 @@ ExecExprVisitor::visit(ColumnExpr& expr) {
 }
 
 void
-ExecExprVisitor::visit(ArithExpr& expr) {
+ExecExprVisitor::visit(UnaryArithExpr& expr) {
+    auto op = expr.op_type_;
+    auto child_res = call_child(*expr.child_);
+    static const std::map<UnaryArithOp, std::string> op_name = {
+        {UnaryArithOp::Minus, "negate"},
+        {UnaryArithOp::BitNot, "bit_wise_not"},
+    };
+    RetType res = cp::CallFunction(op_name.at(op), {child_res}).ValueOrDie();
+    Assert(res.is_scalar() || res.length() == row_count_);
+    ret_ = std::move(res);
+}
+
+void
+ExecExprVisitor::visit(BinaryArithExpr& expr) {
     auto op = expr.op_type_;
     auto left_res = call_child(*expr.left_);
     auto right_res = call_child(*expr.right_);
-    static const std::map<ArithOp, std::string> op_name = {
-        {ArithOp::Add, "add"},
-        {ArithOp::Subtract, "subtract"},
-        {ArithOp::Multiply, "multiply"},
-        {ArithOp::Divide, "divide"},
-        {ArithOp::Modulo, "modulo"},
-        {ArithOp::Power, "power"},
-        {ArithOp::BitAnd, "bit_wise_and"},
-        {ArithOp::BitOr, "bit_wise_or"},
-        {ArithOp::BitXor, "bit_wise_xor"},
+    static const std::map<BinaryArithOp, std::string> op_name = {
+        {BinaryArithOp::Add, "add"},
+        {BinaryArithOp::Subtract, "subtract"},
+        {BinaryArithOp::Multiply, "multiply"},
+        {BinaryArithOp::Divide, "divide"},
+        {BinaryArithOp::Modulo, "modulo"},
+        {BinaryArithOp::Power, "power"},
+        {BinaryArithOp::BitAnd, "bit_wise_and"},
+        {BinaryArithOp::BitOr, "bit_wise_or"},
+        {BinaryArithOp::BitXor, "bit_wise_xor"},
     };
     RetType res = cp::CallFunction(op_name.at(op), {left_res, right_res}).ValueOrDie();
     Assert(res.is_scalar() || res.length() == row_count_);

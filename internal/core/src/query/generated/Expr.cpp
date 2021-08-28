@@ -56,7 +56,12 @@ CompareExpr::accept(ExprVisitor& visitor) {
 }
 
 void
-ArithExpr::accept(ExprVisitor& visitor) {
+UnaryArithExpr::accept(ExprVisitor& visitor) {
+    visitor.visit(*this);
+}
+
+void
+BinaryArithExpr::accept(ExprVisitor& visitor) {
     visitor.visit(*this);
 }
 

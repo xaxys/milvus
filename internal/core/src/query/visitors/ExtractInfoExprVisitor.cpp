@@ -70,7 +70,12 @@ ExtractInfoExprVisitor::visit(CompareExpr& expr) {
 }
 
 void
-ExtractInfoExprVisitor::visit(ArithExpr& expr) {
+ExtractInfoExprVisitor::visit(UnaryArithExpr& expr) {
+    visit_child(expr);
+}
+
+void
+ExtractInfoExprVisitor::visit(BinaryArithExpr& expr) {
     visit_child(expr);
 }
 

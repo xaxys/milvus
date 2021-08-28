@@ -287,7 +287,7 @@ ExprPtr
 ProtoParser::ParseBinaryLogicalExpr(const proto::plan::BinaryLogicalExpr& expr_pb) {
     auto result = std::make_unique<BinaryLogicalExpr>();
     result->op_type_ = static_cast<BinaryLogicalOp>(expr_pb.op());
-    Assert(result->op_type_ != BinaryLogicalOp::InvalidBinaryOp);
+    Assert(result->op_type_ != BinaryLogicalOp::InvalidBinaryLogicalOp);
     result->data_type_ = DataType::BOOL;
     result->left_ = ParseExpr(expr_pb.left());
     result->right_ = ParseExpr(expr_pb.right());
@@ -307,12 +307,22 @@ ProtoParser::ParseColumnExpr(const proto::plan::ColumnExpr& expr_pb) {
 }
 
 ExprPtr
-ProtoParser::ParseArithExpr(const proto::plan::ArithExpr& expr_pb) {
-    auto result = std::make_unique<ArithExpr>();
-    result->op_type_ = static_cast<ArithOp>(expr_pb.op());
-    Assert(result->op_type_ != ArithOp::InvalidArithOp);
-    result->left_ = this->ParseExpr(expr_pb.left());
-    result->right_ = this->ParseExpr(expr_pb.right());
+ProtoParser::ParseUnaryArithExpr(const proto::plan::UnaryArithExpr& expr_pb) {
+    auto result = std::make_unique<UnaryArithExpr>();
+    result->op_type_ = static_cast<UnaryArithOp>(expr_pb.op());
+    Assert(result->op_type_ != UnaryArithOp::InvalidUnaryArithOp);
+    result->child_ = ParseExpr(expr_pb.child());
+    result->data_type_ = result->child_->data_type_;
+    return result;
+}
+
+ExprPtr
+ProtoParser::ParseBinaryArithExpr(const proto::plan::BinaryArithExpr& expr_pb) {
+    auto result = std::make_unique<BinaryArithExpr>();
+    result->op_type_ = static_cast<BinaryArithOp>(expr_pb.op());
+    Assert(result->op_type_ != BinaryArithOp::InvalidBinaryArithOp);
+    result->left_ = ParseExpr(expr_pb.left());
+    result->right_ = ParseExpr(expr_pb.right());
     result->data_type_ = getSameType(result->left_->data_type_, result->right_->data_type_);
     return result;
 }
@@ -411,8 +421,11 @@ ProtoParser::ParseExpr(const proto::plan::Expr& expr_pb) {
         case ppe::kBinaryRangeExpr: {
             return ParseBinaryRangeExpr(expr_pb.binary_range_expr());
         }
-        case ppe::kArithExpr: {
-            return ParseArithExpr(expr_pb.arith_expr());
+        case ppe::kUnaryArithExpr: {
+            return ParseUnaryArithExpr(expr_pb.unary_arith_expr());
+        }
+        case ppe::kBinaryArithExpr: {
+            return ParseBinaryArithExpr(expr_pb.binary_arith_expr());
         }
         case ppe::kValueExpr: {
             return ParseValueExpr(expr_pb.value_expr());

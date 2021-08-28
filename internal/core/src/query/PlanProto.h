@@ -48,7 +48,10 @@ class ProtoParser {
     ParseColumnExpr(const proto::plan::ColumnExpr& expr_pb);
 
     ExprPtr
-    ParseArithExpr(const proto::plan::ArithExpr& expr_pb);
+    ParseUnaryArithExpr(const proto::plan::UnaryArithExpr& expr_pb);
+
+    ExprPtr
+    ParseBinaryArithExpr(const proto::plan::BinaryArithExpr& expr_pb);
 
     ExprPtr
     ParseValueExpr(const proto::plan::ValueExpr& expr_pb);

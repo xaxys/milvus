@@ -31,8 +31,14 @@ enum class CompareOp {
     NotEqual = 6,
 };
 
-enum class ArithOp {
-    InvalidArithOp = 0,
+enum class UnaryArithOp {
+    InvalidUnaryArithOp = 0,
+    Minus = 1,
+    BitNot = 2,
+};
+
+enum class BinaryArithOp {
+    InvalidBinaryArithOp = 0,
     Add = 1,
     Subtract = 2,
     Multiply = 3,
@@ -50,7 +56,7 @@ enum class UnaryLogicalOp {
 };
 
 enum class BinaryLogicalOp {
-    InvalidBinaryOp = 0,
+    InvalidBinaryLogicalOp = 0,
     LogicalAnd = 1,
     LogicalOr = 2,
     LogicalXor = 3,
@@ -162,8 +168,16 @@ struct CompareExpr : BinaryExprBase {
     accept(ExprVisitor&) override;
 };
 
-struct ArithExpr : BinaryExprBase {
-    ArithOp op_type_;
+struct UnaryArithExpr : UnaryExprBase {
+    UnaryArithOp op_type_;
+
+ public:
+    void
+    accept(ExprVisitor&) override;
+};
+
+struct BinaryArithExpr : BinaryExprBase {
+    BinaryArithOp op_type_;
 
  public:
     void

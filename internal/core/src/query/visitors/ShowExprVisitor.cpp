@@ -264,13 +264,24 @@ ShowExprVisitor::visit(ColumnExpr& expr) {
 }
 
 void
-ShowExprVisitor::visit(ArithExpr& expr) {
-    using proto::plan::ArithOp;
-    using proto::plan::ArithOp_Name;
+ShowExprVisitor::visit(UnaryArithExpr& expr) {
+    using proto::plan::UnaryArithOp;
+    using proto::plan::UnaryArithOp_Name;
     Assert(!ret_.has_value());
-    Json res{{"expr_type", "Arith"},
+    Json res{{"expr_type", "UnaryArith"},
              {"data_type", datatype_name(expr.data_type_)},
-             {"op", ArithOp_Name(static_cast<ArithOp>(expr.op_type_))}};
+             {"op", UnaryArithOp_Name(static_cast<UnaryArithOp>(expr.op_type_))}};
+    ret_ = combine(std::move(res), expr);
+}
+
+void
+ShowExprVisitor::visit(BinaryArithExpr& expr) {
+    using proto::plan::BinaryArithOp;
+    using proto::plan::BinaryArithOp_Name;
+    Assert(!ret_.has_value());
+    Json res{{"expr_type", "BinaryArith"},
+             {"data_type", datatype_name(expr.data_type_)},
+             {"op", BinaryArithOp_Name(static_cast<BinaryArithOp>(expr.op_type_))}};
     ret_ = combine(std::move(res), expr);
 }
 

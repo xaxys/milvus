@@ -44,7 +44,10 @@ class ExprVisitor {
     visit(CompareExpr&) = 0;
 
     virtual void
-    visit(ArithExpr&) = 0;
+    visit(UnaryArithExpr&) = 0;
+
+    virtual void
+    visit(BinaryArithExpr&) = 0;
 
     virtual void
     visit(CastExpr&) = 0;

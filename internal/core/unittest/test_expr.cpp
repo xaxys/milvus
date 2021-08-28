@@ -598,7 +598,7 @@ TEST(Expr, TestCompare) {
     }
 }
 
-TEST(Expr, TestArith) {
+TEST(Expr, TestBinaryArith) {
     using namespace milvus::query;
     using namespace milvus::segcore;
     std::vector<std::tuple<std::string, std::function<bool(int64_t, int16_t)>>> testcases = {
@@ -618,7 +618,7 @@ vector_anns: <
   predicates: <
     compare_expr: <
       left: <
-        arith_expr: <
+        binary_arith_expr: <
           left: <
             column_expr: <
               column_info: <
@@ -639,7 +639,7 @@ vector_anns: <
         >
       >
       right: <
-        arith_expr: <
+        binary_arith_expr: <
           left: <
             cast_expr: <
               child: <
@@ -721,6 +721,93 @@ vector_anns: <
     }
 }
 
+TEST(Expr, TestUnaryArith) {
+    using namespace milvus::query;
+    using namespace milvus::segcore;
+    std::vector<std::tuple<std::string, std::function<bool(int64_t)>>> testcases = {
+        {"Minus", [](int64_t a) { return -a > 1234; }},
+        {"BitNot", [](int64_t a) { return ~a > 1234; }},
+    };
+
+    // op a > 1234
+    auto string_tpl = R"(
+vector_anns: <
+  field_id: 2021
+  predicates: <
+    compare_expr: <
+      left: <
+        unary_arith_expr: <
+          child: <
+            column_expr: <
+              column_info: <
+                field_id: 1070
+                data_type: Int64
+              >
+            >
+          >
+          op: %1%
+        >
+      >
+      right: <
+        value_expr: <
+          value: <
+            int64_val: 1234
+          >
+        >
+      >
+      op: GreaterThan
+    >
+  >
+  query_info: <
+    topk: 10
+    metric_type: "L2"
+    search_params: "{\"nprobe\": 10}"
+  >
+  placeholder_tag: "$0"
+>
+)";
+
+    auto schema = std::make_shared<Schema>();
+    schema->AddField(FieldName("fakevec"), FieldId(2021), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
+    schema->AddField(FieldName("age1"), FieldId(1070), DataType::INT64);
+
+    auto seg = CreateGrowingSegment(schema);
+    int N = 10000;
+    std::vector<int64_t> age1_col;
+    int num_iters = 100;
+    for (int iter = 0; iter < num_iters; ++iter) {
+        auto raw_data = DataGen(schema, N, iter);
+        auto new_age1_col = raw_data.get_col<int64_t>(1);
+        age1_col.insert(age1_col.end(), new_age1_col.begin(), new_age1_col.end());
+        seg->PreInsert(N);
+        seg->Insert(iter * N, N, raw_data.row_ids_.data(), raw_data.timestamps_.data(), raw_data.raw_);
+    }
+
+    auto seg_promote = dynamic_cast<SegmentGrowingImpl*>(seg.get());
+    ExecExprVisitor visitor(*seg_promote, seg_promote->get_row_count(), MAX_TIMESTAMP);
+    for (auto [clause, ref_func] : testcases) {
+        auto proto_text = boost::str(boost::format(string_tpl) % clause);
+        proto::plan::PlanNode node_proto;
+        google::protobuf::TextFormat::ParseFromString(proto_text, &node_proto);
+        // std::cout << node_proto.DebugString();
+        auto plan = ProtoParser(*schema).CreatePlan(node_proto);
+        // std::cout << ShowPlanNodeVisitor().call_child(*plan->plan_node_) << std::endl;
+        auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
+        EXPECT_EQ(final.length(), N * num_iters);
+
+        Assert(final.is_array());
+        Assert(final.type()->Equals(arrow::BooleanType()));
+        const auto& array = final.array_as<arrow::BooleanArray>();
+        for (int i = 0; i < N * num_iters; ++i) {
+            auto ans = array->GetView(i);
+
+            auto val = age1_col[i];
+            auto ref = ref_func(val);
+            ASSERT_EQ(ans, ref) << clause << "@" << i << "!!" << boost::format("%1%") % val;
+        }
+    }
+}
+
 TEST(Expr, TestPureScalarExpr) {
     using namespace milvus::query;
     using namespace milvus::segcore;
@@ -731,9 +818,9 @@ TEST(Expr, TestPureScalarExpr) {
 vector_anns: <
   field_id: 2021
   predicates: <
-    arith_expr: <
+    binary_arith_expr: <
       left: <
-        arith_expr: <
+        binary_arith_expr: <
           left: <
             value_expr: <
               value: <
@@ -752,7 +839,7 @@ vector_anns: <
         >
       >
       right: <
-        arith_expr: <
+        binary_arith_expr: <
           left: <
             cast_expr: <
               child: <
@@ -795,9 +882,9 @@ vector_anns: <
   predicates: <
     compare_expr: <
       left: <
-        arith_expr: <
+        binary_arith_expr: <
           left: <
-            arith_expr: <
+            binary_arith_expr: <
               left: <
                 value_expr: <
                   value: <
@@ -826,7 +913,7 @@ vector_anns: <
         >
       >
       right: <
-        arith_expr: <
+        binary_arith_expr: <
           left: <
             value_expr: <
               value: <
