@@ -17,7 +17,9 @@ import (
 	"fmt"
 	"time"
 
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_retry "github.com/grpc-ecosystem/go-grpc-middleware/retry"
@@ -29,8 +31,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/trace"
-	"go.uber.org/zap"
-	"google.golang.org/grpc/codes"
 )
 
 type Client struct {
@@ -127,7 +127,11 @@ func (c *Client) Start() error {
 }
 
 func (c *Client) Stop() error {
-	return c.conn.Close()
+	c.cancel()
+	if c.conn != nil {
+		c.conn.Close()
+	}
+	return nil
 }
 
 // Register dummy

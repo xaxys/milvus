@@ -331,7 +331,8 @@ For guidance on installation, development, deployment, and administration, check
 
 The implemented SDK and its API documentation are listed below:
 
-- [PyMilvus-ORM](https://github.com/milvus-io/pymilvus-orm)
+- [PyMilvus-ORM SDK](https://github.com/milvus-io/pymilvus-orm)
+- [Node SDK](https://github.com/milvus-io/milvus-sdk-node)
 
 
 
@@ -358,7 +359,7 @@ Follow Milvus on social media:
 
 ## Join Us
 
-Zilliz, the company behind Milvus, is [actively hiring](https://app.mokahr.com/apply/zilliz/37974#/) full-stack developers and solution engineers to build the next-generation open-source data fabric.
+Zilliz, the company behind Milvus, is [actively hiring](https://app.mokahr.com/apply/zilliz/37974#/) algorithm, database, full-stack developers and solution engineers to build the next-generation open-source data fabric.
 
 ## Reference
 
