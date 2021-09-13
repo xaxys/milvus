@@ -71,7 +71,7 @@ TEST_P(PlanProtoTest, Range) {
     string value_tag = "bool_val";
     if (datatype_is_floating((DataType)data_type)) {
         value_tag = "float_val";
-    } else if (datatype_is_interger((DataType)data_type)) {
+    } else if (datatype_is_integer((DataType)data_type)) {
         value_tag = "int64_val";
     }
 
@@ -156,7 +156,7 @@ TEST_P(PlanProtoTest, TermExpr) {
     string value_tag = "bool_val";
     if (datatype_is_floating((DataType)data_type)) {
         value_tag = "float_val";
-    } else if (datatype_is_interger((DataType)data_type)) {
+    } else if (datatype_is_integer((DataType)data_type)) {
         value_tag = "int64_val";
     }
 
@@ -247,7 +247,7 @@ TEST(PlanProtoXTest, NotExpr) {
     string value_tag = "bool_val";
     if (datatype_is_floating((DataType)data_type)) {
         value_tag = "float_val";
-    } else if (datatype_is_interger((DataType)data_type)) {
+    } else if (datatype_is_integer((DataType)data_type)) {
         value_tag = "int64_val";
     }
 
@@ -342,7 +342,7 @@ TEST(PlanProtoXTest, AndOrExpr) {
     string value_tag = "bool_val";
     if (datatype_is_floating((DataType)data_type)) {
         value_tag = "float_val";
-    } else if (datatype_is_interger((DataType)data_type)) {
+    } else if (datatype_is_integer((DataType)data_type)) {
         value_tag = "int64_val";
     }
 

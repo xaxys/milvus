@@ -21,10 +21,10 @@ In this section, we introduce the RPCs of milvus service. A brief description of
 | ReleasePartition        | release the memory the collection memory                     |
 | GetPartitionStatistics  | show a collection's statistics                               |
 | ShowPartitions          | list a collection's all partitions                           |
-| CreateIndex             | create index for a field in collection                       |
-| DescribeIndex           | get index details for a field in a collection                |
+| CreateIndex             | create index for a field in the collection                       |
+| DescribeIndex           | get index details for a field in the collection                |
 | GetIndexStates          | get build index state                                        |
-| DropIndex               | drop a specific index for a field in a collection            |
+| DropIndex               | drop a specific index for a field in the collection            |
 | Insert                  | insert a batch of rows into a collection or a partition      |
 | Search                  | query the columns of a collection or a partition with ANNS statements and boolean expressions |
 | Flush                   | Perform persistent storage of data in memory                 |
@@ -40,7 +40,7 @@ message MsgBase {
 }
 ```
 
-**MsgType** is a enum to distingush diffrent message type in message queue, such as insert msg, search msg, etc. **msgID** is a unique id identifier of message. **timestamp** is the time when this message was generated. **sourceID** is a unique id identifier of the source.
+**MsgType** is the enum to distingush diffrent message types in message queue, such as insert msg, search msg, etc. **msgID** is the unique id identifier of message. **timestamp** is the time when this message was generated. **sourceID** is the unique id identifier of the source.
 
 
 
@@ -101,7 +101,7 @@ message FieldSchema {
 }
 ```
 
-**Field schema** contains all the base information of a field including field **fieldID**, **name**, **description**, **data_type**, **type_params** and **index_params**. **data_type** is a enum type to distingush different data type.Total enum is shown in the last of this doc
+**Field schema** contains all the base information of a field including **fieldID**, **name**, **description**, **data_type**, **type_params** and **index_params**. **data_type** is an enum type to distingush different data types.Total enum is shown in the last of this doc
 
 **type_params** contains the detailed information of data_type. For example, vector data type should include dimension information. You can give a pair of <dim, 8> to let the field store 8-dimension vector.
 
@@ -120,7 +120,7 @@ ErrorCode error_code = 1;
 }
 ```
 
-**Status** represents the server error code. It doesn't contains grpc error but contains the server error code. We can get the executing result in common status. **error_code** is a enum type to distingush the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distingush the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 
 
@@ -163,7 +163,7 @@ message Status {
 }
 ```
 
-**Status** represents the server error code. It doesn't contains grpc error but contains the server error code. We can get the executing result in common status. **error_code** is a enum type to distingush the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distingush the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
 
 
 

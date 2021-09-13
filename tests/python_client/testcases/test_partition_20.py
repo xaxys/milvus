@@ -360,7 +360,6 @@ class TestPartitionOperations(TestcaseBase):
                                            check_items={ct.err_code: 1, ct.err_msg: "can't find collection"})
 
     @pytest.mark.tags(CaseLabel.L2)
-    # @pytest.mark.parametrize("partition_name", [cf.gen_unique_str(prefix)])
     def test_partition_same_name_in_diff_collections(self):
         """
         target: verify create partitions with same name in diff collections
@@ -398,7 +397,6 @@ class TestPartitionOperations(TestcaseBase):
             assert collection_w.has_partition(partition_name)[0]
 
     @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.skip(reason="skip for memory issue check")
     def test_partition_maximum_partitions(self):
         """
         target: verify create maximum partitions
@@ -450,7 +448,6 @@ class TestPartitionOperations(TestcaseBase):
                          check_items={ct.err_code: 1, ct.err_msg: "default partition cannot be deleted"})
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("partition_name", [cf.gen_unique_str(prefix)])
     def test_partition_drop_partition_twice(self):
         """
         target: verify drop the same partition twice
@@ -476,7 +473,6 @@ class TestPartitionOperations(TestcaseBase):
                          check_items={ct.err_code: 1, ct.err_msg: PartitionErrorMessage.PartitionNotExist})
 
     @pytest.mark.tags(CaseLabel.L2)
-    # @pytest.mark.parametrize("partition_name", [cf.gen_unique_str(prefix)])
     def test_partition_create_and_drop_multi_times(self):
         """
         target: verify create and drop for times
@@ -589,7 +585,7 @@ class TestPartitionOperations(TestcaseBase):
         target: verify release an dropped partition
         method: 1.create a partition
                 2. drop the partition
-                2. release the partition
+                3. release the partition
         expected: raise exception
         """
         # create partition
@@ -609,7 +605,7 @@ class TestPartitionOperations(TestcaseBase):
         target: verify release an dropped collection
         method: 1.create a collection and partition
                 2. drop the collection
-                2. release the partition
+                3. release the partition
         expected: raise exception
         """
         # create collection
@@ -635,8 +631,8 @@ class TestPartitionOperations(TestcaseBase):
         target: verify release a partition after the collection released
         method: 1.create a collection and partition
                 2. insert some data
-                2. release the collection
-                2. release the partition
+                3. release the collection
+                4. release the partition
         expected: partition released successfully
         """
         # create collection

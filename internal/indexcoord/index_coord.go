@@ -72,6 +72,8 @@ type IndexCoord struct {
 	metaTable   *metaTable
 	nodeManager *NodeManager
 
+	metricsCacheManager *metricsinfo.MetricsCacheManager
+
 	nodeLock sync.RWMutex
 
 	// Add callback functions at different stages
@@ -96,12 +98,17 @@ func NewIndexCoord(ctx context.Context) (*IndexCoord, error) {
 // Register register index service at etcd
 func (i *IndexCoord) Register() error {
 	i.session = sessionutil.NewSession(i.loopCtx, Params.MetaRootPath, Params.EtcdEndpoints)
+	if i.session == nil {
+		return errors.New("failed to initialize session")
+	}
 	i.session.Init(typeutil.IndexCoordRole, Params.Address, true)
 	return nil
 }
 
 func (i *IndexCoord) Init() error {
+	Params.Init()
 	log.Debug("IndexCoord", zap.Any("etcd endpoints", Params.EtcdEndpoints))
+	i.UpdateStateCode(internalpb.StateCode_Initializing)
 
 	connectEtcdFn := func() error {
 		etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
@@ -132,7 +139,7 @@ func (i *IndexCoord) Init() error {
 	for _, session := range sessions {
 		session := session
 		go func() {
-			if err = i.nodeManager.AddNode(session.ServerID, session.Address); err != nil {
+			if err := i.nodeManager.AddNode(session.ServerID, session.Address); err != nil {
 				log.Debug("IndexCoord", zap.Any("ServerID", session.ServerID),
 					zap.Any("Add IndexNode error", err))
 			}
@@ -186,8 +193,8 @@ func (i *IndexCoord) Init() error {
 		return err
 	}
 	log.Debug("IndexCoord new task scheduler success")
-	i.UpdateStateCode(internalpb.StateCode_Healthy)
-	log.Debug("IndexCoord", zap.Any("State", i.stateCode.Load()))
+
+	i.metricsCacheManager = metricsinfo.NewMetricsCacheManager()
 
 	log.Debug("IndexCoord assign tasks server success", zap.Error(err))
 	return nil
@@ -214,7 +221,9 @@ func (i *IndexCoord) Start() error {
 	for _, cb := range i.startCallbacks {
 		cb()
 	}
-	log.Debug("IndexCoord start")
+	i.UpdateStateCode(internalpb.StateCode_Healthy)
+	log.Debug("IndexCoord", zap.Any("State", i.stateCode.Load()))
+	log.Debug("IndexCoord start successfully")
 
 	return nil
 }
@@ -222,6 +231,7 @@ func (i *IndexCoord) Start() error {
 func (i *IndexCoord) Stop() error {
 	i.loopCancel()
 	i.sched.Close()
+	i.loopWg.Wait()
 	for _, cb := range i.closeCallbacks {
 		cb()
 	}
@@ -478,6 +488,13 @@ func (i *IndexCoord) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsReq
 		zap.String("metric_type", metricType))
 
 	if metricType == metricsinfo.SystemInfoMetrics {
+		ret, err := i.metricsCacheManager.GetSystemInfoMetrics()
+		if err == nil && ret != nil {
+			return ret, nil
+		}
+		log.Debug("failed to get system info metrics from cache, recompute instead",
+			zap.Error(err))
+
 		metrics, err := getSystemInfoMetrics(ctx, req, i)
 
 		log.Debug("IndexCoord.GetMetrics",
@@ -486,6 +503,8 @@ func (i *IndexCoord) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsReq
 			zap.String("metric_type", metricType),
 			zap.Any("metrics", metrics), // TODO(dragondriver): necessary? may be very large
 			zap.Error(err))
+
+		i.metricsCacheManager.UpdateSystemInfoMetrics(metrics)
 
 		return metrics, err
 	}
@@ -599,10 +618,12 @@ func (i *IndexCoord) watchNodeLoop() {
 					}
 					log.Debug("IndexCoord", zap.Any("IndexNode number", len(i.nodeManager.nodeClients)))
 				}()
+				i.metricsCacheManager.InvalidateSystemInfoMetrics()
 			case sessionutil.SessionDelEvent:
 				serverID := event.Session.ServerID
 				log.Debug("IndexCoord watchNodeLoop SessionDelEvent", zap.Any("serverID", serverID))
 				i.nodeManager.RemoveNode(serverID)
+				i.metricsCacheManager.InvalidateSystemInfoMetrics()
 			}
 		}
 	}
@@ -683,7 +704,7 @@ func (i *IndexCoord) assignTaskLoop() {
 			if err != nil {
 				log.Debug("IndexCoord assignTaskLoop", zap.Any("GetSessions error", err))
 			}
-			if len(i.nodeManager.nodeClients) <= 0 {
+			if len(sessions) <= 0 {
 				log.Debug("There is no IndexNode available as this time.")
 				break
 			}

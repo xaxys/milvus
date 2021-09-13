@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/types"
+
 	"go.uber.org/zap"
 
 	grpc_opentracing "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
@@ -34,7 +36,7 @@ import (
 )
 
 type Server struct {
-	indexnode *indexnode.IndexNode
+	indexnode types.IndexNode
 
 	grpcServer  *grpc.Server
 	grpcErrChan chan error
@@ -49,7 +51,7 @@ type Server struct {
 func (s *Server) Run() error {
 
 	if err := s.init(); err != nil {
-		return nil
+		return err
 	}
 
 	if err := s.start(); err != nil {
@@ -132,8 +134,6 @@ func (s *Server) init() error {
 		return err
 	}
 
-	s.indexnode.UpdateStateCode(internalpb.StateCode_Initializing)
-	log.Debug("IndexNode", zap.Any("State", internalpb.StateCode_Initializing))
 	err = s.indexnode.Init()
 	if err != nil {
 		log.Error("IndexNode Init failed", zap.Error(err))
@@ -165,6 +165,11 @@ func (s *Server) Stop() error {
 	}
 	s.loopWg.Wait()
 
+	return nil
+}
+
+func (s *Server) SetClient(indexNodeClient types.IndexNode) error {
+	s.indexnode = indexNodeClient
 	return nil
 }
 

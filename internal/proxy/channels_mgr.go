@@ -13,19 +13,25 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"math/rand"
 	"runtime"
 	"sort"
 	"sync"
+
+	"github.com/milvus-io/milvus/internal/proto/querypb"
+
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+
+	"github.com/milvus-io/milvus/internal/types"
+
+	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"go.uber.org/zap"
 )
-
-type vChan = string
-type pChan = string
 
 type channelsMgr interface {
 	getChannels(collectionID UniqueID) ([]pChan, error)
@@ -40,81 +46,78 @@ type channelsMgr interface {
 	removeAllDMLStream() error
 }
 
-type (
-	uniqueIntGenerator interface {
-		get() int
-	}
-	naiveUniqueIntGenerator struct {
-		now int
-		mtx sync.Mutex
-	}
-)
-
-func (generator *naiveUniqueIntGenerator) get() int {
-	generator.mtx.Lock()
-	defer func() {
-		generator.now++
-		generator.mtx.Unlock()
-	}()
-	return generator.now
-}
-
-func newNaiveUniqueIntGenerator() *naiveUniqueIntGenerator {
-	return &naiveUniqueIntGenerator{
-		now: 0,
-	}
-}
-
-var uniqueIntGeneratorIns uniqueIntGenerator
-var getUniqueIntGeneratorInsOnce sync.Once
-
-func getUniqueIntGeneratorIns() uniqueIntGenerator {
-	getUniqueIntGeneratorInsOnce.Do(func() {
-		uniqueIntGeneratorIns = newNaiveUniqueIntGenerator()
-	})
-	return uniqueIntGeneratorIns
-}
-
 type getChannelsFuncType = func(collectionID UniqueID) (map[vChan]pChan, error)
 type repackFuncType = func(tsMsgs []msgstream.TsMsg, hashKeys [][]int32) (map[int32]*msgstream.MsgPack, error)
 
-type getChannelsService interface {
-	GetChannels(collectionID UniqueID) (map[vChan]pChan, error)
-}
+func getDmlChannelsFunc(ctx context.Context, rc types.RootCoord) getChannelsFuncType {
+	return func(collectionID UniqueID) (map[vChan]pChan, error) {
+		req := &milvuspb.DescribeCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_DescribeCollection,
+				MsgID:     0, // todo
+				Timestamp: 0, // todo
+				SourceID:  0, // todo
+			},
+			DbName:         "", // todo
+			CollectionName: "", // todo
+			CollectionID:   collectionID,
+			TimeStamp:      0, // todo
+		}
+		resp, err := rc.DescribeCollection(ctx, req)
+		if err != nil {
+			log.Warn("DescribeCollection", zap.Error(err))
+			return nil, err
+		}
+		if resp.Status.ErrorCode != 0 {
+			log.Warn("DescribeCollection",
+				zap.Any("ErrorCode", resp.Status.ErrorCode),
+				zap.Any("Reason", resp.Status.Reason))
+			return nil, err
+		}
+		if len(resp.VirtualChannelNames) != len(resp.PhysicalChannelNames) {
+			err := fmt.Errorf(
+				"len(VirtualChannelNames): %v, len(PhysicalChannelNames): %v",
+				len(resp.VirtualChannelNames),
+				len(resp.PhysicalChannelNames))
+			log.Warn("GetDmlChannels", zap.Error(err))
+			return nil, err
+		}
 
-type mockGetChannelsService struct {
-	collectionID2Channels map[UniqueID]map[vChan]pChan
-}
+		ret := make(map[vChan]pChan)
+		for idx, name := range resp.VirtualChannelNames {
+			if _, ok := ret[name]; ok {
+				err := fmt.Errorf(
+					"duplicated virtual channel found, vchan: %v, pchan: %v",
+					name,
+					resp.PhysicalChannelNames[idx])
+				return nil, err
+			}
+			ret[name] = resp.PhysicalChannelNames[idx]
+		}
 
-func newMockGetChannelsService() *mockGetChannelsService {
-	return &mockGetChannelsService{
-		collectionID2Channels: make(map[UniqueID]map[vChan]pChan),
+		return ret, nil
 	}
 }
 
-func genUniqueStr() string {
-	l := rand.Uint64()%100 + 1
-	b := make([]byte, l)
-	if _, err := rand.Read(b); err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%X", b)
-}
+func getDqlChannelsFunc(ctx context.Context, proxyID int64, qc createQueryChannelInterface) getChannelsFuncType {
+	return func(collectionID UniqueID) (map[vChan]pChan, error) {
+		req := &querypb.CreateQueryChannelRequest{
+			CollectionID: collectionID,
+			ProxyID:      proxyID,
+		}
+		resp, err := qc.CreateQueryChannel(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
+			return nil, errors.New(resp.Status.Reason)
+		}
 
-func (m *mockGetChannelsService) GetChannels(collectionID UniqueID) (map[vChan]pChan, error) {
-	channels, ok := m.collectionID2Channels[collectionID]
-	if ok {
-		return channels, nil
-	}
+		m := make(map[vChan]pChan)
+		m[resp.RequestChannel] = resp.RequestChannel
 
-	channels = make(map[vChan]pChan)
-	l := rand.Uint64()%10 + 1
-	for i := 0; uint64(i) < l; i++ {
-		channels[genUniqueStr()] = genUniqueStr()
+		return m, nil
 	}
-
-	m.collectionID2Channels[collectionID] = channels
-	return channels, nil
 }
 
 type streamType int
@@ -179,7 +182,12 @@ func (mgr *singleTypeChannelsMgr) getAllVIDs(collectionID UniqueID) ([]int, erro
 	mgr.collMtx.RLock()
 	defer mgr.collMtx.RUnlock()
 
-	return mgr.collectionID2VIDs[collectionID], nil
+	ids, exist := mgr.collectionID2VIDs[collectionID]
+	if !exist {
+		return nil, fmt.Errorf("collection %d not found", collectionID)
+	}
+
+	return ids, nil
 }
 
 func (mgr *singleTypeChannelsMgr) getVChansByVID(vid int) ([]vChan, error) {
@@ -339,14 +347,19 @@ func (mgr *singleTypeChannelsMgr) getVChannels(collectionID UniqueID) ([]vChan, 
 
 func (mgr *singleTypeChannelsMgr) createMsgStream(collectionID UniqueID) error {
 	channels, err := mgr.getChannelsFunc(collectionID)
-	log.Debug("singleTypeChannelsMgr", zap.Any("createMsgStream.getChannels", channels))
 	if err != nil {
+		log.Warn("failed to create message stream",
+			zap.Int64("collection_id", collectionID),
+			zap.Error(err))
 		return err
 	}
+	log.Debug("singleTypeChannelsMgr",
+		zap.Int64("collection_id", collectionID),
+		zap.Any("createMsgStream.getChannels", channels))
 
 	mgr.updateChannels(channels)
 
-	id := getUniqueIntGeneratorIns().get()
+	id := uniquegenerator.GetUniqueIntGeneratorIns().GetInt()
 
 	vchans, pchans := make([]string, 0, len(channels)), make([]string, 0, len(channels))
 	for k, v := range channels {
@@ -480,13 +493,13 @@ func (mgr *channelsMgrImpl) removeAllDMLStream() error {
 	return mgr.dmlChannelsMgr.removeAllStream()
 }
 
-func newChannelsMgr(
+func newChannelsMgrImpl(
 	getDmlChannelsFunc getChannelsFuncType,
 	dmlRepackFunc repackFuncType,
 	getDqlChannelsFunc getChannelsFuncType,
 	dqlRepackFunc repackFuncType,
 	msgStreamFactory msgstream.Factory,
-) channelsMgr {
+) *channelsMgrImpl {
 	return &channelsMgrImpl{
 		dmlChannelsMgr: newSingleTypeChannelsMgr(getDmlChannelsFunc, msgStreamFactory, dmlRepackFunc, dmlStreamType),
 		dqlChannelsMgr: newSingleTypeChannelsMgr(getDqlChannelsFunc, msgStreamFactory, dqlRepackFunc, dqlStreamType),

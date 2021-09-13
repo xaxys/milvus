@@ -47,14 +47,28 @@ type QueryClusterTopology struct {
 	ConnectedNodes []QueryNodeInfos `json:"connected_nodes"`
 }
 
+type ConnectionType = string
+
+const (
+	CoordConnectToNode ConnectionType = "manage"
+	Forward            ConnectionType = "forward"
+)
+
+type ConnectionTargetType = string
+
+type ConnectionInfo struct {
+	TargetName string               `json:"target_name"`
+	TargetType ConnectionTargetType `json:"target_type"`
+}
+
 // TODO(dragondriver)
 // necessary to show all connection edge in topology graph?
 // for example, in system, Proxy connects to RootCoord and RootCoord also connects to Proxy,
 // if we do so, the connection relationship may be confusing.
 // ConnTopology shows how different components connect to each other.
 type ConnTopology struct {
-	Name                string   `json:"name"`
-	ConnectedComponents []string `json:"connected_components"`
+	Name                string           `json:"name"`
+	ConnectedComponents []ConnectionInfo `json:"connected_components"`
 }
 
 // QueryCoordTopology shows the whole metrics of query cluster
@@ -75,14 +89,23 @@ type IndexCoordTopology struct {
 	Connections ConnTopology         `json:"connections"`
 }
 
-type ConnectionType string
+// DataClusterTopology shows the topology between DataCoord and DataNodes
+type DataClusterTopology struct {
+	Self           DataCoordInfos  `json:"self"`
+	ConnectedNodes []DataNodeInfos `json:"connected_nodes"`
+}
 
-const (
-	CoordConnectToNode ConnectionType = "manage"
-	Forward            ConnectionType = "forward"
-)
+// DataCoordTopology shows the whole metrics of index cluster
+type DataCoordTopology struct {
+	Cluster     DataClusterTopology `json:"cluster"`
+	Connections ConnTopology        `json:"connections"`
+}
 
-type ConnectionTargetType string
+// RootCoordTopology shows the whole metrics of root coordinator
+type RootCoordTopology struct {
+	Self        RootCoordInfos `json:"self"`
+	Connections ConnTopology   `json:"connections"`
+}
 
 type ConnectionEdge struct {
 	ConnectedIdentifier int                  `json:"connected_identifier"`

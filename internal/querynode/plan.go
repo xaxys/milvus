@@ -22,9 +22,8 @@ package querynode
 import "C"
 import (
 	"errors"
+	"fmt"
 	"unsafe"
-
-	"github.com/milvus-io/milvus/internal/proto/segcorepb"
 )
 
 type SearchPlan struct {
@@ -32,6 +31,10 @@ type SearchPlan struct {
 }
 
 func createSearchPlan(col *Collection, dsl string) (*SearchPlan, error) {
+	if col.collectionPtr == nil {
+		return nil, errors.New("nil collection ptr, collectionID = " + fmt.Sprintln(col.id))
+	}
+
 	cDsl := C.CString(dsl)
 	defer C.free(unsafe.Pointer(cDsl))
 	var cPlan C.CSearchPlan
@@ -47,6 +50,10 @@ func createSearchPlan(col *Collection, dsl string) (*SearchPlan, error) {
 }
 
 func createSearchPlanByExpr(col *Collection, expr []byte) (*SearchPlan, error) {
+	if col.collectionPtr == nil {
+		return nil, errors.New("nil collection ptr, collectionID = " + fmt.Sprintln(col.id))
+	}
+
 	var cPlan C.CSearchPlan
 	status := C.CreateSearchPlanByExpr(col.collectionPtr, (*C.char)(unsafe.Pointer(&expr[0])), (C.int64_t)(len(expr)), &cPlan)
 
@@ -110,19 +117,36 @@ type RetrievePlan struct {
 	Timestamp     uint64
 }
 
-func createRetrievePlan(col *Collection, msg *segcorepb.RetrieveRequest, timestamp uint64) (*RetrievePlan, error) {
-	protoCGo, err := MarshalForCGo(msg)
+// func createRetrievePlan(col *Collection, msg *segcorepb.RetrieveRequest, timestamp uint64) (*RetrievePlan, error) {
+// 	protoCGo, err := MarshalForCGo(msg)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	plan := new(RetrievePlan)
+// 	plan.Timestamp = timestamp
+// 	status := C.CreateRetrievePlan(col.collectionPtr, protoCGo.CProto, &plan.cRetrievePlan)
+// 	err2 := HandleCStatus(&status, "create retrieve plan failed")
+// 	if err2 != nil {
+// 		return nil, err2
+// 	}
+// 	return plan, nil
+// }
+
+func createRetrievePlanByExpr(col *Collection, expr []byte, timestamp uint64) (*RetrievePlan, error) {
+	var cPlan C.CRetrievePlan
+	status := C.CreateRetrievePlanByExpr(col.collectionPtr, (*C.char)(unsafe.Pointer(&expr[0])),
+		(C.int64_t)(len(expr)), &cPlan)
+
+	err := HandleCStatus(&status, "Create retrieve plan by expr failed")
 	if err != nil {
 		return nil, err
 	}
-	plan := new(RetrievePlan)
-	plan.Timestamp = timestamp
-	status := C.CreateRetrievePlan(col.collectionPtr, protoCGo.CProto, &plan.cRetrievePlan)
-	err2 := HandleCStatus(&status, "create retrieve plan failed")
-	if err2 != nil {
-		return nil, err2
+
+	var newPlan = &RetrievePlan{
+		cRetrievePlan: cPlan,
+		Timestamp:     timestamp,
 	}
-	return plan, nil
+	return newPlan, nil
 }
 
 func (plan *RetrievePlan) delete() {

@@ -202,9 +202,9 @@ SegmentGrowingImpl::do_insert(int64_t reserved_begin,
     }
 
     record_.ack_responder_.AddSegment(reserved_begin, reserved_begin + size);
-    if (!debug_disable_small_index_) {
-        indexing_record_.UpdateResourceAck(record_.ack_responder_.GetAck() / segcore_config_.get_size_per_chunk(),
-                                           record_);
+    if (enable_small_index_) {
+        int64_t chunk_size = segcore_config_.get_size_per_chunk();
+        indexing_record_.UpdateResourceAck(record_.ack_responder_.GetAck() / chunk_size, record_);
     }
 }
 
@@ -435,6 +435,27 @@ SegmentGrowingImpl::Insert(int64_t reserved_offset,
         columns_data.emplace_back(std::move(column));
     }
     do_insert(reserved_offset, size, row_ids.data(), timestamps.data(), columns_data);
+}
+
+std::vector<SegOffset>
+SegmentGrowingImpl::search_ids(const boost::dynamic_bitset<>& bitset, Timestamp timestamp) const {
+    std::vector<SegOffset> res_offsets;
+
+    for (int i = 0; i < bitset.size(); i++) {
+        if (bitset[i]) {
+            SegOffset the_offset(-1);
+            auto offset = SegOffset(i);
+            if (record_.timestamps_[offset.get()] < timestamp) {
+                the_offset = std::max(the_offset, offset);
+            }
+
+            if (the_offset == SegOffset(-1)) {
+                continue;
+            }
+            res_offsets.push_back(the_offset);
+        }
+    }
+    return res_offsets;
 }
 
 std::pair<std::unique_ptr<IdArray>, std::vector<SegOffset>>

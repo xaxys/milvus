@@ -165,9 +165,10 @@ func (q *queryCollection) addToUnsolvedMsg(msg queryMsg) {
 func (q *queryCollection) popAllUnsolvedMsg() []queryMsg {
 	q.unsolvedMsgMu.Lock()
 	defer q.unsolvedMsgMu.Unlock()
-	tmp := q.unsolvedMsg
+	ret := make([]queryMsg, 0, len(q.unsolvedMsg))
+	ret = append(ret, q.unsolvedMsg...)
 	q.unsolvedMsg = q.unsolvedMsg[:0]
-	return tmp
+	return ret
 }
 
 func (q *queryCollection) waitNewTSafe() Timestamp {
@@ -253,33 +254,6 @@ func (q *queryCollection) consumeQuery() {
 
 func (q *queryCollection) loadBalance(msg *msgstream.LoadBalanceSegmentsMsg) {
 	//TODO:: get loadBalance info from etcd
-	//log.Debug("consume load balance message",
-	//	zap.Int64("msgID", msg.ID()))
-	//nodeID := Params.QueryNodeID
-	//for _, info := range msg.Infos {
-	//	segmentID := info.SegmentID
-	//	if nodeID == info.SourceNodeID {
-	//		err := s.historical.replica.removeSegment(segmentID)
-	//		if err != nil {
-	//			log.Warn("loadBalance failed when remove segment",
-	//				zap.Error(err),
-	//				zap.Any("segmentID", segmentID))
-	//		}
-	//	}
-	//	if nodeID == info.DstNodeID {
-	//		segment, err := s.historical.replica.getSegmentByID(segmentID)
-	//		if err != nil {
-	//			log.Warn("loadBalance failed when making segment on service",
-	//				zap.Error(err),
-	//				zap.Any("segmentID", segmentID))
-	//			continue // not return, try to load balance all segment
-	//		}
-	//		segment.setOnService(true)
-	//	}
-	//}
-	//log.Debug("load balance done",
-	//	zap.Int64("msgID", msg.ID()),
-	//	zap.Int("num of segment", len(msg.Infos)))
 }
 
 func (q *queryCollection) receiveQueryMsg(msg queryMsg) error {
@@ -1045,12 +1019,8 @@ func (q *queryCollection) retrieve(msg queryMsg) error {
 		return err
 	}
 
-	req := &segcorepb.RetrieveRequest{
-		Ids:            retrieveMsg.Ids,
-		OutputFieldsId: retrieveMsg.OutputFieldsId,
-	}
-
-	plan, err := createRetrievePlan(collection, req, timestamp)
+	expr := retrieveMsg.SerializedExprPlan
+	plan, err := createRetrievePlanByExpr(collection, expr, timestamp)
 	if err != nil {
 		return err
 	}

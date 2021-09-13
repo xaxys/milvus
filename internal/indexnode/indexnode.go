@@ -13,6 +13,7 @@ package indexnode
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math/rand"
 	"strconv"
@@ -81,12 +82,18 @@ func NewIndexNode(ctx context.Context) (*IndexNode, error) {
 // Register register index node at etcd
 func (i *IndexNode) Register() error {
 	i.session = sessionutil.NewSession(i.loopCtx, Params.MetaRootPath, Params.EtcdEndpoints)
+	if i.session == nil {
+		return errors.New("failed to initialize session")
+	}
 	i.session.Init(typeutil.IndexNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
 	Params.NodeID = i.session.ServerID
 	return nil
 }
 
 func (i *IndexNode) Init() error {
+	Params.Init()
+	i.UpdateStateCode(internalpb.StateCode_Initializing)
+	log.Debug("IndexNode", zap.Any("State", internalpb.StateCode_Initializing))
 	connectEtcdFn := func() error {
 		etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
 		i.etcdKV = etcdKV
@@ -114,15 +121,14 @@ func (i *IndexNode) Init() error {
 	}
 	log.Debug("IndexNode NewMinIOKV success")
 	i.closer = trace.InitTracing("index_node")
-
-	i.UpdateStateCode(internalpb.StateCode_Healthy)
-	log.Debug("IndexNode", zap.Any("State", i.stateCode.Load()))
 	return nil
 }
 
 func (i *IndexNode) Start() error {
 	i.sched.Start()
 
+	i.UpdateStateCode(internalpb.StateCode_Healthy)
+	log.Debug("IndexNode", zap.Any("State", i.stateCode.Load()))
 	// Start callbacks
 	for _, cb := range i.startCallbacks {
 		cb()
@@ -199,14 +205,14 @@ func (i *IndexNode) CreateIndex(ctx context.Context, request *indexpb.CreateInde
 }
 
 // AddStartCallback adds a callback in the startServer phase.
-func (i *IndexNode) AddStartCallback(callbacks ...func()) {
-	i.startCallbacks = append(i.startCallbacks, callbacks...)
-}
+//func (i *IndexNode) AddStartCallback(callbacks ...func()) {
+//	i.startCallbacks = append(i.startCallbacks, callbacks...)
+//}
 
 // AddCloseCallback adds a callback in the Close phase.
-func (i *IndexNode) AddCloseCallback(callbacks ...func()) {
-	i.closeCallbacks = append(i.closeCallbacks, callbacks...)
-}
+//func (i *IndexNode) AddCloseCallback(callbacks ...func()) {
+//	i.closeCallbacks = append(i.closeCallbacks, callbacks...)
+//}
 
 func (i *IndexNode) GetComponentStates(ctx context.Context) (*internalpb.ComponentStates, error) {
 	log.Debug("get IndexNode components states ...")

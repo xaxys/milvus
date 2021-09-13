@@ -12,8 +12,13 @@ package datacoord
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
+
+	"github.com/milvus-io/milvus/internal/kv"
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
+	"github.com/milvus-io/milvus/internal/util/typeutil"
 
 	memkv "github.com/milvus-io/milvus/internal/kv/mem"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
@@ -48,6 +53,35 @@ func (m *MockAllocator) allocTimestamp(ctx context.Context) (Timestamp, error) {
 func (m *MockAllocator) allocID(ctx context.Context) (UniqueID, error) {
 	val := atomic.AddInt64(&m.cnt, 1)
 	return val, nil
+}
+
+var _ allocator = (*FailsAllocator)(nil)
+
+// FailsAllocator allocator that fails
+type FailsAllocator struct{}
+
+func (a *FailsAllocator) allocTimestamp(_ context.Context) (Timestamp, error) {
+	return 0, errors.New("always fail")
+}
+
+func (a *FailsAllocator) allocID(_ context.Context) (UniqueID, error) {
+	return 0, errors.New("always fail")
+}
+
+// a mock kv that always fail when do `Save`
+type saveFailKV struct{ kv.TxnKV }
+
+// Save override behavior
+func (kv *saveFailKV) Save(key, value string) error {
+	return errors.New("mocked fail")
+}
+
+// a mock kv that always fail when do `Remove`
+type removeFailKV struct{ kv.TxnKV }
+
+// Remove override behavior, inject error
+func (kv *removeFailKV) Remove(key string) error {
+	return errors.New("mocked fail")
 }
 
 func newMockAllocator() *MockAllocator {
@@ -115,6 +149,37 @@ func (c *mockDataNodeClient) FlushSegments(ctx context.Context, in *datapb.Flush
 		c.ch <- in
 	}
 	return &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}, nil
+}
+
+func (c *mockDataNodeClient) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
+	// TODO(dragondriver): change the id, though it's not important in ut
+	nodeID := UniqueID(c.id)
+
+	nodeInfos := metricsinfo.DataNodeInfos{
+		BaseComponentInfos: metricsinfo.BaseComponentInfos{
+			Name: metricsinfo.ConstructComponentName(typeutil.DataNodeRole, nodeID),
+		},
+	}
+	resp, err := metricsinfo.MarshalComponentInfos(nodeInfos)
+	if err != nil {
+		return &milvuspb.GetMetricsResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    err.Error(),
+			},
+			Response:      "",
+			ComponentName: metricsinfo.ConstructComponentName(typeutil.DataNodeRole, nodeID),
+		}, nil
+	}
+
+	return &milvuspb.GetMetricsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+		Response:      resp,
+		ComponentName: metricsinfo.ConstructComponentName(typeutil.DataNodeRole, nodeID),
+	}, nil
 }
 
 func (c *mockDataNodeClient) Stop() error {
@@ -310,4 +375,43 @@ func (m *mockRootCoordService) SegmentFlushCompleted(ctx context.Context, in *da
 }
 func (m *mockRootCoordService) AddNewSegment(ctx context.Context, in *datapb.SegmentMsg) (*commonpb.Status, error) {
 	panic("not implemented") // TODO: Implement
+}
+
+func (m *mockRootCoordService) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
+	// TODO(dragondriver): change the id, though it's not important in ut
+	nodeID := UniqueID(20210901)
+
+	rootCoordTopology := metricsinfo.RootCoordTopology{
+		Self: metricsinfo.RootCoordInfos{
+			BaseComponentInfos: metricsinfo.BaseComponentInfos{
+				Name: metricsinfo.ConstructComponentName(typeutil.RootCoordRole, nodeID),
+			},
+		},
+		Connections: metricsinfo.ConnTopology{
+			Name: metricsinfo.ConstructComponentName(typeutil.RootCoordRole, nodeID),
+			// TODO(dragondriver): fill ConnectedComponents if necessary
+			ConnectedComponents: []metricsinfo.ConnectionInfo{},
+		},
+	}
+
+	resp, err := metricsinfo.MarshalTopology(rootCoordTopology)
+	if err != nil {
+		return &milvuspb.GetMetricsResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    err.Error(),
+			},
+			Response:      "",
+			ComponentName: metricsinfo.ConstructComponentName(typeutil.RootCoordRole, nodeID),
+		}, nil
+	}
+
+	return &milvuspb.GetMetricsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+		Response:      resp,
+		ComponentName: metricsinfo.ConstructComponentName(typeutil.RootCoordRole, nodeID),
+	}, nil
 }

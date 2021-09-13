@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
+
 	datanodeclient "github.com/milvus-io/milvus/internal/distributed/datanode/client"
 	rootcoordclient "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
 	"github.com/milvus-io/milvus/internal/logutil"
@@ -39,11 +41,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
 
-const (
-	rootCoordClientTimout = 20 * time.Second
-	connEtcdMaxRetryTime  = 100000
-	connEtcdRetryInterval = 200 * time.Millisecond
-)
+const connEtcdMaxRetryTime = 100000
 
 var (
 	// TODO: sunby put to config
@@ -54,13 +52,15 @@ var (
 )
 
 type (
-	UniqueID  = typeutil.UniqueID
+	// UniqueID shortcut for typeutil.UniqueID
+	UniqueID = typeutil.UniqueID
+	// Timestamp shortcurt for typeutil.Timestamp
 	Timestamp = typeutil.Timestamp
 )
 
 var errNilKvClient = errors.New("kv client not initialized")
 
-// ServerState type alias
+// ServerState type alias, presents datacoord Server State
 type ServerState = int64
 
 const (
@@ -91,7 +91,8 @@ type Server struct {
 	allocator       allocator
 	cluster         *Cluster
 	rootCoordClient types.RootCoord
-	ddChannelName   string
+
+	metricsCacheManager *metricsinfo.MetricsCacheManager
 
 	flushCh   chan UniqueID
 	msFactory msgstream.Factory
@@ -104,6 +105,7 @@ type Server struct {
 	rootCoordClientCreator rootCoordCreatorFunc
 }
 
+// ServerHelper datacoord server injection helper
 type ServerHelper struct {
 	eventAfterHandleDataNodeTt func()
 }
@@ -114,17 +116,27 @@ func defaultServerHelper() ServerHelper {
 	}
 }
 
+// Option utility function signature to set DataCoord server attributes
 type Option func(svr *Server)
 
+// SetRootCoordCreator returns an `Option` setting RootCoord creator with provided parameter
 func SetRootCoordCreator(creator rootCoordCreatorFunc) Option {
 	return func(svr *Server) {
 		svr.rootCoordClientCreator = creator
 	}
 }
 
+// SetServerHelper returns an `Option` setting ServerHelp with provided parameter
 func SetServerHelper(helper ServerHelper) Option {
 	return func(svr *Server) {
 		svr.helper = helper
+	}
+}
+
+// SetCluster returns an `Option` setting Cluster with provided parameter
+func SetCluster(cluster *Cluster) Option {
+	return func(svr *Server) {
+		svr.cluster = cluster
 	}
 }
 
@@ -138,6 +150,8 @@ func CreateServer(ctx context.Context, factory msgstream.Factory, opts ...Option
 		dataClientCreator:      defaultDataNodeCreatorFunc,
 		rootCoordClientCreator: defaultRootCoordCreatorFunc,
 		helper:                 defaultServerHelper(),
+
+		metricsCacheManager: metricsinfo.NewMetricsCacheManager(),
 	}
 
 	for _, opt := range opts {
@@ -157,6 +171,9 @@ func defaultRootCoordCreatorFunc(ctx context.Context, metaRootPath string, etcdE
 // Register register data service at etcd
 func (s *Server) Register() error {
 	s.session = sessionutil.NewSession(s.ctx, Params.MetaRootPath, Params.EtcdEndpoints)
+	if s.session == nil {
+		return errors.New("failed to initialize session")
+	}
 	s.activeCh = s.session.Init(typeutil.DataCoordRole, Params.IP, true)
 	Params.NodeID = s.session.ServerID
 	return nil
@@ -217,7 +234,11 @@ func (s *Server) Start() error {
 
 func (s *Server) initCluster() error {
 	var err error
-	s.cluster, err = NewCluster(s.ctx, s.kvClient, NewNodesInfo(), s)
+	// cluster could be set by options
+	// by-pass default NewCluster process if already set
+	if s.cluster == nil {
+		s.cluster, err = NewCluster(s.ctx, s.kvClient, NewNodesInfo(), s)
+	}
 	return err
 }
 
@@ -244,27 +265,6 @@ func (s *Server) initServiceDiscovery() error {
 
 	s.eventCh = s.session.WatchServices(typeutil.DataNodeRole, rev+1)
 	return nil
-}
-
-func (s *Server) loadDataNodes() []*datapb.DataNodeInfo {
-	if s.session == nil {
-		log.Warn("load data nodes but session is nil")
-		return []*datapb.DataNodeInfo{}
-	}
-	sessions, _, err := s.session.GetSessions(typeutil.DataNodeRole)
-	if err != nil {
-		log.Warn("load data nodes faild", zap.Error(err))
-		return []*datapb.DataNodeInfo{}
-	}
-	datanodes := make([]*datapb.DataNodeInfo, 0, len(sessions))
-	for _, session := range sessions {
-		datanodes = append(datanodes, &datapb.DataNodeInfo{
-			Address:  session.Address,
-			Version:  session.ServerID,
-			Channels: []*datapb.ChannelStatus{},
-		})
-	}
-	return datanodes
 }
 
 func (s *Server) startSegmentManager() {
@@ -354,6 +354,7 @@ func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 	if enableTtChecker {
 		checker = NewLongTermChecker(ctx, ttCheckerName, ttMaxInterval, ttCheckerWarnMsg)
 		checker.Start()
+		defer checker.Stop()
 	}
 	for {
 		select {
@@ -419,28 +420,38 @@ func (s *Server) startWatchService(ctx context.Context) {
 			log.Debug("watch service shutdown")
 			return
 		case event := <-s.eventCh:
-			info := &datapb.DataNodeInfo{
-				Address:  event.Session.Address,
-				Version:  event.Session.ServerID,
-				Channels: []*datapb.ChannelStatus{},
-			}
-			node := NewNodeInfo(ctx, info)
-			switch event.EventType {
-			case sessionutil.SessionAddEvent:
-				log.Info("received datanode register",
-					zap.String("address", info.Address),
-					zap.Int64("serverID", info.Version))
-				s.cluster.Register(node)
-			case sessionutil.SessionDelEvent:
-				log.Info("received datanode unregister",
-					zap.String("address", info.Address),
-					zap.Int64("serverID", info.Version))
-				s.cluster.UnRegister(node)
-			default:
-				log.Warn("receive unknown service event type",
-					zap.Any("type", event.EventType))
-			}
+			s.handleSessionEvent(ctx, event)
 		}
+	}
+}
+
+// handles session events - DataNodes Add/Del
+func (s *Server) handleSessionEvent(ctx context.Context, event *sessionutil.SessionEvent) {
+	if event == nil {
+		return
+	}
+	info := &datapb.DataNodeInfo{
+		Address:  event.Session.Address,
+		Version:  event.Session.ServerID,
+		Channels: []*datapb.ChannelStatus{},
+	}
+	node := NewNodeInfo(ctx, info)
+	switch event.EventType {
+	case sessionutil.SessionAddEvent:
+		log.Info("received datanode register",
+			zap.String("address", info.Address),
+			zap.Int64("serverID", info.Version))
+		s.cluster.Register(node)
+		s.metricsCacheManager.InvalidateSystemInfoMetrics()
+	case sessionutil.SessionDelEvent:
+		log.Info("received datanode unregister",
+			zap.String("address", info.Address),
+			zap.Int64("serverID", info.Version))
+		s.cluster.UnRegister(node)
+		s.metricsCacheManager.InvalidateSystemInfoMetrics()
+	default:
+		log.Warn("receive unknown service event type",
+			zap.Any("type", event.EventType))
 	}
 }
 
@@ -477,32 +488,44 @@ func (s *Server) startFlushLoop(ctx context.Context) {
 			log.Debug("flush loop shutdown")
 			return
 		case segmentID := <-s.flushCh:
-			segment := s.meta.GetSegment(segmentID)
-			if segment == nil {
-				log.Warn("failed to get flused segment", zap.Int64("id", segmentID))
-				continue
-			}
-			req := &datapb.SegmentFlushCompletedMsg{
-				Base: &commonpb.MsgBase{
-					MsgType: commonpb.MsgType_SegmentFlushDone,
-				},
-				Segment: segment.SegmentInfo,
-			}
-			resp, err := s.rootCoordClient.SegmentFlushCompleted(ctx, req)
-			if err = VerifyResponse(resp, err); err != nil {
-				log.Warn("failed to call SegmentFlushComplete", zap.Int64("segmentID", segmentID), zap.Error(err))
-				continue
-			}
-			// set segment to SegmentState_Flushed
-			if err = s.meta.SetState(segmentID, commonpb.SegmentState_Flushed); err != nil {
-				log.Error("flush segment complete failed", zap.Error(err))
-				continue
-			}
-			log.Debug("flush segment complete", zap.Int64("id", segmentID))
+			//Ignore return error
+			_ = s.postFlush(ctx, segmentID)
 		}
 	}
 }
 
+// post function after flush is done
+// 1. check segment id is valid
+// 2. notify RootCoord segment is flushed
+// 3. change segment state to `Flushed` in meta
+func (s *Server) postFlush(ctx context.Context, segmentID UniqueID) error {
+	segment := s.meta.GetSegment(segmentID)
+	if segment == nil {
+		log.Warn("failed to get flused segment", zap.Int64("id", segmentID))
+		return errors.New("segment not found")
+	}
+	// Notify RootCoord segment is flushed
+	req := &datapb.SegmentFlushCompletedMsg{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_SegmentFlushDone,
+		},
+		Segment: segment.SegmentInfo,
+	}
+	resp, err := s.rootCoordClient.SegmentFlushCompleted(ctx, req)
+	if err = VerifyResponse(resp, err); err != nil {
+		log.Warn("failed to call SegmentFlushComplete", zap.Int64("segmentID", segmentID), zap.Error(err))
+		return err
+	}
+	// set segment to SegmentState_Flushed
+	if err = s.meta.SetState(segmentID, commonpb.SegmentState_Flushed); err != nil {
+		log.Error("flush segment complete failed", zap.Error(err))
+		return err
+	}
+	log.Debug("flush segment complete", zap.Int64("id", segmentID))
+	return nil
+}
+
+// recovery logic, fetch all Segment in `Flushing` state and do Flush notification logic
 func (s *Server) handleFlushingSegments(ctx context.Context) {
 	segments := s.meta.GetFlushingSegments()
 	for _, segment := range segments {

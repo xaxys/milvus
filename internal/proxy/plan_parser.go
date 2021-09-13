@@ -61,6 +61,25 @@ func parseQueryExprAdvanced(schema *typeutil.SchemaHelper, exprStr string) (*pla
 	return predicate.expr, nil
 }
 
+func CreateExprQueryPlan(schemaPb *schemapb.CollectionSchema, exprStr string) (*planpb.PlanNode, error) {
+	schema, err := typeutil.CreateSchemaHelper(schemaPb)
+	if err != nil {
+		return nil, err
+	}
+
+	expr, err := parseQueryExpr(schema, exprStr)
+	if err != nil {
+		return nil, err
+	}
+
+	planNode := &planpb.PlanNode{
+		Node: &planpb.PlanNode_Predicates{
+			Predicates: expr,
+		},
+	}
+	return planNode, nil
+}
+
 func CreateQueryPlan(schemaPb *schemapb.CollectionSchema, exprStr string, vectorFieldName string, queryInfo *planpb.QueryInfo) (*planpb.PlanNode, error) {
 	schema, err := typeutil.CreateSchemaHelper(schemaPb)
 	if err != nil {

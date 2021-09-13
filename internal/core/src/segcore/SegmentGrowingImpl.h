@@ -115,8 +115,8 @@ class SegmentGrowingImpl : public SegmentGrowing {
  public:
     // only for debug
     void
-    debug_disable_small_index() override {
-        debug_disable_small_index_ = true;
+    disable_small_index() override {
+        enable_small_index_ = false;
     }
 
     ssize_t
@@ -182,6 +182,9 @@ class SegmentGrowingImpl : public SegmentGrowing {
     std::pair<std::unique_ptr<IdArray>, std::vector<SegOffset>>
     search_ids(const IdArray& id_array, Timestamp timestamp) const override;
 
+    std::vector<SegOffset>
+    search_ids(const boost::dynamic_bitset<>& view, Timestamp timestamp) const override;
+
  protected:
     int64_t
     num_chunk() const override;
@@ -214,7 +217,7 @@ class SegmentGrowingImpl : public SegmentGrowing {
     tbb::concurrent_unordered_multimap<idx_t, int64_t> uid2offset_;
 
  private:
-    bool debug_disable_small_index_ = false;
+    bool enable_small_index_ = true;
 };
 
 }  // namespace milvus::segcore

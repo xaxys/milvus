@@ -13,6 +13,7 @@ package datanode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/milvus-io/milvus/internal/log"
@@ -37,6 +38,8 @@ type dataSyncService struct {
 	collectionID UniqueID
 	dataCoord    types.DataCoord
 	clearSignal  chan<- UniqueID
+
+	saveBinlog func(fu *segmentFlushUnit) error
 }
 
 func newDataSyncService(ctx context.Context,
@@ -49,6 +52,10 @@ func newDataSyncService(ctx context.Context,
 	dataCoord types.DataCoord,
 
 ) (*dataSyncService, error) {
+
+	if replica == nil {
+		return nil, errors.New("Nil input")
+	}
 
 	ctx1, cancel := context.WithCancel(ctx)
 
@@ -148,6 +155,8 @@ func (dsService *dataSyncService) initNodes(vchanInfo *datapb.VchannelInfo) erro
 		return nil
 	}
 
+	dsService.saveBinlog = saveBinlog
+
 	pchan := rootcoord.ToPhysicalChannel(vchanInfo.GetChannelName())
 	var dmStreamNode Node = newDmInputNode(
 		dsService.ctx,
@@ -156,7 +165,8 @@ func (dsService *dataSyncService) initNodes(vchanInfo *datapb.VchannelInfo) erro
 		vchanInfo.GetSeekPosition(),
 	)
 	var ddNode Node = newDDNode(dsService.clearSignal, dsService.collectionID, vchanInfo)
-	var insertBufferNode Node = newInsertBufferNode(
+	var insertBufferNode Node
+	insertBufferNode, err = newInsertBufferNode(
 		dsService.ctx,
 		dsService.replica,
 		dsService.msFactory,
@@ -165,11 +175,13 @@ func (dsService *dataSyncService) initNodes(vchanInfo *datapb.VchannelInfo) erro
 		saveBinlog,
 		vchanInfo.GetChannelName(),
 	)
+	if err != nil {
+		return err
+	}
 
-	var deleteNode Node = newDeleteDNode(
-		dsService.ctx,
-		dsService.replica,
-	)
+	dn := newDeleteDNode(dsService.replica)
+
+	var deleteNode Node = dn
 
 	// recover segment checkpoints
 	for _, us := range vchanInfo.GetUnflushedSegments() {

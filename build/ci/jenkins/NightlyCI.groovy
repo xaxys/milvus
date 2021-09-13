@@ -5,7 +5,7 @@
 String cron_timezone = "TZ=Asia/Shanghai"
 String cron_string = BRANCH_NAME == "master" ? "50 22 * * * " : ""
 
-int total_timeout_minutes = 360
+int total_timeout_minutes = 660
 int e2e_timeout_seconds = 4 * 60 * 60
 
 pipeline {
@@ -67,7 +67,7 @@ pipeline {
                                         def clusterEnabled = "false"
                                         if ("${MILVUS_SERVER_TYPE}" == "distributed") {
                                             clusterEnabled = "true"
-                                            e2e_timeout_seconds = 5 * 60 * 60
+                                            e2e_timeout_seconds = 10 * 60 * 60
                                         }
 
                                         if ("${MILVUS_CLIENT}" == "pymilvus") {
@@ -79,7 +79,7 @@ pipeline {
                                             --install-extra-arg "--set etcd.enabled=false --set externalEtcd.enabled=true --set externalEtcd.endpoints={\$KRTE_POD_IP:2379}" \
                                             --skip-export-logs \
                                             --skip-cleanup \
-                                            --test-extra-arg "--tags smoke L0 L1 L2 --reportportal" \
+                                            --test-extra-arg "--tags L0 L1 L2" \
                                             --test-timeout ${e2e_timeout_seconds}
                                             """
 //                                         } else if ("${MILVUS_CLIENT}" == "pymilvus-orm") {

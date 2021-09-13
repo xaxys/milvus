@@ -13,6 +13,7 @@ package indexcoord
 
 import (
 	"context"
+	"os"
 
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 
@@ -35,7 +36,25 @@ func getSystemInfoMetrics(
 	clusterTopology := metricsinfo.IndexClusterTopology{
 		Self: metricsinfo.IndexCoordInfos{
 			BaseComponentInfos: metricsinfo.BaseComponentInfos{
-				Name: metricsinfo.ConstructComponentName(typeutil.IndexCoordRole, coord.ID),
+				Name: metricsinfo.ConstructComponentName(typeutil.IndexCoordRole, coord.session.ServerID),
+				HardwareInfos: metricsinfo.HardwareMetrics{
+					IP:           coord.session.Address,
+					CPUCoreCount: metricsinfo.GetCPUCoreCount(false),
+					CPUCoreUsage: metricsinfo.GetCPUUsage(),
+					Memory:       metricsinfo.GetMemoryCount(),
+					MemoryUsage:  metricsinfo.GetUsedMemoryCount(),
+					Disk:         metricsinfo.GetDiskCount(),
+					DiskUsage:    metricsinfo.GetDiskUsage(),
+				},
+				SystemInfo: metricsinfo.DeployMetrics{
+					SystemVersion: os.Getenv(metricsinfo.GitCommitEnvKey),
+					DeployMode:    os.Getenv(metricsinfo.DeployModeEnvKey),
+				},
+				// TODO(dragondriver): CreatedTime & UpdatedTime, easy but time-costing
+				Type: typeutil.IndexCoordRole,
+			},
+			SystemConfigurations: metricsinfo.IndexCoordConfiguration{
+				MinioBucketName: Params.MinioBucketName,
 			},
 		},
 		ConnectedNodes: make([]metricsinfo.IndexNodeInfos, 0),
@@ -91,8 +110,9 @@ func getSystemInfoMetrics(
 	coordTopology := metricsinfo.IndexCoordTopology{
 		Cluster: clusterTopology,
 		Connections: metricsinfo.ConnTopology{
-			Name: metricsinfo.ConstructComponentName(typeutil.IndexCoordRole, coord.ID),
-			// TODO(dragondriver): connection info
+			Name: metricsinfo.ConstructComponentName(typeutil.IndexCoordRole, coord.session.ServerID),
+			// TODO(dragondriver): fill ConnectedComponents if necessary
+			ConnectedComponents: []metricsinfo.ConnectionInfo{},
 		},
 	}
 
@@ -104,7 +124,7 @@ func getSystemInfoMetrics(
 				Reason:    err.Error(),
 			},
 			Response:      "",
-			ComponentName: metricsinfo.ConstructComponentName(typeutil.IndexCoordRole, coord.ID),
+			ComponentName: metricsinfo.ConstructComponentName(typeutil.IndexCoordRole, coord.session.ServerID),
 		}, nil
 	}
 
@@ -114,6 +134,6 @@ func getSystemInfoMetrics(
 			Reason:    "",
 		},
 		Response:      resp,
-		ComponentName: metricsinfo.ConstructComponentName(typeutil.IndexCoordRole, coord.ID),
+		ComponentName: metricsinfo.ConstructComponentName(typeutil.IndexCoordRole, coord.session.ServerID),
 	}, nil
 }
