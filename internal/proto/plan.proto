@@ -37,10 +37,13 @@ enum BinaryArithOp {
   Subtract = 2;
   Multiply = 3;
   Divide = 4;
+  Modulo = 5;
   Power = 6;
   BitAnd = 7;
   BitOr = 8;
   BitXor = 9;
+  ShiftLeft = 10;
+  ShiftRight = 11;
 }
 
 message GenericValue {

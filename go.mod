@@ -4,6 +4,7 @@ go 1.15
 
 require (
 	github.com/HdrHistogram/hdrhistogram-go v1.0.1 // indirect
+	github.com/antlr/antlr4/runtime/Go/antlr v0.0.0-20210826220005-b48c857c3a0e // indirect
 	github.com/antonmedv/expr v1.8.9
 	github.com/apache/pulsar-client-go v0.5.0
 	github.com/bits-and-blooms/bitset v1.2.0 // indirect

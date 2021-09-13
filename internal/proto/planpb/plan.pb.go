@@ -21,20 +21,73 @@ var _ = math.Inf
 // proto package needs to be updated.
 const _ = proto.ProtoPackageIsVersion3 // please upgrade the proto package
 
-type OpType int32
+type UnaryLogicalOp int32
 
 const (
-	OpType_Invalid      OpType = 0
-	OpType_GreaterThan  OpType = 1
-	OpType_GreaterEqual OpType = 2
-	OpType_LessThan     OpType = 3
-	OpType_LessEqual    OpType = 4
-	OpType_Equal        OpType = 5
-	OpType_NotEqual     OpType = 6
+	UnaryLogicalOp_InvalidUnaryLogicalOp UnaryLogicalOp = 0
+	UnaryLogicalOp_Not                   UnaryLogicalOp = 1
 )
 
-var OpType_name = map[int32]string{
-	0: "Invalid",
+var UnaryLogicalOp_name = map[int32]string{
+	0: "InvalidUnaryLogicalOp",
+	1: "Not",
+}
+
+var UnaryLogicalOp_value = map[string]int32{
+	"InvalidUnaryLogicalOp": 0,
+	"Not":                   1,
+}
+
+func (x UnaryLogicalOp) String() string {
+	return proto.EnumName(UnaryLogicalOp_name, int32(x))
+}
+
+func (UnaryLogicalOp) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{0}
+}
+
+type BinaryLogicalOp int32
+
+const (
+	BinaryLogicalOp_InvalidBinaryLogicalOp BinaryLogicalOp = 0
+	BinaryLogicalOp_LogicalAnd             BinaryLogicalOp = 1
+	BinaryLogicalOp_LogicalOr              BinaryLogicalOp = 2
+)
+
+var BinaryLogicalOp_name = map[int32]string{
+	0: "InvalidBinaryLogicalOp",
+	1: "LogicalAnd",
+	2: "LogicalOr",
+}
+
+var BinaryLogicalOp_value = map[string]int32{
+	"InvalidBinaryLogicalOp": 0,
+	"LogicalAnd":             1,
+	"LogicalOr":              2,
+}
+
+func (x BinaryLogicalOp) String() string {
+	return proto.EnumName(BinaryLogicalOp_name, int32(x))
+}
+
+func (BinaryLogicalOp) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{1}
+}
+
+type CompareOp int32
+
+const (
+	CompareOp_InvalidCompareOp CompareOp = 0
+	CompareOp_GreaterThan      CompareOp = 1
+	CompareOp_GreaterEqual     CompareOp = 2
+	CompareOp_LessThan         CompareOp = 3
+	CompareOp_LessEqual        CompareOp = 4
+	CompareOp_Equal            CompareOp = 5
+	CompareOp_NotEqual         CompareOp = 6
+)
+
+var CompareOp_name = map[int32]string{
+	0: "InvalidCompareOp",
 	1: "GreaterThan",
 	2: "GreaterEqual",
 	3: "LessThan",
@@ -43,75 +96,102 @@ var OpType_name = map[int32]string{
 	6: "NotEqual",
 }
 
-var OpType_value = map[string]int32{
-	"Invalid":      0,
-	"GreaterThan":  1,
-	"GreaterEqual": 2,
-	"LessThan":     3,
-	"LessEqual":    4,
-	"Equal":        5,
-	"NotEqual":     6,
+var CompareOp_value = map[string]int32{
+	"InvalidCompareOp": 0,
+	"GreaterThan":      1,
+	"GreaterEqual":     2,
+	"LessThan":         3,
+	"LessEqual":        4,
+	"Equal":            5,
+	"NotEqual":         6,
 }
 
-func (x OpType) String() string {
-	return proto.EnumName(OpType_name, int32(x))
+func (x CompareOp) String() string {
+	return proto.EnumName(CompareOp_name, int32(x))
 }
 
-func (OpType) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{0}
+func (CompareOp) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{2}
 }
 
-type UnaryExpr_UnaryOp int32
+type UnaryArithOp int32
 
 const (
-	UnaryExpr_Invalid UnaryExpr_UnaryOp = 0
-	UnaryExpr_Not     UnaryExpr_UnaryOp = 1
+	UnaryArithOp_InvalidUnaryArithOp UnaryArithOp = 0
+	UnaryArithOp_Minus               UnaryArithOp = 1
+	UnaryArithOp_BitNot              UnaryArithOp = 2
 )
 
-var UnaryExpr_UnaryOp_name = map[int32]string{
-	0: "Invalid",
-	1: "Not",
+var UnaryArithOp_name = map[int32]string{
+	0: "InvalidUnaryArithOp",
+	1: "Minus",
+	2: "BitNot",
 }
 
-var UnaryExpr_UnaryOp_value = map[string]int32{
-	"Invalid": 0,
-	"Not":     1,
+var UnaryArithOp_value = map[string]int32{
+	"InvalidUnaryArithOp": 0,
+	"Minus":               1,
+	"BitNot":              2,
 }
 
-func (x UnaryExpr_UnaryOp) String() string {
-	return proto.EnumName(UnaryExpr_UnaryOp_name, int32(x))
+func (x UnaryArithOp) String() string {
+	return proto.EnumName(UnaryArithOp_name, int32(x))
 }
 
-func (UnaryExpr_UnaryOp) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{7, 0}
+func (UnaryArithOp) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{3}
 }
 
-type BinaryExpr_BinaryOp int32
+type BinaryArithOp int32
 
 const (
-	BinaryExpr_Invalid    BinaryExpr_BinaryOp = 0
-	BinaryExpr_LogicalAnd BinaryExpr_BinaryOp = 1
-	BinaryExpr_LogicalOr  BinaryExpr_BinaryOp = 2
+	BinaryArithOp_InvalidBinaryArithOp BinaryArithOp = 0
+	BinaryArithOp_Add                  BinaryArithOp = 1
+	BinaryArithOp_Subtract             BinaryArithOp = 2
+	BinaryArithOp_Multiply             BinaryArithOp = 3
+	BinaryArithOp_Divide               BinaryArithOp = 4
+	BinaryArithOp_Power                BinaryArithOp = 6
+	BinaryArithOp_BitAnd               BinaryArithOp = 7
+	BinaryArithOp_BitOr                BinaryArithOp = 8
+	BinaryArithOp_BitXor               BinaryArithOp = 9
+	BinaryArithOp_ShiftLeft            BinaryArithOp = 10
+	BinaryArithOp_ShiftRight           BinaryArithOp = 11
 )
 
-var BinaryExpr_BinaryOp_name = map[int32]string{
-	0: "Invalid",
-	1: "LogicalAnd",
-	2: "LogicalOr",
+var BinaryArithOp_name = map[int32]string{
+	0:  "InvalidBinaryArithOp",
+	1:  "Add",
+	2:  "Subtract",
+	3:  "Multiply",
+	4:  "Divide",
+	6:  "Power",
+	7:  "BitAnd",
+	8:  "BitOr",
+	9:  "BitXor",
+	10: "ShiftLeft",
+	11: "ShiftRight",
 }
 
-var BinaryExpr_BinaryOp_value = map[string]int32{
-	"Invalid":    0,
-	"LogicalAnd": 1,
-	"LogicalOr":  2,
+var BinaryArithOp_value = map[string]int32{
+	"InvalidBinaryArithOp": 0,
+	"Add":                  1,
+	"Subtract":             2,
+	"Multiply":             3,
+	"Divide":               4,
+	"Power":                6,
+	"BitAnd":               7,
+	"BitOr":                8,
+	"BitXor":               9,
+	"ShiftLeft":            10,
+	"ShiftRight":           11,
 }
 
-func (x BinaryExpr_BinaryOp) String() string {
-	return proto.EnumName(BinaryExpr_BinaryOp_name, int32(x))
+func (x BinaryArithOp) String() string {
+	return proto.EnumName(BinaryArithOp_name, int32(x))
 }
 
-func (BinaryExpr_BinaryOp) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{8, 0}
+func (BinaryArithOp) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{4}
 }
 
 type GenericValue struct {
@@ -120,6 +200,7 @@ type GenericValue struct {
 	//	*GenericValue_Int64Val
 	//	*GenericValue_FloatVal
 	Val                  isGenericValue_Val `protobuf_oneof:"val"`
+	DataType             schemapb.DataType  `protobuf:"varint,4,opt,name=data_type,json=dataType,proto3,enum=milvus.proto.schema.DataType" json:"data_type,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}           `json:"-"`
 	XXX_unrecognized     []byte             `json:"-"`
 	XXX_sizecache        int32              `json:"-"`
@@ -198,6 +279,13 @@ func (m *GenericValue) GetFloatVal() float64 {
 		return x.FloatVal
 	}
 	return 0
+}
+
+func (m *GenericValue) GetDataType() schemapb.DataType {
+	if m != nil {
+		return m.DataType
+	}
+	return schemapb.DataType_None
 }
 
 // XXX_OneofWrappers is for the internal use of the proto package.
@@ -327,9 +415,236 @@ func (m *ColumnInfo) GetIsAutoID() bool {
 	return false
 }
 
+type ValueExpr struct {
+	Value                *GenericValue `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}      `json:"-"`
+	XXX_unrecognized     []byte        `json:"-"`
+	XXX_sizecache        int32         `json:"-"`
+}
+
+func (m *ValueExpr) Reset()         { *m = ValueExpr{} }
+func (m *ValueExpr) String() string { return proto.CompactTextString(m) }
+func (*ValueExpr) ProtoMessage()    {}
+func (*ValueExpr) Descriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{3}
+}
+
+func (m *ValueExpr) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_ValueExpr.Unmarshal(m, b)
+}
+func (m *ValueExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_ValueExpr.Marshal(b, m, deterministic)
+}
+func (m *ValueExpr) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ValueExpr.Merge(m, src)
+}
+func (m *ValueExpr) XXX_Size() int {
+	return xxx_messageInfo_ValueExpr.Size(m)
+}
+func (m *ValueExpr) XXX_DiscardUnknown() {
+	xxx_messageInfo_ValueExpr.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ValueExpr proto.InternalMessageInfo
+
+func (m *ValueExpr) GetValue() *GenericValue {
+	if m != nil {
+		return m.Value
+	}
+	return nil
+}
+
+type ColumnExpr struct {
+	ColumnInfo           *ColumnInfo `protobuf:"bytes,1,opt,name=column_info,json=columnInfo,proto3" json:"column_info,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}    `json:"-"`
+	XXX_unrecognized     []byte      `json:"-"`
+	XXX_sizecache        int32       `json:"-"`
+}
+
+func (m *ColumnExpr) Reset()         { *m = ColumnExpr{} }
+func (m *ColumnExpr) String() string { return proto.CompactTextString(m) }
+func (*ColumnExpr) ProtoMessage()    {}
+func (*ColumnExpr) Descriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{4}
+}
+
+func (m *ColumnExpr) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_ColumnExpr.Unmarshal(m, b)
+}
+func (m *ColumnExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_ColumnExpr.Marshal(b, m, deterministic)
+}
+func (m *ColumnExpr) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ColumnExpr.Merge(m, src)
+}
+func (m *ColumnExpr) XXX_Size() int {
+	return xxx_messageInfo_ColumnExpr.Size(m)
+}
+func (m *ColumnExpr) XXX_DiscardUnknown() {
+	xxx_messageInfo_ColumnExpr.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ColumnExpr proto.InternalMessageInfo
+
+func (m *ColumnExpr) GetColumnInfo() *ColumnInfo {
+	if m != nil {
+		return m.ColumnInfo
+	}
+	return nil
+}
+
+type CastExpr struct {
+	Child                *Expr             `protobuf:"bytes,1,opt,name=child,proto3" json:"child,omitempty"`
+	DataType             schemapb.DataType `protobuf:"varint,2,opt,name=data_type,json=dataType,proto3,enum=milvus.proto.schema.DataType" json:"data_type,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}          `json:"-"`
+	XXX_unrecognized     []byte            `json:"-"`
+	XXX_sizecache        int32             `json:"-"`
+}
+
+func (m *CastExpr) Reset()         { *m = CastExpr{} }
+func (m *CastExpr) String() string { return proto.CompactTextString(m) }
+func (*CastExpr) ProtoMessage()    {}
+func (*CastExpr) Descriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{5}
+}
+
+func (m *CastExpr) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_CastExpr.Unmarshal(m, b)
+}
+func (m *CastExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_CastExpr.Marshal(b, m, deterministic)
+}
+func (m *CastExpr) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_CastExpr.Merge(m, src)
+}
+func (m *CastExpr) XXX_Size() int {
+	return xxx_messageInfo_CastExpr.Size(m)
+}
+func (m *CastExpr) XXX_DiscardUnknown() {
+	xxx_messageInfo_CastExpr.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_CastExpr proto.InternalMessageInfo
+
+func (m *CastExpr) GetChild() *Expr {
+	if m != nil {
+		return m.Child
+	}
+	return nil
+}
+
+func (m *CastExpr) GetDataType() schemapb.DataType {
+	if m != nil {
+		return m.DataType
+	}
+	return schemapb.DataType_None
+}
+
+type UnaryArithExpr struct {
+	Child                *Expr        `protobuf:"bytes,1,opt,name=child,proto3" json:"child,omitempty"`
+	Op                   UnaryArithOp `protobuf:"varint,2,opt,name=op,proto3,enum=milvus.proto.plan.UnaryArithOp" json:"op,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}     `json:"-"`
+	XXX_unrecognized     []byte       `json:"-"`
+	XXX_sizecache        int32        `json:"-"`
+}
+
+func (m *UnaryArithExpr) Reset()         { *m = UnaryArithExpr{} }
+func (m *UnaryArithExpr) String() string { return proto.CompactTextString(m) }
+func (*UnaryArithExpr) ProtoMessage()    {}
+func (*UnaryArithExpr) Descriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{6}
+}
+
+func (m *UnaryArithExpr) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_UnaryArithExpr.Unmarshal(m, b)
+}
+func (m *UnaryArithExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_UnaryArithExpr.Marshal(b, m, deterministic)
+}
+func (m *UnaryArithExpr) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_UnaryArithExpr.Merge(m, src)
+}
+func (m *UnaryArithExpr) XXX_Size() int {
+	return xxx_messageInfo_UnaryArithExpr.Size(m)
+}
+func (m *UnaryArithExpr) XXX_DiscardUnknown() {
+	xxx_messageInfo_UnaryArithExpr.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_UnaryArithExpr proto.InternalMessageInfo
+
+func (m *UnaryArithExpr) GetChild() *Expr {
+	if m != nil {
+		return m.Child
+	}
+	return nil
+}
+
+func (m *UnaryArithExpr) GetOp() UnaryArithOp {
+	if m != nil {
+		return m.Op
+	}
+	return UnaryArithOp_InvalidUnaryArithOp
+}
+
+type BinaryArithExpr struct {
+	Left                 *Expr         `protobuf:"bytes,1,opt,name=left,proto3" json:"left,omitempty"`
+	Right                *Expr         `protobuf:"bytes,2,opt,name=right,proto3" json:"right,omitempty"`
+	Op                   BinaryArithOp `protobuf:"varint,3,opt,name=op,proto3,enum=milvus.proto.plan.BinaryArithOp" json:"op,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}      `json:"-"`
+	XXX_unrecognized     []byte        `json:"-"`
+	XXX_sizecache        int32         `json:"-"`
+}
+
+func (m *BinaryArithExpr) Reset()         { *m = BinaryArithExpr{} }
+func (m *BinaryArithExpr) String() string { return proto.CompactTextString(m) }
+func (*BinaryArithExpr) ProtoMessage()    {}
+func (*BinaryArithExpr) Descriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{7}
+}
+
+func (m *BinaryArithExpr) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_BinaryArithExpr.Unmarshal(m, b)
+}
+func (m *BinaryArithExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_BinaryArithExpr.Marshal(b, m, deterministic)
+}
+func (m *BinaryArithExpr) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_BinaryArithExpr.Merge(m, src)
+}
+func (m *BinaryArithExpr) XXX_Size() int {
+	return xxx_messageInfo_BinaryArithExpr.Size(m)
+}
+func (m *BinaryArithExpr) XXX_DiscardUnknown() {
+	xxx_messageInfo_BinaryArithExpr.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_BinaryArithExpr proto.InternalMessageInfo
+
+func (m *BinaryArithExpr) GetLeft() *Expr {
+	if m != nil {
+		return m.Left
+	}
+	return nil
+}
+
+func (m *BinaryArithExpr) GetRight() *Expr {
+	if m != nil {
+		return m.Right
+	}
+	return nil
+}
+
+func (m *BinaryArithExpr) GetOp() BinaryArithOp {
+	if m != nil {
+		return m.Op
+	}
+	return BinaryArithOp_InvalidBinaryArithOp
+}
+
 type UnaryRangeExpr struct {
-	ColumnInfo           *ColumnInfo   `protobuf:"bytes,1,opt,name=column_info,json=columnInfo,proto3" json:"column_info,omitempty"`
-	Op                   OpType        `protobuf:"varint,2,opt,name=op,proto3,enum=milvus.proto.plan.OpType" json:"op,omitempty"`
+	Child                *Expr         `protobuf:"bytes,1,opt,name=child,proto3" json:"child,omitempty"`
+	Op                   CompareOp     `protobuf:"varint,2,opt,name=op,proto3,enum=milvus.proto.plan.CompareOp" json:"op,omitempty"`
 	Value                *GenericValue `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}      `json:"-"`
 	XXX_unrecognized     []byte        `json:"-"`
@@ -340,7 +655,7 @@ func (m *UnaryRangeExpr) Reset()         { *m = UnaryRangeExpr{} }
 func (m *UnaryRangeExpr) String() string { return proto.CompactTextString(m) }
 func (*UnaryRangeExpr) ProtoMessage()    {}
 func (*UnaryRangeExpr) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{3}
+	return fileDescriptor_2d655ab2f7683c23, []int{8}
 }
 
 func (m *UnaryRangeExpr) XXX_Unmarshal(b []byte) error {
@@ -361,18 +676,18 @@ func (m *UnaryRangeExpr) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_UnaryRangeExpr proto.InternalMessageInfo
 
-func (m *UnaryRangeExpr) GetColumnInfo() *ColumnInfo {
+func (m *UnaryRangeExpr) GetChild() *Expr {
 	if m != nil {
-		return m.ColumnInfo
+		return m.Child
 	}
 	return nil
 }
 
-func (m *UnaryRangeExpr) GetOp() OpType {
+func (m *UnaryRangeExpr) GetOp() CompareOp {
 	if m != nil {
 		return m.Op
 	}
-	return OpType_Invalid
+	return CompareOp_InvalidCompareOp
 }
 
 func (m *UnaryRangeExpr) GetValue() *GenericValue {
@@ -383,7 +698,7 @@ func (m *UnaryRangeExpr) GetValue() *GenericValue {
 }
 
 type BinaryRangeExpr struct {
-	ColumnInfo           *ColumnInfo   `protobuf:"bytes,1,opt,name=column_info,json=columnInfo,proto3" json:"column_info,omitempty"`
+	Child                *Expr         `protobuf:"bytes,1,opt,name=child,proto3" json:"child,omitempty"`
 	LowerInclusive       bool          `protobuf:"varint,2,opt,name=lower_inclusive,json=lowerInclusive,proto3" json:"lower_inclusive,omitempty"`
 	UpperInclusive       bool          `protobuf:"varint,3,opt,name=upper_inclusive,json=upperInclusive,proto3" json:"upper_inclusive,omitempty"`
 	LowerValue           *GenericValue `protobuf:"bytes,4,opt,name=lower_value,json=lowerValue,proto3" json:"lower_value,omitempty"`
@@ -397,7 +712,7 @@ func (m *BinaryRangeExpr) Reset()         { *m = BinaryRangeExpr{} }
 func (m *BinaryRangeExpr) String() string { return proto.CompactTextString(m) }
 func (*BinaryRangeExpr) ProtoMessage()    {}
 func (*BinaryRangeExpr) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{4}
+	return fileDescriptor_2d655ab2f7683c23, []int{9}
 }
 
 func (m *BinaryRangeExpr) XXX_Unmarshal(b []byte) error {
@@ -418,9 +733,9 @@ func (m *BinaryRangeExpr) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_BinaryRangeExpr proto.InternalMessageInfo
 
-func (m *BinaryRangeExpr) GetColumnInfo() *ColumnInfo {
+func (m *BinaryRangeExpr) GetChild() *Expr {
 	if m != nil {
-		return m.ColumnInfo
+		return m.Child
 	}
 	return nil
 }
@@ -454,19 +769,19 @@ func (m *BinaryRangeExpr) GetUpperValue() *GenericValue {
 }
 
 type CompareExpr struct {
-	LeftColumnInfo       *ColumnInfo `protobuf:"bytes,1,opt,name=left_column_info,json=leftColumnInfo,proto3" json:"left_column_info,omitempty"`
-	RightColumnInfo      *ColumnInfo `protobuf:"bytes,2,opt,name=right_column_info,json=rightColumnInfo,proto3" json:"right_column_info,omitempty"`
-	Op                   OpType      `protobuf:"varint,3,opt,name=op,proto3,enum=milvus.proto.plan.OpType" json:"op,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}    `json:"-"`
-	XXX_unrecognized     []byte      `json:"-"`
-	XXX_sizecache        int32       `json:"-"`
+	Left                 *Expr     `protobuf:"bytes,1,opt,name=left,proto3" json:"left,omitempty"`
+	Right                *Expr     `protobuf:"bytes,2,opt,name=right,proto3" json:"right,omitempty"`
+	Op                   CompareOp `protobuf:"varint,3,opt,name=op,proto3,enum=milvus.proto.plan.CompareOp" json:"op,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}  `json:"-"`
+	XXX_unrecognized     []byte    `json:"-"`
+	XXX_sizecache        int32     `json:"-"`
 }
 
 func (m *CompareExpr) Reset()         { *m = CompareExpr{} }
 func (m *CompareExpr) String() string { return proto.CompactTextString(m) }
 func (*CompareExpr) ProtoMessage()    {}
 func (*CompareExpr) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{5}
+	return fileDescriptor_2d655ab2f7683c23, []int{10}
 }
 
 func (m *CompareExpr) XXX_Unmarshal(b []byte) error {
@@ -487,29 +802,29 @@ func (m *CompareExpr) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_CompareExpr proto.InternalMessageInfo
 
-func (m *CompareExpr) GetLeftColumnInfo() *ColumnInfo {
+func (m *CompareExpr) GetLeft() *Expr {
 	if m != nil {
-		return m.LeftColumnInfo
+		return m.Left
 	}
 	return nil
 }
 
-func (m *CompareExpr) GetRightColumnInfo() *ColumnInfo {
+func (m *CompareExpr) GetRight() *Expr {
 	if m != nil {
-		return m.RightColumnInfo
+		return m.Right
 	}
 	return nil
 }
 
-func (m *CompareExpr) GetOp() OpType {
+func (m *CompareExpr) GetOp() CompareOp {
 	if m != nil {
 		return m.Op
 	}
-	return OpType_Invalid
+	return CompareOp_InvalidCompareOp
 }
 
 type TermExpr struct {
-	ColumnInfo           *ColumnInfo     `protobuf:"bytes,1,opt,name=column_info,json=columnInfo,proto3" json:"column_info,omitempty"`
+	Child                *Expr           `protobuf:"bytes,1,opt,name=child,proto3" json:"child,omitempty"`
 	Values               []*GenericValue `protobuf:"bytes,2,rep,name=values,proto3" json:"values,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}        `json:"-"`
 	XXX_unrecognized     []byte          `json:"-"`
@@ -520,7 +835,7 @@ func (m *TermExpr) Reset()         { *m = TermExpr{} }
 func (m *TermExpr) String() string { return proto.CompactTextString(m) }
 func (*TermExpr) ProtoMessage()    {}
 func (*TermExpr) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{6}
+	return fileDescriptor_2d655ab2f7683c23, []int{11}
 }
 
 func (m *TermExpr) XXX_Unmarshal(b []byte) error {
@@ -541,9 +856,9 @@ func (m *TermExpr) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_TermExpr proto.InternalMessageInfo
 
-func (m *TermExpr) GetColumnInfo() *ColumnInfo {
+func (m *TermExpr) GetChild() *Expr {
 	if m != nil {
-		return m.ColumnInfo
+		return m.Child
 	}
 	return nil
 }
@@ -555,116 +870,121 @@ func (m *TermExpr) GetValues() []*GenericValue {
 	return nil
 }
 
-type UnaryExpr struct {
-	Op                   UnaryExpr_UnaryOp `protobuf:"varint,1,opt,name=op,proto3,enum=milvus.proto.plan.UnaryExpr_UnaryOp" json:"op,omitempty"`
-	Child                *Expr             `protobuf:"bytes,2,opt,name=child,proto3" json:"child,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}          `json:"-"`
-	XXX_unrecognized     []byte            `json:"-"`
-	XXX_sizecache        int32             `json:"-"`
+type UnaryLogicalExpr struct {
+	Child                *Expr          `protobuf:"bytes,1,opt,name=child,proto3" json:"child,omitempty"`
+	Op                   UnaryLogicalOp `protobuf:"varint,2,opt,name=op,proto3,enum=milvus.proto.plan.UnaryLogicalOp" json:"op,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}       `json:"-"`
+	XXX_unrecognized     []byte         `json:"-"`
+	XXX_sizecache        int32          `json:"-"`
 }
 
-func (m *UnaryExpr) Reset()         { *m = UnaryExpr{} }
-func (m *UnaryExpr) String() string { return proto.CompactTextString(m) }
-func (*UnaryExpr) ProtoMessage()    {}
-func (*UnaryExpr) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{7}
+func (m *UnaryLogicalExpr) Reset()         { *m = UnaryLogicalExpr{} }
+func (m *UnaryLogicalExpr) String() string { return proto.CompactTextString(m) }
+func (*UnaryLogicalExpr) ProtoMessage()    {}
+func (*UnaryLogicalExpr) Descriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{12}
 }
 
-func (m *UnaryExpr) XXX_Unmarshal(b []byte) error {
-	return xxx_messageInfo_UnaryExpr.Unmarshal(m, b)
+func (m *UnaryLogicalExpr) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_UnaryLogicalExpr.Unmarshal(m, b)
 }
-func (m *UnaryExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	return xxx_messageInfo_UnaryExpr.Marshal(b, m, deterministic)
+func (m *UnaryLogicalExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_UnaryLogicalExpr.Marshal(b, m, deterministic)
 }
-func (m *UnaryExpr) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_UnaryExpr.Merge(m, src)
+func (m *UnaryLogicalExpr) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_UnaryLogicalExpr.Merge(m, src)
 }
-func (m *UnaryExpr) XXX_Size() int {
-	return xxx_messageInfo_UnaryExpr.Size(m)
+func (m *UnaryLogicalExpr) XXX_Size() int {
+	return xxx_messageInfo_UnaryLogicalExpr.Size(m)
 }
-func (m *UnaryExpr) XXX_DiscardUnknown() {
-	xxx_messageInfo_UnaryExpr.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_UnaryExpr proto.InternalMessageInfo
-
-func (m *UnaryExpr) GetOp() UnaryExpr_UnaryOp {
-	if m != nil {
-		return m.Op
-	}
-	return UnaryExpr_Invalid
+func (m *UnaryLogicalExpr) XXX_DiscardUnknown() {
+	xxx_messageInfo_UnaryLogicalExpr.DiscardUnknown(m)
 }
 
-func (m *UnaryExpr) GetChild() *Expr {
+var xxx_messageInfo_UnaryLogicalExpr proto.InternalMessageInfo
+
+func (m *UnaryLogicalExpr) GetChild() *Expr {
 	if m != nil {
 		return m.Child
 	}
 	return nil
 }
 
-type BinaryExpr struct {
-	Op                   BinaryExpr_BinaryOp `protobuf:"varint,1,opt,name=op,proto3,enum=milvus.proto.plan.BinaryExpr_BinaryOp" json:"op,omitempty"`
-	Left                 *Expr               `protobuf:"bytes,2,opt,name=left,proto3" json:"left,omitempty"`
-	Right                *Expr               `protobuf:"bytes,3,opt,name=right,proto3" json:"right,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}            `json:"-"`
-	XXX_unrecognized     []byte              `json:"-"`
-	XXX_sizecache        int32               `json:"-"`
-}
-
-func (m *BinaryExpr) Reset()         { *m = BinaryExpr{} }
-func (m *BinaryExpr) String() string { return proto.CompactTextString(m) }
-func (*BinaryExpr) ProtoMessage()    {}
-func (*BinaryExpr) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{8}
-}
-
-func (m *BinaryExpr) XXX_Unmarshal(b []byte) error {
-	return xxx_messageInfo_BinaryExpr.Unmarshal(m, b)
-}
-func (m *BinaryExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
-	return xxx_messageInfo_BinaryExpr.Marshal(b, m, deterministic)
-}
-func (m *BinaryExpr) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_BinaryExpr.Merge(m, src)
-}
-func (m *BinaryExpr) XXX_Size() int {
-	return xxx_messageInfo_BinaryExpr.Size(m)
-}
-func (m *BinaryExpr) XXX_DiscardUnknown() {
-	xxx_messageInfo_BinaryExpr.DiscardUnknown(m)
-}
-
-var xxx_messageInfo_BinaryExpr proto.InternalMessageInfo
-
-func (m *BinaryExpr) GetOp() BinaryExpr_BinaryOp {
+func (m *UnaryLogicalExpr) GetOp() UnaryLogicalOp {
 	if m != nil {
 		return m.Op
 	}
-	return BinaryExpr_Invalid
+	return UnaryLogicalOp_InvalidUnaryLogicalOp
 }
 
-func (m *BinaryExpr) GetLeft() *Expr {
+type BinaryLogicalExpr struct {
+	Left                 *Expr           `protobuf:"bytes,1,opt,name=left,proto3" json:"left,omitempty"`
+	Right                *Expr           `protobuf:"bytes,2,opt,name=right,proto3" json:"right,omitempty"`
+	Op                   BinaryLogicalOp `protobuf:"varint,3,opt,name=op,proto3,enum=milvus.proto.plan.BinaryLogicalOp" json:"op,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}        `json:"-"`
+	XXX_unrecognized     []byte          `json:"-"`
+	XXX_sizecache        int32           `json:"-"`
+}
+
+func (m *BinaryLogicalExpr) Reset()         { *m = BinaryLogicalExpr{} }
+func (m *BinaryLogicalExpr) String() string { return proto.CompactTextString(m) }
+func (*BinaryLogicalExpr) ProtoMessage()    {}
+func (*BinaryLogicalExpr) Descriptor() ([]byte, []int) {
+	return fileDescriptor_2d655ab2f7683c23, []int{13}
+}
+
+func (m *BinaryLogicalExpr) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_BinaryLogicalExpr.Unmarshal(m, b)
+}
+func (m *BinaryLogicalExpr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_BinaryLogicalExpr.Marshal(b, m, deterministic)
+}
+func (m *BinaryLogicalExpr) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_BinaryLogicalExpr.Merge(m, src)
+}
+func (m *BinaryLogicalExpr) XXX_Size() int {
+	return xxx_messageInfo_BinaryLogicalExpr.Size(m)
+}
+func (m *BinaryLogicalExpr) XXX_DiscardUnknown() {
+	xxx_messageInfo_BinaryLogicalExpr.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_BinaryLogicalExpr proto.InternalMessageInfo
+
+func (m *BinaryLogicalExpr) GetLeft() *Expr {
 	if m != nil {
 		return m.Left
 	}
 	return nil
 }
 
-func (m *BinaryExpr) GetRight() *Expr {
+func (m *BinaryLogicalExpr) GetRight() *Expr {
 	if m != nil {
 		return m.Right
 	}
 	return nil
 }
 
+func (m *BinaryLogicalExpr) GetOp() BinaryLogicalOp {
+	if m != nil {
+		return m.Op
+	}
+	return BinaryLogicalOp_InvalidBinaryLogicalOp
+}
+
 type Expr struct {
 	// Types that are valid to be assigned to Expr:
 	//	*Expr_TermExpr
-	//	*Expr_UnaryExpr
-	//	*Expr_BinaryExpr
 	//	*Expr_CompareExpr
+	//	*Expr_UnaryLogicalExpr
+	//	*Expr_BinaryLogicalExpr
 	//	*Expr_UnaryRangeExpr
 	//	*Expr_BinaryRangeExpr
+	//	*Expr_UnaryArithExpr
+	//	*Expr_BinaryArithExpr
+	//	*Expr_ValueExpr
+	//	*Expr_ColumnExpr
+	//	*Expr_CastExpr
 	Expr                 isExpr_Expr `protobuf_oneof:"expr"`
 	XXX_NoUnkeyedLiteral struct{}    `json:"-"`
 	XXX_unrecognized     []byte      `json:"-"`
@@ -675,7 +995,7 @@ func (m *Expr) Reset()         { *m = Expr{} }
 func (m *Expr) String() string { return proto.CompactTextString(m) }
 func (*Expr) ProtoMessage()    {}
 func (*Expr) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{9}
+	return fileDescriptor_2d655ab2f7683c23, []int{14}
 }
 
 func (m *Expr) XXX_Unmarshal(b []byte) error {
@@ -704,16 +1024,16 @@ type Expr_TermExpr struct {
 	TermExpr *TermExpr `protobuf:"bytes,1,opt,name=term_expr,json=termExpr,proto3,oneof"`
 }
 
-type Expr_UnaryExpr struct {
-	UnaryExpr *UnaryExpr `protobuf:"bytes,2,opt,name=unary_expr,json=unaryExpr,proto3,oneof"`
-}
-
-type Expr_BinaryExpr struct {
-	BinaryExpr *BinaryExpr `protobuf:"bytes,3,opt,name=binary_expr,json=binaryExpr,proto3,oneof"`
-}
-
 type Expr_CompareExpr struct {
-	CompareExpr *CompareExpr `protobuf:"bytes,4,opt,name=compare_expr,json=compareExpr,proto3,oneof"`
+	CompareExpr *CompareExpr `protobuf:"bytes,2,opt,name=compare_expr,json=compareExpr,proto3,oneof"`
+}
+
+type Expr_UnaryLogicalExpr struct {
+	UnaryLogicalExpr *UnaryLogicalExpr `protobuf:"bytes,3,opt,name=unary_logical_expr,json=unaryLogicalExpr,proto3,oneof"`
+}
+
+type Expr_BinaryLogicalExpr struct {
+	BinaryLogicalExpr *BinaryLogicalExpr `protobuf:"bytes,4,opt,name=binary_logical_expr,json=binaryLogicalExpr,proto3,oneof"`
 }
 
 type Expr_UnaryRangeExpr struct {
@@ -724,17 +1044,47 @@ type Expr_BinaryRangeExpr struct {
 	BinaryRangeExpr *BinaryRangeExpr `protobuf:"bytes,6,opt,name=binary_range_expr,json=binaryRangeExpr,proto3,oneof"`
 }
 
+type Expr_UnaryArithExpr struct {
+	UnaryArithExpr *UnaryArithExpr `protobuf:"bytes,7,opt,name=unary_arith_expr,json=unaryArithExpr,proto3,oneof"`
+}
+
+type Expr_BinaryArithExpr struct {
+	BinaryArithExpr *BinaryArithExpr `protobuf:"bytes,8,opt,name=binary_arith_expr,json=binaryArithExpr,proto3,oneof"`
+}
+
+type Expr_ValueExpr struct {
+	ValueExpr *ValueExpr `protobuf:"bytes,9,opt,name=value_expr,json=valueExpr,proto3,oneof"`
+}
+
+type Expr_ColumnExpr struct {
+	ColumnExpr *ColumnExpr `protobuf:"bytes,10,opt,name=column_expr,json=columnExpr,proto3,oneof"`
+}
+
+type Expr_CastExpr struct {
+	CastExpr *CastExpr `protobuf:"bytes,11,opt,name=cast_expr,json=castExpr,proto3,oneof"`
+}
+
 func (*Expr_TermExpr) isExpr_Expr() {}
 
-func (*Expr_UnaryExpr) isExpr_Expr() {}
-
-func (*Expr_BinaryExpr) isExpr_Expr() {}
-
 func (*Expr_CompareExpr) isExpr_Expr() {}
+
+func (*Expr_UnaryLogicalExpr) isExpr_Expr() {}
+
+func (*Expr_BinaryLogicalExpr) isExpr_Expr() {}
 
 func (*Expr_UnaryRangeExpr) isExpr_Expr() {}
 
 func (*Expr_BinaryRangeExpr) isExpr_Expr() {}
+
+func (*Expr_UnaryArithExpr) isExpr_Expr() {}
+
+func (*Expr_BinaryArithExpr) isExpr_Expr() {}
+
+func (*Expr_ValueExpr) isExpr_Expr() {}
+
+func (*Expr_ColumnExpr) isExpr_Expr() {}
+
+func (*Expr_CastExpr) isExpr_Expr() {}
 
 func (m *Expr) GetExpr() isExpr_Expr {
 	if m != nil {
@@ -750,23 +1100,23 @@ func (m *Expr) GetTermExpr() *TermExpr {
 	return nil
 }
 
-func (m *Expr) GetUnaryExpr() *UnaryExpr {
-	if x, ok := m.GetExpr().(*Expr_UnaryExpr); ok {
-		return x.UnaryExpr
-	}
-	return nil
-}
-
-func (m *Expr) GetBinaryExpr() *BinaryExpr {
-	if x, ok := m.GetExpr().(*Expr_BinaryExpr); ok {
-		return x.BinaryExpr
-	}
-	return nil
-}
-
 func (m *Expr) GetCompareExpr() *CompareExpr {
 	if x, ok := m.GetExpr().(*Expr_CompareExpr); ok {
 		return x.CompareExpr
+	}
+	return nil
+}
+
+func (m *Expr) GetUnaryLogicalExpr() *UnaryLogicalExpr {
+	if x, ok := m.GetExpr().(*Expr_UnaryLogicalExpr); ok {
+		return x.UnaryLogicalExpr
+	}
+	return nil
+}
+
+func (m *Expr) GetBinaryLogicalExpr() *BinaryLogicalExpr {
+	if x, ok := m.GetExpr().(*Expr_BinaryLogicalExpr); ok {
+		return x.BinaryLogicalExpr
 	}
 	return nil
 }
@@ -785,15 +1135,55 @@ func (m *Expr) GetBinaryRangeExpr() *BinaryRangeExpr {
 	return nil
 }
 
+func (m *Expr) GetUnaryArithExpr() *UnaryArithExpr {
+	if x, ok := m.GetExpr().(*Expr_UnaryArithExpr); ok {
+		return x.UnaryArithExpr
+	}
+	return nil
+}
+
+func (m *Expr) GetBinaryArithExpr() *BinaryArithExpr {
+	if x, ok := m.GetExpr().(*Expr_BinaryArithExpr); ok {
+		return x.BinaryArithExpr
+	}
+	return nil
+}
+
+func (m *Expr) GetValueExpr() *ValueExpr {
+	if x, ok := m.GetExpr().(*Expr_ValueExpr); ok {
+		return x.ValueExpr
+	}
+	return nil
+}
+
+func (m *Expr) GetColumnExpr() *ColumnExpr {
+	if x, ok := m.GetExpr().(*Expr_ColumnExpr); ok {
+		return x.ColumnExpr
+	}
+	return nil
+}
+
+func (m *Expr) GetCastExpr() *CastExpr {
+	if x, ok := m.GetExpr().(*Expr_CastExpr); ok {
+		return x.CastExpr
+	}
+	return nil
+}
+
 // XXX_OneofWrappers is for the internal use of the proto package.
 func (*Expr) XXX_OneofWrappers() []interface{} {
 	return []interface{}{
 		(*Expr_TermExpr)(nil),
-		(*Expr_UnaryExpr)(nil),
-		(*Expr_BinaryExpr)(nil),
 		(*Expr_CompareExpr)(nil),
+		(*Expr_UnaryLogicalExpr)(nil),
+		(*Expr_BinaryLogicalExpr)(nil),
 		(*Expr_UnaryRangeExpr)(nil),
 		(*Expr_BinaryRangeExpr)(nil),
+		(*Expr_UnaryArithExpr)(nil),
+		(*Expr_BinaryArithExpr)(nil),
+		(*Expr_ValueExpr)(nil),
+		(*Expr_ColumnExpr)(nil),
+		(*Expr_CastExpr)(nil),
 	}
 }
 
@@ -812,7 +1202,7 @@ func (m *VectorANNS) Reset()         { *m = VectorANNS{} }
 func (m *VectorANNS) String() string { return proto.CompactTextString(m) }
 func (*VectorANNS) ProtoMessage()    {}
 func (*VectorANNS) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{10}
+	return fileDescriptor_2d655ab2f7683c23, []int{15}
 }
 
 func (m *VectorANNS) XXX_Unmarshal(b []byte) error {
@@ -882,7 +1272,7 @@ func (m *PlanNode) Reset()         { *m = PlanNode{} }
 func (m *PlanNode) String() string { return proto.CompactTextString(m) }
 func (*PlanNode) ProtoMessage()    {}
 func (*PlanNode) Descriptor() ([]byte, []int) {
-	return fileDescriptor_2d655ab2f7683c23, []int{11}
+	return fileDescriptor_2d655ab2f7683c23, []int{16}
 }
 
 func (m *PlanNode) XXX_Unmarshal(b []byte) error {
@@ -942,18 +1332,25 @@ func (*PlanNode) XXX_OneofWrappers() []interface{} {
 }
 
 func init() {
-	proto.RegisterEnum("milvus.proto.plan.OpType", OpType_name, OpType_value)
-	proto.RegisterEnum("milvus.proto.plan.UnaryExpr_UnaryOp", UnaryExpr_UnaryOp_name, UnaryExpr_UnaryOp_value)
-	proto.RegisterEnum("milvus.proto.plan.BinaryExpr_BinaryOp", BinaryExpr_BinaryOp_name, BinaryExpr_BinaryOp_value)
+	proto.RegisterEnum("milvus.proto.plan.UnaryLogicalOp", UnaryLogicalOp_name, UnaryLogicalOp_value)
+	proto.RegisterEnum("milvus.proto.plan.BinaryLogicalOp", BinaryLogicalOp_name, BinaryLogicalOp_value)
+	proto.RegisterEnum("milvus.proto.plan.CompareOp", CompareOp_name, CompareOp_value)
+	proto.RegisterEnum("milvus.proto.plan.UnaryArithOp", UnaryArithOp_name, UnaryArithOp_value)
+	proto.RegisterEnum("milvus.proto.plan.BinaryArithOp", BinaryArithOp_name, BinaryArithOp_value)
 	proto.RegisterType((*GenericValue)(nil), "milvus.proto.plan.GenericValue")
 	proto.RegisterType((*QueryInfo)(nil), "milvus.proto.plan.QueryInfo")
 	proto.RegisterType((*ColumnInfo)(nil), "milvus.proto.plan.ColumnInfo")
+	proto.RegisterType((*ValueExpr)(nil), "milvus.proto.plan.ValueExpr")
+	proto.RegisterType((*ColumnExpr)(nil), "milvus.proto.plan.ColumnExpr")
+	proto.RegisterType((*CastExpr)(nil), "milvus.proto.plan.CastExpr")
+	proto.RegisterType((*UnaryArithExpr)(nil), "milvus.proto.plan.UnaryArithExpr")
+	proto.RegisterType((*BinaryArithExpr)(nil), "milvus.proto.plan.BinaryArithExpr")
 	proto.RegisterType((*UnaryRangeExpr)(nil), "milvus.proto.plan.UnaryRangeExpr")
 	proto.RegisterType((*BinaryRangeExpr)(nil), "milvus.proto.plan.BinaryRangeExpr")
 	proto.RegisterType((*CompareExpr)(nil), "milvus.proto.plan.CompareExpr")
 	proto.RegisterType((*TermExpr)(nil), "milvus.proto.plan.TermExpr")
-	proto.RegisterType((*UnaryExpr)(nil), "milvus.proto.plan.UnaryExpr")
-	proto.RegisterType((*BinaryExpr)(nil), "milvus.proto.plan.BinaryExpr")
+	proto.RegisterType((*UnaryLogicalExpr)(nil), "milvus.proto.plan.UnaryLogicalExpr")
+	proto.RegisterType((*BinaryLogicalExpr)(nil), "milvus.proto.plan.BinaryLogicalExpr")
 	proto.RegisterType((*Expr)(nil), "milvus.proto.plan.Expr")
 	proto.RegisterType((*VectorANNS)(nil), "milvus.proto.plan.VectorANNS")
 	proto.RegisterType((*PlanNode)(nil), "milvus.proto.plan.PlanNode")
@@ -962,71 +1359,88 @@ func init() {
 func init() { proto.RegisterFile("plan.proto", fileDescriptor_2d655ab2f7683c23) }
 
 var fileDescriptor_2d655ab2f7683c23 = []byte{
-	// 1055 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xac, 0x56, 0xdd, 0x72, 0xdb, 0x44,
-	0x14, 0xb6, 0x2c, 0xdb, 0x91, 0x8e, 0x5c, 0xdb, 0xd1, 0x0d, 0x29, 0xa1, 0x24, 0x88, 0x0e, 0x0d,
-	0x30, 0x4d, 0x86, 0xb6, 0xa4, 0x33, 0x65, 0x60, 0xf2, 0xd3, 0x12, 0x7b, 0x28, 0x49, 0x10, 0x21,
-	0x17, 0xdc, 0x68, 0xd6, 0xd2, 0xc6, 0xde, 0xe9, 0x5a, 0xab, 0xac, 0x56, 0xa6, 0xbe, 0xe1, 0x86,
-	0x27, 0xe0, 0x25, 0xe0, 0x1a, 0x9e, 0x83, 0x07, 0xe0, 0x9e, 0x17, 0x61, 0xf6, 0xac, 0xe2, 0x9f,
-	0x8e, 0xd3, 0xa6, 0x33, 0xbd, 0x5b, 0x9d, 0x3d, 0x7f, 0xdf, 0x77, 0x7e, 0x56, 0x00, 0x19, 0x27,
-	0xe9, 0x76, 0x26, 0x85, 0x12, 0xfe, 0xea, 0x88, 0xf1, 0x71, 0x91, 0x9b, 0xaf, 0x6d, 0x7d, 0xf1,
-	0x7e, 0x33, 0x8f, 0x87, 0x74, 0x44, 0x8c, 0x28, 0xc8, 0xa0, 0x79, 0x44, 0x53, 0x2a, 0x59, 0x7c,
-	0x4e, 0x78, 0x41, 0xfd, 0x75, 0x70, 0xfa, 0x42, 0xf0, 0x68, 0x4c, 0xf8, 0x9a, 0xb5, 0x69, 0x6d,
-	0x39, 0xdd, 0x4a, 0xb8, 0xa2, 0x25, 0xe7, 0x84, 0xfb, 0x77, 0xc0, 0x65, 0xa9, 0xda, 0x7d, 0x84,
-	0xb7, 0xd5, 0x4d, 0x6b, 0xcb, 0xee, 0x56, 0x42, 0x07, 0x45, 0xe5, 0xf5, 0x05, 0x17, 0x44, 0xe1,
-	0xb5, 0xbd, 0x69, 0x6d, 0x59, 0xfa, 0x1a, 0x45, 0xe7, 0x84, 0x1f, 0xd4, 0xc1, 0x1e, 0x13, 0x1e,
-	0x50, 0x70, 0x7f, 0x28, 0xa8, 0x9c, 0xf4, 0xd2, 0x0b, 0xe1, 0xfb, 0x50, 0x53, 0x22, 0x7b, 0x81,
-	0xa1, 0xec, 0x10, 0xcf, 0xfe, 0x06, 0x78, 0x23, 0xaa, 0x24, 0x8b, 0x23, 0x35, 0xc9, 0x28, 0x3a,
-	0x72, 0x43, 0x30, 0xa2, 0xb3, 0x49, 0x46, 0xfd, 0x8f, 0xe1, 0x56, 0x4e, 0x89, 0x8c, 0x87, 0x51,
-	0x46, 0x24, 0x19, 0xe5, 0x6b, 0x35, 0x54, 0x69, 0x1a, 0xe1, 0x29, 0xca, 0x82, 0x3f, 0x2c, 0x80,
-	0x43, 0xc1, 0x8b, 0x51, 0x8a, 0x81, 0x6e, 0x83, 0x73, 0xc1, 0x28, 0x4f, 0x22, 0x96, 0x94, 0xc1,
-	0x56, 0xf0, 0xbb, 0x97, 0xf8, 0x4f, 0xc0, 0x4d, 0x88, 0x22, 0x26, 0x9a, 0x46, 0xd5, 0x7a, 0x70,
-	0x67, 0x7b, 0x81, 0xb7, 0x92, 0xb1, 0xa7, 0x44, 0x11, 0x9d, 0x40, 0xe8, 0x24, 0xe5, 0xc9, 0xbf,
-	0x0b, 0x2d, 0x96, 0x47, 0x99, 0x64, 0x23, 0x22, 0x27, 0xd1, 0x0b, 0x3a, 0xc1, 0x74, 0x9d, 0xb0,
-	0xc9, 0xf2, 0x53, 0x23, 0xfc, 0x8e, 0x4e, 0xfc, 0x75, 0x70, 0x59, 0x1e, 0x91, 0x42, 0x89, 0xde,
-	0x53, 0x4c, 0xd6, 0x09, 0x1d, 0x96, 0xef, 0xe3, 0x77, 0xf0, 0xb7, 0x05, 0xad, 0x9f, 0x52, 0x22,
-	0x27, 0x21, 0x49, 0x07, 0xf4, 0xd9, 0xcb, 0x4c, 0xfa, 0xdf, 0x80, 0x17, 0x63, 0xea, 0x11, 0x4b,
-	0x2f, 0x04, 0xe6, 0xeb, 0xbd, 0x9a, 0x13, 0x16, 0x79, 0x06, 0x30, 0x84, 0x78, 0x06, 0xf6, 0x53,
-	0xa8, 0x8a, 0xac, 0x84, 0x72, 0x7b, 0x89, 0xd9, 0x49, 0x86, 0x30, 0xaa, 0x22, 0xf3, 0xbf, 0x84,
-	0xfa, 0x58, 0x17, 0x1e, 0xf3, 0xf6, 0x1e, 0x6c, 0x2c, 0xd1, 0x9e, 0xef, 0x8f, 0xd0, 0x68, 0x07,
-	0x7f, 0x56, 0xa1, 0x7d, 0xc0, 0xde, 0x6d, 0xd6, 0xf7, 0xa0, 0xcd, 0xc5, 0x2f, 0x54, 0x46, 0x2c,
-	0x8d, 0x79, 0x91, 0xb3, 0xb1, 0xa9, 0x86, 0x13, 0xb6, 0x50, 0xdc, 0xbb, 0x92, 0x6a, 0xc5, 0x22,
-	0xcb, 0x16, 0x14, 0x0d, 0xeb, 0x2d, 0x14, 0xcf, 0x14, 0xf7, 0xc0, 0x33, 0x1e, 0x0d, 0xc4, 0xda,
-	0xcd, 0x20, 0x02, 0xda, 0x98, 0x71, 0xd8, 0x03, 0xcf, 0x84, 0x32, 0x1e, 0xea, 0x37, 0xf4, 0x80,
-	0x36, 0x78, 0x0e, 0xfe, 0xb1, 0xc0, 0x3b, 0x14, 0xa3, 0x8c, 0x48, 0xc3, 0xd2, 0x11, 0x74, 0x38,
-	0xbd, 0x50, 0xd1, 0x5b, 0x53, 0xd5, 0xd2, 0x66, 0x73, 0x1d, 0xdd, 0x83, 0x55, 0xc9, 0x06, 0xc3,
-	0x45, 0x4f, 0xd5, 0x9b, 0x78, 0x6a, 0xa3, 0xdd, 0xe1, 0xab, 0xfd, 0x62, 0xdf, 0xa0, 0x5f, 0x82,
-	0xdf, 0x2c, 0x70, 0xce, 0xa8, 0x1c, 0xbd, 0x93, 0x8a, 0x3f, 0x86, 0x06, 0xf2, 0x9a, 0xaf, 0x55,
-	0x37, 0xed, 0x9b, 0x10, 0x5b, 0xaa, 0x07, 0xbf, 0x5b, 0xe0, 0xe2, 0xcc, 0x60, 0x1a, 0x8f, 0x30,
-	0x7d, 0x0b, 0xd3, 0xbf, 0xbb, 0xc4, 0xc5, 0x54, 0xd3, 0x9c, 0x4e, 0x32, 0xec, 0xfc, 0xfb, 0x50,
-	0x8f, 0x87, 0x8c, 0x27, 0x25, 0x67, 0xef, 0x2d, 0x31, 0xd4, 0x36, 0xa1, 0xd1, 0x0a, 0x36, 0x60,
-	0xa5, 0xb4, 0xf6, 0x3d, 0x58, 0xe9, 0xa5, 0x63, 0xc2, 0x59, 0xd2, 0xa9, 0xf8, 0x2b, 0x60, 0x1f,
-	0x0b, 0xd5, 0xb1, 0x82, 0x7f, 0x2d, 0x00, 0x33, 0x12, 0x98, 0xd4, 0xee, 0x5c, 0x52, 0x9f, 0x2c,
-	0xf1, 0x3d, 0x53, 0x2d, 0x8f, 0x65, 0x5a, 0x9f, 0x43, 0x4d, 0x17, 0xfa, 0x4d, 0x59, 0xa1, 0x92,
-	0xc6, 0x80, 0xb5, 0x2c, 0xa7, 0xf7, 0x7a, 0x0c, 0xa8, 0x15, 0xec, 0x82, 0x73, 0x15, 0x6b, 0x11,
-	0x44, 0x0b, 0xe0, 0xb9, 0x18, 0xb0, 0x98, 0xf0, 0xfd, 0x34, 0xe9, 0x58, 0xfe, 0x2d, 0x70, 0xcb,
-	0xef, 0x13, 0xd9, 0xa9, 0x06, 0x7f, 0xd9, 0x50, 0x43, 0x50, 0x4f, 0xc0, 0x55, 0x54, 0x8e, 0x22,
-	0xfa, 0x32, 0x93, 0x65, 0xb9, 0xd7, 0x97, 0xc4, 0xbc, 0x6a, 0x10, 0xbd, 0xfe, 0xd5, 0x55, 0xb3,
-	0x7c, 0x0d, 0x50, 0xe8, 0xd8, 0xc6, 0xd8, 0xc0, 0xfb, 0xe0, 0x75, 0xd5, 0xea, 0x56, 0x42, 0xb7,
-	0x98, 0xf2, 0xb9, 0x07, 0x5e, 0x9f, 0xcd, 0xec, 0xed, 0x6b, 0x7b, 0x6d, 0x46, 0x6c, 0xb7, 0x12,
-	0x42, 0x7f, 0x56, 0x91, 0x43, 0x68, 0xc6, 0x66, 0x10, 0x8d, 0x0b, 0xb3, 0x0e, 0x3e, 0x5c, 0xda,
-	0xae, 0xd3, 0x79, 0xed, 0x56, 0x42, 0x2f, 0x9e, 0x1b, 0xdf, 0xef, 0xa1, 0x63, 0x50, 0x48, 0xbd,
-	0xf7, 0x8c, 0x23, 0xb3, 0x15, 0x3e, 0xba, 0x0e, 0xcb, 0x74, 0x43, 0x76, 0x2b, 0x61, 0xab, 0x58,
-	0xdc, 0x99, 0xa7, 0xb0, 0x5a, 0xa2, 0x9a, 0xf3, 0xd7, 0x40, 0x7f, 0xc1, 0xb5, 0xd8, 0xe6, 0x1d,
-	0xb6, 0xfb, 0x8b, 0xa2, 0x83, 0x06, 0xd4, 0xb4, 0x93, 0xe0, 0x3f, 0x0b, 0xe0, 0x9c, 0xc6, 0x4a,
-	0xc8, 0xfd, 0xe3, 0xe3, 0x1f, 0xcb, 0x27, 0xc8, 0x28, 0x9b, 0x87, 0x5d, 0x3f, 0x41, 0xc6, 0xdf,
-	0xc2, 0xe3, 0x58, 0x5d, 0x7c, 0x1c, 0x1f, 0x03, 0x64, 0x92, 0x26, 0x2c, 0x26, 0x8a, 0xe6, 0x6f,
-	0x6a, 0xb3, 0x39, 0x55, 0xff, 0x2b, 0x80, 0x4b, 0xfd, 0xcc, 0x9b, 0xd5, 0x50, 0xbb, 0xb6, 0xdc,
-	0xd3, 0x7f, 0x81, 0xd0, 0xbd, 0x9c, 0xfe, 0x16, 0xdc, 0x83, 0x76, 0xc6, 0x49, 0x4c, 0x87, 0x82,
-	0x27, 0x54, 0x46, 0x8a, 0x0c, 0x90, 0x64, 0x37, 0x6c, 0xcd, 0x89, 0xcf, 0xc8, 0x20, 0xf8, 0x15,
-	0x9c, 0x53, 0x4e, 0xd2, 0x63, 0x91, 0xe0, 0xae, 0x1e, 0x23, 0xe0, 0x88, 0xa4, 0x69, 0xfe, 0x9a,
-	0x6d, 0x34, 0xa3, 0x45, 0x77, 0x88, 0xb1, 0xd9, 0x4f, 0xd3, 0xdc, 0xdf, 0x82, 0x8e, 0x28, 0x54,
-	0x56, 0xa8, 0xe8, 0x8a, 0x0e, 0xb3, 0x99, 0xec, 0xb0, 0x65, 0xe4, 0xdf, 0x1a, 0x56, 0x72, 0xcd,
-	0x72, 0x2a, 0x12, 0xfa, 0x59, 0x0a, 0x0d, 0xb3, 0x1c, 0x17, 0xe7, 0xa9, 0x0d, 0xde, 0x91, 0xa4,
-	0x44, 0x51, 0x79, 0x36, 0x24, 0x69, 0xc7, 0xf2, 0x3b, 0xd0, 0x2c, 0x05, 0xcf, 0x2e, 0x0b, 0xc2,
-	0x3b, 0x55, 0xbf, 0x09, 0xce, 0x73, 0x9a, 0xe7, 0x78, 0x6f, 0xe3, 0xc0, 0xd1, 0x3c, 0x37, 0x97,
-	0x35, 0xdf, 0x85, 0xba, 0x39, 0xd6, 0xb5, 0xde, 0xb1, 0x50, 0xe6, 0xab, 0x71, 0xf0, 0xf0, 0xe7,
-	0x2f, 0x06, 0x4c, 0x0d, 0x8b, 0xfe, 0x76, 0x2c, 0x46, 0x3b, 0x06, 0xda, 0x7d, 0x26, 0xca, 0xd3,
-	0x0e, 0x4b, 0x15, 0x95, 0x29, 0xe1, 0x3b, 0x88, 0x76, 0x47, 0xa3, 0xcd, 0xfa, 0xfd, 0x06, 0x7e,
-	0x3d, 0xfc, 0x3f, 0x00, 0x00, 0xff, 0xff, 0xda, 0x8a, 0xf0, 0x6c, 0x19, 0x0a, 0x00, 0x00,
+	// 1323 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xb4, 0x56, 0xdd, 0x72, 0xd3, 0x46,
+	0x14, 0xb6, 0x6c, 0xc7, 0x91, 0x8e, 0x8d, 0x23, 0x16, 0x5a, 0x02, 0x94, 0x92, 0x0a, 0x66, 0xc8,
+	0xa4, 0x90, 0x94, 0x9f, 0x96, 0x19, 0x3a, 0x65, 0x88, 0x81, 0x92, 0x4c, 0x43, 0x48, 0x95, 0x34,
+	0xd3, 0xe9, 0x8d, 0x66, 0x2d, 0xad, 0xe3, 0x1d, 0x64, 0xad, 0x58, 0xad, 0x5c, 0xdc, 0x8b, 0x3e,
+	0x46, 0x7b, 0xd9, 0x8b, 0x76, 0xda, 0x9b, 0xbe, 0x41, 0x1f, 0xa7, 0x2f, 0xd2, 0xd9, 0x1f, 0xcb,
+	0x32, 0xd8, 0x04, 0xd2, 0xe1, 0x6e, 0xf7, 0xec, 0xd9, 0xef, 0x7c, 0xfb, 0x9d, 0xb3, 0xbb, 0x07,
+	0x20, 0x8d, 0x71, 0xb2, 0x9e, 0x72, 0x26, 0x18, 0x3a, 0x3d, 0xa0, 0xf1, 0x30, 0xcf, 0xf4, 0x6c,
+	0x5d, 0x2e, 0x5c, 0x68, 0x65, 0x61, 0x9f, 0x0c, 0xb0, 0x36, 0x79, 0x7f, 0x5b, 0xd0, 0x7a, 0x42,
+	0x12, 0xc2, 0x69, 0x78, 0x88, 0xe3, 0x9c, 0xa0, 0x8b, 0x60, 0x77, 0x19, 0x8b, 0x83, 0x21, 0x8e,
+	0x97, 0xad, 0x15, 0x6b, 0xd5, 0xde, 0xaa, 0xf8, 0x8b, 0xd2, 0x72, 0x88, 0x63, 0x74, 0x09, 0x1c,
+	0x9a, 0x88, 0x2f, 0xee, 0xa8, 0xd5, 0xea, 0x8a, 0xb5, 0x5a, 0xdb, 0xaa, 0xf8, 0xb6, 0x32, 0x99,
+	0xe5, 0x5e, 0xcc, 0xb0, 0x50, 0xcb, 0xb5, 0x15, 0x6b, 0xd5, 0x92, 0xcb, 0xca, 0x24, 0x97, 0xef,
+	0x81, 0x13, 0x61, 0x81, 0x03, 0x31, 0x4a, 0xc9, 0x72, 0x7d, 0xc5, 0x5a, 0x6d, 0xdf, 0xba, 0xb4,
+	0x3e, 0x45, 0xd0, 0x50, 0x7b, 0x84, 0x05, 0x3e, 0x18, 0xa5, 0xc4, 0xb7, 0x23, 0x33, 0xea, 0x2c,
+	0x40, 0x6d, 0x88, 0x63, 0x8f, 0x80, 0xf3, 0x6d, 0x4e, 0xf8, 0x68, 0x3b, 0xe9, 0x31, 0x84, 0xa0,
+	0x2e, 0x58, 0xfa, 0x5c, 0xd1, 0xac, 0xf9, 0x6a, 0x8c, 0x2e, 0x43, 0x73, 0x40, 0x04, 0xa7, 0xa1,
+	0x8e, 0x22, 0x49, 0x38, 0x3e, 0x68, 0x93, 0x04, 0x42, 0x57, 0xe0, 0x54, 0x46, 0x30, 0x0f, 0xfb,
+	0x41, 0x8a, 0x39, 0x1e, 0x64, 0x8a, 0x88, 0xe3, 0xb7, 0xb4, 0x71, 0x4f, 0xd9, 0xbc, 0x3f, 0x2d,
+	0x80, 0x87, 0x2c, 0xce, 0x07, 0x89, 0x0a, 0x74, 0x1e, 0xec, 0x1e, 0x25, 0x71, 0x14, 0xd0, 0xc8,
+	0x04, 0x5b, 0x54, 0xf3, 0xed, 0x68, 0xfa, 0x4c, 0xd5, 0x77, 0x3a, 0x13, 0xba, 0x0a, 0x6d, 0x9a,
+	0x05, 0x29, 0xa7, 0x03, 0xcc, 0x47, 0xc1, 0x73, 0x32, 0x52, 0x74, 0x6d, 0xbf, 0x45, 0xb3, 0x3d,
+	0x6d, 0xfc, 0x86, 0x8c, 0xd0, 0x45, 0x70, 0x68, 0x16, 0xe0, 0x5c, 0xb0, 0xed, 0x47, 0x8a, 0xac,
+	0xed, 0xdb, 0x34, 0xdb, 0x54, 0x73, 0xaf, 0x03, 0x8e, 0x4a, 0xdb, 0xe3, 0x97, 0x29, 0x47, 0x9f,
+	0xc3, 0xc2, 0x50, 0x4e, 0x14, 0xc7, 0xe6, 0xad, 0xcb, 0xeb, 0xaf, 0x25, 0x7f, 0xbd, 0x9c, 0x6a,
+	0x5f, 0x7b, 0x7b, 0x3b, 0xe3, 0xb3, 0x2a, 0x90, 0xfb, 0xd0, 0x0c, 0xd5, 0x2c, 0xa0, 0x49, 0x8f,
+	0x19, 0xa8, 0x4b, 0x33, 0xa0, 0x26, 0xfa, 0xf8, 0x10, 0x16, 0x63, 0x2f, 0x07, 0xfb, 0x21, 0xce,
+	0x84, 0xc2, 0xba, 0x01, 0x0b, 0x61, 0x9f, 0xc6, 0x91, 0x41, 0x39, 0x37, 0x03, 0x45, 0xfa, 0xf9,
+	0xda, 0xeb, 0xff, 0x68, 0xe9, 0xa5, 0xd0, 0xfe, 0x2e, 0xc1, 0x7c, 0xb4, 0xc9, 0xa9, 0xe8, 0x9f,
+	0x24, 0xf8, 0x06, 0x54, 0x59, 0x6a, 0xa2, 0xce, 0x52, 0x6e, 0x82, 0xfe, 0x2c, 0xf5, 0xab, 0x2c,
+	0xf5, 0x7e, 0xb3, 0x60, 0xa9, 0x43, 0xa7, 0x63, 0x7e, 0x0a, 0xf5, 0x98, 0xf4, 0xc4, 0x71, 0x21,
+	0x95, 0x93, 0x24, 0xc8, 0xe9, 0x51, 0x5f, 0xa8, 0xa0, 0x6f, 0x22, 0xa8, 0xbc, 0xd0, 0x67, 0x8a,
+	0x60, 0x4d, 0x11, 0x5c, 0x99, 0xe1, 0x5b, 0xe2, 0x62, 0x18, 0xfe, 0x61, 0x19, 0x51, 0x7c, 0x9c,
+	0x1c, 0x91, 0x93, 0x88, 0x72, 0xbd, 0x24, 0xca, 0x47, 0x33, 0x6b, 0x60, 0x90, 0x62, 0x4e, 0x74,
+	0xbc, 0x49, 0xfd, 0xd5, 0xde, 0xa9, 0xfe, 0x7e, 0xa9, 0x8e, 0x85, 0x3c, 0x31, 0xcf, 0x6b, 0xb0,
+	0x14, 0xb3, 0x1f, 0x09, 0x0f, 0x68, 0x12, 0xc6, 0x79, 0x46, 0x87, 0xba, 0x7e, 0x6c, 0xbf, 0xad,
+	0xcc, 0xdb, 0x63, 0xab, 0x74, 0xcc, 0xd3, 0x74, 0xca, 0x51, 0xdf, 0xb9, 0xb6, 0x32, 0x4f, 0x1c,
+	0x1f, 0x40, 0x53, 0x23, 0xea, 0x13, 0xd5, 0xdf, 0xee, 0x44, 0xa0, 0xf6, 0xe8, 0x87, 0xf4, 0x01,
+	0x34, 0x75, 0x28, 0x8d, 0xb0, 0xf0, 0x96, 0x08, 0x6a, 0x8f, 0x1a, 0x7b, 0xbf, 0x5a, 0xd0, 0x34,
+	0x0a, 0xbf, 0xf7, 0xea, 0xba, 0x5e, 0xaa, 0xae, 0x63, 0x33, 0xed, 0x71, 0xb0, 0x0f, 0x08, 0x1f,
+	0x9c, 0x24, 0x55, 0x77, 0xa1, 0xa1, 0x04, 0xc9, 0x96, 0xab, 0x2b, 0xb5, 0xb7, 0x51, 0xc4, 0xb8,
+	0x7b, 0x02, 0x5c, 0x55, 0xcc, 0x3b, 0xec, 0x88, 0x86, 0x38, 0x3e, 0x49, 0xec, 0x9b, 0xa5, 0x72,
+	0xfe, 0x64, 0xde, 0x1d, 0x37, 0xf8, 0xe6, 0xa4, 0xbf, 0x5b, 0x70, 0x5a, 0x17, 0x67, 0x39, 0xee,
+	0xfb, 0xcc, 0xc4, 0xad, 0x52, 0x26, 0xbc, 0xb9, 0xf7, 0x7c, 0x9a, 0xe5, 0x3f, 0x0d, 0xa8, 0x2b,
+	0x62, 0xf7, 0xc0, 0x11, 0x84, 0x0f, 0x02, 0xf2, 0x32, 0xe5, 0x86, 0xdd, 0xc5, 0x19, 0x18, 0xe3,
+	0xe4, 0xc9, 0xef, 0x59, 0x8c, 0x13, 0xf9, 0x10, 0x5a, 0xa1, 0xce, 0xb2, 0xde, 0xae, 0xe9, 0x7e,
+	0x3c, 0xbf, 0x18, 0x0c, 0x42, 0x33, 0x2c, 0xd5, 0xe8, 0x3e, 0xa0, 0x5c, 0xf2, 0x0b, 0x62, 0x4d,
+	0x50, 0x43, 0xe9, 0x07, 0xe1, 0xca, 0x31, 0x92, 0x1b, 0x3c, 0x37, 0x7f, 0x55, 0xee, 0x43, 0x38,
+	0xd3, 0xa5, 0xaf, 0xa3, 0xea, 0x4b, 0x79, 0xf5, 0x38, 0x8d, 0x0c, 0xec, 0xe9, 0xee, 0x6b, 0x69,
+	0x7c, 0x0a, 0x3a, 0x56, 0xc0, 0xe5, 0xc3, 0xa3, 0x41, 0xf5, 0x3d, 0x9d, 0x5b, 0x1d, 0xc5, 0x13,
+	0xb5, 0x55, 0xf1, 0xdb, 0xf9, 0xf4, 0xa3, 0xb5, 0x07, 0x26, 0x46, 0x19, 0xaf, 0xa1, 0xf0, 0xe6,
+	0x27, 0xb2, 0x0c, 0xb8, 0xd4, 0x7d, 0xe5, 0x19, 0x2c, 0x08, 0x62, 0xf9, 0xac, 0x6b, 0xc0, 0xc5,
+	0x37, 0x13, 0x2c, 0x3e, 0xa3, 0x82, 0xe0, 0xe4, 0x7b, 0x9a, 0x10, 0x2c, 0xe1, 0xd9, 0xc7, 0x10,
+	0x2c, 0x03, 0x1a, 0x82, 0x13, 0xc4, 0xaf, 0x00, 0xd4, 0xf5, 0xd4, 0x50, 0x8e, 0x82, 0x9a, 0xf5,
+	0x7c, 0x14, 0x4d, 0xca, 0x56, 0xc5, 0x77, 0x86, 0x45, 0xc7, 0xf2, 0xa0, 0x68, 0x36, 0xd4, 0x7e,
+	0x38, 0xa6, 0xd9, 0x30, 0x00, 0xa6, 0xdd, 0x18, 0x17, 0x7c, 0x88, 0x33, 0xa1, 0xf7, 0x37, 0xe7,
+	0x16, 0xfc, 0xb8, 0x25, 0x91, 0x05, 0x1f, 0x9a, 0x71, 0xa7, 0x01, 0x75, 0xb9, 0xcd, 0xfb, 0xd7,
+	0x02, 0x38, 0x24, 0xa1, 0x60, 0x7c, 0x73, 0x77, 0x77, 0xdf, 0x34, 0x5c, 0xfa, 0xa4, 0xba, 0x05,
+	0x96, 0x0d, 0x97, 0x16, 0x63, 0xaa, 0x15, 0xac, 0x4e, 0xb7, 0x82, 0x77, 0x01, 0x52, 0x4e, 0x22,
+	0x1a, 0x62, 0x41, 0x32, 0x53, 0xf2, 0x73, 0x2f, 0x7b, 0xc9, 0x15, 0x7d, 0x09, 0xf0, 0x42, 0x36,
+	0xb5, 0xba, 0xe3, 0xaa, 0xcf, 0x15, 0xb1, 0xe8, 0x7c, 0x7d, 0xe7, 0x45, 0xd1, 0x04, 0x5f, 0x83,
+	0xa5, 0x34, 0xc6, 0x21, 0xe9, 0xb3, 0x38, 0x22, 0x3c, 0x10, 0xf8, 0x48, 0x95, 0xb0, 0xe3, 0xb7,
+	0x4b, 0xe6, 0x03, 0x7c, 0xe4, 0xfd, 0x0c, 0xf6, 0x5e, 0x8c, 0x93, 0x5d, 0x16, 0xa9, 0xbf, 0x69,
+	0xa8, 0x0e, 0x1c, 0xe0, 0x24, 0xc9, 0xde, 0xd0, 0xe4, 0x4d, 0x64, 0x91, 0xba, 0xeb, 0x3d, 0x9b,
+	0x49, 0x92, 0xa1, 0x55, 0x70, 0x59, 0x2e, 0xd2, 0x5c, 0x04, 0x63, 0x39, 0xf4, 0x83, 0x5e, 0xf3,
+	0xdb, 0xda, 0xfe, 0xb5, 0x56, 0x25, 0x93, 0x2a, 0x27, 0x2c, 0x22, 0x6b, 0x77, 0x4c, 0x33, 0x52,
+	0xbc, 0x5c, 0xe8, 0x3c, 0x7c, 0xb0, 0x9d, 0x0c, 0x71, 0x4c, 0xa3, 0xe9, 0x05, 0xb7, 0x82, 0x16,
+	0xa1, 0xb6, 0xcb, 0x84, 0x6b, 0xad, 0xed, 0x8c, 0x7b, 0x83, 0xc9, 0xb6, 0x0b, 0xf0, 0xa1, 0xd9,
+	0xf6, 0xca, 0x8a, 0x5b, 0x41, 0x6d, 0x00, 0x33, 0xdd, 0x4c, 0x22, 0xd7, 0x42, 0xa7, 0xc0, 0x19,
+	0x2f, 0x73, 0xb7, 0xba, 0xf6, 0x13, 0x38, 0xc5, 0x47, 0x86, 0xce, 0x82, 0x6b, 0x70, 0x0a, 0x9b,
+	0x5b, 0x41, 0x4b, 0xd0, 0x7c, 0xc2, 0x09, 0x16, 0x84, 0x1f, 0xf4, 0x71, 0xe2, 0x5a, 0xc8, 0x85,
+	0x96, 0x31, 0x3c, 0x7e, 0x91, 0xe3, 0xd8, 0xad, 0xa2, 0x16, 0xd8, 0x3b, 0x24, 0xcb, 0xd4, 0x7a,
+	0x4d, 0x85, 0x20, 0x59, 0xa6, 0x17, 0xeb, 0xc8, 0x81, 0x05, 0x3d, 0x5c, 0x90, 0x7e, 0xbb, 0x4c,
+	0xe8, 0x59, 0x63, 0xed, 0x3e, 0xb4, 0xca, 0x3d, 0x24, 0x3a, 0x07, 0x67, 0xca, 0xa7, 0x37, 0x66,
+	0xb7, 0x22, 0x11, 0x9e, 0xd2, 0x24, 0xcf, 0x5c, 0x0b, 0x01, 0x34, 0x3a, 0x54, 0x48, 0x25, 0xaa,
+	0x6b, 0x7f, 0x59, 0x70, 0x6a, 0xaa, 0xc7, 0x43, 0xcb, 0x70, 0x76, 0x4a, 0x88, 0x09, 0xc4, 0x22,
+	0xd4, 0x36, 0x23, 0x79, 0xfe, 0x16, 0xd8, 0xfb, 0x79, 0x57, 0x70, 0x1c, 0x0a, 0x4d, 0xfc, 0x69,
+	0x1e, 0x0b, 0x9a, 0xc6, 0x23, 0xb7, 0x26, 0xc1, 0x1f, 0xd1, 0x21, 0x8d, 0x88, 0x66, 0xbd, 0x27,
+	0x5b, 0x17, 0xb7, 0x61, 0x62, 0x4a, 0xf9, 0x16, 0xa5, 0xb9, 0x43, 0xc5, 0x33, 0xee, 0xda, 0xc6,
+	0xfc, 0x3d, 0xe3, 0xae, 0x23, 0x8f, 0xbc, 0xdf, 0xa7, 0x3d, 0xb1, 0x43, 0x7a, 0xc2, 0x05, 0x29,
+	0xba, 0x9a, 0xfa, 0xf2, 0xff, 0x72, 0x9b, 0x9d, 0xdb, 0x3f, 0xdc, 0x3c, 0xa2, 0xa2, 0x9f, 0x77,
+	0xd7, 0x43, 0x36, 0xd8, 0xd0, 0x45, 0x75, 0x83, 0x32, 0x33, 0xda, 0xa0, 0x89, 0x20, 0x3c, 0xc1,
+	0xf1, 0x86, 0xaa, 0xb3, 0x0d, 0x59, 0x67, 0x69, 0xb7, 0xdb, 0x50, 0xb3, 0xdb, 0xff, 0x05, 0x00,
+	0x00, 0xff, 0xff, 0xd1, 0x27, 0x54, 0x86, 0xbe, 0x0e, 0x00, 0x00,
 }

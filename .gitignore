@@ -82,3 +82,6 @@ profile.out
 
 # virtualenv
 venv/
+
+#antlr
+.antlr

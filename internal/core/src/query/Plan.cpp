@@ -72,9 +72,12 @@ class Parser {
     ExprPtr
     ParseTermNode(const Json& out_body);
 
-    // parse the value of "term" entry
+    // parse the value of "compare" entry
     ExprPtr
     ParseCompareNode(const Json& out_body);
+
+    GenericValuePtr
+    ParseGenericValue(const Json& out_body);
 
  private:
     // template implementation of leaf parser
@@ -121,7 +124,6 @@ Parser::ParseCompareNode(const Json& out_body) {
 
     auto expr = std::make_unique<CompareExpr>();
     expr->op_type_ = mapping_.at(op_name);
-    expr->data_type_ = DataType::BOOL;
     expr->left_ = std::move(left);
     expr->right_ = std::move(right);
     return expr;
@@ -180,6 +182,27 @@ Parser::CreatePlanImpl(const Json& dsl) {
     return plan;
 }
 
+GenericValuePtr
+Parser::ParseGenericValue(const Json& value) {
+    if (value.is_boolean()) {
+        auto result = std::make_unique<GenericValueImpl<bool>>();
+        result->value_ = static_cast<bool>(value);
+        result->data_type_ = DataType::BOOL;
+        return result;
+    } else if (value.is_number_integer()) {
+        auto result = std::make_unique<GenericValueImpl<int64_t>>();
+        result->value_ = static_cast<int64_t>(value);
+        result->data_type_ = DataType::INT64;
+        return result;
+    } else if (value.is_number()) {
+        auto result = std::make_unique<GenericValueImpl<double>>();
+        result->value_ = static_cast<double>(value);
+        result->data_type_ = DataType::DOUBLE;
+        return result;
+    } else
+        PanicInfo("unsupported type");
+}
+
 ExprPtr
 Parser::ParseTermNode(const Json& out_body) {
     Assert(out_body.size() == 1);
@@ -188,32 +211,36 @@ Parser::ParseTermNode(const Json& out_body) {
     auto body = out_iter.value();
     auto data_type = schema[field_name].get_data_type();
     Assert(!datatype_is_vector(data_type));
-    switch (data_type) {
-        case DataType::BOOL: {
-            return ParseTermNodeImpl<bool>(field_name, body);
+    auto expr = std::make_unique<TermExpr>();
+    auto field_offset = schema.get_offset(field_name);
+    Assert(body.is_object());
+    auto values = body["values"];
+
+    auto child = std::make_unique<ColumnExpr>();
+    child->field_offset_ = field_offset;
+    child->data_type_ = data_type;
+    expr->child_ = std::move(child);
+    for (auto& value : values) {
+        switch (data_type) {
+            case DataType::BOOL:
+                Assert(value.is_boolean());
+                break;
+            case DataType::INT8:
+            case DataType::INT16:
+            case DataType::INT32:
+            case DataType::INT64:
+                Assert(value.is_number_integer());
+                break;
+            case DataType::FLOAT:
+            case DataType::DOUBLE:
+                Assert(value.is_number());
+                break;
+            default:
+                PanicInfo("unsupported type");
         }
-        case DataType::INT8: {
-            return ParseTermNodeImpl<int8_t>(field_name, body);
-        }
-        case DataType::INT16: {
-            return ParseTermNodeImpl<int16_t>(field_name, body);
-        }
-        case DataType::INT32: {
-            return ParseTermNodeImpl<int32_t>(field_name, body);
-        }
-        case DataType::INT64: {
-            return ParseTermNodeImpl<int64_t>(field_name, body);
-        }
-        case DataType::FLOAT: {
-            return ParseTermNodeImpl<float>(field_name, body);
-        }
-        case DataType::DOUBLE: {
-            return ParseTermNodeImpl<double>(field_name, body);
-        }
-        default: {
-            PanicInfo("unsupported data_type");
-        }
+        expr->values_.emplace_back(ParseGenericValue(value));
     }
+    return expr;
 }
 
 std::unique_ptr<VectorPlanNode>
@@ -253,38 +280,6 @@ Parser::ParseVecNode(const Json& out_body) {
 
 template <typename T>
 ExprPtr
-Parser::ParseTermNodeImpl(const FieldName& field_name, const Json& body) {
-    auto expr = std::make_unique<TermExprImpl<T>>();
-    auto field_offset = schema.get_offset(field_name);
-    auto data_type = schema[field_name].get_data_type();
-    Assert(body.is_object());
-    auto values = body["values"];
-
-    auto child = std::make_unique<ColumnExpr>();
-    child->field_offset_ = field_offset;
-    child->data_type_ = data_type;
-    expr->child_ = std::move(child);
-    expr->data_type_ = DataType::BOOL;
-    for (auto& value : values) {
-        if constexpr (std::is_same_v<T, bool>) {
-            Assert(value.is_boolean());
-        } else if constexpr (std::is_integral_v<T>) {
-            Assert(value.is_number_integer());
-        } else if constexpr (std::is_floating_point_v<T>) {
-            Assert(value.is_number());
-        } else {
-            static_assert(always_false<T>, "unsupported type");
-            __builtin_unreachable();
-        }
-        T real_value = value;
-        expr->terms_.push_back(real_value);
-    }
-    std::sort(expr->terms_.begin(), expr->terms_.end());
-    return expr;
-}
-
-template <typename T>
-ExprPtr
 Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
     Assert(body.is_object());
     if (body.size() == 1) {
@@ -305,11 +300,10 @@ Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
         child->field_offset_ = schema.get_offset(field_name);
         child->data_type_ = schema[field_name].get_data_type();
 
-        auto expr = std::make_unique<UnaryRangeExprImpl<T>>();
+        auto expr = std::make_unique<UnaryRangeExpr>();
         expr->child_ = std::move(child);
-        expr->data_type_ = DataType::BOOL;
         expr->op_type_ = mapping_.at(op_name);
-        expr->value_ = item.value();
+        expr->value_ = ParseGenericValue(item.value());
         return expr;
     } else if (body.size() == 2) {
         bool has_lower_value = false;
@@ -354,13 +348,12 @@ Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
         child->field_offset_ = schema.get_offset(field_name);
         child->data_type_ = schema[field_name].get_data_type();
 
-        auto expr = std::make_unique<BinaryRangeExprImpl<T>>();
-        expr->data_type_ = DataType::BOOL;
+        auto expr = std::make_unique<BinaryRangeExpr>();
         expr->child_ = std::move(child);
         expr->lower_inclusive_ = lower_inclusive;
         expr->upper_inclusive_ = upper_inclusive;
-        expr->lower_value_ = lower_value;
-        expr->upper_value_ = upper_value;
+        expr->lower_value_ = ParseGenericValue(lower_value);
+        expr->upper_value_ = ParseGenericValue(upper_value);
         return expr;
     } else {
         PanicInfo("illegal range node, too more or too few ops");
@@ -507,7 +500,6 @@ Parser::ParseMustNode(const Json& body) {
     auto merger = [](ExprPtr left, ExprPtr right) {
         auto res = std::make_unique<BinaryLogicalExpr>();
         res->op_type_ = BinaryLogicalOp::LogicalAnd;
-        res->data_type_ = DataType::BOOL;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
         return res;
@@ -522,7 +514,6 @@ Parser::ParseShouldNode(const Json& body) {
     auto merger = [](ExprPtr left, ExprPtr right) {
         auto res = std::make_unique<BinaryLogicalExpr>();
         res->op_type_ = BinaryLogicalOp::LogicalOr;
-        res->data_type_ = DataType::BOOL;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
         return res;
@@ -537,7 +528,6 @@ Parser::ParseMustNotNode(const Json& body) {
     auto merger = [](ExprPtr left, ExprPtr right) {
         auto res = std::make_unique<BinaryLogicalExpr>();
         res->op_type_ = BinaryLogicalOp::LogicalAnd;
-        res->data_type_ = DataType::BOOL;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
         return res;
@@ -546,7 +536,6 @@ Parser::ParseMustNotNode(const Json& body) {
 
     auto res = std::make_unique<UnaryLogicalExpr>();
     res->op_type_ = UnaryLogicalOp::LogicalNot;
-    res->data_type_ = DataType::BOOL;
     res->child_ = std::move(subtree);
 
     return res;

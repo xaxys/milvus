@@ -83,15 +83,13 @@ class ExecExprVisitor : public ExprVisitor {
 
     template <typename T>
     auto
-    ExecUnaryRangeVisitorDispatcher(UnaryRangeExpr& expr_raw) -> RetType;
+    ExecUnaryRangeVisitorDispatcher(const FieldOffset& field_offset, const UnaryRangeExpr& expr)
+        -> std::tuple<RetType, ArrayPtr>;
 
     template <typename T>
     auto
-    ExecBinaryRangeVisitorDispatcher(BinaryRangeExpr& expr_raw) -> RetType;
-
-    template <typename T>
-    auto
-    ExecTermVisitorImpl(TermExpr& expr_raw) -> RetType;
+    ExecBinaryRangeVisitorDispatcher(const FieldOffset& field_offset, const BinaryRangeExpr& expr)
+        -> std::tuple<RetType, ArrayPtr>;
 
     auto
     BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset = 0) -> RetType;

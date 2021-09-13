@@ -548,12 +548,13 @@ const char descriptor_table_protodef_plan_2eproto[] PROTOBUF_SECTION_VARIABLE(pr
   "erEqual\020\002\022\014\n\010LessThan\020\003\022\r\n\tLessEqual\020\004\022\t"
   "\n\005Equal\020\005\022\014\n\010NotEqual\020\006*>\n\014UnaryArithOp\022"
   "\027\n\023InvalidUnaryArithOp\020\000\022\t\n\005Minus\020\001\022\n\n\006B"
-  "itNot\020\002*\210\001\n\rBinaryArithOp\022\030\n\024InvalidBina"
+  "itNot\020\002*\263\001\n\rBinaryArithOp\022\030\n\024InvalidBina"
   "ryArithOp\020\000\022\007\n\003Add\020\001\022\014\n\010Subtract\020\002\022\014\n\010Mu"
-  "ltiply\020\003\022\n\n\006Divide\020\004\022\t\n\005Power\020\006\022\n\n\006BitAn"
-  "d\020\007\022\t\n\005BitOr\020\010\022\n\n\006BitXor\020\tB3Z1github.com"
-  "/milvus-io/milvus/internal/proto/planpbb"
-  "\006proto3"
+  "ltiply\020\003\022\n\n\006Divide\020\004\022\n\n\006Modulo\020\005\022\t\n\005Powe"
+  "r\020\006\022\n\n\006BitAnd\020\007\022\t\n\005BitOr\020\010\022\n\n\006BitXor\020\t\022\r"
+  "\n\tShiftLeft\020\n\022\016\n\nShiftRight\020\013B3Z1github."
+  "com/milvus-io/milvus/internal/proto/plan"
+  "pbb\006proto3"
   ;
 static const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable*const descriptor_table_plan_2eproto_deps[1] = {
   &::descriptor_table_schema_2eproto,
@@ -571,7 +572,7 @@ static ::PROTOBUF_NAMESPACE_ID::internal::SCCInfoBase*const descriptor_table_pla
 static ::PROTOBUF_NAMESPACE_ID::internal::once_flag descriptor_table_plan_2eproto_once;
 static bool descriptor_table_plan_2eproto_initialized = false;
 const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable descriptor_table_plan_2eproto = {
-  &descriptor_table_plan_2eproto_initialized, descriptor_table_protodef_plan_2eproto, "plan.proto", 3127,
+  &descriptor_table_plan_2eproto_initialized, descriptor_table_protodef_plan_2eproto, "plan.proto", 3170,
   &descriptor_table_plan_2eproto_once, descriptor_table_plan_2eproto_sccs, descriptor_table_plan_2eproto_deps, 8, 1,
   schemas, file_default_instances, TableStruct_plan_2eproto::offsets,
   file_level_metadata_plan_2eproto, 17, file_level_enum_descriptors_plan_2eproto, file_level_service_descriptors_plan_2eproto,
@@ -656,10 +657,13 @@ bool BinaryArithOp_IsValid(int value) {
     case 2:
     case 3:
     case 4:
+    case 5:
     case 6:
     case 7:
     case 8:
     case 9:
+    case 10:
+    case 11:
       return true;
     default:
       return false;

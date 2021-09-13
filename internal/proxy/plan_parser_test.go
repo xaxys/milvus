@@ -15,8 +15,6 @@ import (
 	"fmt"
 	"testing"
 
-	ant_parser "github.com/antonmedv/expr/parser"
-
 	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 
@@ -32,7 +30,7 @@ func newTestSchema() *schemapb.CollectionSchema {
 
 	for name, value := range schemapb.DataType_value {
 		dataType := schemapb.DataType(value)
-		if !typeutil.IsIntergerType(dataType) && !typeutil.IsFloatingType(dataType) && !typeutil.IsVectorType(dataType) {
+		if !typeutil.IsIntegerType(dataType) && !typeutil.IsFloatingType(dataType) && !typeutil.IsVectorType(dataType) {
 			continue
 		}
 		newField := &schemapb.FieldSchema{
@@ -89,14 +87,6 @@ func TestParsePlanNode_Naive(t *testing.T) {
 
 }
 
-func TestExternalParser(t *testing.T) {
-	ast, err := ant_parser.Parse("!(1 < a < 2 or b in [1, 2, 3]) or (c < 3 and b > 5)")
-	// NOTE: probe ast here via IDE
-	assert.Nil(t, err)
-
-	println(ast.Node.Location().Column)
-}
-
 func TestExprPlan_Str(t *testing.T) {
 	fields := []*schemapb.FieldSchema{
 		{FieldID: 100, Name: "fakevec", DataType: schemapb.DataType_FloatVector},
@@ -140,22 +130,21 @@ func TestExprPlan_Str(t *testing.T) {
 func TestExprMultiRange_Str(t *testing.T) {
 	exprStrs := []string{
 		"3 < FloatN < 4.0",
-		"3 < age1 < 5 < age2 < 7 < FloatN < 9.0 < FloatN2",
+		"3 < age2 < 4.0",
 		"1 + 1 < age1 < 2 * 2",
 		"1 - 1 < age1 < 3 / 2",
 		"1.0 - 1 < FloatN < 3 / 2",
-		"2 ** 10 > FloatN >= 7 % 4",
+		"7 % 4 <= FloatN <= 2 ** 10",
 		"0.1 ** 2 < FloatN < 2 ** 0.1",
 		"0.1 ** 1.1 < FloatN < 3.1 / 4",
-		"4.1 / 3 < FloatN < 0.0 / 5.0",
+		"0.0 / 5.0 < FloatN < 4.1 / 3",
 	}
 
 	fields := []*schemapb.FieldSchema{
 		{FieldID: 100, Name: "fakevec", DataType: schemapb.DataType_FloatVector},
 		{FieldID: 101, Name: "age1", DataType: schemapb.DataType_Int64},
-		{FieldID: 102, Name: "age2", DataType: schemapb.DataType_Int64},
+		{FieldID: 102, Name: "age2", DataType: schemapb.DataType_Int32},
 		{FieldID: 103, Name: "FloatN", DataType: schemapb.DataType_Float},
-		{FieldID: 104, Name: "FloatN2", DataType: schemapb.DataType_Float},
 	}
 
 	schema := &schemapb.CollectionSchema{
@@ -180,17 +169,170 @@ func TestExprMultiRange_Str(t *testing.T) {
 	}
 }
 
-func TestExprFieldCompare_Str(t *testing.T) {
+func TestExprCompare_Str(t *testing.T) {
 	exprStrs := []string{
 		"age1 < age2",
-		"3 < age1 <= age2 < 4",
+		"age1 <= age2",
+		"age1 > age2",
+		"age1 >= age2",
+		"age1 != age2",
+		"age1 == age2",
 	}
 
 	fields := []*schemapb.FieldSchema{
 		{FieldID: 100, Name: "fakevec", DataType: schemapb.DataType_FloatVector},
 		{FieldID: 101, Name: "age1", DataType: schemapb.DataType_Int64},
-		{FieldID: 102, Name: "age2", DataType: schemapb.DataType_Int64},
-		{FieldID: 103, Name: "FloatN", DataType: schemapb.DataType_Float},
+		{FieldID: 102, Name: "age2", DataType: schemapb.DataType_Int32},
+	}
+
+	schema := &schemapb.CollectionSchema{
+		Name:        "default-collection",
+		Description: "",
+		AutoID:      true,
+		Fields:      fields,
+	}
+
+	queryInfo := &planpb.QueryInfo{
+		Topk:         10,
+		MetricType:   "L2",
+		SearchParams: "{\"nprobe\": 10}",
+	}
+
+	for offset, exprStr := range exprStrs {
+		fmt.Printf("case %d: %s\n", offset, exprStr)
+		planProto, err := CreateQueryPlan(schema, exprStr, "fakevec", queryInfo)
+		assert.Nil(t, err)
+		dbgStr := proto.MarshalTextString(planProto)
+		println(dbgStr)
+	}
+}
+
+func TestExprArith_Str(t *testing.T) {
+	exprStrs := []string{
+		"Int64Field ** Int8Field == 0",
+		"Int64Field ** DoubleField == 0",
+		"DoubleField ** Int8Field == 0",
+		"DoubleField ** FloatField == 0",
+		"Int64Field + Int8Field == 0",
+		"Int64Field - FloatField == 0",
+		"FloatField * DoubleField == 0",
+		"FloatField / Int8Field == 0",
+		"Int8Field / DoubleField == 0",
+		"DoubleField / 0 == 0",
+		"Int64Field % Int8Field == 0",
+		"Int64Field % 3 == 0",
+		"-Int64Field % Int8Field == 0",
+		"+Int64Field % Int8Field == 0",
+		"Int64Field << Int8Field == 0",
+		"Int8Field >> Int8Field == 0",
+		"(Int64Field & Int8Field) == 0",
+		"(Int64Field ^ Int8Field) == 0",
+		"(Int64Field | Int8Field) == 0",
+		"BoolField and true",
+		"BoolField or false",
+		"(bool)Int64Field or false",
+		"(bool)FloatField or false",
+		"(int64)FloatField == Int64Field",
+		"(int64)FloatField == Int8Field",
+	}
+
+	invalidExprStrs := []string{
+		"Int8Field",
+		"Int64Field",
+		"FloatField",
+		"DoubleField",
+		"Int64Field + true == 0",
+		"Int64Field + BoolField == 0",
+		"BoolField - FloatField == 0",
+		"FloatField * BoolField == 0",
+		"Int8Field / 0 == 0",
+		"Int8Field / 0 * 0 == 0",
+		"BoolField % Int8Field == 0",
+		"Int64Field % 0 == 0",
+		"DoubleField % Int64Field == 0",
+		"FloatField << Int8Field == 0",
+		"Int8Field >> BoolField == 0",
+		"FloatField << 0.0 == 0",
+		"(Int64Field & FloatField) == 0",
+		"(Int64Field & BoolField) == 0",
+		"(Int64Field & false) == 0",
+		"(Int64Field ^ FloatField) == 0",
+		"(Int64Field ^ BoolField) == 0",
+		"(Int64Field ^ false) == 0",
+		"(Int64Field | FloatField) == 0",
+		"(Int64Field | BoolField) == 0",
+		"(Int64Field | false) == 0",
+		"Int64Field and FloatField",
+		"Int64Field or false",
+		"FloatField or false",
+		"(int64)FloatField == false",
+	}
+
+	fields := []*schemapb.FieldSchema{
+		{FieldID: 100, Name: "fakevec", DataType: schemapb.DataType_FloatVector},
+		{FieldID: 101, Name: "Int64Field", DataType: schemapb.DataType_Int64},
+		{FieldID: 102, Name: "Int8Field", DataType: schemapb.DataType_Int8},
+		{FieldID: 103, Name: "FloatField", DataType: schemapb.DataType_Float},
+		{FieldID: 104, Name: "DoubleField", DataType: schemapb.DataType_Double},
+		{FieldID: 105, Name: "BoolField", DataType: schemapb.DataType_Bool},
+	}
+
+	schema := &schemapb.CollectionSchema{
+		Name:        "default-collection",
+		Description: "",
+		AutoID:      true,
+		Fields:      fields,
+	}
+
+	queryInfo := &planpb.QueryInfo{
+		Topk:         10,
+		MetricType:   "L2",
+		SearchParams: "{\"nprobe\": 10}",
+	}
+
+	for offset, exprStr := range exprStrs {
+		fmt.Printf("case %d: %s\n", offset, exprStr)
+		planProto, err := CreateQueryPlan(schema, exprStr, "fakevec", queryInfo)
+		assert.Nil(t, err)
+		dbgStr := proto.MarshalTextString(planProto)
+		println(dbgStr)
+	}
+
+	for offset, invalidExprStr := range invalidExprStrs {
+		fmt.Printf("case %d: %s\n", offset, invalidExprStr)
+		planProto, err := CreateQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
+		assert.Error(t, err)
+		dbgStr := proto.MarshalTextString(planProto)
+		println(dbgStr)
+	}
+}
+
+func TestExprTypePromotion_Str(t *testing.T) {
+	exprStrs := []string{
+		"Int64Field < Int8Field / 2",
+		"Int64Field < Int8Field + 128",
+		"Int8Field < Int8Field + 2147483648",
+		"0 <= Int8Field <= 1",
+		"2147483647 <= Int8Field <= 2147483648",
+		"0.0 <= Int64Field <= 1",
+		"0.0 <= FloatField <= 1",
+		"0.0 <= DoubleField <= 1",
+		"DoubleField < Int8Field / 2",
+		"DoubleField < FloatField + 0",
+		"DoubleField < FloatField + 0.0",
+		"0.0 + DoubleField < FloatField + 0.0",
+		"0.0 + FloatField < FloatField + 0.0",
+		"FloatField in [1, 2.0, 3.3 ** 1, (4 & 5), 128.0]",
+		"Int8Field not in [1, 2.0, 3.3 ** 1, (4 & 5), 128.0]",
+	}
+
+	fields := []*schemapb.FieldSchema{
+		{FieldID: 100, Name: "fakevec", DataType: schemapb.DataType_FloatVector},
+		{FieldID: 101, Name: "Int64Field", DataType: schemapb.DataType_Int64},
+		{FieldID: 102, Name: "Int8Field", DataType: schemapb.DataType_Int8},
+		{FieldID: 103, Name: "FloatField", DataType: schemapb.DataType_Float},
+		{FieldID: 104, Name: "DoubleField", DataType: schemapb.DataType_Double},
+		{FieldID: 105, Name: "BoolField", DataType: schemapb.DataType_Bool},
 	}
 
 	schema := &schemapb.CollectionSchema{

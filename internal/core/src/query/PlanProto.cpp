@@ -18,83 +18,6 @@
 namespace milvus::query {
 namespace planpb = milvus::proto::plan;
 
-static DataType
-getSameType(const DataType& ty1, const DataType& ty2) {
-    if (ty1 == DataType::DOUBLE || ty2 == DataType::DOUBLE)
-        return DataType::DOUBLE;
-    if (ty1 == DataType::FLOAT || ty2 == DataType::FLOAT)
-        return DataType::FLOAT;
-    if (ty1 == DataType::INT64 || ty2 == DataType::INT64)
-        return DataType::INT64;
-    if (ty1 == DataType::INT32 || ty2 == DataType::INT32)
-        return DataType::INT32;
-    if (ty1 == DataType::INT16 || ty2 == DataType::INT16)
-        return DataType::INT16;
-    if (ty1 == DataType::INT8 || ty2 == DataType::INT8)
-        return DataType::INT8;
-    if (ty1 == DataType::BOOL || ty2 == DataType::BOOL)
-        return DataType::BOOL;
-    // for string case
-    PanicInfo("can not get same type");
-}
-
-template <typename T>
-static T
-ExtractValue(const planpb::GenericValue& value_proto) {
-    if constexpr (std::is_same_v<T, bool>) {
-        Assert(value_proto.val_case() == planpb::GenericValue::kBoolVal);
-        return static_cast<T>(value_proto.bool_val());
-    } else if constexpr (std::is_integral_v<T>) {
-        Assert(value_proto.val_case() == planpb::GenericValue::kInt64Val);
-        return static_cast<T>(value_proto.int64_val());
-    } else if constexpr (std::is_floating_point_v<T>) {
-        Assert(value_proto.val_case() == planpb::GenericValue::kFloatVal);
-        return static_cast<T>(value_proto.float_val());
-    } else {
-        static_assert(always_false<T>);
-    }
-};
-
-template <typename T>
-std::unique_ptr<TermExprImpl<T>>
-ExtractTermExprImpl(ExprPtr&& child, const planpb::TermExpr& expr_proto) {
-    static_assert(std::is_fundamental_v<T>);
-    auto result = std::make_unique<TermExprImpl<T>>();
-    result->child_ = std::move(child);
-    result->data_type_ = DataType::BOOL;
-
-    auto size = expr_proto.values_size();
-    for (int i = 0; i < size; ++i) {
-        auto term = ExtractValue<T>(expr_proto.values(i));
-        result->terms_.emplace_back(term);
-    }
-    return result;
-}
-
-template <typename T>
-std::unique_ptr<UnaryRangeExprImpl<T>>
-ExtractUnaryRangeExprImpl(ExprPtr&& child, const planpb::UnaryRangeExpr& expr_proto) {
-    static_assert(std::is_fundamental_v<T>);
-    auto result = std::make_unique<UnaryRangeExprImpl<T>>();
-    result->child_ = std::move(child);
-    result->data_type_ = DataType::BOOL;
-    result->op_type_ = static_cast<CompareOp>(expr_proto.op());
-    result->value_ = ExtractValue<T>(expr_proto.value());
-    return result;
-}
-
-template <typename T>
-std::unique_ptr<BinaryRangeExprImpl<T>>
-ExtractBinaryRangeExprImpl(ExprPtr&& child, const planpb::BinaryRangeExpr& expr_proto) {
-    static_assert(std::is_fundamental_v<T>);
-    auto result = std::make_unique<BinaryRangeExprImpl<T>>();
-    result->child_ = std::move(child);
-    result->data_type_ = DataType::BOOL;
-    result->lower_value_ = ExtractValue<T>(expr_proto.lower_value());
-    result->upper_value_ = ExtractValue<T>(expr_proto.upper_value());
-    return result;
-}
-
 std::unique_ptr<VectorPlanNode>
 ProtoParser::PlanNodeFromProto(const planpb::PlanNode& plan_node_proto) {
     // TODO: add more buffs
@@ -156,73 +79,19 @@ ProtoParser::CreatePlan(const proto::plan::PlanNode& plan_node_proto) {
 
 ExprPtr
 ProtoParser::ParseUnaryRangeExpr(const proto::plan::UnaryRangeExpr& expr_pb) {
-    auto expr = ParseExpr(expr_pb.child());
-    auto data_type = expr->data_type_;
-
-    auto result = [&]() -> ExprPtr {
-        switch (data_type) {
-            case DataType::BOOL: {
-                return ExtractUnaryRangeExprImpl<bool>(std::move(expr), expr_pb);
-            }
-            case DataType::INT8: {
-                return ExtractUnaryRangeExprImpl<int8_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT16: {
-                return ExtractUnaryRangeExprImpl<int16_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT32: {
-                return ExtractUnaryRangeExprImpl<int32_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT64: {
-                return ExtractUnaryRangeExprImpl<int64_t>(std::move(expr), expr_pb);
-            }
-            case DataType::FLOAT: {
-                return ExtractUnaryRangeExprImpl<float>(std::move(expr), expr_pb);
-            }
-            case DataType::DOUBLE: {
-                return ExtractUnaryRangeExprImpl<double>(std::move(expr), expr_pb);
-            }
-            default: {
-                PanicInfo("unsupported data type");
-            }
-        }
-    }();
+    auto result = std::make_unique<UnaryRangeExpr>();
+    result->child_ = ParseExpr(expr_pb.child());
+    result->op_type_ = static_cast<CompareOp>(expr_pb.op());
+    result->value_ = ParseGenericValue(expr_pb.value());
     return result;
 }
 
 ExprPtr
 ProtoParser::ParseBinaryRangeExpr(const proto::plan::BinaryRangeExpr& expr_pb) {
-    auto expr = ParseExpr(expr_pb.child());
-    auto data_type = expr->data_type_;
-
-    auto result = [&]() -> ExprPtr {
-        switch (data_type) {
-            case DataType::BOOL: {
-                return ExtractBinaryRangeExprImpl<bool>(std::move(expr), expr_pb);
-            }
-            case DataType::INT8: {
-                return ExtractBinaryRangeExprImpl<int8_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT16: {
-                return ExtractBinaryRangeExprImpl<int16_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT32: {
-                return ExtractBinaryRangeExprImpl<int32_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT64: {
-                return ExtractBinaryRangeExprImpl<int64_t>(std::move(expr), expr_pb);
-            }
-            case DataType::FLOAT: {
-                return ExtractBinaryRangeExprImpl<float>(std::move(expr), expr_pb);
-            }
-            case DataType::DOUBLE: {
-                return ExtractBinaryRangeExprImpl<double>(std::move(expr), expr_pb);
-            }
-            default: {
-                PanicInfo("unsupported data type");
-            }
-        }
-    }();
+    auto result = std::make_unique<BinaryRangeExpr>();
+    result->child_ = ParseExpr(expr_pb.child());
+    result->lower_value_ = ParseGenericValue(expr_pb.lower_value());
+    result->upper_value_ = ParseGenericValue(expr_pb.upper_value());
     return result;
 }
 
@@ -230,7 +99,6 @@ ExprPtr
 ProtoParser::ParseCompareExpr(const proto::plan::CompareExpr& expr_pb) {
     auto result = std::make_unique<CompareExpr>();
     result->op_type_ = static_cast<CompareOp>(expr_pb.op());
-    result->data_type_ = DataType::BOOL;
     result->left_ = ParseExpr(expr_pb.left());
     result->right_ = ParseExpr(expr_pb.right());
     return result;
@@ -238,37 +106,14 @@ ProtoParser::ParseCompareExpr(const proto::plan::CompareExpr& expr_pb) {
 
 ExprPtr
 ProtoParser::ParseTermExpr(const proto::plan::TermExpr& expr_pb) {
-    auto expr = this->ParseExpr(expr_pb.child());
-    auto data_type = expr->data_type_;
-
-    auto result = [&]() -> ExprPtr {
-        switch (data_type) {
-            case DataType::BOOL: {
-                return ExtractTermExprImpl<bool>(std::move(expr), expr_pb);
-            }
-            case DataType::INT8: {
-                return ExtractTermExprImpl<int8_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT16: {
-                return ExtractTermExprImpl<int16_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT32: {
-                return ExtractTermExprImpl<int32_t>(std::move(expr), expr_pb);
-            }
-            case DataType::INT64: {
-                return ExtractTermExprImpl<int64_t>(std::move(expr), expr_pb);
-            }
-            case DataType::FLOAT: {
-                return ExtractTermExprImpl<float>(std::move(expr), expr_pb);
-            }
-            case DataType::DOUBLE: {
-                return ExtractTermExprImpl<double>(std::move(expr), expr_pb);
-            }
-            default: {
-                PanicInfo("unsupported data type");
-            }
-        }
-    }();
+    auto result = std::make_unique<TermExpr>();
+    result->child_ = ParseExpr(expr_pb.child());
+    for (int i = 0; i < expr_pb.values_size(); i++) {
+        auto term = ParseGenericValue(expr_pb.values(i));
+        auto data_type = term->data_type_;
+        result->values_.emplace_back(std::move(term));
+        Assert(data_type == result->values_[0]->data_type_);
+    }
     return result;
 }
 
@@ -276,10 +121,8 @@ ExprPtr
 ProtoParser::ParseUnaryLogicalExpr(const proto::plan::UnaryLogicalExpr& expr_pb) {
     auto result = std::make_unique<UnaryLogicalExpr>();
     result->op_type_ = static_cast<UnaryLogicalOp>(expr_pb.op());
-    result->data_type_ = DataType::BOOL;
     Assert(result->op_type_ == UnaryLogicalOp::LogicalNot);
     result->child_ = ParseExpr(expr_pb.child());
-    Assert(result->child_->data_type_ == DataType::BOOL);
     return result;
 }
 
@@ -288,11 +131,8 @@ ProtoParser::ParseBinaryLogicalExpr(const proto::plan::BinaryLogicalExpr& expr_p
     auto result = std::make_unique<BinaryLogicalExpr>();
     result->op_type_ = static_cast<BinaryLogicalOp>(expr_pb.op());
     Assert(result->op_type_ != BinaryLogicalOp::InvalidBinaryLogicalOp);
-    result->data_type_ = DataType::BOOL;
     result->left_ = ParseExpr(expr_pb.left());
     result->right_ = ParseExpr(expr_pb.right());
-    Assert(result->left_->data_type_ == DataType::BOOL);
-    Assert(result->right_->data_type_ == DataType::BOOL);
     return result;
 }
 
@@ -312,7 +152,6 @@ ProtoParser::ParseUnaryArithExpr(const proto::plan::UnaryArithExpr& expr_pb) {
     result->op_type_ = static_cast<UnaryArithOp>(expr_pb.op());
     Assert(result->op_type_ != UnaryArithOp::InvalidUnaryArithOp);
     result->child_ = ParseExpr(expr_pb.child());
-    result->data_type_ = result->child_->data_type_;
     return result;
 }
 
@@ -323,72 +162,42 @@ ProtoParser::ParseBinaryArithExpr(const proto::plan::BinaryArithExpr& expr_pb) {
     Assert(result->op_type_ != BinaryArithOp::InvalidBinaryArithOp);
     result->left_ = ParseExpr(expr_pb.left());
     result->right_ = ParseExpr(expr_pb.right());
-    result->data_type_ = getSameType(result->left_->data_type_, result->right_->data_type_);
     return result;
 }
 
-template <typename T, typename U>
-static bool
-in_limits(const U& value) {
-    return value <= std::numeric_limits<T>::max() && value >= std::numeric_limits<T>::lowest();
-}
-
-ExprPtr
-ProtoParser::ParseValueExpr(const planpb::ValueExpr& expr_pb) {
+GenericValuePtr
+ProtoParser::ParseGenericValue(const proto::plan::GenericValue& gv_pb) {
     using pgv = planpb::GenericValue::ValCase;
-    const auto& value_proto = expr_pb.value();
-    switch (value_proto.val_case()) {
+    switch (gv_pb.val_case()) {
         case pgv::kBoolVal: {
-            auto result = std::make_unique<ValueExprImpl<bool>>();
-            result->value_ = static_cast<bool>(value_proto.bool_val());
+            auto result = std::make_unique<GenericValueImpl<bool>>();
+            result->value_ = static_cast<bool>(gv_pb.bool_val());
             result->data_type_ = DataType::BOOL;
             return result;
         }
         case pgv::kInt64Val: {
-            auto value = static_cast<int64_t>(value_proto.int64_val());
-            if (in_limits<int8_t>(value)) {
-                auto result = std::make_unique<ValueExprImpl<int8_t>>();
-                result->value_ = value;
-                result->data_type_ = DataType::INT8;
-                return result;
-            }
-            if (in_limits<int16_t>(value)) {
-                auto result = std::make_unique<ValueExprImpl<int16_t>>();
-                result->value_ = value;
-                result->data_type_ = DataType::INT16;
-                return result;
-            }
-            if (in_limits<int32_t>(value)) {
-                auto result = std::make_unique<ValueExprImpl<int32_t>>();
-                result->value_ = value;
-                result->data_type_ = DataType::INT32;
-                return result;
-            }
-            {
-                auto result = std::make_unique<ValueExprImpl<int64_t>>();
-                result->value_ = value;
-                result->data_type_ = DataType::INT64;
-                return result;
-            }
+            auto result = std::make_unique<GenericValueImpl<int64_t>>();
+            result->value_ = static_cast<int64_t>(gv_pb.int64_val());
+            ;
+            result->data_type_ = DataType::INT64;
+            return result;
         }
         case pgv::kFloatVal: {
-            auto value = static_cast<double>(value_proto.float_val());
-            if (in_limits<float>(value)) {
-                auto result = std::make_unique<ValueExprImpl<float>>();
-                result->value_ = value;
-                result->data_type_ = DataType::FLOAT;
-                return result;
-            }
-            {
-                auto result = std::make_unique<ValueExprImpl<double>>();
-                result->value_ = value;
-                result->data_type_ = DataType::DOUBLE;
-                return result;
-            }
+            auto result = std::make_unique<GenericValueImpl<double>>();
+            result->value_ = static_cast<double>(gv_pb.float_val());
+            result->data_type_ = DataType::DOUBLE;
+            return result;
         }
         case proto::plan::GenericValue::VAL_NOT_SET:
             PanicInfo("value not set");
     }
+}
+
+ExprPtr
+ProtoParser::ParseValueExpr(const planpb::ValueExpr& expr_pb) {
+    auto result = std::make_unique<ValueExpr>();
+    result->value_ = ParseGenericValue(expr_pb.value());
+    return result;
 }
 
 ExprPtr

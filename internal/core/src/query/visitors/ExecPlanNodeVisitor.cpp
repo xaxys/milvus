@@ -100,9 +100,7 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
 
     if (node.predicate_.has_value()) {
         auto expr_ret = ExecExprVisitor(*segment, active_count, timestamp_).call_child(*node.predicate_.value());
-        if (!expr_ret.type()->Equals(arrow::BooleanType())) {
-            expr_ret = cp::CallFunction("equal", {expr_ret, arrow::Datum(0)}).ValueOrDie();
-        }
+        Assert(expr_ret.type()->Equals(arrow::BooleanType()));
         if (expr_ret.is_scalar()) {
             if (!expr_ret.scalar_as<arrow::BooleanScalar>().value) {
                 ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.metric_type_);

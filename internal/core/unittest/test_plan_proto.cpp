@@ -122,7 +122,7 @@ vector_anns: <
             {
                 "range": {
                     "%1%": {
-                        "GT": 3
+                        "GT": %2%
                     }
                 }
             },
@@ -141,7 +141,7 @@ vector_anns: <
         ]
     }
 }
-)") % field_name);
+)") % field_name % (value_tag == "float_val" ? "3.0" : "3"));
 
     auto ref_plan = CreatePlan(*schema, dsl_text);
     plan->check_identical(*ref_plan);
@@ -212,7 +212,7 @@ vector_anns: <
             {
                 "term": {
                     "%1%": {
-                        "values": [1,2,3]
+                        "values": %2%
                     }
                 }
             },
@@ -231,7 +231,7 @@ vector_anns: <
         ]
     }
 }
-)") % field_name);
+)") % field_name % (value_tag == "float_val" ? "[1.0,2.0,3.0]" : "[1,2,3]"));
 
     auto ref_plan = CreatePlan(*schema, dsl_text);
     plan->check_identical(*ref_plan);

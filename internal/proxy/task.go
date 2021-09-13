@@ -2095,9 +2095,9 @@ func parseIdsFromExpr(exprStr string, schema *typeutil.SchemaHelper) ([]int64, e
 			}
 		}
 
-		if !xExpr.TermExpr.ColumnInfo.IsPrimaryKey {
-			return nil, errors.New("column is not primary key")
-		}
+		// if !xExpr.TermExpr.ColumnInfo.IsPrimaryKey {
+		// 	return nil, errors.New("column is not primary key")
+		// }
 
 		return ids, nil
 	default:

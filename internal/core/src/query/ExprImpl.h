@@ -16,23 +16,7 @@
 
 namespace milvus::query {
 template <typename T>
-struct TermExprImpl : TermExpr {
-    std::vector<T> terms_;
-};
-
-template <typename T>
-struct UnaryRangeExprImpl : UnaryRangeExpr {
-    T value_;
-};
-
-template <typename T>
-struct BinaryRangeExprImpl : BinaryRangeExpr {
-    T lower_value_;
-    T upper_value_;
-};
-
-template <typename T>
-struct ValueExprImpl : ValueExpr {
+struct GenericValueImpl : GenericValue {
     T value_;
 };
 }  // namespace milvus::query

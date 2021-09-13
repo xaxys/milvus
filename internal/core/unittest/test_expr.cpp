@@ -403,8 +403,16 @@ TEST(Expr, TestTerm) {
         dsl_string.replace(loc, 4, clause);
         auto plan = CreatePlan(*schema, dsl_string);
         auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
+        if (final.is_scalar()) {
+            // for [] case
+            for (int i = 0; i < N * num_iters; ++i) {
+                auto val = age_col[i];
+                auto ref = ref_func(val);
+                ASSERT_EQ(false, ref) << clause << "@" << i << "!!" << val;
+            }
+            continue;
+        }
         EXPECT_EQ(final.length(), N * num_iters);
-
         Assert(final.is_array());
         Assert(final.type()->Equals(arrow::BooleanType()));
         const auto& array = final.array_as<arrow::BooleanArray>();
@@ -611,7 +619,7 @@ TEST(Expr, TestBinaryArith) {
         {"BitXor", [](int64_t a, int16_t b) { return (a ^ b) >= b * b; }},
     };
 
-    // (age1 op age2) >= ((int64)(age2) ** 2)
+    // (age1 op age2) >= ((double)(age2) ** 2)
     auto string_tpl = R"(
 vector_anns: <
   field_id: 2021
@@ -650,7 +658,7 @@ vector_anns: <
                   >
                 >
               >
-              data_type: Int64
+              data_type: Double
             >
           >
           right: <
@@ -805,162 +813,5 @@ vector_anns: <
             auto ref = ref_func(val);
             ASSERT_EQ(ans, ref) << clause << "@" << i << "!!" << boost::format("%1%") % val;
         }
-    }
-}
-
-TEST(Expr, TestPureScalarExpr) {
-    using namespace milvus::query;
-    using namespace milvus::segcore;
-    std::vector<std::tuple<std::string, int64_t>> testcases;
-
-    // (420010 + 2147483648) / ((int64)(30) * 420000)
-    auto proto_text1 = R"(
-vector_anns: <
-  field_id: 2021
-  predicates: <
-    binary_arith_expr: <
-      left: <
-        binary_arith_expr: <
-          left: <
-            value_expr: <
-              value: <
-                int64_val: 420010
-              >
-            >
-          >
-          right: <
-            value_expr: <
-              value: <
-                int64_val: 2147483648
-              >
-            >
-          >
-          op: Add
-        >
-      >
-      right: <
-        binary_arith_expr: <
-          left: <
-            cast_expr: <
-              child: <
-                value_expr: <
-                  value: <
-                    int64_val: 30
-                  >
-                >
-              >
-              data_type: Int64
-            >
-          >
-          right: <
-            value_expr: <
-              value: <
-                int64_val: 420000
-              >
-            >
-          >
-          op: Multiply
-        >
-      >
-      op: Divide
-    >
-  >
-  query_info: <
-    topk: 10
-    metric_type: "L2"
-    search_params: "{\"nprobe\": 10}"
-  >
-  placeholder_tag: "$0"
->
-)";
-    testcases.push_back({proto_text1, 170});
-
-    // ((16 * 2) | 1) == (31 ^ 62)
-    auto proto_text2 = R"(
-vector_anns: <
-  field_id: 2021
-  predicates: <
-    compare_expr: <
-      left: <
-        binary_arith_expr: <
-          left: <
-            binary_arith_expr: <
-              left: <
-                value_expr: <
-                  value: <
-                    int64_val: 16
-                  >
-                >
-              >
-              right: <
-                value_expr: <
-                  value: <
-                    int64_val: 2
-                  >
-                >
-              >
-              op: Multiply
-            >
-          >
-          right: <
-            value_expr: <
-              value: <
-                int64_val: 1
-              >
-            >
-          >
-          op: BitOr
-        >
-      >
-      right: <
-        binary_arith_expr: <
-          left: <
-            value_expr: <
-              value: <
-                int64_val: 31
-              >
-            >
-          >
-          right: <
-            value_expr: <
-              value: <
-                int64_val: 62
-              >
-            >
-          >
-          op: BitXor
-        >
-      >
-      op: Equal
-    >
-  >
-  query_info: <
-    topk: 10
-    metric_type: "L2"
-    search_params: "{\"nprobe\": 10}"
-  >
-  placeholder_tag: "$0"
->
-)";
-    testcases.push_back({proto_text2, true});
-
-    auto schema = std::make_shared<Schema>();
-    schema->AddField(FieldName("fakevec"), FieldId(2021), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
-
-    auto seg = CreateGrowingSegment(schema);
-    auto seg_promote = dynamic_cast<SegmentGrowingImpl*>(seg.get());
-    ExecExprVisitor visitor(*seg_promote, seg_promote->get_row_count(), MAX_TIMESTAMP);
-    for (auto [proto_text, std_ans] : testcases) {
-        proto::plan::PlanNode node_proto;
-        google::protobuf::TextFormat::ParseFromString(proto_text, &node_proto);
-        // std::cout << node_proto.DebugString();
-        auto plan = ProtoParser(*schema).CreatePlan(node_proto);
-        // std::cout << ShowPlanNodeVisitor().call_child(*plan->plan_node_) << std::endl;
-        auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
-
-        Assert(final.is_scalar());
-        auto scalar = final.scalar()->CastTo(arrow::int64()).ValueOrDie();
-        auto ans = static_cast<arrow::Int64Scalar*>(scalar.get())->value;
-        ASSERT_EQ(ans, std_ans) << "@" << proto_text;
     }
 }

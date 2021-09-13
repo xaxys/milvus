@@ -50,15 +50,13 @@ class ExecExprVisitor : ExprVisitor {
 
     template <typename T>
     auto
-    ExecUnaryRangeVisitorDispatcher(UnaryRangeExpr& expr_raw) -> RetType;
+    ExecUnaryRangeVisitorDispatcher(const FieldOffset& field_offset, const UnaryRangeExpr& expr)
+        -> std::tuple<RetType, ArrayPtr>;
 
     template <typename T>
     auto
-    ExecBinaryRangeVisitorDispatcher(BinaryRangeExpr& expr_raw) -> RetType;
-
-    template <typename T>
-    auto
-    ExecTermVisitorImpl(TermExpr& expr_raw) -> RetType;
+    ExecBinaryRangeVisitorDispatcher(const FieldOffset& field_offset, const BinaryRangeExpr& expr)
+        -> std::tuple<RetType, ArrayPtr>;
 
     auto
     BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset = 0) -> RetType;
@@ -77,6 +75,135 @@ class ExecExprVisitor : ExprVisitor {
 #endif
 
 namespace cp = ::arrow::compute;
+
+static arrow::Datum
+ExecGenericValueVisitor(const GenericValue& gv) {
+    switch (gv.data_type_) {
+        case DataType::BOOL: {
+            auto& gv_impl = static_cast<const GenericValueImpl<bool>&>(gv);
+            return arrow::Datum(gv_impl.value_);
+        }
+        case DataType::INT8: {
+            auto& gv_impl = static_cast<const GenericValueImpl<int8_t>&>(gv);
+            return arrow::Datum(gv_impl.value_);
+        }
+        case DataType::INT16: {
+            auto& gv_impl = static_cast<const GenericValueImpl<int16_t>&>(gv);
+            return arrow::Datum(gv_impl.value_);
+        }
+        case DataType::INT32: {
+            auto& gv_impl = static_cast<const GenericValueImpl<int32_t>&>(gv);
+            return arrow::Datum(gv_impl.value_);
+        }
+        case DataType::INT64: {
+            auto& gv_impl = static_cast<const GenericValueImpl<int64_t>&>(gv);
+            return arrow::Datum(gv_impl.value_);
+        }
+        case DataType::FLOAT: {
+            auto& gv_impl = static_cast<const GenericValueImpl<float>&>(gv);
+            return arrow::Datum(gv_impl.value_);
+        }
+        case DataType::DOUBLE: {
+            auto& gv_impl = static_cast<const GenericValueImpl<double>&>(gv);
+            return arrow::Datum(gv_impl.value_);
+        }
+        default:
+            PanicInfo("unsupported datatype");
+    }
+}
+
+template <typename T>
+static T
+ExtractGenericValue(const GenericValue& gv) {
+    switch (gv.data_type_) {
+        case DataType::BOOL: {
+            auto& gv_impl = static_cast<const GenericValueImpl<bool>&>(gv);
+            return static_cast<T>(gv_impl.value_);
+        }
+        case DataType::INT8: {
+            auto& gv_impl = static_cast<const GenericValueImpl<int8_t>&>(gv);
+            return static_cast<T>(gv_impl.value_);
+        }
+        case DataType::INT16: {
+            auto& gv_impl = static_cast<const GenericValueImpl<int16_t>&>(gv);
+            return static_cast<T>(gv_impl.value_);
+        }
+        case DataType::INT32: {
+            auto& gv_impl = static_cast<const GenericValueImpl<int32_t>&>(gv);
+            return static_cast<T>(gv_impl.value_);
+        }
+        case DataType::INT64: {
+            auto& gv_impl = static_cast<const GenericValueImpl<int64_t>&>(gv);
+            return static_cast<T>(gv_impl.value_);
+        }
+        case DataType::FLOAT: {
+            auto& gv_impl = static_cast<const GenericValueImpl<float>&>(gv);
+            return static_cast<T>(gv_impl.value_);
+        }
+        case DataType::DOUBLE: {
+            auto& gv_impl = static_cast<const GenericValueImpl<double>&>(gv);
+            return static_cast<T>(gv_impl.value_);
+        }
+        default:
+            PanicInfo("unsupported datatype");
+    }
+}
+
+template <typename T, typename Builder>
+static void
+ExtractGenericValueList(Builder& builder, const std::vector<GenericValuePtr>& gvl) {
+    for (const auto& gv : gvl) {
+        auto gv_impl = dynamic_cast<const GenericValueImpl<T>*>(gv.get());
+        Assert(gv_impl);
+        builder.Append(gv_impl->value_);
+    }
+}
+
+static arrow::Datum
+ExecGenericValueListVisitor(const std::vector<GenericValuePtr>& gvl) {
+    if (gvl.size() <= 0) {
+        return arrow::Datum(false);
+    }
+    switch (gvl[0]->data_type_) {
+        case DataType::BOOL: {
+            arrow::BooleanBuilder builder;
+            ExtractGenericValueList<bool>(builder, gvl);
+            return builder.Finish().ValueOrDie();
+        }
+        case DataType::INT8: {
+            arrow::Int8Builder builder;
+            ExtractGenericValueList<int8_t>(builder, gvl);
+            return builder.Finish().ValueOrDie();
+        }
+        case DataType::INT16: {
+            arrow::Int16Builder builder;
+            ExtractGenericValueList<int16_t>(builder, gvl);
+            return builder.Finish().ValueOrDie();
+        }
+        case DataType::INT32: {
+            arrow::Int32Builder builder;
+            ExtractGenericValueList<int32_t>(builder, gvl);
+            return builder.Finish().ValueOrDie();
+        }
+        case DataType::INT64: {
+            arrow::Int64Builder builder;
+            ExtractGenericValueList<int64_t>(builder, gvl);
+            return builder.Finish().ValueOrDie();
+        }
+        case DataType::FLOAT: {
+            arrow::FloatBuilder builder;
+            ExtractGenericValueList<float>(builder, gvl);
+            return builder.Finish().ValueOrDie();
+        }
+        case DataType::DOUBLE: {
+            arrow::DoubleBuilder builder;
+            ExtractGenericValueList<double>(builder, gvl);
+            return builder.Finish().ValueOrDie();
+        }
+        default:
+            PanicInfo("unsupported datatype");
+    }
+}
 
 void
 ExecExprVisitor::visit(UnaryLogicalExpr& expr) {
@@ -149,14 +276,82 @@ BuildBitmasksArray(const ExecExprVisitor::Bitmasks& bitmasks) {
     return builder.Finish().ValueOrDie();
 }
 
-#pragma clang diagnostic push
-#pragma ide diagnostic ignored "Simplify"
 template <typename T>
 auto
-ExecExprVisitor::ExecUnaryRangeVisitorDispatcher(UnaryRangeExpr& expr_raw) -> RetType {
-    auto& expr = static_cast<UnaryRangeExprImpl<T>&>(expr_raw);
+ExecExprVisitor::ExecBinaryRangeVisitorDispatcher(const FieldOffset& field_offset, const BinaryRangeExpr& expr)
+    -> std::tuple<RetType, ArrayPtr> {
+    using Index = knowhere::scalar::StructuredIndex<T>;
+    auto lower_inclusive = expr.lower_inclusive_;
+    auto upper_inclusive = expr.upper_inclusive_;
+    auto lower_value = ExtractGenericValue<T>(*expr.lower_value_);
+    auto upper_value = ExtractGenericValue<T>(*expr.upper_value_);
+    if (lower_inclusive && upper_inclusive) {
+        if (lower_value > upper_value)
+            return {arrow::Datum(false), nullptr};
+    } else {
+        if (lower_value >= upper_value)
+            return {arrow::Datum(false), nullptr};
+    }
+    auto index_func = [=](Index* index) {
+        return index->Range(lower_value, lower_inclusive, upper_value, upper_inclusive);
+    };
+    auto bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+    auto child_res = BuildFieldArray(field_offset, bitmasks.size());
+    auto index_res = BuildBitmasksArray(bitmasks);
+    return {child_res, index_res};
+}
+
+template <typename T>
+auto
+ExecExprVisitor::ExecUnaryRangeVisitorDispatcher(const FieldOffset& field_offset, const UnaryRangeExpr& expr)
+    -> std::tuple<RetType, ArrayPtr> {
+    using Index = knowhere::scalar::StructuredIndex<T>;
+    using Operator = knowhere::scalar::OperatorType;
+    auto value = ExtractGenericValue<T>(*expr.value_);
+    Bitmasks bitmasks;
+    switch (expr.op_type_) {
+        case CompareOp::Equal: {
+            auto index_func = [=](Index* index) { return index->In(1, &value); };
+            bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            break;
+        }
+        case CompareOp::NotEqual: {
+            auto index_func = [=](Index* index) { return index->NotIn(1, &value); };
+            bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            break;
+        }
+        case CompareOp::GreaterEqual: {
+            auto index_func = [=](Index* index) { return index->Range(value, Operator::GE); };
+            bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            break;
+        }
+        case CompareOp::GreaterThan: {
+            auto index_func = [=](Index* index) { return index->Range(value, Operator::GT); };
+            bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            break;
+        }
+        case CompareOp::LessEqual: {
+            auto index_func = [=](Index* index) { return index->Range(value, Operator::LE); };
+            bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            break;
+        }
+        case CompareOp::LessThan: {
+            auto index_func = [=](Index* index) { return index->Range(value, Operator::LT); };
+            bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            break;
+        }
+        default: {
+            PanicInfo("unsupported range node");
+        }
+    }
+    auto child_res = BuildFieldArray(field_offset, bitmasks.size());
+    auto index_res = BuildBitmasksArray(bitmasks);
+    return {child_res, index_res};
+}
+
+void
+ExecExprVisitor::visit(UnaryRangeExpr& expr) {
     auto op = expr.op_type_;
-    auto val = expr.value_;
     static const std::map<CompareOp, std::string> op_name = {
         {CompareOp::Equal, "equal"},
         {CompareOp::NotEqual, "not_equal"},
@@ -169,174 +364,109 @@ ExecExprVisitor::ExecUnaryRangeVisitorDispatcher(UnaryRangeExpr& expr_raw) -> Re
     ArrayPtr index_res;
     if (const auto child = dynamic_cast<ColumnExpr*>(expr.child_.get()); child) {
         // get bitmask from index
-        using Index = knowhere::scalar::StructuredIndex<T>;
-        using Operator = knowhere::scalar::OperatorType;
-        auto field_offset = child->field_offset_;
-        Bitmasks bitmasks;
-        switch (op) {
-            case CompareOp::Equal: {
-                auto index_func = [val](Index* index) { return index->In(1, &val); };
-                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+        switch (child->data_type_) {
+            case DataType::BOOL: {
+                std::tie(child_res, index_res) = ExecUnaryRangeVisitorDispatcher<bool>(child->field_offset_, expr);
                 break;
             }
-            case CompareOp::NotEqual: {
-                auto index_func = [val](Index* index) { return index->NotIn(1, &val); };
-                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            case DataType::INT8: {
+                std::tie(child_res, index_res) = ExecUnaryRangeVisitorDispatcher<int8_t>(child->field_offset_, expr);
                 break;
             }
-            case CompareOp::GreaterEqual: {
-                auto index_func = [val](Index* index) { return index->Range(val, Operator::GE); };
-                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            case DataType::INT16: {
+                std::tie(child_res, index_res) = ExecUnaryRangeVisitorDispatcher<int16_t>(child->field_offset_, expr);
                 break;
             }
-            case CompareOp::GreaterThan: {
-                auto index_func = [val](Index* index) { return index->Range(val, Operator::GT); };
-                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            case DataType::INT32: {
+                std::tie(child_res, index_res) = ExecUnaryRangeVisitorDispatcher<int32_t>(child->field_offset_, expr);
                 break;
             }
-            case CompareOp::LessEqual: {
-                auto index_func = [val](Index* index) { return index->Range(val, Operator::LE); };
-                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            case DataType::INT64: {
+                std::tie(child_res, index_res) = ExecUnaryRangeVisitorDispatcher<int64_t>(child->field_offset_, expr);
                 break;
             }
-            case CompareOp::LessThan: {
-                auto index_func = [val](Index* index) { return index->Range(val, Operator::LT); };
-                bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
+            case DataType::FLOAT: {
+                std::tie(child_res, index_res) = ExecUnaryRangeVisitorDispatcher<float>(child->field_offset_, expr);
                 break;
             }
-            default: {
-                PanicInfo("unsupported range node");
+            case DataType::DOUBLE: {
+                std::tie(child_res, index_res) = ExecUnaryRangeVisitorDispatcher<double>(child->field_offset_, expr);
+                break;
             }
+            default:
+                PanicInfo("unsupported datatype");
         }
-        child_res = BuildFieldArray(field_offset, bitmasks.size());
-        index_res = BuildBitmasksArray(bitmasks);
     } else {
         child_res = call_child(*expr.child_);
     }
-    auto scalar = arrow::Datum(val);
+    auto scalar = ExecGenericValueVisitor(*expr.value_);
     auto res = cp::CallFunction(op_name.at(op), {child_res, scalar}).ValueOrDie();
-    if (index_res->length() != 0) {
+    if (index_res) {
         res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
     }
-    return res;
-}
-#pragma clang diagnostic pop
-
-#pragma clang diagnostic push
-#pragma ide diagnostic ignored "Simplify"
-template <typename T>
-auto
-ExecExprVisitor::ExecBinaryRangeVisitorDispatcher(BinaryRangeExpr& expr_raw) -> RetType {
-    auto& expr = static_cast<BinaryRangeExprImpl<T>&>(expr_raw);
-    bool lower_inclusive = expr.lower_inclusive_;
-    bool upper_inclusive = expr.upper_inclusive_;
-    T val1 = expr.lower_value_;
-    T val2 = expr.upper_value_;
-    RetType child_res;
-    ArrayPtr index_res;
-    if (val1 > val2 || (val1 == val2 && !(lower_inclusive && upper_inclusive))) {
-        return arrow::Datum(false);
-    }
-    if (const auto child = dynamic_cast<ColumnExpr*>(expr.child_.get()); child) {
-        // get bitmask from index
-        using Index = knowhere::scalar::StructuredIndex<T>;
-        auto field_offset = child->field_offset_;
-        auto index_func = [=](Index* index) { return index->Range(val1, lower_inclusive, val2, upper_inclusive); };
-        auto bitmasks = GetBitmaskFromIndex<T>(field_offset, index_func);
-        child_res = BuildFieldArray(field_offset, bitmasks.size());
-        index_res = BuildBitmasksArray(bitmasks);
-    } else {
-        child_res = call_child(*expr.child_);
-    }
-    auto scalar1 = arrow::Datum(val1);
-    auto scalar2 = arrow::Datum(val2);
-    std::string op_name1 = lower_inclusive ? "greater_equal" : "greater";
-    std::string op_name2 = upper_inclusive ? "less_equal" : "less";
-    auto res1 = cp::CallFunction(op_name1, {child_res, scalar1}).ValueOrDie();
-    auto res2 = cp::CallFunction(op_name2, {child_res, scalar2}).ValueOrDie();
-    auto res = cp::And(res1, res2).ValueOrDie();
-    if (index_res->length() != 0) {
-        res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
-    }
-    return res;
-}
-#pragma clang diagnostic pop
-
-void
-ExecExprVisitor::visit(UnaryRangeExpr& expr) {
-    RetType res;
-    switch (expr.child_->data_type_) {
-        case DataType::BOOL: {
-            res = ExecUnaryRangeVisitorDispatcher<bool>(expr);
-            break;
-        }
-        case DataType::INT8: {
-            res = ExecUnaryRangeVisitorDispatcher<int8_t>(expr);
-            break;
-        }
-        case DataType::INT16: {
-            res = ExecUnaryRangeVisitorDispatcher<int16_t>(expr);
-            break;
-        }
-        case DataType::INT32: {
-            res = ExecUnaryRangeVisitorDispatcher<int32_t>(expr);
-            break;
-        }
-        case DataType::INT64: {
-            res = ExecUnaryRangeVisitorDispatcher<int64_t>(expr);
-            break;
-        }
-        case DataType::FLOAT: {
-            res = ExecUnaryRangeVisitorDispatcher<float>(expr);
-            break;
-        }
-        case DataType::DOUBLE: {
-            res = ExecUnaryRangeVisitorDispatcher<double>(expr);
-            break;
-        }
-        default:
-            PanicInfo("unsupported datatype");
-    }
-    Assert(res.is_scalar() || res.length() == row_count_);
+    Assert(res.length() == row_count_);
     ret_ = std::move(res);
 }
 
 void
 ExecExprVisitor::visit(BinaryRangeExpr& expr) {
-    RetType res;
-    switch (expr.child_->data_type_) {
-        case DataType::BOOL: {
-            res = ExecBinaryRangeVisitorDispatcher<bool>(expr);
-            break;
+    bool lower_inclusive = expr.lower_inclusive_;
+    bool upper_inclusive = expr.upper_inclusive_;
+    RetType child_res;
+    ArrayPtr index_res;
+    if (const auto child = dynamic_cast<ColumnExpr*>(expr.child_.get()); child) {
+        // get bitmask from index
+        switch (child->data_type_) {
+            case DataType::BOOL: {
+                std::tie(child_res, index_res) = ExecBinaryRangeVisitorDispatcher<bool>(child->field_offset_, expr);
+                break;
+            }
+            case DataType::INT8: {
+                std::tie(child_res, index_res) = ExecBinaryRangeVisitorDispatcher<int8_t>(child->field_offset_, expr);
+                break;
+            }
+            case DataType::INT16: {
+                std::tie(child_res, index_res) = ExecBinaryRangeVisitorDispatcher<int16_t>(child->field_offset_, expr);
+                break;
+            }
+            case DataType::INT32: {
+                std::tie(child_res, index_res) = ExecBinaryRangeVisitorDispatcher<int32_t>(child->field_offset_, expr);
+                break;
+            }
+            case DataType::INT64: {
+                std::tie(child_res, index_res) = ExecBinaryRangeVisitorDispatcher<int64_t>(child->field_offset_, expr);
+                break;
+            }
+            case DataType::FLOAT: {
+                std::tie(child_res, index_res) = ExecBinaryRangeVisitorDispatcher<float>(child->field_offset_, expr);
+                break;
+            }
+            case DataType::DOUBLE: {
+                std::tie(child_res, index_res) = ExecBinaryRangeVisitorDispatcher<double>(child->field_offset_, expr);
+                break;
+            }
+            default:
+                PanicInfo("unsupported datatype");
         }
-        case DataType::INT8: {
-            res = ExecBinaryRangeVisitorDispatcher<int8_t>(expr);
-            break;
+        // invalid case: lowerbound > upperbound
+        if (child_res.is_scalar()) {
+            ret_ = std::move(child_res);
+            return;
         }
-        case DataType::INT16: {
-            res = ExecBinaryRangeVisitorDispatcher<int16_t>(expr);
-            break;
-        }
-        case DataType::INT32: {
-            res = ExecBinaryRangeVisitorDispatcher<int32_t>(expr);
-            break;
-        }
-        case DataType::INT64: {
-            res = ExecBinaryRangeVisitorDispatcher<int64_t>(expr);
-            break;
-        }
-        case DataType::FLOAT: {
-            res = ExecBinaryRangeVisitorDispatcher<float>(expr);
-            break;
-        }
-        case DataType::DOUBLE: {
-            res = ExecBinaryRangeVisitorDispatcher<double>(expr);
-            break;
-        }
-        default:
-            PanicInfo("unsupported datatype");
+    } else {
+        child_res = call_child(*expr.child_);
     }
-    Assert(res.is_scalar() || res.length() == row_count_);
+    auto scalar1 = ExecGenericValueVisitor(*expr.lower_value_);
+    auto scalar2 = ExecGenericValueVisitor(*expr.upper_value_);
+    std::string op_name1 = lower_inclusive ? "greater_equal" : "greater";
+    std::string op_name2 = upper_inclusive ? "less_equal" : "less";
+    auto res1 = cp::CallFunction(op_name1, {child_res, scalar1}).ValueOrDie();
+    auto res2 = cp::CallFunction(op_name2, {child_res, scalar2}).ValueOrDie();
+    auto res = cp::And(res1, res2).ValueOrDie();
+    if (index_res) {
+        res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
+    }
+    Assert(res.length() == row_count_);
     ret_ = std::move(res);
 }
 
@@ -358,81 +488,15 @@ ExecExprVisitor::visit(CompareExpr& expr) {
     ret_ = std::move(res);
 }
 
-template <typename T>
-auto
-ExecExprVisitor::ExecTermVisitorImpl(TermExpr& expr_raw) -> RetType {
-    auto& expr = static_cast<TermExprImpl<T>&>(expr_raw);
-    auto child_res = call_child(*expr.child_);
-    arrow::Datum terms;
-    if constexpr (std::is_same_v<T, bool>) {
-        arrow::BooleanBuilder builder;
-        builder.AppendValues(expr.terms_);
-        terms = builder.Finish().ValueOrDie();
-    } else if constexpr (std::is_same_v<T, int8_t>) {
-        arrow::Int8Builder builder;
-        builder.AppendValues(expr.terms_);
-        terms = builder.Finish().ValueOrDie();
-    } else if constexpr (std::is_same_v<T, int16_t>) {
-        arrow::Int16Builder builder;
-        builder.AppendValues(expr.terms_);
-        terms = builder.Finish().ValueOrDie();
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-        arrow::Int32Builder builder;
-        builder.AppendValues(expr.terms_);
-        terms = builder.Finish().ValueOrDie();
-    } else if constexpr (std::is_same_v<T, int64_t>) {
-        arrow::Int64Builder builder;
-        builder.AppendValues(expr.terms_);
-        terms = builder.Finish().ValueOrDie();
-    } else if constexpr (std::is_same_v<T, float>) {
-        arrow::FloatBuilder builder;
-        builder.AppendValues(expr.terms_);
-        terms = builder.Finish().ValueOrDie();
-    } else if constexpr (std::is_same_v<T, double>) {
-        arrow::DoubleBuilder builder;
-        builder.AppendValues(expr.terms_);
-        terms = builder.Finish().ValueOrDie();
-    } else {
-        PanicInfo("unsupported datatype");
-    }
-    return cp::IsIn(child_res, cp::SetLookupOptions(terms, true)).ValueOrDie();
-}
-
 void
 ExecExprVisitor::visit(TermExpr& expr) {
-    RetType res;
-    switch (expr.child_->data_type_) {
-        case DataType::BOOL: {
-            res = ExecTermVisitorImpl<bool>(expr);
-            break;
-        }
-        case DataType::INT8: {
-            res = ExecTermVisitorImpl<int8_t>(expr);
-            break;
-        }
-        case DataType::INT16: {
-            res = ExecTermVisitorImpl<int16_t>(expr);
-            break;
-        }
-        case DataType::INT32: {
-            res = ExecTermVisitorImpl<int32_t>(expr);
-            break;
-        }
-        case DataType::INT64: {
-            res = ExecTermVisitorImpl<int64_t>(expr);
-            break;
-        }
-        case DataType::FLOAT: {
-            res = ExecTermVisitorImpl<float>(expr);
-            break;
-        }
-        case DataType::DOUBLE: {
-            res = ExecTermVisitorImpl<double>(expr);
-            break;
-        }
-        default:
-            PanicInfo("unsupported datatype");
+    auto child_res = call_child(*expr.child_);
+    auto terms = ExecGenericValueListVisitor(expr.values_);
+    if (terms.is_scalar()) {
+        ret_ = std::move(terms);
+        return;
     }
+    auto res = cp::IsIn(child_res, cp::SetLookupOptions(terms, true)).ValueOrDie();
     Assert(res.length() == row_count_);
     ret_ = std::move(res);
 }
@@ -464,18 +528,24 @@ ExecExprVisitor::BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset
             auto builder = arrow::Int8Builder();
             ExtractFieldData<int8_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
+            // TODO: remove cast
+            res = cp::Cast(res, cp::CastOptions::Unsafe(arrow::int64())).ValueOrDie();
             break;
         }
         case DataType::INT16: {
             auto builder = arrow::Int16Builder();
             ExtractFieldData<int16_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
+            // TODO: remove cast
+            res = cp::Cast(res, cp::CastOptions::Unsafe(arrow::int64())).ValueOrDie();
             break;
         }
         case DataType::INT32: {
             auto builder = arrow::Int32Builder();
             ExtractFieldData<int32_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
+            // TODO: remove cast
+            res = cp::Cast(res, cp::CastOptions::Unsafe(arrow::int64())).ValueOrDie();
             break;
         }
         case DataType::INT64: {
@@ -488,6 +558,8 @@ ExecExprVisitor::BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset
             auto builder = arrow::FloatBuilder();
             ExtractFieldData<float>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
+            // TODO: remove cast
+            res = cp::Cast(res, cp::CastOptions::Unsafe(arrow::float64())).ValueOrDie();
             break;
         }
         case DataType::DOUBLE: {
@@ -539,6 +611,8 @@ ExecExprVisitor::visit(BinaryArithExpr& expr) {
         {BinaryArithOp::BitAnd, "bit_wise_and"},
         {BinaryArithOp::BitOr, "bit_wise_or"},
         {BinaryArithOp::BitXor, "bit_wise_xor"},
+        {BinaryArithOp::ShiftLeft, "shift_left"},
+        {BinaryArithOp::BitXor, "shift_right"},
     };
     RetType res = cp::CallFunction(op_name.at(op), {left_res, right_res}).ValueOrDie();
     Assert(res.is_scalar() || res.length() == row_count_);
@@ -547,47 +621,7 @@ ExecExprVisitor::visit(BinaryArithExpr& expr) {
 
 void
 ExecExprVisitor::visit(ValueExpr& expr) {
-    RetType res;
-    switch (expr.data_type_) {
-        case DataType::BOOL: {
-            auto& expr_impl = static_cast<ValueExprImpl<bool>&>(expr);
-            res = arrow::Datum(expr_impl.value_);
-            break;
-        }
-        case DataType::INT8: {
-            auto& expr_impl = static_cast<ValueExprImpl<int8_t>&>(expr);
-            res = arrow::Datum(expr_impl.value_);
-            break;
-        }
-        case DataType::INT16: {
-            auto& expr_impl = static_cast<ValueExprImpl<int16_t>&>(expr);
-            res = arrow::Datum(expr_impl.value_);
-            break;
-        }
-        case DataType::INT32: {
-            auto& expr_impl = static_cast<ValueExprImpl<int32_t>&>(expr);
-            res = arrow::Datum(expr_impl.value_);
-            break;
-        }
-        case DataType::INT64: {
-            auto& expr_impl = static_cast<ValueExprImpl<int64_t>&>(expr);
-            res = arrow::Datum(expr_impl.value_);
-            break;
-        }
-        case DataType::FLOAT: {
-            auto& expr_impl = static_cast<ValueExprImpl<float>&>(expr);
-            res = arrow::Datum(expr_impl.value_);
-            break;
-        }
-        case DataType::DOUBLE: {
-            auto& expr_impl = static_cast<ValueExprImpl<double>&>(expr);
-            res = arrow::Datum(expr_impl.value_);
-            break;
-        }
-        default:
-            PanicInfo("unsupported datatype");
-    }
-    ret_ = std::move(res);
+    ret_ = ExecGenericValueVisitor(*expr.value_);
 }
 
 void

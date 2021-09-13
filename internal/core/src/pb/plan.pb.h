@@ -249,16 +249,19 @@ enum BinaryArithOp : int {
   Subtract = 2,
   Multiply = 3,
   Divide = 4,
+  Modulo = 5,
   Power = 6,
   BitAnd = 7,
   BitOr = 8,
   BitXor = 9,
+  ShiftLeft = 10,
+  ShiftRight = 11,
   BinaryArithOp_INT_MIN_SENTINEL_DO_NOT_USE_ = std::numeric_limits<::PROTOBUF_NAMESPACE_ID::int32>::min(),
   BinaryArithOp_INT_MAX_SENTINEL_DO_NOT_USE_ = std::numeric_limits<::PROTOBUF_NAMESPACE_ID::int32>::max()
 };
 bool BinaryArithOp_IsValid(int value);
 constexpr BinaryArithOp BinaryArithOp_MIN = InvalidBinaryArithOp;
-constexpr BinaryArithOp BinaryArithOp_MAX = BitXor;
+constexpr BinaryArithOp BinaryArithOp_MAX = ShiftRight;
 constexpr int BinaryArithOp_ARRAYSIZE = BinaryArithOp_MAX + 1;
 
 const ::PROTOBUF_NAMESPACE_ID::EnumDescriptor* BinaryArithOp_descriptor();

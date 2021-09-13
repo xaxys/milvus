@@ -48,6 +48,8 @@ enum class BinaryArithOp {
     BitAnd = 7,
     BitOr = 8,
     BitXor = 9,
+    ShiftLeft = 10,
+    ShiftRight = 11,
 };
 
 enum class UnaryLogicalOp {
@@ -64,8 +66,6 @@ enum class BinaryLogicalOp {
 
 // Base of all Exprs
 struct Expr {
-    DataType data_type_ = DataType::NONE;
-
  public:
     virtual ~Expr() = default;
     virtual void
@@ -83,8 +83,22 @@ struct UnaryExprBase : Expr {
     ExprPtr child_;
 };
 
+struct GenericValue {
+    DataType data_type_ = DataType::NONE;
+
+ protected:
+    // prevent accidential instantiation
+    GenericValue() = default;
+
+ public:
+    virtual ~GenericValue() = default;
+};
+
+using GenericValuePtr = std::unique_ptr<GenericValue>;
+
 struct ColumnExpr : Expr {
     FieldOffset field_offset_;
+    DataType data_type_ = DataType::NONE;
 
  public:
     void
@@ -92,9 +106,7 @@ struct ColumnExpr : Expr {
 };
 
 struct ValueExpr : Expr {
- protected:
-    // prevent accidential instantiation
-    ValueExpr() = default;
+    GenericValuePtr value_;
 
  public:
     void
@@ -118,9 +130,7 @@ struct BinaryLogicalExpr : BinaryExprBase {
 };
 
 struct TermExpr : UnaryExprBase {
- protected:
-    // prevent accidential instantiation
-    TermExpr() = default;
+    std::vector<GenericValuePtr> values_;
 
  public:
     void
@@ -136,11 +146,8 @@ static const std::map<std::string, CompareOp> mapping_ = {
 };
 
 struct UnaryRangeExpr : UnaryExprBase {
+    GenericValuePtr value_;
     CompareOp op_type_;
-
- protected:
-    // prevent accidential instantiation
-    UnaryRangeExpr() = default;
 
  public:
     void
@@ -150,10 +157,8 @@ struct UnaryRangeExpr : UnaryExprBase {
 struct BinaryRangeExpr : UnaryExprBase {
     bool lower_inclusive_;
     bool upper_inclusive_;
-
- protected:
-    // prevent accidential instantiation
-    BinaryRangeExpr() = default;
+    GenericValuePtr lower_value_;
+    GenericValuePtr upper_value_;
 
  public:
     void
@@ -185,6 +190,8 @@ struct BinaryArithExpr : BinaryExprBase {
 };
 
 struct CastExpr : UnaryExprBase {
+    DataType data_type_ = DataType::NONE;
+
  public:
     void
     accept(ExprVisitor&) override;

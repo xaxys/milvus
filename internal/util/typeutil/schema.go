@@ -143,7 +143,16 @@ func IsVectorType(dataType schemapb.DataType) bool {
 	}
 }
 
-func IsIntergerType(dataType schemapb.DataType) bool {
+func IsBooleanType(dataType schemapb.DataType) bool {
+	switch dataType {
+	case schemapb.DataType_Bool:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsIntegerType(dataType schemapb.DataType) bool {
 	switch dataType {
 	case schemapb.DataType_Int8, schemapb.DataType_Int16,
 		schemapb.DataType_Int32, schemapb.DataType_Int64:
@@ -156,6 +165,17 @@ func IsIntergerType(dataType schemapb.DataType) bool {
 func IsFloatingType(dataType schemapb.DataType) bool {
 	switch dataType {
 	case schemapb.DataType_Float, schemapb.DataType_Double:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsNumberType(dataType schemapb.DataType) bool {
+	switch dataType {
+	case schemapb.DataType_Int8, schemapb.DataType_Int16,
+		schemapb.DataType_Int32, schemapb.DataType_Int64,
+		schemapb.DataType_Float, schemapb.DataType_Double:
 		return true
 	default:
 		return false

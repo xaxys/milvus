@@ -59,6 +59,9 @@ class ProtoParser {
     ExprPtr
     ParseCastExpr(const proto::plan::CastExpr& expr_pb);
 
+    GenericValuePtr
+    ParseGenericValue(const proto::plan::GenericValue& gv_pb);
+
     ExprPtr
     ParseExpr(const proto::plan::Expr& expr_pb);
 
