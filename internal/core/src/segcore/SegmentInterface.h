@@ -121,7 +121,7 @@ class SegmentInternalInterface : public SegmentInterface {
     get_active_count(Timestamp ts) const = 0;
 
     virtual std::vector<SegOffset>
-    search_ids(const boost::dynamic_bitset<>& view, Timestamp timestamp) const = 0;
+    search_ids(const std::shared_ptr<arrow::BooleanArray>& view, Timestamp timestamp) const = 0;
 
  protected:
     // internal API: return chunk_data in span

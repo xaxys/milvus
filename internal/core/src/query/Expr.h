@@ -130,7 +130,7 @@ struct BinaryLogicalExpr : BinaryExprBase {
 };
 
 struct TermExpr : UnaryExprBase {
-    std::vector<GenericValuePtr> values_;
+    std::vector<GenericValuePtr> terms_;
 
  public:
     void

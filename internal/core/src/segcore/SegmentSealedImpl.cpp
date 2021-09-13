@@ -450,10 +450,10 @@ SegmentSealedImpl::search_ids(const IdArray& id_array, Timestamp timestamp) cons
 }
 
 std::vector<SegOffset>
-SegmentSealedImpl::search_ids(const boost::dynamic_bitset<>& bitset, Timestamp timestamp) const {
+SegmentSealedImpl::search_ids(const std::shared_ptr<arrow::BooleanArray>& bitset, Timestamp timestamp) const {
     std::vector<SegOffset> dst_offset;
-    for (int i = 0; i < bitset.size(); i++) {
-        if (bitset[i]) {
+    for (int i = 0; i < bitset->length(); i++) {
+        if (bitset->Value(i)) {
             dst_offset.emplace_back(SegOffset(i));
         }
     }

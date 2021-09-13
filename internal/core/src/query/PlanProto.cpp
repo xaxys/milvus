@@ -140,8 +140,8 @@ ProtoParser::ParseTermExpr(const proto::plan::TermExpr& expr_pb) {
     for (int i = 0; i < expr_pb.values_size(); i++) {
         auto term = ParseGenericValue(expr_pb.values(i));
         auto data_type = term->data_type_;
-        result->values_.emplace_back(std::move(term));
-        Assert(data_type == result->values_[0]->data_type_);
+        result->terms_.emplace_back(std::move(term));
+        Assert(data_type == result->terms_[0]->data_type_);
     }
     return result;
 }

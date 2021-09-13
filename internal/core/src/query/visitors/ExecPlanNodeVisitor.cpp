@@ -28,12 +28,16 @@ namespace impl {
 class ExecPlanNodeVisitor : PlanNodeVisitor {
  public:
     using RetType = SearchResult;
+    using RetrieveRetType = RetrieveResult;
     ExecPlanNodeVisitor(const segcore::SegmentInterface& segment,
                         Timestamp timestamp,
                         const PlaceholderGroup& placeholder_group)
         : segment_(segment), timestamp_(timestamp), placeholder_group_(placeholder_group) {
     }
-    // using RetType = nlohmann::json;
+
+    ExecPlanNodeVisitor(const segcore::SegmentInterface& segment, Timestamp timestamp)
+            : segment_(segment), timestamp_(timestamp) {
+    }
 
     RetType
     get_moved_result(PlanNode& node) {
@@ -45,7 +49,18 @@ class ExecPlanNodeVisitor : PlanNodeVisitor {
         return ret;
     }
 
- private:
+    RetrieveRetType
+    get_retrieve_result(PlanNode& node) {
+        assert(!retrieve_ret_.has_value());
+        std::cout.flush();
+        node.accept(*this);
+        assert(retrieve_ret_.has_value());
+        auto retrieve_ret = std::move(retrieve_ret_).value();
+        retrieve_ret_ = std::nullopt;
+        return retrieve_ret;
+    }
+
+private:
     template <typename VectorType>
     void
     VectorVisitorImpl(VectorPlanNode& node);
@@ -54,9 +69,10 @@ class ExecPlanNodeVisitor : PlanNodeVisitor {
     // std::optional<RetType> ret_;
     const segcore::SegmentInterface& segment_;
     Timestamp timestamp_;
-    const PlaceholderGroup& placeholder_group_;
+    PlaceholderGroup placeholder_group_;
 
     std::optional<RetType> ret_;
+    std::optional<RetrieveResult> retrieve_ret_;
 };
 }  // namespace impl
 #endif
@@ -138,22 +154,39 @@ ExecPlanNodeVisitor::visit(RetrievePlanNode& node) {
     AssertInfo(segment, "Support SegmentSmallIndex Only");
     RetrieveRetType ret;
 
-    boost::dynamic_bitset<> bitset_holder;
+    arrow::Datum bitset;
+    BitsetView view;
     auto active_count = segment->get_active_count(timestamp_);
-
     if (active_count == 0) {
         return;
     }
 
     if (node.predicate_ != nullptr) {
-        ExecExprVisitor::RetType expr_ret =
-            ExecExprVisitor(*segment, active_count, timestamp_).call_child(*(node.predicate_));
-        bitset_holder = std::move(expr_ret);
+        auto expr_ret = ExecExprVisitor(*segment, active_count, timestamp_).call_child(*node.predicate_);
+        Assert(expr_ret.type()->Equals(arrow::BooleanType()));
+        if (expr_ret.is_scalar()) {
+            if (!expr_ret.scalar_as<arrow::BooleanScalar>().value) {
+                return;
+            }
+        } else {
+            Assert(expr_ret.is_array());
+            bitset = std::move(expr_ret);
+        }
     }
 
-    segment->mask_with_timestamps(bitset_holder, timestamp_);
+    if (auto bitmask = segment->generate_timestamp_mask(timestamp_); bitmask) {
+        if (bitset.kind() != arrow::Datum::NONE) {
+            bitset = cp::And(bitset, bitmask).ValueOrDie();
+        } else {
+            bitset = std::move(bitmask);
+        }
+    }
 
-    auto seg_offsets = std::move(segment->search_ids(bitset_holder, MAX_TIMESTAMP));
+    if (bitset.kind() == arrow::Datum::NONE) {
+        bitset = arrow::BooleanBuilder().Finish().ValueOrDie();
+    }
+
+    auto seg_offsets = std::move(segment->search_ids(bitset.array_as<arrow::BooleanArray>(), MAX_TIMESTAMP));
     ret.result_offsets_.assign((int64_t*)seg_offsets.data(), (int64_t*)seg_offsets.data() + seg_offsets.size());
     retrieve_ret_ = ret;
 }

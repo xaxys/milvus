@@ -775,7 +775,6 @@ func (v *Visitor) VisitTerm(ctx *parser.TermContext) interface{} {
 			n = NewFloat(n.Float())
 		}
 		value := toGenericValue(n)
-		value.DataType = childExpr.dataType
 		values = append(values, value)
 	}
 	if len(values) <= 0 {
@@ -886,8 +885,6 @@ func (v *Visitor) VisitRange(ctx *parser.RangeContext) interface{} {
 	}
 	lowerValue := toGenericValue(lowerNumber)
 	upperValue := toGenericValue(upperNumber)
-	lowerValue.DataType = childExpr.dataType
-	upperValue.DataType = childExpr.dataType
 
 	expr := &planpb.Expr{
 		Expr: &planpb.Expr_BinaryRangeExpr{
@@ -913,7 +910,6 @@ func HandleCompare(op int, left, right *ExprWithType) (*planpb.Expr, error) {
 	}
 	cmpOp := cmpOpMap[op]
 	if valueExpr := left.expr.GetValueExpr(); valueExpr != nil {
-		valueExpr.Value.DataType = right.dataType
 		expr := &planpb.Expr{
 			Expr: &planpb.Expr_UnaryRangeExpr{
 				UnaryRangeExpr: &planpb.UnaryRangeExpr{
@@ -925,7 +921,6 @@ func HandleCompare(op int, left, right *ExprWithType) (*planpb.Expr, error) {
 		}
 		return expr, nil
 	} else if valueExpr := right.expr.GetValueExpr(); valueExpr != nil {
-		valueExpr.Value.DataType = left.dataType
 		expr := &planpb.Expr{
 			Expr: &planpb.Expr_UnaryRangeExpr{
 				UnaryRangeExpr: &planpb.UnaryRangeExpr{

@@ -150,7 +150,7 @@ void
 ShowExprVisitor::visit(TermExpr& expr) {
     Assert(!ret_.has_value());
     Json terms;
-    for (const auto& term : expr.values_) {
+    for (const auto& term : expr.terms_) {
         terms.push_back(GenericValueExtract(*term));
     }
     Json res{

@@ -238,7 +238,7 @@ Parser::ParseTermNode(const Json& out_body) {
             default:
                 PanicInfo("unsupported type");
         }
-        expr->values_.emplace_back(ParseGenericValue(value));
+        expr->terms_.emplace_back(ParseGenericValue(value));
     }
     return expr;
 }

@@ -438,11 +438,11 @@ SegmentGrowingImpl::Insert(int64_t reserved_offset,
 }
 
 std::vector<SegOffset>
-SegmentGrowingImpl::search_ids(const boost::dynamic_bitset<>& bitset, Timestamp timestamp) const {
+SegmentGrowingImpl::search_ids(const std::shared_ptr<arrow::BooleanArray>& bitset, Timestamp timestamp) const {
     std::vector<SegOffset> res_offsets;
 
-    for (int i = 0; i < bitset.size(); i++) {
-        if (bitset[i]) {
+    for (int i = 0; i < bitset->length(); i++) {
+        if (bitset->Value(i)) {
             SegOffset the_offset(-1);
             auto offset = SegOffset(i);
             if (record_.timestamps_[offset.get()] < timestamp) {

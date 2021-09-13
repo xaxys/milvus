@@ -107,6 +107,7 @@ class PlanNodeDefaultTypeInternal {
  public:
   ::PROTOBUF_NAMESPACE_ID::internal::ExplicitlyConstructed<PlanNode> _instance;
   const ::milvus::proto::plan::VectorANNS* vector_anns_;
+  const ::milvus::proto::plan::Expr* predicates_;
 } _PlanNode_default_instance_;
 }  // namespace plan
 }  // namespace proto
@@ -236,9 +237,10 @@ static void InitDefaultsscc_info_PlanNode_plan_2eproto() {
   ::milvus::proto::plan::PlanNode::InitAsDefaultInstance();
 }
 
-::PROTOBUF_NAMESPACE_ID::internal::SCCInfo<1> scc_info_PlanNode_plan_2eproto =
-    {{ATOMIC_VAR_INIT(::PROTOBUF_NAMESPACE_ID::internal::SCCInfoBase::kUninitialized), 1, InitDefaultsscc_info_PlanNode_plan_2eproto}, {
-      &scc_info_VectorANNS_plan_2eproto.base,}};
+::PROTOBUF_NAMESPACE_ID::internal::SCCInfo<2> scc_info_PlanNode_plan_2eproto =
+    {{ATOMIC_VAR_INIT(::PROTOBUF_NAMESPACE_ID::internal::SCCInfoBase::kUninitialized), 2, InitDefaultsscc_info_PlanNode_plan_2eproto}, {
+      &scc_info_VectorANNS_plan_2eproto.base,
+      &scc_info_BinaryArithExpr_plan_2eproto.base,}};
 
 static void InitDefaultsscc_info_QueryInfo_plan_2eproto() {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
@@ -431,6 +433,7 @@ const ::PROTOBUF_NAMESPACE_ID::uint32 TableStruct_plan_2eproto::offsets[] PROTOB
   PROTOBUF_FIELD_OFFSET(::milvus::proto::plan::PlanNode, _oneof_case_[0]),
   ~0u,  // no _weak_field_map_
   offsetof(::milvus::proto::plan::PlanNodeDefaultTypeInternal, vector_anns_),
+  offsetof(::milvus::proto::plan::PlanNodeDefaultTypeInternal, predicates_),
   PROTOBUF_FIELD_OFFSET(::milvus::proto::plan::PlanNode, output_field_ids_),
   PROTOBUF_FIELD_OFFSET(::milvus::proto::plan::PlanNode, node_),
 };
@@ -537,24 +540,25 @@ const char descriptor_table_protodef_plan_2eproto[] PROTOBUF_SECTION_VARIABLE(pr
   "ary\030\001 \001(\010\022\020\n\010field_id\030\002 \001(\003\022+\n\npredicate"
   "s\030\003 \001(\0132\027.milvus.proto.plan.Expr\0220\n\nquer"
   "y_info\030\004 \001(\0132\034.milvus.proto.plan.QueryIn"
-  "fo\022\027\n\017placeholder_tag\030\005 \001(\t\"b\n\010PlanNode\022"
-  "4\n\013vector_anns\030\001 \001(\0132\035.milvus.proto.plan"
-  ".VectorANNSH\000\022\030\n\020output_field_ids\030\002 \003(\003B"
-  "\006\n\004node*4\n\016UnaryLogicalOp\022\031\n\025InvalidUnar"
-  "yLogicalOp\020\000\022\007\n\003Not\020\001*L\n\017BinaryLogicalOp"
-  "\022\032\n\026InvalidBinaryLogicalOp\020\000\022\016\n\nLogicalA"
-  "nd\020\001\022\r\n\tLogicalOr\020\002*z\n\tCompareOp\022\024\n\020Inva"
-  "lidCompareOp\020\000\022\017\n\013GreaterThan\020\001\022\020\n\014Great"
-  "erEqual\020\002\022\014\n\010LessThan\020\003\022\r\n\tLessEqual\020\004\022\t"
-  "\n\005Equal\020\005\022\014\n\010NotEqual\020\006*>\n\014UnaryArithOp\022"
-  "\027\n\023InvalidUnaryArithOp\020\000\022\t\n\005Minus\020\001\022\n\n\006B"
-  "itNot\020\002*\263\001\n\rBinaryArithOp\022\030\n\024InvalidBina"
-  "ryArithOp\020\000\022\007\n\003Add\020\001\022\014\n\010Subtract\020\002\022\014\n\010Mu"
-  "ltiply\020\003\022\n\n\006Divide\020\004\022\n\n\006Modulo\020\005\022\t\n\005Powe"
-  "r\020\006\022\n\n\006BitAnd\020\007\022\t\n\005BitOr\020\010\022\n\n\006BitXor\020\t\022\r"
-  "\n\tShiftLeft\020\n\022\016\n\nShiftRight\020\013B3Z1github."
-  "com/milvus-io/milvus/internal/proto/plan"
-  "pbb\006proto3"
+  "fo\022\027\n\017placeholder_tag\030\005 \001(\t\"\221\001\n\010PlanNode"
+  "\0224\n\013vector_anns\030\001 \001(\0132\035.milvus.proto.pla"
+  "n.VectorANNSH\000\022-\n\npredicates\030\002 \001(\0132\027.mil"
+  "vus.proto.plan.ExprH\000\022\030\n\020output_field_id"
+  "s\030\003 \003(\003B\006\n\004node*4\n\016UnaryLogicalOp\022\031\n\025Inv"
+  "alidUnaryLogicalOp\020\000\022\007\n\003Not\020\001*L\n\017BinaryL"
+  "ogicalOp\022\032\n\026InvalidBinaryLogicalOp\020\000\022\016\n\n"
+  "LogicalAnd\020\001\022\r\n\tLogicalOr\020\002*z\n\tCompareOp"
+  "\022\024\n\020InvalidCompareOp\020\000\022\017\n\013GreaterThan\020\001\022"
+  "\020\n\014GreaterEqual\020\002\022\014\n\010LessThan\020\003\022\r\n\tLessE"
+  "qual\020\004\022\t\n\005Equal\020\005\022\014\n\010NotEqual\020\006*>\n\014Unary"
+  "ArithOp\022\027\n\023InvalidUnaryArithOp\020\000\022\t\n\005Minu"
+  "s\020\001\022\n\n\006BitNot\020\002*\263\001\n\rBinaryArithOp\022\030\n\024Inv"
+  "alidBinaryArithOp\020\000\022\007\n\003Add\020\001\022\014\n\010Subtract"
+  "\020\002\022\014\n\010Multiply\020\003\022\n\n\006Divide\020\004\022\n\n\006Modulo\020\005"
+  "\022\t\n\005Power\020\006\022\n\n\006BitAnd\020\007\022\t\n\005BitOr\020\010\022\n\n\006Bi"
+  "tXor\020\t\022\r\n\tShiftLeft\020\n\022\016\n\nShiftRight\020\013B3Z"
+  "1github.com/milvus-io/milvus/internal/pr"
+  "oto/planpbb\006proto3"
   ;
 static const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable*const descriptor_table_plan_2eproto_deps[1] = {
   &::descriptor_table_schema_2eproto,
@@ -572,7 +576,7 @@ static ::PROTOBUF_NAMESPACE_ID::internal::SCCInfoBase*const descriptor_table_pla
 static ::PROTOBUF_NAMESPACE_ID::internal::once_flag descriptor_table_plan_2eproto_once;
 static bool descriptor_table_plan_2eproto_initialized = false;
 const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable descriptor_table_plan_2eproto = {
-  &descriptor_table_plan_2eproto_initialized, descriptor_table_protodef_plan_2eproto, "plan.proto", 3170,
+  &descriptor_table_plan_2eproto_initialized, descriptor_table_protodef_plan_2eproto, "plan.proto", 3218,
   &descriptor_table_plan_2eproto_once, descriptor_table_plan_2eproto_sccs, descriptor_table_plan_2eproto_deps, 8, 1,
   schemas, file_default_instances, TableStruct_plan_2eproto::offsets,
   file_level_metadata_plan_2eproto, 17, file_level_enum_descriptors_plan_2eproto, file_level_service_descriptors_plan_2eproto,
@@ -7071,15 +7075,22 @@ void VectorANNS::InternalSwap(VectorANNS* other) {
 void PlanNode::InitAsDefaultInstance() {
   ::milvus::proto::plan::_PlanNode_default_instance_.vector_anns_ = const_cast< ::milvus::proto::plan::VectorANNS*>(
       ::milvus::proto::plan::VectorANNS::internal_default_instance());
+  ::milvus::proto::plan::_PlanNode_default_instance_.predicates_ = const_cast< ::milvus::proto::plan::Expr*>(
+      ::milvus::proto::plan::Expr::internal_default_instance());
 }
 class PlanNode::_Internal {
  public:
   static const ::milvus::proto::plan::VectorANNS& vector_anns(const PlanNode* msg);
+  static const ::milvus::proto::plan::Expr& predicates(const PlanNode* msg);
 };
 
 const ::milvus::proto::plan::VectorANNS&
 PlanNode::_Internal::vector_anns(const PlanNode* msg) {
   return *msg->node_.vector_anns_;
+}
+const ::milvus::proto::plan::Expr&
+PlanNode::_Internal::predicates(const PlanNode* msg) {
+  return *msg->node_.predicates_;
 }
 void PlanNode::set_allocated_vector_anns(::milvus::proto::plan::VectorANNS* vector_anns) {
   ::PROTOBUF_NAMESPACE_ID::Arena* message_arena = GetArenaNoVirtual();
@@ -7095,6 +7106,20 @@ void PlanNode::set_allocated_vector_anns(::milvus::proto::plan::VectorANNS* vect
   }
   // @@protoc_insertion_point(field_set_allocated:milvus.proto.plan.PlanNode.vector_anns)
 }
+void PlanNode::set_allocated_predicates(::milvus::proto::plan::Expr* predicates) {
+  ::PROTOBUF_NAMESPACE_ID::Arena* message_arena = GetArenaNoVirtual();
+  clear_node();
+  if (predicates) {
+    ::PROTOBUF_NAMESPACE_ID::Arena* submessage_arena = nullptr;
+    if (message_arena != submessage_arena) {
+      predicates = ::PROTOBUF_NAMESPACE_ID::internal::GetOwnedMessage(
+          message_arena, predicates, submessage_arena);
+    }
+    set_has_predicates();
+    node_.predicates_ = predicates;
+  }
+  // @@protoc_insertion_point(field_set_allocated:milvus.proto.plan.PlanNode.predicates)
+}
 PlanNode::PlanNode()
   : ::PROTOBUF_NAMESPACE_ID::Message(), _internal_metadata_(nullptr) {
   SharedCtor();
@@ -7109,6 +7134,10 @@ PlanNode::PlanNode(const PlanNode& from)
   switch (from.node_case()) {
     case kVectorAnns: {
       mutable_vector_anns()->::milvus::proto::plan::VectorANNS::MergeFrom(from.vector_anns());
+      break;
+    }
+    case kPredicates: {
+      mutable_predicates()->::milvus::proto::plan::Expr::MergeFrom(from.predicates());
       break;
     }
     case NODE_NOT_SET: {
@@ -7150,6 +7179,10 @@ void PlanNode::clear_node() {
       delete node_.vector_anns_;
       break;
     }
+    case kPredicates: {
+      delete node_.predicates_;
+      break;
+    }
     case NODE_NOT_SET: {
       break;
     }
@@ -7184,12 +7217,19 @@ const char* PlanNode::_InternalParse(const char* ptr, ::PROTOBUF_NAMESPACE_ID::i
           CHK_(ptr);
         } else goto handle_unusual;
         continue;
-      // repeated int64 output_field_ids = 2;
+      // .milvus.proto.plan.Expr predicates = 2;
       case 2:
         if (PROTOBUF_PREDICT_TRUE(static_cast<::PROTOBUF_NAMESPACE_ID::uint8>(tag) == 18)) {
+          ptr = ctx->ParseMessage(mutable_predicates(), ptr);
+          CHK_(ptr);
+        } else goto handle_unusual;
+        continue;
+      // repeated int64 output_field_ids = 3;
+      case 3:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<::PROTOBUF_NAMESPACE_ID::uint8>(tag) == 26)) {
           ptr = ::PROTOBUF_NAMESPACE_ID::internal::PackedInt64Parser(mutable_output_field_ids(), ptr, ctx);
           CHK_(ptr);
-        } else if (static_cast<::PROTOBUF_NAMESPACE_ID::uint8>(tag) == 16) {
+        } else if (static_cast<::PROTOBUF_NAMESPACE_ID::uint8>(tag) == 24) {
           add_output_field_ids(::PROTOBUF_NAMESPACE_ID::internal::ReadVarint(&ptr));
           CHK_(ptr);
         } else goto handle_unusual;
@@ -7235,16 +7275,27 @@ bool PlanNode::MergePartialFromCodedStream(
         break;
       }
 
-      // repeated int64 output_field_ids = 2;
+      // .milvus.proto.plan.Expr predicates = 2;
       case 2: {
         if (static_cast< ::PROTOBUF_NAMESPACE_ID::uint8>(tag) == (18 & 0xFF)) {
+          DO_(::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::ReadMessage(
+               input, mutable_predicates()));
+        } else {
+          goto handle_unusual;
+        }
+        break;
+      }
+
+      // repeated int64 output_field_ids = 3;
+      case 3: {
+        if (static_cast< ::PROTOBUF_NAMESPACE_ID::uint8>(tag) == (26 & 0xFF)) {
           DO_((::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::ReadPackedPrimitive<
                    ::PROTOBUF_NAMESPACE_ID::int64, ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::TYPE_INT64>(
                  input, this->mutable_output_field_ids())));
-        } else if (static_cast< ::PROTOBUF_NAMESPACE_ID::uint8>(tag) == (16 & 0xFF)) {
+        } else if (static_cast< ::PROTOBUF_NAMESPACE_ID::uint8>(tag) == (24 & 0xFF)) {
           DO_((::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::ReadRepeatedPrimitiveNoInline<
                    ::PROTOBUF_NAMESPACE_ID::int64, ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::TYPE_INT64>(
-                 1, 18u, input, this->mutable_output_field_ids())));
+                 1, 26u, input, this->mutable_output_field_ids())));
         } else {
           goto handle_unusual;
         }
@@ -7284,9 +7335,15 @@ void PlanNode::SerializeWithCachedSizes(
       1, _Internal::vector_anns(this), output);
   }
 
-  // repeated int64 output_field_ids = 2;
+  // .milvus.proto.plan.Expr predicates = 2;
+  if (has_predicates()) {
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WriteMessageMaybeToArray(
+      2, _Internal::predicates(this), output);
+  }
+
+  // repeated int64 output_field_ids = 3;
   if (this->output_field_ids_size() > 0) {
-    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WriteTag(2, ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WIRETYPE_LENGTH_DELIMITED, output);
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WriteTag(3, ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WIRETYPE_LENGTH_DELIMITED, output);
     output->WriteVarint32(_output_field_ids_cached_byte_size_.load(
         std::memory_order_relaxed));
   }
@@ -7315,10 +7372,17 @@ void PlanNode::SerializeWithCachedSizes(
         1, _Internal::vector_anns(this), target);
   }
 
-  // repeated int64 output_field_ids = 2;
+  // .milvus.proto.plan.Expr predicates = 2;
+  if (has_predicates()) {
+    target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
+      InternalWriteMessageToArray(
+        2, _Internal::predicates(this), target);
+  }
+
+  // repeated int64 output_field_ids = 3;
   if (this->output_field_ids_size() > 0) {
     target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WriteTagToArray(
-      2,
+      3,
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::WIRETYPE_LENGTH_DELIMITED,
       target);
     target = ::PROTOBUF_NAMESPACE_ID::io::CodedOutputStream::WriteVarint32ToArray(
@@ -7349,7 +7413,7 @@ size_t PlanNode::ByteSizeLong() const {
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  // repeated int64 output_field_ids = 2;
+  // repeated int64 output_field_ids = 3;
   {
     size_t data_size = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
       Int64Size(this->output_field_ids_);
@@ -7370,6 +7434,13 @@ size_t PlanNode::ByteSizeLong() const {
       total_size += 1 +
         ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(
           *node_.vector_anns_);
+      break;
+    }
+    // .milvus.proto.plan.Expr predicates = 2;
+    case kPredicates: {
+      total_size += 1 +
+        ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(
+          *node_.predicates_);
       break;
     }
     case NODE_NOT_SET: {
@@ -7407,6 +7478,10 @@ void PlanNode::MergeFrom(const PlanNode& from) {
   switch (from.node_case()) {
     case kVectorAnns: {
       mutable_vector_anns()->::milvus::proto::plan::VectorANNS::MergeFrom(from.vector_anns());
+      break;
+    }
+    case kPredicates: {
+      mutable_predicates()->::milvus::proto::plan::Expr::MergeFrom(from.predicates());
       break;
     }
     case NODE_NOT_SET: {

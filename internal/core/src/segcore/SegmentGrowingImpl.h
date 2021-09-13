@@ -183,7 +183,7 @@ class SegmentGrowingImpl : public SegmentGrowing {
     search_ids(const IdArray& id_array, Timestamp timestamp) const override;
 
     std::vector<SegOffset>
-    search_ids(const boost::dynamic_bitset<>& view, Timestamp timestamp) const override;
+    search_ids(const std::shared_ptr<arrow::BooleanArray>& view, Timestamp timestamp) const override;
 
  protected:
     int64_t

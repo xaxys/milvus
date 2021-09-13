@@ -491,7 +491,7 @@ ExecExprVisitor::visit(CompareExpr& expr) {
 void
 ExecExprVisitor::visit(TermExpr& expr) {
     auto child_res = call_child(*expr.child_);
-    auto terms = ExecGenericValueListVisitor(expr.values_);
+    auto terms = ExecGenericValueListVisitor(expr.terms_);
     if (terms.is_scalar()) {
         ret_ = std::move(terms);
         return;
