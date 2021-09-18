@@ -22,6 +22,18 @@ endif ()
 
 macro( build_arrow )
     message( STATUS "Building ARROW-${ARROW_VERSION} from source" )
+
+    set( ARROW_CMAKE_ARGS
+        "-DARROW_COMPUTE=ON"
+        "-DARROW_BUILD_STATIC=ON"
+        "-DARROW_BUILD_SHARED=OFF"
+        "-DARROW_BUILD_TESTS=OFF"
+        "-DARROW_TEST_MEMCHECK=OFF"
+        "-DARROW_BUILD_BENCHMARKS=OFF"
+        "-DARROW_CUDA=OFF"
+        "-DCMAKE_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}"
+        )
+
     ExternalProject_Add(
             arrow_ep
             PREFIX              ${CMAKE_BINARY_DIR}/3rdparty_download/arrow-subbuild
@@ -29,10 +41,8 @@ macro( build_arrow )
             INSTALL_DIR         ${CMAKE_CURRENT_BINARY_DIR}
             URL                 ${ARROW_SOURCE_URL}
             URL_MD5             "9caf5dbd36ef4972c3a591bcfeaf59c8"
-            CONFIGURE_COMMAND   ${CMAKE_COMMAND}
-                                -DARROW_COMPUTE=ON
-                                -DCMAKE_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}
-                                ./cpp
+            CMAKE_ARGS          ${ARROW_CMAKE_ARGS}
+            SOURCE_SUBDIR       "cpp"
             BUILD_IN_SOURCE     1
             BUILD_COMMAND       ${MAKE}
             INSTALL_COMMAND     ${MAKE} install
@@ -42,20 +52,30 @@ macro( build_arrow )
     if( NOT IS_DIRECTORY ${INSTALL_DIR}/include )
         file( MAKE_DIRECTORY "${INSTALL_DIR}/include" )
     endif()
-    add_library( arrow SHARED IMPORTED )
+
+    add_library( arrow_bundled_dependencies STATIC IMPORTED )
+    set_target_properties( arrow_bundled_dependencies
+            PROPERTIES
+                IMPORTED_GLOBAL                 TRUE
+                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
+                INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
+    add_dependencies(arrow_bundled_dependencies arrow_ep)
+
+    add_library( arrow STATIC IMPORTED )
     set_target_properties( arrow
             PROPERTIES
                 IMPORTED_GLOBAL                 TRUE
-                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.so
+                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies(arrow arrow_ep)
+
+    target_link_libraries(arrow INTERFACE arrow_bundled_dependencies)
 endmacro()
 
 build_arrow()
 
-install( FILES  ${INSTALL_DIR}/lib/libarrow.so
-                ${INSTALL_DIR}/lib/libarrow.so.500
-                ${INSTALL_DIR}/lib/libarrow.so.500.0.0
+install( FILES  ${INSTALL_DIR}/lib/libarrow.a
+                ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
         DESTINATION lib )
 
 get_target_property( var arrow INTERFACE_INCLUDE_DIRECTORIES )
