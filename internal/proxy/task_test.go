@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -12,16 +13,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/msgstream"
-
-	"github.com/milvus-io/milvus/internal/util/distance"
+	"github.com/milvus-io/milvus/internal/allocator"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/util/distance"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
 	"github.com/stretchr/testify/assert"
@@ -67,6 +70,110 @@ func constructCollectionSchema(
 		Fields: []*schemapb.FieldSchema{
 			pk,
 			fVec,
+		},
+	}
+}
+
+func constructCollectionSchemaWithAllType(
+	boolField, int32Field, int64Field, floatField, doubleField string,
+	floatVecField, binaryVecField string,
+	dim int,
+	collectionName string,
+) *schemapb.CollectionSchema {
+
+	b := &schemapb.FieldSchema{
+		FieldID:      0,
+		Name:         boolField,
+		IsPrimaryKey: false,
+		Description:  "",
+		DataType:     schemapb.DataType_Bool,
+		TypeParams:   nil,
+		IndexParams:  nil,
+		AutoID:       false,
+	}
+	i32 := &schemapb.FieldSchema{
+		FieldID:      0,
+		Name:         int32Field,
+		IsPrimaryKey: false,
+		Description:  "",
+		DataType:     schemapb.DataType_Int32,
+		TypeParams:   nil,
+		IndexParams:  nil,
+		AutoID:       false,
+	}
+	i64 := &schemapb.FieldSchema{
+		FieldID:      0,
+		Name:         int64Field,
+		IsPrimaryKey: true,
+		Description:  "",
+		DataType:     schemapb.DataType_Int64,
+		TypeParams:   nil,
+		IndexParams:  nil,
+		AutoID:       false,
+	}
+	f := &schemapb.FieldSchema{
+		FieldID:      0,
+		Name:         floatField,
+		IsPrimaryKey: false,
+		Description:  "",
+		DataType:     schemapb.DataType_Float,
+		TypeParams:   nil,
+		IndexParams:  nil,
+		AutoID:       false,
+	}
+	d := &schemapb.FieldSchema{
+		FieldID:      0,
+		Name:         doubleField,
+		IsPrimaryKey: false,
+		Description:  "",
+		DataType:     schemapb.DataType_Double,
+		TypeParams:   nil,
+		IndexParams:  nil,
+		AutoID:       false,
+	}
+	fVec := &schemapb.FieldSchema{
+		FieldID:      0,
+		Name:         floatVecField,
+		IsPrimaryKey: false,
+		Description:  "",
+		DataType:     schemapb.DataType_FloatVector,
+		TypeParams: []*commonpb.KeyValuePair{
+			{
+				Key:   "dim",
+				Value: strconv.Itoa(dim),
+			},
+		},
+		IndexParams: nil,
+		AutoID:      false,
+	}
+	bVec := &schemapb.FieldSchema{
+		FieldID:      0,
+		Name:         binaryVecField,
+		IsPrimaryKey: false,
+		Description:  "",
+		DataType:     schemapb.DataType_BinaryVector,
+		TypeParams: []*commonpb.KeyValuePair{
+			{
+				Key:   "dim",
+				Value: strconv.Itoa(dim),
+			},
+		},
+		IndexParams: nil,
+		AutoID:      false,
+	}
+
+	return &schemapb.CollectionSchema{
+		Name:        collectionName,
+		Description: "",
+		AutoID:      false,
+		Fields: []*schemapb.FieldSchema{
+			b,
+			i32,
+			i64,
+			f,
+			d,
+			fVec,
+			bVec,
 		},
 	}
 }
@@ -1209,6 +1316,129 @@ func TestDescribeCollectionTask(t *testing.T) {
 	assert.Equal(t, commonpb.ErrorCode_UnexpectedError, task.result.Status.ErrorCode)
 }
 
+func TestDescribeCollectionTask_ShardsNum1(t *testing.T) {
+	Params.Init()
+	rc := NewRootCoordMock()
+	rc.Start()
+	defer rc.Stop()
+	ctx := context.Background()
+	InitMetaCache(rc)
+	prefix := "TestDescribeCollectionTask"
+	dbName := ""
+	collectionName := prefix + funcutil.GenRandomStr()
+
+	shardsNum := int32(2)
+	int64Field := "int64"
+	floatVecField := "fvec"
+	dim := 128
+
+	schema := constructCollectionSchema(int64Field, floatVecField, dim, collectionName)
+	marshaledSchema, err := proto.Marshal(schema)
+	assert.NoError(t, err)
+
+	createColReq := &milvuspb.CreateCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_DropCollection,
+			MsgID:     100,
+			Timestamp: 100,
+		},
+		DbName:         dbName,
+		CollectionName: collectionName,
+		Schema:         marshaledSchema,
+		ShardsNum:      shardsNum,
+	}
+
+	rc.CreateCollection(ctx, createColReq)
+	globalMetaCache.GetCollectionID(ctx, collectionName)
+
+	//CreateCollection
+	task := &describeCollectionTask{
+		Condition: NewTaskCondition(ctx),
+		DescribeCollectionRequest: &milvuspb.DescribeCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_DescribeCollection,
+				MsgID:     100,
+				Timestamp: 100,
+			},
+			DbName:         dbName,
+			CollectionName: collectionName,
+		},
+		ctx:       ctx,
+		rootCoord: rc,
+		result:    nil,
+	}
+	err = task.PreExecute(ctx)
+	assert.Nil(t, err)
+
+	err = task.Execute(ctx)
+	assert.Nil(t, err)
+	assert.Equal(t, commonpb.ErrorCode_Success, task.result.Status.ErrorCode)
+	assert.Equal(t, shardsNum, task.result.ShardsNum)
+
+}
+
+func TestDescribeCollectionTask_ShardsNum2(t *testing.T) {
+	Params.Init()
+	rc := NewRootCoordMock()
+	rc.Start()
+	defer rc.Stop()
+	ctx := context.Background()
+	InitMetaCache(rc)
+	prefix := "TestDescribeCollectionTask"
+	dbName := ""
+	collectionName := prefix + funcutil.GenRandomStr()
+
+	int64Field := "int64"
+	floatVecField := "fvec"
+	dim := 128
+
+	schema := constructCollectionSchema(int64Field, floatVecField, dim, collectionName)
+	marshaledSchema, err := proto.Marshal(schema)
+	assert.NoError(t, err)
+
+	createColReq := &milvuspb.CreateCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_DropCollection,
+			MsgID:     100,
+			Timestamp: 100,
+		},
+		DbName:         dbName,
+		CollectionName: collectionName,
+		Schema:         marshaledSchema,
+	}
+
+	rc.CreateCollection(ctx, createColReq)
+	globalMetaCache.GetCollectionID(ctx, collectionName)
+
+	//CreateCollection
+	task := &describeCollectionTask{
+		Condition: NewTaskCondition(ctx),
+		DescribeCollectionRequest: &milvuspb.DescribeCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_DescribeCollection,
+				MsgID:     100,
+				Timestamp: 100,
+			},
+			DbName:         dbName,
+			CollectionName: collectionName,
+		},
+		ctx:       ctx,
+		rootCoord: rc,
+		result:    nil,
+	}
+	task.PreExecute(ctx)
+
+	// missing collectionID in globalMetaCache
+	err = task.Execute(ctx)
+	assert.Nil(t, err)
+
+	err = task.Execute(ctx)
+	assert.Nil(t, err)
+	assert.Equal(t, commonpb.ErrorCode_Success, task.result.Status.ErrorCode)
+	assert.Equal(t, common.DefaultShardsNum, task.result.ShardsNum)
+	rc.Stop()
+}
+
 func TestCreatePartitionTask(t *testing.T) {
 	Params.Init()
 	rc := NewRootCoordMock()
@@ -1425,15 +1655,23 @@ func TestSearchTask_all(t *testing.T) {
 	prefix := "TestSearchTask_all"
 	dbName := ""
 	collectionName := prefix + funcutil.GenRandomStr()
+	boolField := "bool"
+	int32Field := "int32"
 	int64Field := "int64"
+	floatField := "float"
+	doubleField := "double"
 	floatVecField := "fvec"
+	binaryVecField := "bvec"
+	fieldsLen := len([]string{boolField, int32Field, int64Field, floatField, doubleField, floatVecField, binaryVecField})
 	dim := 128
 	expr := fmt.Sprintf("%s > 0", int64Field)
 	nq := 10
 	topk := 10
 	nprobe := 10
 
-	schema := constructCollectionSchema(int64Field, floatVecField, dim, collectionName)
+	schema := constructCollectionSchemaWithAllType(
+		boolField, int32Field, int64Field, floatField, doubleField,
+		floatVecField, binaryVecField, dim, collectionName)
 	marshaledSchema, err := proto.Marshal(schema)
 	assert.NoError(t, err)
 
@@ -1467,8 +1705,22 @@ func TestSearchTask_all(t *testing.T) {
 	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
 	assert.NoError(t, err)
 
-	qc := newMockQueryCoordShowCollectionsInterface()
-	qc.addCollection(collectionID, 100)
+	qc := NewQueryCoordMock()
+	qc.Start()
+	defer qc.Stop()
+	status, err := qc.LoadCollection(ctx, &querypb.LoadCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_LoadCollection,
+			MsgID:     0,
+			Timestamp: 0,
+			SourceID:  Params.ProxyID,
+		},
+		DbID:         0,
+		CollectionID: collectionID,
+		Schema:       nil,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
 
 	req := constructSearchRequest(dbName, collectionName,
 		expr,
@@ -1531,7 +1783,7 @@ func TestSearchTask_all(t *testing.T) {
 						resultData := &schemapb.SearchResultData{
 							NumQueries: int64(nq),
 							TopK:       int64(topk),
-							FieldsData: nil,
+							FieldsData: make([]*schemapb.FieldData, fieldsLen),
 							Scores:     make([]float32, nq*topk),
 							Ids: &schemapb.IDs{
 								IdField: &schemapb.IDs_IntId{
@@ -1543,10 +1795,110 @@ func TestSearchTask_all(t *testing.T) {
 							Topks: make([]int64, nq),
 						}
 
-						// ids := make([]int64, topk)
-						// for i := 0; i < topk; i++ {
-						// 	ids[i] = int64(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
-						// }
+						resultData.FieldsData[0] = &schemapb.FieldData{
+							Type:      schemapb.DataType_Bool,
+							FieldName: boolField,
+							Field: &schemapb.FieldData_Scalars{
+								Scalars: &schemapb.ScalarField{
+									Data: &schemapb.ScalarField_BoolData{
+										BoolData: &schemapb.BoolArray{
+											Data: generateBoolArray(nq * topk),
+										},
+									},
+								},
+							},
+							FieldId: common.StartOfUserFieldID + 0,
+						}
+
+						resultData.FieldsData[1] = &schemapb.FieldData{
+							Type:      schemapb.DataType_Int32,
+							FieldName: int32Field,
+							Field: &schemapb.FieldData_Scalars{
+								Scalars: &schemapb.ScalarField{
+									Data: &schemapb.ScalarField_IntData{
+										IntData: &schemapb.IntArray{
+											Data: generateInt32Array(nq * topk),
+										},
+									},
+								},
+							},
+							FieldId: common.StartOfUserFieldID + 1,
+						}
+
+						resultData.FieldsData[2] = &schemapb.FieldData{
+							Type:      schemapb.DataType_Int64,
+							FieldName: int64Field,
+							Field: &schemapb.FieldData_Scalars{
+								Scalars: &schemapb.ScalarField{
+									Data: &schemapb.ScalarField_LongData{
+										LongData: &schemapb.LongArray{
+											Data: generateInt64Array(nq * topk),
+										},
+									},
+								},
+							},
+							FieldId: common.StartOfUserFieldID + 2,
+						}
+
+						resultData.FieldsData[3] = &schemapb.FieldData{
+							Type:      schemapb.DataType_Float,
+							FieldName: floatField,
+							Field: &schemapb.FieldData_Scalars{
+								Scalars: &schemapb.ScalarField{
+									Data: &schemapb.ScalarField_FloatData{
+										FloatData: &schemapb.FloatArray{
+											Data: generateFloat32Array(nq * topk),
+										},
+									},
+								},
+							},
+							FieldId: common.StartOfUserFieldID + 3,
+						}
+
+						resultData.FieldsData[4] = &schemapb.FieldData{
+							Type:      schemapb.DataType_Double,
+							FieldName: doubleField,
+							Field: &schemapb.FieldData_Scalars{
+								Scalars: &schemapb.ScalarField{
+									Data: &schemapb.ScalarField_DoubleData{
+										DoubleData: &schemapb.DoubleArray{
+											Data: generateFloat64Array(nq * topk),
+										},
+									},
+								},
+							},
+							FieldId: common.StartOfUserFieldID + 4,
+						}
+
+						resultData.FieldsData[5] = &schemapb.FieldData{
+							Type:      schemapb.DataType_FloatVector,
+							FieldName: doubleField,
+							Field: &schemapb.FieldData_Vectors{
+								Vectors: &schemapb.VectorField{
+									Dim: int64(dim),
+									Data: &schemapb.VectorField_FloatVector{
+										FloatVector: &schemapb.FloatArray{
+											Data: generateFloatVectors(nq*topk, dim),
+										},
+									},
+								},
+							},
+							FieldId: common.StartOfUserFieldID + 5,
+						}
+
+						resultData.FieldsData[6] = &schemapb.FieldData{
+							Type:      schemapb.DataType_BinaryVector,
+							FieldName: doubleField,
+							Field: &schemapb.FieldData_Vectors{
+								Vectors: &schemapb.VectorField{
+									Dim: int64(dim),
+									Data: &schemapb.VectorField_BinaryVector{
+										BinaryVector: generateBinaryVectors(nq*topk, dim),
+									},
+								},
+							},
+							FieldId: common.StartOfUserFieldID + 6,
+						}
 
 						for i := 0; i < nq; i++ {
 							for j := 0; j < topk; j++ {
@@ -1589,8 +1941,32 @@ func TestSearchTask_all(t *testing.T) {
 					assert.NoError(t, err)
 					result1.SlicedBlob = sliceBlob
 
+					// result2.SliceBlob = nil, will be skipped in decode stage
+					result2 := &internalpb.SearchResults{
+						Base: &commonpb.MsgBase{
+							MsgType:   commonpb.MsgType_SearchResult,
+							MsgID:     0,
+							Timestamp: 0,
+							SourceID:  0,
+						},
+						Status: &commonpb.Status{
+							ErrorCode: commonpb.ErrorCode_Success,
+							Reason:    "",
+						},
+						ResultChannelID:          "",
+						MetricType:               distance.L2,
+						NumQueries:               int64(nq),
+						TopK:                     int64(topk),
+						SealedSegmentIDsSearched: nil,
+						ChannelIDsSearched:       nil,
+						GlobalSealedSegmentIDs:   nil,
+						SlicedBlob:               nil,
+						SlicedNumCount:           1,
+						SlicedOffset:             0,
+					}
+
 					// send search result
-					task.resultBuf <- []*internalpb.SearchResults{result1}
+					task.resultBuf <- []*internalpb.SearchResults{result1, result2}
 				}
 			}
 		}
@@ -1603,4 +1979,1101 @@ func TestSearchTask_all(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+}
+
+func TestSearchTask_Type(t *testing.T) {
+	Params.Init()
+
+	task := &searchTask{
+		SearchRequest: &internalpb.SearchRequest{
+			Base: nil,
+		},
+	}
+	assert.NoError(t, task.OnEnqueue())
+	assert.Equal(t, commonpb.MsgType_Search, task.Type())
+}
+
+func TestSearchTask_Ts(t *testing.T) {
+	Params.Init()
+
+	task := &searchTask{
+		SearchRequest: &internalpb.SearchRequest{
+			Base: nil,
+		},
+	}
+	assert.NoError(t, task.OnEnqueue())
+
+	ts := Timestamp(time.Now().Nanosecond())
+	task.SetTs(ts)
+	assert.Equal(t, ts, task.BeginTs())
+	assert.Equal(t, ts, task.EndTs())
+}
+
+func TestSearchTask_Channels(t *testing.T) {
+	var err error
+
+	Params.Init()
+
+	rc := NewRootCoordMock()
+	rc.Start()
+	defer rc.Stop()
+
+	ctx := context.Background()
+
+	err = InitMetaCache(rc)
+	assert.NoError(t, err)
+
+	dmlChannelsFunc := getDmlChannelsFunc(ctx, rc)
+	query := newMockGetChannelsService()
+	factory := newSimpleMockMsgStreamFactory()
+	chMgr := newChannelsMgrImpl(dmlChannelsFunc, nil, query.GetChannels, nil, factory)
+	defer chMgr.removeAllDMLStream()
+	defer chMgr.removeAllDQLStream()
+
+	prefix := "TestSearchTask_Channels"
+	collectionName := prefix + funcutil.GenRandomStr()
+	shardsNum := int32(2)
+	dbName := ""
+	int64Field := "int64"
+	floatVecField := "fvec"
+	dim := 128
+
+	task := &searchTask{
+		ctx: ctx,
+		query: &milvuspb.SearchRequest{
+			CollectionName: collectionName,
+		},
+		chMgr: chMgr,
+	}
+
+	// collection not exist
+	_, err = task.getVChannels()
+	assert.Error(t, err)
+	_, err = task.getVChannels()
+	assert.Error(t, err)
+
+	schema := constructCollectionSchema(int64Field, floatVecField, dim, collectionName)
+	marshaledSchema, err := proto.Marshal(schema)
+	assert.NoError(t, err)
+
+	createColT := &createCollectionTask{
+		Condition: NewTaskCondition(ctx),
+		CreateCollectionRequest: &milvuspb.CreateCollectionRequest{
+			Base:           nil,
+			DbName:         dbName,
+			CollectionName: collectionName,
+			Schema:         marshaledSchema,
+			ShardsNum:      shardsNum,
+		},
+		ctx:       ctx,
+		rootCoord: rc,
+		result:    nil,
+		schema:    nil,
+	}
+
+	assert.NoError(t, createColT.OnEnqueue())
+	assert.NoError(t, createColT.PreExecute(ctx))
+	assert.NoError(t, createColT.Execute(ctx))
+	assert.NoError(t, createColT.PostExecute(ctx))
+
+	_, err = task.getChannels()
+	assert.NoError(t, err)
+	_, err = task.getVChannels()
+	assert.NoError(t, err)
+
+	_ = chMgr.removeAllDMLStream()
+	chMgr.dmlChannelsMgr.getChannelsFunc = func(collectionID UniqueID) (map[vChan]pChan, error) {
+		return nil, errors.New("mock")
+	}
+	_, err = task.getChannels()
+	assert.Error(t, err)
+	_, err = task.getVChannels()
+	assert.Error(t, err)
+}
+
+func TestSearchTask_PreExecute(t *testing.T) {
+	var err error
+
+	Params.Init()
+	Params.SearchResultChannelNames = []string{funcutil.GenRandomStr()}
+
+	rc := NewRootCoordMock()
+	rc.Start()
+	defer rc.Stop()
+
+	qc := NewQueryCoordMock()
+	qc.Start()
+	defer qc.Stop()
+
+	ctx := context.Background()
+
+	err = InitMetaCache(rc)
+	assert.NoError(t, err)
+
+	dmlChannelsFunc := getDmlChannelsFunc(ctx, rc)
+	query := newMockGetChannelsService()
+	factory := newSimpleMockMsgStreamFactory()
+	chMgr := newChannelsMgrImpl(dmlChannelsFunc, nil, query.GetChannels, nil, factory)
+	defer chMgr.removeAllDMLStream()
+	defer chMgr.removeAllDQLStream()
+
+	prefix := "TestSearchTask_PreExecute"
+	collectionName := prefix + funcutil.GenRandomStr()
+	shardsNum := int32(2)
+	dbName := ""
+	int64Field := "int64"
+	floatVecField := "fvec"
+	dim := 128
+
+	task := &searchTask{
+		ctx:           ctx,
+		SearchRequest: &internalpb.SearchRequest{},
+		query: &milvuspb.SearchRequest{
+			CollectionName: collectionName,
+		},
+		chMgr: chMgr,
+		qc:    qc,
+	}
+	assert.NoError(t, task.OnEnqueue())
+
+	// collection not exist
+	assert.Error(t, task.PreExecute(ctx))
+
+	schema := constructCollectionSchema(int64Field, floatVecField, dim, collectionName)
+	marshaledSchema, err := proto.Marshal(schema)
+	assert.NoError(t, err)
+
+	createColT := &createCollectionTask{
+		Condition: NewTaskCondition(ctx),
+		CreateCollectionRequest: &milvuspb.CreateCollectionRequest{
+			Base:           nil,
+			DbName:         dbName,
+			CollectionName: collectionName,
+			Schema:         marshaledSchema,
+			ShardsNum:      shardsNum,
+		},
+		ctx:       ctx,
+		rootCoord: rc,
+		result:    nil,
+		schema:    nil,
+	}
+
+	assert.NoError(t, createColT.OnEnqueue())
+	assert.NoError(t, createColT.PreExecute(ctx))
+	assert.NoError(t, createColT.Execute(ctx))
+	assert.NoError(t, createColT.PostExecute(ctx))
+
+	collectionID, _ := globalMetaCache.GetCollectionID(ctx, collectionName)
+
+	// ValidateCollectionName
+	task.query.CollectionName = "$"
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.CollectionName = collectionName
+
+	// Validate Partition
+	task.query.PartitionNames = []string{"$"}
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.PartitionNames = nil
+
+	// mock show collections of query coord
+	qc.SetShowCollectionsFunc(func(ctx context.Context, request *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
+		return nil, errors.New("mock")
+	})
+	assert.Error(t, task.PreExecute(ctx))
+	qc.SetShowCollectionsFunc(func(ctx context.Context, request *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
+		return &querypb.ShowCollectionsResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    "mock",
+			},
+		}, nil
+	})
+	assert.Error(t, task.PreExecute(ctx))
+	qc.ResetShowCollectionsFunc()
+
+	// collection not loaded
+	assert.Error(t, task.PreExecute(ctx))
+	_, _ = qc.LoadCollection(ctx, &querypb.LoadCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_LoadCollection,
+			MsgID:     0,
+			Timestamp: 0,
+			SourceID:  0,
+		},
+		DbID:         0,
+		CollectionID: collectionID,
+		Schema:       nil,
+	})
+
+	// no anns field
+	task.query.DslType = commonpb.DslType_BoolExprV1
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.SearchParams = []*commonpb.KeyValuePair{
+		{
+			Key:   AnnsFieldKey,
+			Value: floatVecField,
+		},
+	}
+
+	// no topk
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.SearchParams = []*commonpb.KeyValuePair{
+		{
+			Key:   AnnsFieldKey,
+			Value: floatVecField,
+		},
+		{
+			Key:   TopKKey,
+			Value: "invalid",
+		},
+	}
+
+	// invalid topk
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.SearchParams = []*commonpb.KeyValuePair{
+		{
+			Key:   AnnsFieldKey,
+			Value: floatVecField,
+		},
+		{
+			Key:   TopKKey,
+			Value: "10",
+		},
+	}
+
+	// no metric type
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.SearchParams = []*commonpb.KeyValuePair{
+		{
+			Key:   AnnsFieldKey,
+			Value: floatVecField,
+		},
+		{
+			Key:   TopKKey,
+			Value: "10",
+		},
+		{
+			Key:   MetricTypeKey,
+			Value: distance.L2,
+		},
+	}
+
+	// no search params
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.SearchParams = []*commonpb.KeyValuePair{
+		{
+			Key:   AnnsFieldKey,
+			Value: int64Field,
+		},
+		{
+			Key:   TopKKey,
+			Value: "10",
+		},
+		{
+			Key:   MetricTypeKey,
+			Value: distance.L2,
+		},
+		{
+			Key:   SearchParamsKey,
+			Value: `{"nprobe": 10}`,
+		},
+	}
+
+	// failed to create query plan
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.SearchParams = []*commonpb.KeyValuePair{
+		{
+			Key:   AnnsFieldKey,
+			Value: floatVecField,
+		},
+		{
+			Key:   TopKKey,
+			Value: "10",
+		},
+		{
+			Key:   MetricTypeKey,
+			Value: distance.L2,
+		},
+		{
+			Key:   SearchParamsKey,
+			Value: `{"nprobe": 10}`,
+		},
+	}
+
+	// field not exist
+	task.query.OutputFields = []string{int64Field + funcutil.GenRandomStr()}
+	assert.Error(t, task.PreExecute(ctx))
+	// contain vector field
+	task.query.OutputFields = []string{floatVecField}
+	assert.Error(t, task.PreExecute(ctx))
+	task.query.OutputFields = []string{int64Field}
+
+	// partition
+	rc.showPartitionsFunc = func(ctx context.Context, request *milvuspb.ShowPartitionsRequest) (*milvuspb.ShowPartitionsResponse, error) {
+		return nil, errors.New("mock")
+	}
+	assert.Error(t, task.PreExecute(ctx))
+	rc.showPartitionsFunc = nil
+
+	// TODO(dragondriver): test partition-related error
+}
+
+func TestSearchTask_Execute(t *testing.T) {
+	var err error
+
+	Params.Init()
+	Params.SearchResultChannelNames = []string{funcutil.GenRandomStr()}
+
+	rc := NewRootCoordMock()
+	rc.Start()
+	defer rc.Stop()
+
+	qc := NewQueryCoordMock()
+	qc.Start()
+	defer qc.Stop()
+
+	ctx := context.Background()
+
+	err = InitMetaCache(rc)
+	assert.NoError(t, err)
+
+	dmlChannelsFunc := getDmlChannelsFunc(ctx, rc)
+	query := newMockGetChannelsService()
+	factory := newSimpleMockMsgStreamFactory()
+	chMgr := newChannelsMgrImpl(dmlChannelsFunc, nil, query.GetChannels, nil, factory)
+	defer chMgr.removeAllDMLStream()
+	defer chMgr.removeAllDQLStream()
+
+	prefix := "TestSearchTask_Execute"
+	collectionName := prefix + funcutil.GenRandomStr()
+	shardsNum := int32(2)
+	dbName := ""
+	int64Field := "int64"
+	floatVecField := "fvec"
+	dim := 128
+
+	task := &searchTask{
+		ctx: ctx,
+		SearchRequest: &internalpb.SearchRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_Search,
+				MsgID:     0,
+				Timestamp: uint64(time.Now().UnixNano()),
+				SourceID:  0,
+			},
+		},
+		query: &milvuspb.SearchRequest{
+			CollectionName: collectionName,
+		},
+		result: &milvuspb.SearchResults{
+			Status:  &commonpb.Status{},
+			Results: nil,
+		},
+		chMgr: chMgr,
+		qc:    qc,
+	}
+	assert.NoError(t, task.OnEnqueue())
+
+	// collection not exist
+	assert.Error(t, task.PreExecute(ctx))
+
+	schema := constructCollectionSchema(int64Field, floatVecField, dim, collectionName)
+	marshaledSchema, err := proto.Marshal(schema)
+	assert.NoError(t, err)
+
+	createColT := &createCollectionTask{
+		Condition: NewTaskCondition(ctx),
+		CreateCollectionRequest: &milvuspb.CreateCollectionRequest{
+			Base:           nil,
+			DbName:         dbName,
+			CollectionName: collectionName,
+			Schema:         marshaledSchema,
+			ShardsNum:      shardsNum,
+		},
+		ctx:       ctx,
+		rootCoord: rc,
+		result:    nil,
+		schema:    nil,
+	}
+
+	assert.NoError(t, createColT.OnEnqueue())
+	assert.NoError(t, createColT.PreExecute(ctx))
+	assert.NoError(t, createColT.Execute(ctx))
+	assert.NoError(t, createColT.PostExecute(ctx))
+
+	assert.NoError(t, task.Execute(ctx))
+
+	_ = chMgr.removeAllDQLStream()
+	query.f = func(collectionID UniqueID) (map[vChan]pChan, error) {
+		return nil, errors.New("mock")
+	}
+	assert.Error(t, task.Execute(ctx))
+	// TODO(dragondriver): cover getDQLStream
+}
+
+func TestQueryTask_all(t *testing.T) {
+	var err error
+
+	Params.Init()
+	Params.RetrieveResultChannelNames = []string{funcutil.GenRandomStr()}
+
+	rc := NewRootCoordMock()
+	rc.Start()
+	defer rc.Stop()
+
+	ctx := context.Background()
+
+	err = InitMetaCache(rc)
+	assert.NoError(t, err)
+
+	shardsNum := int32(2)
+	prefix := "TestQueryTask_all"
+	dbName := ""
+	collectionName := prefix + funcutil.GenRandomStr()
+	boolField := "bool"
+	int32Field := "int32"
+	int64Field := "int64"
+	floatField := "float"
+	doubleField := "double"
+	floatVecField := "fvec"
+	binaryVecField := "bvec"
+	fieldsLen := len([]string{boolField, int32Field, int64Field, floatField, doubleField, floatVecField, binaryVecField})
+	dim := 128
+	expr := fmt.Sprintf("%s > 0", int64Field)
+	hitNum := 10
+
+	schema := constructCollectionSchemaWithAllType(
+		boolField, int32Field, int64Field, floatField, doubleField,
+		floatVecField, binaryVecField, dim, collectionName)
+	marshaledSchema, err := proto.Marshal(schema)
+	assert.NoError(t, err)
+
+	createColT := &createCollectionTask{
+		Condition: NewTaskCondition(ctx),
+		CreateCollectionRequest: &milvuspb.CreateCollectionRequest{
+			Base:           nil,
+			DbName:         dbName,
+			CollectionName: collectionName,
+			Schema:         marshaledSchema,
+			ShardsNum:      shardsNum,
+		},
+		ctx:       ctx,
+		rootCoord: rc,
+		result:    nil,
+		schema:    nil,
+	}
+
+	assert.NoError(t, createColT.OnEnqueue())
+	assert.NoError(t, createColT.PreExecute(ctx))
+	assert.NoError(t, createColT.Execute(ctx))
+	assert.NoError(t, createColT.PostExecute(ctx))
+
+	dmlChannelsFunc := getDmlChannelsFunc(ctx, rc)
+	query := newMockGetChannelsService()
+	factory := newSimpleMockMsgStreamFactory()
+	chMgr := newChannelsMgrImpl(dmlChannelsFunc, nil, query.GetChannels, nil, factory)
+	defer chMgr.removeAllDMLStream()
+	defer chMgr.removeAllDQLStream()
+
+	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
+	assert.NoError(t, err)
+
+	qc := NewQueryCoordMock()
+	qc.Start()
+	defer qc.Stop()
+	status, err := qc.LoadCollection(ctx, &querypb.LoadCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_LoadCollection,
+			MsgID:     0,
+			Timestamp: 0,
+			SourceID:  Params.ProxyID,
+		},
+		DbID:         0,
+		CollectionID: collectionID,
+		Schema:       nil,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
+
+	task := &queryTask{
+		Condition: NewTaskCondition(ctx),
+		RetrieveRequest: &internalpb.RetrieveRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_Retrieve,
+				MsgID:     0,
+				Timestamp: 0,
+				SourceID:  Params.ProxyID,
+			},
+			ResultChannelID:    strconv.Itoa(int(Params.ProxyID)),
+			DbID:               0,
+			CollectionID:       collectionID,
+			PartitionIDs:       nil,
+			SerializedExprPlan: nil,
+			OutputFieldsId:     make([]int64, fieldsLen),
+			TravelTimestamp:    0,
+			GuaranteeTimestamp: 0,
+		},
+		ctx:       ctx,
+		resultBuf: make(chan []*internalpb.RetrieveResults),
+		result: &milvuspb.QueryResults{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_Success,
+			},
+			FieldsData: nil,
+		},
+		query: &milvuspb.QueryRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_Retrieve,
+				MsgID:     0,
+				Timestamp: 0,
+				SourceID:  Params.ProxyID,
+			},
+			DbName:             dbName,
+			CollectionName:     collectionName,
+			Expr:               expr,
+			OutputFields:       nil,
+			PartitionNames:     nil,
+			TravelTimestamp:    0,
+			GuaranteeTimestamp: 0,
+		},
+		chMgr: chMgr,
+		qc:    qc,
+		ids:   nil,
+	}
+	for i := 0; i < fieldsLen; i++ {
+		task.RetrieveRequest.OutputFieldsId[i] = int64(common.StartOfUserFieldID + i)
+	}
+
+	// simple mock for query node
+	// TODO(dragondriver): should we replace this mock using RocksMq or MemMsgStream?
+
+	err = chMgr.createDQLStream(collectionID)
+	assert.NoError(t, err)
+	stream, err := chMgr.getDQLStream(collectionID)
+	assert.NoError(t, err)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	consumeCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-consumeCtx.Done():
+				return
+			case pack := <-stream.Chan():
+				for _, msg := range pack.Msgs {
+					_, ok := msg.(*msgstream.RetrieveMsg)
+					assert.True(t, ok)
+					// TODO(dragondriver): construct result according to the request
+
+					result1 := &internalpb.RetrieveResults{
+						Base: &commonpb.MsgBase{
+							MsgType:   commonpb.MsgType_RetrieveResult,
+							MsgID:     0,
+							Timestamp: 0,
+							SourceID:  0,
+						},
+						Status: &commonpb.Status{
+							ErrorCode: commonpb.ErrorCode_Success,
+							Reason:    "",
+						},
+						ResultChannelID: strconv.Itoa(int(Params.ProxyID)),
+						Ids: &schemapb.IDs{
+							IdField: &schemapb.IDs_IntId{
+								IntId: &schemapb.LongArray{
+									Data: generateInt64Array(hitNum),
+								},
+							},
+						},
+						FieldsData:                make([]*schemapb.FieldData, fieldsLen),
+						SealedSegmentIDsRetrieved: nil,
+						ChannelIDsRetrieved:       nil,
+						GlobalSealedSegmentIDs:    nil,
+					}
+
+					result1.FieldsData[0] = &schemapb.FieldData{
+						Type:      schemapb.DataType_Bool,
+						FieldName: boolField,
+						Field: &schemapb.FieldData_Scalars{
+							Scalars: &schemapb.ScalarField{
+								Data: &schemapb.ScalarField_BoolData{
+									BoolData: &schemapb.BoolArray{
+										Data: generateBoolArray(hitNum),
+									},
+								},
+							},
+						},
+						FieldId: common.StartOfUserFieldID + 0,
+					}
+
+					result1.FieldsData[1] = &schemapb.FieldData{
+						Type:      schemapb.DataType_Int32,
+						FieldName: int32Field,
+						Field: &schemapb.FieldData_Scalars{
+							Scalars: &schemapb.ScalarField{
+								Data: &schemapb.ScalarField_IntData{
+									IntData: &schemapb.IntArray{
+										Data: generateInt32Array(hitNum),
+									},
+								},
+							},
+						},
+						FieldId: common.StartOfUserFieldID + 1,
+					}
+
+					result1.FieldsData[2] = &schemapb.FieldData{
+						Type:      schemapb.DataType_Int64,
+						FieldName: int64Field,
+						Field: &schemapb.FieldData_Scalars{
+							Scalars: &schemapb.ScalarField{
+								Data: &schemapb.ScalarField_LongData{
+									LongData: &schemapb.LongArray{
+										Data: generateInt64Array(hitNum),
+									},
+								},
+							},
+						},
+						FieldId: common.StartOfUserFieldID + 2,
+					}
+
+					result1.FieldsData[3] = &schemapb.FieldData{
+						Type:      schemapb.DataType_Float,
+						FieldName: floatField,
+						Field: &schemapb.FieldData_Scalars{
+							Scalars: &schemapb.ScalarField{
+								Data: &schemapb.ScalarField_FloatData{
+									FloatData: &schemapb.FloatArray{
+										Data: generateFloat32Array(hitNum),
+									},
+								},
+							},
+						},
+						FieldId: common.StartOfUserFieldID + 3,
+					}
+
+					result1.FieldsData[4] = &schemapb.FieldData{
+						Type:      schemapb.DataType_Double,
+						FieldName: doubleField,
+						Field: &schemapb.FieldData_Scalars{
+							Scalars: &schemapb.ScalarField{
+								Data: &schemapb.ScalarField_DoubleData{
+									DoubleData: &schemapb.DoubleArray{
+										Data: generateFloat64Array(hitNum),
+									},
+								},
+							},
+						},
+						FieldId: common.StartOfUserFieldID + 4,
+					}
+
+					result1.FieldsData[5] = &schemapb.FieldData{
+						Type:      schemapb.DataType_FloatVector,
+						FieldName: doubleField,
+						Field: &schemapb.FieldData_Vectors{
+							Vectors: &schemapb.VectorField{
+								Dim: int64(dim),
+								Data: &schemapb.VectorField_FloatVector{
+									FloatVector: &schemapb.FloatArray{
+										Data: generateFloatVectors(hitNum, dim),
+									},
+								},
+							},
+						},
+						FieldId: common.StartOfUserFieldID + 5,
+					}
+
+					result1.FieldsData[6] = &schemapb.FieldData{
+						Type:      schemapb.DataType_BinaryVector,
+						FieldName: doubleField,
+						Field: &schemapb.FieldData_Vectors{
+							Vectors: &schemapb.VectorField{
+								Dim: int64(dim),
+								Data: &schemapb.VectorField_BinaryVector{
+									BinaryVector: generateBinaryVectors(hitNum, dim),
+								},
+							},
+						},
+						FieldId: common.StartOfUserFieldID + 6,
+					}
+
+					// send search result
+					task.resultBuf <- []*internalpb.RetrieveResults{result1}
+				}
+			}
+		}
+	}()
+
+	assert.NoError(t, task.OnEnqueue())
+	assert.NoError(t, task.PreExecute(ctx))
+	assert.NoError(t, task.Execute(ctx))
+	assert.NoError(t, task.PostExecute(ctx))
+
+	cancel()
+	wg.Wait()
+}
+
+func TestInsertTask_all(t *testing.T) {
+	var err error
+
+	Params.Init()
+	Params.RetrieveResultChannelNames = []string{funcutil.GenRandomStr()}
+
+	rc := NewRootCoordMock()
+	rc.Start()
+	defer rc.Stop()
+
+	ctx := context.Background()
+
+	err = InitMetaCache(rc)
+	assert.NoError(t, err)
+
+	shardsNum := int32(2)
+	prefix := "TestQueryTask_all"
+	dbName := ""
+	collectionName := prefix + funcutil.GenRandomStr()
+	partitionName := prefix + funcutil.GenRandomStr()
+	boolField := "bool"
+	int32Field := "int32"
+	int64Field := "int64"
+	floatField := "float"
+	doubleField := "double"
+	floatVecField := "fvec"
+	binaryVecField := "bvec"
+	fieldsLen := len([]string{boolField, int32Field, int64Field, floatField, doubleField, floatVecField, binaryVecField})
+	dim := 128
+	nb := 10
+
+	schema := constructCollectionSchemaWithAllType(
+		boolField, int32Field, int64Field, floatField, doubleField,
+		floatVecField, binaryVecField, dim, collectionName)
+	marshaledSchema, err := proto.Marshal(schema)
+	assert.NoError(t, err)
+
+	createColT := &createCollectionTask{
+		Condition: NewTaskCondition(ctx),
+		CreateCollectionRequest: &milvuspb.CreateCollectionRequest{
+			Base:           nil,
+			DbName:         dbName,
+			CollectionName: collectionName,
+			Schema:         marshaledSchema,
+			ShardsNum:      shardsNum,
+		},
+		ctx:       ctx,
+		rootCoord: rc,
+		result:    nil,
+		schema:    nil,
+	}
+
+	assert.NoError(t, createColT.OnEnqueue())
+	assert.NoError(t, createColT.PreExecute(ctx))
+	assert.NoError(t, createColT.Execute(ctx))
+	assert.NoError(t, createColT.PostExecute(ctx))
+
+	_, _ = rc.CreatePartition(ctx, &milvuspb.CreatePartitionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_CreatePartition,
+			MsgID:     0,
+			Timestamp: 0,
+			SourceID:  Params.ProxyID,
+		},
+		DbName:         dbName,
+		CollectionName: collectionName,
+		PartitionName:  partitionName,
+	})
+
+	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
+	assert.NoError(t, err)
+
+	dmlChannelsFunc := getDmlChannelsFunc(ctx, rc)
+	query := newMockGetChannelsService()
+	factory := newSimpleMockMsgStreamFactory()
+	chMgr := newChannelsMgrImpl(dmlChannelsFunc, nil, query.GetChannels, nil, factory)
+	defer chMgr.removeAllDMLStream()
+	defer chMgr.removeAllDQLStream()
+
+	err = chMgr.createDMLMsgStream(collectionID)
+	assert.NoError(t, err)
+	pchans, err := chMgr.getChannels(collectionID)
+	assert.NoError(t, err)
+
+	interval := time.Millisecond * 10
+	tso := newMockTsoAllocator()
+
+	ticker := newChannelsTimeTicker(ctx, interval, []string{}, newGetStatisticsFunc(pchans), tso)
+	_ = ticker.start()
+	defer ticker.close()
+
+	idAllocator, err := allocator.NewIDAllocator(ctx, rc, Params.ProxyID)
+	assert.NoError(t, err)
+	_ = idAllocator.Start()
+	defer idAllocator.Close()
+
+	segAllocator, err := NewSegIDAssigner(ctx, &mockDataCoord{expireTime: Timestamp(2500)}, getLastTick1)
+	assert.NoError(t, err)
+	segAllocator.Init()
+	_ = segAllocator.Start()
+	defer segAllocator.Close()
+
+	hash := generateHashKeys(nb)
+	task := &insertTask{
+		BaseInsertTask: BaseInsertTask{
+			BaseMsg: msgstream.BaseMsg{
+				HashValues: hash,
+			},
+			InsertRequest: internalpb.InsertRequest{
+				Base: &commonpb.MsgBase{
+					MsgType: commonpb.MsgType_Insert,
+					MsgID:   0,
+				},
+				CollectionName: collectionName,
+				PartitionName:  partitionName,
+			},
+		},
+		req: &milvuspb.InsertRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_Insert,
+				MsgID:     0,
+				Timestamp: 0,
+				SourceID:  Params.ProxyID,
+			},
+			DbName:         dbName,
+			CollectionName: collectionName,
+			PartitionName:  partitionName,
+			FieldsData:     make([]*schemapb.FieldData, fieldsLen),
+			HashKeys:       hash,
+			NumRows:        uint32(nb),
+		},
+		Condition: NewTaskCondition(ctx),
+		ctx:       ctx,
+		result: &milvuspb.MutationResult{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_Success,
+				Reason:    "",
+			},
+			IDs:          nil,
+			SuccIndex:    nil,
+			ErrIndex:     nil,
+			Acknowledged: false,
+			InsertCnt:    0,
+			DeleteCnt:    0,
+			UpsertCnt:    0,
+			Timestamp:    0,
+		},
+		rowIDAllocator: idAllocator,
+		segIDAssigner:  segAllocator,
+		chMgr:          chMgr,
+		chTicker:       ticker,
+		vChannels:      nil,
+		pChannels:      nil,
+		schema:         nil,
+	}
+
+	task.req.FieldsData[0] = &schemapb.FieldData{
+		Type:      schemapb.DataType_Bool,
+		FieldName: boolField,
+		Field: &schemapb.FieldData_Scalars{
+			Scalars: &schemapb.ScalarField{
+				Data: &schemapb.ScalarField_BoolData{
+					BoolData: &schemapb.BoolArray{
+						Data: generateBoolArray(nb),
+					},
+				},
+			},
+		},
+		FieldId: common.StartOfUserFieldID + 0,
+	}
+
+	task.req.FieldsData[1] = &schemapb.FieldData{
+		Type:      schemapb.DataType_Int32,
+		FieldName: int32Field,
+		Field: &schemapb.FieldData_Scalars{
+			Scalars: &schemapb.ScalarField{
+				Data: &schemapb.ScalarField_IntData{
+					IntData: &schemapb.IntArray{
+						Data: generateInt32Array(nb),
+					},
+				},
+			},
+		},
+		FieldId: common.StartOfUserFieldID + 1,
+	}
+
+	task.req.FieldsData[2] = &schemapb.FieldData{
+		Type:      schemapb.DataType_Int64,
+		FieldName: int64Field,
+		Field: &schemapb.FieldData_Scalars{
+			Scalars: &schemapb.ScalarField{
+				Data: &schemapb.ScalarField_LongData{
+					LongData: &schemapb.LongArray{
+						Data: generateInt64Array(nb),
+					},
+				},
+			},
+		},
+		FieldId: common.StartOfUserFieldID + 2,
+	}
+
+	task.req.FieldsData[3] = &schemapb.FieldData{
+		Type:      schemapb.DataType_Float,
+		FieldName: floatField,
+		Field: &schemapb.FieldData_Scalars{
+			Scalars: &schemapb.ScalarField{
+				Data: &schemapb.ScalarField_FloatData{
+					FloatData: &schemapb.FloatArray{
+						Data: generateFloat32Array(nb),
+					},
+				},
+			},
+		},
+		FieldId: common.StartOfUserFieldID + 3,
+	}
+
+	task.req.FieldsData[4] = &schemapb.FieldData{
+		Type:      schemapb.DataType_Double,
+		FieldName: doubleField,
+		Field: &schemapb.FieldData_Scalars{
+			Scalars: &schemapb.ScalarField{
+				Data: &schemapb.ScalarField_DoubleData{
+					DoubleData: &schemapb.DoubleArray{
+						Data: generateFloat64Array(nb),
+					},
+				},
+			},
+		},
+		FieldId: common.StartOfUserFieldID + 4,
+	}
+
+	task.req.FieldsData[5] = &schemapb.FieldData{
+		Type:      schemapb.DataType_FloatVector,
+		FieldName: doubleField,
+		Field: &schemapb.FieldData_Vectors{
+			Vectors: &schemapb.VectorField{
+				Dim: int64(dim),
+				Data: &schemapb.VectorField_FloatVector{
+					FloatVector: &schemapb.FloatArray{
+						Data: generateFloatVectors(nb, dim),
+					},
+				},
+			},
+		},
+		FieldId: common.StartOfUserFieldID + 5,
+	}
+
+	task.req.FieldsData[6] = &schemapb.FieldData{
+		Type:      schemapb.DataType_BinaryVector,
+		FieldName: doubleField,
+		Field: &schemapb.FieldData_Vectors{
+			Vectors: &schemapb.VectorField{
+				Dim: int64(dim),
+				Data: &schemapb.VectorField_BinaryVector{
+					BinaryVector: generateBinaryVectors(nb, dim),
+				},
+			},
+		},
+		FieldId: common.StartOfUserFieldID + 6,
+	}
+
+	assert.NoError(t, task.OnEnqueue())
+	assert.NoError(t, task.PreExecute(ctx))
+	assert.NoError(t, task.Execute(ctx))
+	assert.NoError(t, task.PostExecute(ctx))
+}
+
+func TestDeleteTask_all(t *testing.T) {
+	Params.Init()
+
+	ctx := context.Background()
+
+	prefix := "TestDeleteTask_all"
+	dbName := ""
+	collectionName := prefix + funcutil.GenRandomStr()
+	partitionName := prefix + funcutil.GenRandomStr()
+
+	task := &deleteTask{
+		Condition: NewTaskCondition(ctx),
+		DeleteRequest: &milvuspb.DeleteRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_Delete,
+				MsgID:     0,
+				Timestamp: 0,
+				SourceID:  0,
+			},
+			DbName:         dbName,
+			CollectionName: collectionName,
+			PartitionName:  partitionName,
+			Expr:           "",
+		},
+		ctx: ctx,
+		result: &milvuspb.MutationResult{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_Success,
+				Reason:    "",
+			},
+			IDs:          nil,
+			SuccIndex:    nil,
+			ErrIndex:     nil,
+			Acknowledged: false,
+			InsertCnt:    0,
+			DeleteCnt:    0,
+			UpsertCnt:    0,
+			Timestamp:    0,
+		},
+	}
+
+	assert.NoError(t, task.OnEnqueue())
+
+	assert.NotNil(t, task.TraceCtx())
+
+	id := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	task.SetID(id)
+	assert.Equal(t, id, task.ID())
+
+	task.Base.MsgType = commonpb.MsgType_Delete
+	assert.Equal(t, commonpb.MsgType_Delete, task.Type())
+
+	ts := Timestamp(time.Now().UnixNano())
+	task.SetTs(ts)
+	assert.Equal(t, ts, task.BeginTs())
+	assert.Equal(t, ts, task.EndTs())
+
+	assert.NoError(t, task.PreExecute(ctx))
+	assert.NoError(t, task.Execute(ctx))
+	assert.NoError(t, task.PostExecute(ctx))
+}
+
+func TestDeleteTask_PreExecute(t *testing.T) {
+	Params.Init()
+
+	ctx := context.Background()
+
+	prefix := "TestDeleteTask_all"
+	dbName := ""
+	collectionName := prefix + funcutil.GenRandomStr()
+	partitionName := prefix + funcutil.GenRandomStr()
+
+	task := &deleteTask{
+		DeleteRequest: &milvuspb.DeleteRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_Delete,
+				MsgID:     0,
+				Timestamp: 0,
+				SourceID:  0,
+			},
+			DbName:         dbName,
+			CollectionName: collectionName,
+			PartitionName:  partitionName,
+			Expr:           "",
+		},
+	}
+
+	assert.NoError(t, task.PreExecute(ctx))
+
+	task.DeleteRequest.CollectionName = "" // empty
+	assert.Error(t, task.PreExecute(ctx))
+	task.DeleteRequest.CollectionName = collectionName
+
+	task.DeleteRequest.PartitionName = "" // empty
+	assert.Error(t, task.PreExecute(ctx))
+	task.DeleteRequest.PartitionName = partitionName
 }

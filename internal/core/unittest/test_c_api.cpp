@@ -1885,7 +1885,7 @@ TEST(CApiTest, Indexing_Expr_With_binary_Predicate_Range) {
                                               search_params: "{\"nprobe\": 10}"
                                             >
                                             placeholder_tag: "$0"
-    >)";
+                                        >)";
 
     // create place_holder_group
     int num_queries = 5;
@@ -2531,7 +2531,7 @@ TEST(CApiTest, SealedSegment_search_float_With_Expr_Predicate_Range) {
                                               search_params: "{\"nprobe\": 10}"
                                             >
                                             placeholder_tag: "$0"
-    >)";
+                                        >)";
 
     // create place_holder_group
     int num_queries = 10;

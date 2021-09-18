@@ -40,7 +40,7 @@ import (
 
 // ---------- unittest util functions ----------
 // common definitions
-const ctxTimeInMillisecond = 5000
+const ctxTimeInMillisecond = 500
 const debug = false
 
 const (
@@ -71,6 +71,12 @@ const (
 )
 
 const defaultMsgLength = 100
+
+const (
+	buildID   = UniqueID(0)
+	indexID   = UniqueID(0)
+	indexName = "query-node-index-0"
+)
 
 // ---------- unittest util functions ----------
 // functions of init meta and generate meta
@@ -242,7 +248,7 @@ func generateIndex(segmentID UniqueID) ([]string, error) {
 
 	// serialize index params
 	var indexCodec storage.IndexCodec
-	serializedIndexBlobs, err := indexCodec.Serialize(binarySet, indexParams, "index_test_name", 1234)
+	serializedIndexBlobs, err := indexCodec.Serialize(binarySet, indexParams, indexName, indexID)
 	if err != nil {
 		return nil, err
 	}
@@ -260,13 +266,28 @@ func generateIndex(segmentID UniqueID) ([]string, error) {
 	return indexPaths, nil
 }
 
-func genSimpleSchema() (*schemapb.CollectionSchema, *schemapb.CollectionSchema) {
+func genSimpleSegCoreSchema() *schemapb.CollectionSchema {
+	fieldVec := genFloatVectorField(simpleVecField)
+	fieldInt := genConstantField(simpleConstField)
+
+	schema := schemapb.CollectionSchema{ // schema for segCore
+		Name:   defaultCollectionName,
+		AutoID: true,
+		Fields: []*schemapb.FieldSchema{
+			fieldVec,
+			fieldInt,
+		},
+	}
+	return &schema
+}
+
+func genSimpleInsertDataSchema() *schemapb.CollectionSchema {
 	fieldUID := genConstantField(uidField)
 	fieldTimestamp := genConstantField(timestampField)
 	fieldVec := genFloatVectorField(simpleVecField)
 	fieldInt := genConstantField(simpleConstField)
 
-	schema1 := schemapb.CollectionSchema{ // schema for insertData
+	schema := schemapb.CollectionSchema{ // schema for insertData
 		Name:   defaultCollectionName,
 		AutoID: true,
 		Fields: []*schemapb.FieldSchema{
@@ -276,15 +297,7 @@ func genSimpleSchema() (*schemapb.CollectionSchema, *schemapb.CollectionSchema) 
 			fieldInt,
 		},
 	}
-	schema2 := schemapb.CollectionSchema{ // schema for segCore
-		Name:   defaultCollectionName,
-		AutoID: true,
-		Fields: []*schemapb.FieldSchema{
-			fieldVec,
-			fieldInt,
-		},
-	}
-	return &schema1, &schema2
+	return &schema
 }
 
 func genCollectionMeta(collectionID UniqueID, schema *schemapb.CollectionSchema) *etcdpb.CollectionMeta {
@@ -297,7 +310,7 @@ func genCollectionMeta(collectionID UniqueID, schema *schemapb.CollectionSchema)
 }
 
 func genSimpleCollectionMeta() *etcdpb.CollectionMeta {
-	simpleSchema, _ := genSimpleSchema()
+	simpleSchema := genSimpleInsertDataSchema()
 	return genCollectionMeta(defaultCollectionID, simpleSchema)
 }
 
@@ -383,7 +396,7 @@ func genVectorChunkManager(ctx context.Context) (storage.ChunkManager, error) {
 	}
 	rcm := storage.NewMinioChunkManager(client)
 
-	schema, _ := genSimpleSchema()
+	schema := genSimpleInsertDataSchema()
 	vcm := storage.NewVectorChunkManager(lcm, rcm, &etcdpb.CollectionMeta{
 		ID:     defaultCollectionID,
 		Schema: schema,
@@ -495,7 +508,7 @@ func genInsertData(msgLength int, schema *schemapb.CollectionSchema) (*storage.I
 }
 
 func genSimpleInsertData() (*storage.InsertData, error) {
-	schema, _ := genSimpleSchema()
+	schema := genSimpleInsertDataSchema()
 	return genInsertData(defaultMsgLength, schema)
 }
 
@@ -531,7 +544,7 @@ func genStorageBlob(collectionID UniqueID,
 }
 
 func genSimpleStorageBlob() ([]*storage.Blob, error) {
-	schema, _ := genSimpleSchema()
+	schema := genSimpleInsertDataSchema()
 	return genStorageBlob(defaultCollectionID, defaultPartitionID, defaultSegmentID, defaultMsgLength, schema)
 }
 
@@ -593,7 +606,7 @@ func genCommonBlob(msgLength int, schema *schemapb.CollectionSchema) ([]*commonp
 }
 
 func genSimpleCommonBlob() ([]*commonpb.Blob, error) {
-	_, schema := genSimpleSchema()
+	schema := genSimpleSegCoreSchema()
 	return genCommonBlob(defaultMsgLength, schema)
 }
 
@@ -642,7 +655,7 @@ func saveBinLog(ctx context.Context,
 }
 
 func saveSimpleBinLog(ctx context.Context) ([]*datapb.FieldBinlog, error) {
-	schema, _ := genSimpleSchema()
+	schema := genSimpleInsertDataSchema()
 	return saveBinLog(ctx, defaultCollectionID, defaultPartitionID, defaultSegmentID, defaultMsgLength, schema)
 }
 
@@ -703,7 +716,7 @@ func genSimpleInsertMsg() (*msgstream.InsertMsg, error) {
 // ---------- unittest util functions ----------
 // functions of replica
 func genSimpleSealedSegment() (*Segment, error) {
-	_, schema := genSimpleSchema()
+	schema := genSimpleSegCoreSchema()
 	col := newCollection(defaultCollectionID, schema)
 	seg := newSegment(col,
 		defaultSegmentID,
@@ -771,7 +784,7 @@ func genSimpleReplica() (ReplicaInterface, error) {
 		return nil, err
 	}
 	r := newCollectionReplica(kv)
-	_, schema := genSimpleSchema()
+	schema := genSimpleSegCoreSchema()
 	err = r.addCollection(defaultCollectionID, schema)
 	if err != nil {
 		return nil, err
@@ -789,7 +802,7 @@ func genSimpleHistorical(ctx context.Context) (*historical, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := newHistorical(ctx, nil, nil, fac, kv)
+	h := newHistorical(ctx, newMockRootCoord(), newMockIndexCoord(), fac, kv)
 	r, err := genSimpleReplica()
 	if err != nil {
 		return nil, err
@@ -803,6 +816,7 @@ func genSimpleHistorical(ctx context.Context) (*historical, error) {
 		return nil, err
 	}
 	h.replica = r
+	h.loader.historicalReplica = r
 	col, err := h.replica.getCollectionByID(defaultCollectionID)
 	if err != nil {
 		return nil, err
@@ -880,7 +894,7 @@ func genDSL(schema *schemapb.CollectionSchema, nProb int, topK int64) (string, e
 }
 
 func genSimpleDSL() (string, error) {
-	_, schema := genSimpleSchema()
+	schema := genSimpleSegCoreSchema()
 	return genDSL(schema, defaultNProb, defaultTopK)
 }
 
@@ -916,7 +930,7 @@ func genSimplePlaceHolderGroup() ([]byte, error) {
 }
 
 func genSimpleSearchPlanAndRequests() (*SearchPlan, []*searchRequest, error) {
-	_, schema := genSimpleSchema()
+	schema := genSimpleSegCoreSchema()
 	collection := newCollection(defaultCollectionID, schema)
 
 	var plan *SearchPlan
@@ -993,7 +1007,7 @@ func genSimpleRetrievePlan() (*RetrievePlan, error) {
 	}
 	timestamp := retrieveMsg.RetrieveRequest.TravelTimestamp
 
-	_, schema := genSimpleSchema()
+	schema := genSimpleSegCoreSchema()
 	collection := newCollection(defaultCollectionID, schema)
 
 	planExpr, err := genSimpleRetrievePlanExpr()

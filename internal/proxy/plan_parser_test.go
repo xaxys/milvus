@@ -138,6 +138,11 @@ func TestExprMultiRange_Str(t *testing.T) {
 		"0.1 ** 2 < FloatN < 2 ** 0.1",
 		"0.1 ** 1.1 < FloatN < 3.1 / 4",
 		"0.0 / 5.0 < FloatN < 4.1 / 3",
+		"BoolN1 == True",
+        "True == BoolN1",
+        "BoolN1 == False",
+        "BoolN1 == 1",
+        "BoolN1 == 0",
 	}
 
 	fields := []*schemapb.FieldSchema{
@@ -145,6 +150,7 @@ func TestExprMultiRange_Str(t *testing.T) {
 		{FieldID: 101, Name: "age1", DataType: schemapb.DataType_Int64},
 		{FieldID: 102, Name: "age2", DataType: schemapb.DataType_Int32},
 		{FieldID: 103, Name: "FloatN", DataType: schemapb.DataType_Float},
+		{FieldID: 104, Name: "BoolN1", DataType: schemapb.DataType_Bool},
 	}
 
 	schema := &schemapb.CollectionSchema{

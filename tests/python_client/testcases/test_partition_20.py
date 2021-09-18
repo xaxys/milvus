@@ -15,8 +15,6 @@ class TestPartitionParams(TestcaseBase):
     """ Test case of partition interface in parameters"""
 
     @pytest.mark.tags(CaseLabel.L0)
-    # @pytest.mark.parametrize("partition_name, description",
-                             # [(cf.gen_unique_str(prefix), cf.gen_unique_str("desc_"))])
     def test_partition_default(self):
         """
         target: verify create a partition
@@ -40,7 +38,6 @@ class TestPartitionParams(TestcaseBase):
         assert collection_w.has_partition(partition_name)[0]
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.xfail(reason="issue #5375")
     @pytest.mark.parametrize("partition_name", [""])
     def test_partition_empty_name(self, partition_name):
         """
@@ -57,7 +54,6 @@ class TestPartitionParams(TestcaseBase):
                                            check_items={ct.err_code: 1, ct.err_msg: "Partition name should not be empty"})
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("partition_name, description", [(cf.gen_unique_str(prefix), "")])
     def test_partition_empty_description(self):
         """
         target: verify create a partition with empty description
@@ -496,14 +492,11 @@ class TestPartitionOperations(TestcaseBase):
             assert not collection_w.has_partition(partition_name)[0]
 
     @pytest.mark.tags(CaseLabel.L2)
-    # @pytest.mark.parametrize("flush", [True, False])
-    # @pytest.mark.parametrize("partition_name", [cf.gen_unique_str(prefix)])
     def test_partition_drop_non_empty_partition(self):
         """
         target: verify drop a partition which has data inserted
         method: 1.create a partition with default schema
                 2. insert some data
-                3. flush / not flush
                 3. drop the partition
         expected: drop successfully
         """
@@ -517,10 +510,6 @@ class TestPartitionOperations(TestcaseBase):
 
         # insert data to partition
         partition_w.insert(cf.gen_default_dataframe_data())
-
-        # # flush   remove flush for issue #5837
-        # if flush:
-        #      self._connect().flush([collection_w.name])
 
         # drop partition
         partition_w.drop()
@@ -674,7 +663,6 @@ class TestPartitionOperations(TestcaseBase):
         partition_w.release()
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("partition_name, data", [(ct.default_partition_name, cf.gen_default_dataframe_data())])
     def test_partition_insert_default_partition(self):
         """
         target: verify insert data into _default partition

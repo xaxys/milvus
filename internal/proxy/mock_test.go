@@ -17,8 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/proto/querypb"
-
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 
 	"github.com/milvus-io/milvus/internal/msgstream"
@@ -87,6 +85,7 @@ func newMockIDAllocatorInterface() idAllocatorInterface {
 
 type mockGetChannelsService struct {
 	collectionID2Channels map[UniqueID]map[vChan]pChan
+	f                     getChannelsFuncType
 }
 
 func newMockGetChannelsService() *mockGetChannelsService {
@@ -96,6 +95,10 @@ func newMockGetChannelsService() *mockGetChannelsService {
 }
 
 func (m *mockGetChannelsService) GetChannels(collectionID UniqueID) (map[vChan]pChan, error) {
+	if m.f != nil {
+		return m.f(collectionID)
+	}
+
 	channels, ok := m.collectionID2Channels[collectionID]
 	if ok {
 		return channels, nil
@@ -274,7 +277,23 @@ func (ms *simpleMockMsgStream) AsConsumer(channels []string, subName string) {
 }
 
 func (ms *simpleMockMsgStream) ComputeProduceChannelIndexes(tsMsgs []msgstream.TsMsg) [][]int32 {
-	return nil
+	if len(tsMsgs) <= 0 {
+		return nil
+	}
+	reBucketValues := make([][]int32, len(tsMsgs))
+	channelNum := uint32(1)
+	if channelNum == 0 {
+		return nil
+	}
+	for idx, tsMsg := range tsMsgs {
+		hashValues := tsMsg.HashKeys()
+		bucketValues := make([]int32, len(hashValues))
+		for index, hashValue := range hashValues {
+			bucketValues[index] = int32(hashValue % channelNum)
+		}
+		reBucketValues[idx] = bucketValues
+	}
+	return reBucketValues
 }
 
 func (ms *simpleMockMsgStream) SetRepackFunc(repackFunc msgstream.RepackFunc) {
@@ -554,34 +573,4 @@ func generateHashKeys(numRows int) []uint32 {
 		ret = append(ret, rand.Uint32())
 	}
 	return ret
-}
-
-type mockQueryCoordShowCollectionsInterface struct {
-	collectionIDs       []int64
-	inMemoryPercentages []int64
-}
-
-func (ins *mockQueryCoordShowCollectionsInterface) ShowCollections(ctx context.Context, request *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
-	resp := &querypb.ShowCollectionsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-			Reason:    "",
-		},
-		CollectionIDs:       ins.collectionIDs,
-		InMemoryPercentages: ins.inMemoryPercentages,
-	}
-
-	return resp, nil
-}
-
-func (ins *mockQueryCoordShowCollectionsInterface) addCollection(collectionID int64, inMemoryPercentage int64) {
-	ins.collectionIDs = append(ins.collectionIDs, collectionID)
-	ins.inMemoryPercentages = append(ins.inMemoryPercentages, collectionID)
-}
-
-func newMockQueryCoordShowCollectionsInterface() *mockQueryCoordShowCollectionsInterface {
-	return &mockQueryCoordShowCollectionsInterface{
-		collectionIDs:       make([]int64, 0),
-		inMemoryPercentages: make([]int64, 0),
-	}
 }

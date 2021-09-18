@@ -79,6 +79,7 @@ const (
 	ReleaseCollectionTaskName       = "ReleaseCollectionTask"
 	LoadPartitionTaskName           = "LoadPartitionsTask"
 	ReleasePartitionTaskName        = "ReleasePartitionsTask"
+	deleteTaskName                  = "DeleteTask"
 )
 
 type task interface {
@@ -113,7 +114,6 @@ type insertTask struct {
 	ctx context.Context
 
 	result         *milvuspb.MutationResult
-	dataCoord      types.DataCoord
 	rowIDAllocator *allocator.IDAllocator
 	segIDAssigner  *SegIDAssigner
 	chMgr          channelsMgr
@@ -1179,7 +1179,7 @@ func (cct *createCollectionTask) PreExecute(ctx context.Context) error {
 				}
 			}
 			if !exist {
-				return errors.New("dimension is not defined in field type params")
+				return errors.New("dimension is not defined in field type params, check type param `dim` for vector field")
 			}
 			if field.DataType == schemapb.DataType_FloatVector {
 				if err := ValidateDimension(dim, false); err != nil {
@@ -1350,7 +1350,7 @@ type searchTask struct {
 	result    *milvuspb.SearchResults
 	query     *milvuspb.SearchRequest
 	chMgr     channelsMgr
-	qc        queryCoordShowCollectionsInterface
+	qc        types.QueryCoord
 }
 
 func (st *searchTask) TraceCtx() context.Context {
@@ -1396,6 +1396,14 @@ func (st *searchTask) getChannels() ([]pChan, error) {
 	collID, err := globalMetaCache.GetCollectionID(st.ctx, st.query.CollectionName)
 	if err != nil {
 		return nil, err
+	}
+
+	_, err = st.chMgr.getChannels(collID)
+	if err != nil {
+		err := st.chMgr.createDMLMsgStream(collID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return st.chMgr.getChannels(collID)
@@ -1474,10 +1482,7 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 
 	st.Base.MsgType = commonpb.MsgType_Search
 
-	schema, err := globalMetaCache.GetCollectionSchema(ctx, collectionName)
-	if err != nil { // err is not nil if collection not exists
-		return err
-	}
+	schema, _ := globalMetaCache.GetCollectionSchema(ctx, collectionName)
 
 	outputFields, err := translateOutputFields(st.query.OutputFields, schema, false)
 	if err != nil {
@@ -1575,11 +1580,7 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 
 	st.SearchRequest.ResultChannelID = Params.SearchResultChannelNames[0]
 	st.SearchRequest.DbID = 0 // todo
-	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
-	if err != nil { // err is not nil if collection not exists
-		return err
-	}
-	st.SearchRequest.CollectionID = collectionID
+	st.SearchRequest.CollectionID = collID
 	st.SearchRequest.PartitionIDs = make([]UniqueID, 0)
 
 	partitionsMap, err := globalMetaCache.GetPartitions(ctx, collectionName)
@@ -1655,14 +1656,14 @@ func (st *searchTask) Execute(ctx context.Context) error {
 		}
 	}
 	err = stream.Produce(&msgPack)
-	log.Debug("proxy", zap.Int("length of searchMsg", len(msgPack.Msgs)))
-	log.Debug("proxy sent one searchMsg",
-		zap.Any("collectionID", st.CollectionID),
-		zap.Any("msgID", tsMsg.ID()),
-	)
 	if err != nil {
 		log.Debug("proxy", zap.String("send search request failed", err.Error()))
 	}
+	log.Debug("proxy sent one searchMsg",
+		zap.Any("collectionID", st.CollectionID),
+		zap.Any("msgID", tsMsg.ID()),
+		zap.Int("length of search msg", len(msgPack.Msgs)),
+	)
 	return err
 }
 
@@ -2098,6 +2099,14 @@ func (qt *queryTask) getChannels() ([]pChan, error) {
 		return nil, err
 	}
 
+	_, err = qt.chMgr.getChannels(collID)
+	if err != nil {
+		err := qt.chMgr.createDMLMsgStream(collID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return qt.chMgr.getChannels(collID)
 }
 
@@ -2118,6 +2127,7 @@ func (qt *queryTask) getVChannels() ([]vChan, error) {
 	return qt.chMgr.getVChannels(collID)
 }
 
+/* not used
 func parseIdsFromExpr(exprStr string, schema *typeutil.SchemaHelper) ([]int64, error) {
 	expr, err := parseQueryExpr(schema, exprStr)
 	if err != nil {
@@ -2145,6 +2155,7 @@ func parseIdsFromExpr(exprStr string, schema *typeutil.SchemaHelper) ([]int64, e
 		return nil, errors.New("not top level term")
 	}
 }
+*/
 
 func IDs2Expr(fieldName string, ids []int64) string {
 	idsStr := strings.Trim(strings.Join(strings.Fields(fmt.Sprint(ids)), ", "), "[]")
@@ -2156,14 +2167,6 @@ func (qt *queryTask) PreExecute(ctx context.Context) error {
 	qt.Base.SourceID = Params.ProxyID
 
 	collectionName := qt.query.CollectionName
-	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
-	if err != nil {
-		log.Debug("Failed to get collection id.", zap.Any("collectionName", collectionName),
-			zap.Any("requestID", qt.Base.MsgID), zap.Any("requestType", "query"))
-		return err
-	}
-	log.Info("Get collection id by name.", zap.Any("collectionName", collectionName),
-		zap.Any("requestID", qt.Base.MsgID), zap.Any("requestType", "query"))
 
 	if err := ValidateCollectionName(qt.query.CollectionName); err != nil {
 		log.Debug("Invalid collection name.", zap.Any("collectionName", collectionName),
@@ -2171,6 +2174,15 @@ func (qt *queryTask) PreExecute(ctx context.Context) error {
 		return err
 	}
 	log.Info("Validate collection name.", zap.Any("collectionName", collectionName),
+		zap.Any("requestID", qt.Base.MsgID), zap.Any("requestType", "query"))
+
+	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
+	if err != nil {
+		log.Debug("Failed to get collection id.", zap.Any("collectionName", collectionName),
+			zap.Any("requestID", qt.Base.MsgID), zap.Any("requestType", "query"))
+		return err
+	}
+	log.Info("Get collection id by name.", zap.Any("collectionName", collectionName),
 		zap.Any("requestID", qt.Base.MsgID), zap.Any("requestType", "query"))
 
 	for _, tag := range qt.query.PartitionNames {
@@ -2214,10 +2226,7 @@ func (qt *queryTask) PreExecute(ctx context.Context) error {
 		return fmt.Errorf("collection %v was not loaded into memory", collectionName)
 	}
 
-	schema, err := globalMetaCache.GetCollectionSchema(ctx, qt.query.CollectionName)
-	if err != nil { // err is not nil if collection not exists
-		return err
-	}
+	schema, _ := globalMetaCache.GetCollectionSchema(ctx, qt.query.CollectionName)
 	// schemaHelper, err := typeutil.CreateSchemaHelper(schema)
 	// if err != nil {
 	// 	return err
@@ -2700,7 +2709,7 @@ func (dct *describeCollectionTask) Execute(ctx context.Context) error {
 		dct.result.PhysicalChannelNames = result.PhysicalChannelNames
 		dct.result.CreatedTimestamp = result.CreatedTimestamp
 		dct.result.CreatedUtcTimestamp = result.CreatedUtcTimestamp
-
+		dct.result.ShardsNum = result.ShardsNum
 		for _, field := range result.Schema.Fields {
 			if field.FieldID >= common.StartOfUserFieldID {
 				dct.result.Schema.Fields = append(dct.result.Schema.Fields, &schemapb.FieldSchema{
@@ -4612,52 +4621,52 @@ func (rpt *releasePartitionsTask) PostExecute(ctx context.Context) error {
 	return nil
 }
 
-type DeleteTask struct {
+type deleteTask struct {
 	Condition
 	*milvuspb.DeleteRequest
 	ctx    context.Context
 	result *milvuspb.MutationResult
 }
 
-func (dt *DeleteTask) TraceCtx() context.Context {
+func (dt *deleteTask) TraceCtx() context.Context {
 	return dt.ctx
 }
 
-func (dt *DeleteTask) ID() UniqueID {
+func (dt *deleteTask) ID() UniqueID {
 	return dt.Base.MsgID
 }
 
-func (dt *DeleteTask) SetID(uid UniqueID) {
+func (dt *deleteTask) SetID(uid UniqueID) {
 	dt.Base.MsgID = uid
 }
 
-func (dt *DeleteTask) Type() commonpb.MsgType {
+func (dt *deleteTask) Type() commonpb.MsgType {
 	return dt.Base.MsgType
 }
 
-func (dt *DeleteTask) Name() string {
-	return ReleasePartitionTaskName
+func (dt *deleteTask) Name() string {
+	return deleteTaskName
 }
 
-func (dt *DeleteTask) BeginTs() Timestamp {
+func (dt *deleteTask) BeginTs() Timestamp {
 	return dt.Base.Timestamp
 }
 
-func (dt *DeleteTask) EndTs() Timestamp {
+func (dt *deleteTask) EndTs() Timestamp {
 	return dt.Base.Timestamp
 }
 
-func (dt *DeleteTask) SetTs(ts Timestamp) {
+func (dt *deleteTask) SetTs(ts Timestamp) {
 	dt.Base.Timestamp = ts
 }
 
-func (dt *DeleteTask) OnEnqueue() error {
+func (dt *deleteTask) OnEnqueue() error {
 	dt.Base = &commonpb.MsgBase{}
 	return nil
 }
 
-func (dt *DeleteTask) PreExecute(ctx context.Context) error {
-	dt.Base.MsgType = commonpb.MsgType_ReleasePartitions
+func (dt *deleteTask) PreExecute(ctx context.Context) error {
+	dt.Base.MsgType = commonpb.MsgType_Delete
 	dt.Base.SourceID = Params.ProxyID
 
 	collName := dt.CollectionName
@@ -4673,10 +4682,10 @@ func (dt *DeleteTask) PreExecute(ctx context.Context) error {
 	return nil
 }
 
-func (dt *DeleteTask) Execute(ctx context.Context) (err error) {
+func (dt *deleteTask) Execute(ctx context.Context) (err error) {
 	return nil
 }
 
-func (dt *DeleteTask) PostExecute(ctx context.Context) error {
+func (dt *deleteTask) PostExecute(ctx context.Context) error {
 	return nil
 }
