@@ -73,7 +73,7 @@ class TestIndexParams(TestcaseBase):
                                    check_items={ct.err_code: 1,
                                                 ct.err_msg: f"cannot create index on non-existed field: {f_name}"})
 
-    @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.tags(CaseLabel.L0)
     # TODO (reason="pymilvus issue #677", raises=TypeError)
     @pytest.mark.parametrize("index_type", ct.get_invalid_strs)
     def test_index_type_invalid(self, index_type):
@@ -944,6 +944,11 @@ class TestIndexBase:
 
     @pytest.mark.tags(CaseLabel.L0)
     def test_create_PQ_without_nbits(self, connect, collection):
+        """
+        target: test create PQ index
+        method: create PQ index without nbits
+        expected: create successfully
+        """
         PQ_index = {"index_type": "IVF_PQ", "params": {"nlist": 128, "m": 16}, "metric_type": "L2"}
         result = connect.insert(collection, default_entities)
         connect.create_index(collection, field_name, PQ_index)
@@ -1168,6 +1173,11 @@ class TestIndexInvalid(object):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_drop_index_with_invalid_collection_name(self, connect, get_collection_name):
+        """
+        target: test drop index interface for invalid scenario
+        method: drop index with invalid collection name
+        expected: raise exception
+        """
         collection_name = get_collection_name
         with pytest.raises(Exception) as e:
             connect.drop_index(collection_name)
@@ -1181,6 +1191,11 @@ class TestIndexInvalid(object):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_create_index_with_invalid_index_params(self, connect, collection, get_index):
+        """
+        target: test create index interface for invalid scenario
+        method: create index with invalid index params
+        expected: raise exception
+        """
         logging.getLogger().info(get_index)
         with pytest.raises(Exception) as e:
             connect.create_index(collection, field_name, get_index)

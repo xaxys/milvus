@@ -35,9 +35,9 @@ class ExecExprVisitor : ExprVisitor {
     }
     RetType
     call_child(Expr& expr) {
-        Assert(!ret_.has_value());
+        AssertInfo(!ret_.has_value(), "[ExecExprVisitor]Bitset already has value before accept");
         expr.accept(*this);
-        Assert(ret_.has_value());
+        AssertInfo(ret_.has_value(), "[ExecExprVisitor]Bitset doesn't have value after accept");
         auto res = std::move(ret_);
         ret_ = std::nullopt;
         return std::move(res.value());
@@ -218,7 +218,7 @@ ExecExprVisitor::visit(UnaryLogicalExpr& expr) {
             PanicInfo("Invalid Unary Op");
         }
     }
-    Assert(res.is_scalar() || res.length() == row_count_);
+    AssertInfo(res.is_scalar() || res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 
@@ -244,7 +244,7 @@ ExecExprVisitor::visit(BinaryLogicalExpr& expr) {
             PanicInfo("Invalid Binary Op");
         }
     }
-    Assert(res.is_scalar() || res.length() == row_count_);
+    AssertInfo(res.is_scalar() || res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 
@@ -261,7 +261,7 @@ ExecExprVisitor::GetBitmaskFromIndex(FieldOffset field_offset, IndexFunc index_f
         // NOTE: knowhere is not const-ready
         // This is a dirty workaround
         auto data = index_func(const_cast<Index*>(&indexing));
-        Assert(data->size() == size_per_chunk);
+        AssertInfo(data->size() == size_per_chunk, "[ExecExprVisitor]Data size not equal to size_per_chunk");
         bitmasks.emplace_back(std::move(*data));
     }
     return bitmasks;
@@ -404,7 +404,7 @@ ExecExprVisitor::visit(UnaryRangeExpr& expr) {
     if (index_res) {
         res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
     }
-    Assert(res.length() == row_count_);
+    AssertInfo(res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 
@@ -466,7 +466,7 @@ ExecExprVisitor::visit(BinaryRangeExpr& expr) {
     if (index_res) {
         res = arrow::Concatenate({index_res, res.make_array()}).ValueOrDie();
     }
-    Assert(res.length() == row_count_);
+    AssertInfo(res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 
@@ -497,7 +497,7 @@ ExecExprVisitor::visit(TermExpr& expr) {
         return;
     }
     auto res = cp::IsIn(child_res, cp::SetLookupOptions(terms, true)).ValueOrDie();
-    Assert(res.length() == row_count_);
+    AssertInfo(res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 
@@ -571,6 +571,7 @@ ExecExprVisitor::BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset
         default:
             PanicInfo("unsupported datatype");
     }
+    AssertInfo(res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     return res;
 }
 
@@ -579,7 +580,7 @@ ExecExprVisitor::visit(ColumnExpr& expr) {
     auto& field_meta = segment_.get_schema()[expr.field_offset_];
     Assert(expr.data_type_ == field_meta.get_data_type());
     RetType res = BuildFieldArray(expr.field_offset_);
-    Assert(res.length() == row_count_);
+    AssertInfo(res.is_scalar() || res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 
@@ -592,7 +593,7 @@ ExecExprVisitor::visit(UnaryArithExpr& expr) {
         {UnaryArithOp::BitNot, "bit_wise_not"},
     };
     RetType res = cp::CallFunction(op_name.at(op), {child_res}).ValueOrDie();
-    Assert(res.is_scalar() || res.length() == row_count_);
+    AssertInfo(res.is_scalar() || res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 
@@ -615,7 +616,7 @@ ExecExprVisitor::visit(BinaryArithExpr& expr) {
         {BinaryArithOp::BitXor, "shift_right"},
     };
     RetType res = cp::CallFunction(op_name.at(op), {left_res, right_res}).ValueOrDie();
-    Assert(res.is_scalar() || res.length() == row_count_);
+    AssertInfo(res.is_scalar() || res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 
@@ -633,7 +634,7 @@ ExecExprVisitor::visit(CastExpr& expr) {
         {DataType::DOUBLE, arrow::float64()},
     };
     RetType res = cp::Cast(child_res, cp::CastOptions::Unsafe(type_name.at(expr.data_type_))).ValueOrDie();
-    Assert(res.is_scalar() || res.length() == row_count_);
+    AssertInfo(res.is_scalar() || res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     ret_ = std::move(res);
 }
 }  // namespace milvus::query

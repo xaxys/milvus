@@ -158,6 +158,7 @@ ExecPlanNodeVisitor::visit(RetrievePlanNode& node) {
     BitsetView view;
     auto active_count = segment->get_active_count(timestamp_);
     if (active_count == 0) {
+        retrieve_ret_ = ret;
         return;
     }
 
