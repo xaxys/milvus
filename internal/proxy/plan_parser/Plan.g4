@@ -61,7 +61,7 @@ NOT: '!' | 'not';
 IN: 'in';
 NIN: 'not in';
 
-BooleanConstant: 'true' | 'false';
+BooleanConstant: 'true' | 'True' | 'false' | 'False';
 
 IntegerConstant:
 	DecimalConstant

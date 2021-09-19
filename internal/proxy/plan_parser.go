@@ -151,6 +151,10 @@ func reverseOrder(op planpb.CompareOp) planpb.CompareOp {
 		return planpb.CompareOp_LessThan
 	case planpb.CompareOp_GreaterEqual:
 		return planpb.CompareOp_LessEqual
+	case planpb.CompareOp_Equal:
+		return planpb.CompareOp_Equal
+	case planpb.CompareOp_NotEqual:
+		return planpb.CompareOp_NotEqual
 	default:
 		panic("cannot reverse order")
 	}
@@ -905,9 +909,6 @@ func (v *Visitor) VisitRange(ctx *parser.RangeContext) interface{} {
 
 func HandleCompare(op int, left, right *ExprWithType) (*planpb.Expr, error) {
 	// handle CompareExpr and UnaryRangeExpr
-	if !typeutil.IsNumberType(left.dataType) || !typeutil.IsNumberType(right.dataType) {
-		return nil, fmt.Errorf("'%s' can only be used between integer or floating expressions", cmpNameMap[op])
-	}
 	cmpOp := cmpOpMap[op]
 	if valueExpr := left.expr.GetValueExpr(); valueExpr != nil {
 		expr := &planpb.Expr{
@@ -984,6 +985,9 @@ func (v *Visitor) VisitRelational(ctx *parser.RelationalContext) interface{} {
 	} else {
 		rightExpr = getExpr(right)
 	}
+	if !typeutil.IsNumberType(leftExpr.dataType) || !typeutil.IsNumberType(rightExpr.dataType) {
+		return fmt.Errorf("'%s' can only be used between integer or floating expressions", cmpNameMap[ctx.GetOp().GetTokenType()])
+	}
 	expr, err := HandleCompare(ctx.GetOp().GetTokenType(), leftExpr, rightExpr)
 	if err != nil {
 		return err
@@ -1019,14 +1023,27 @@ func (v *Visitor) VisitEquality(ctx *parser.EqualityContext) interface{} {
 	var leftExpr *ExprWithType
 	var rightExpr *ExprWithType
 	if leftNumber != nil {
+		rightExpr = getExpr(right)
+		if typeutil.IsBooleanType(rightExpr.dataType) && leftNumber.IsInt() {
+			if Equal(leftNumber, NewInt(0)).Bool() || Equal(leftNumber, NewInt(1)).Bool() {
+				leftNumber = NewBool(leftNumber.Bool())
+			}
+		}
 		leftExpr = toValueExpr(leftNumber)
-	} else {
+	} else if rightNumber != nil {
 		leftExpr = getExpr(left)
-	}
-	if rightNumber != nil {
+		if typeutil.IsBooleanType(leftExpr.dataType) && rightNumber.IsInt() {
+			if Equal(rightNumber, NewInt(0)).Bool() || Equal(rightNumber, NewInt(1)).Bool() {
+				rightNumber = NewBool(rightNumber.Bool())
+			}
+		}
 		rightExpr = toValueExpr(rightNumber)
 	} else {
+		leftExpr = getExpr(left)
 		rightExpr = getExpr(right)
+	}
+	if typeutil.IsBooleanType(leftExpr.dataType) != typeutil.IsBooleanType(rightExpr.dataType) {
+		return fmt.Errorf("operands of '%s' must be boolean expressions or not at same time", cmpNameMap[ctx.GetOp().GetTokenType()])
 	}
 	expr, err := HandleCompare(ctx.GetOp().GetTokenType(), leftExpr, rightExpr)
 	if err != nil {
