@@ -74,10 +74,6 @@ endmacro()
 
 build_arrow()
 
-install( FILES  ${INSTALL_DIR}/lib/libarrow.a
-                ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
-        DESTINATION lib )
-
 get_target_property( var arrow INTERFACE_INCLUDE_DIRECTORIES )
 message( STATUS ${var} )
 set_directory_properties( PROPERTY INCLUDE_DIRECTORIES ${var} )
