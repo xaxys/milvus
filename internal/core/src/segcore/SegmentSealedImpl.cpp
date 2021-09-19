@@ -463,7 +463,7 @@ SegmentSealedImpl::search_ids(const std::shared_ptr<arrow::BooleanArray>& bitset
             dst_offset.emplace_back(SegOffset(i));
         }
     }
-    return std::move(dst_offset);
+    return dst_offset;
 }
 
 std::string
@@ -492,7 +492,7 @@ SegmentSealedImpl::get_active_count(Timestamp ts) const {
     return this->get_row_count();
 }
 
-std::shared_ptr<arrow::Array>
+arrow::Datum
 SegmentSealedImpl::generate_timestamp_mask(Timestamp timestamp) const {
     // TODO change the
     AssertInfo(this->timestamps_.size() == get_row_count(), "Timestamp size not equal to row count");
@@ -503,13 +503,12 @@ SegmentSealedImpl::generate_timestamp_mask(Timestamp timestamp) const {
     // It can be thought of as an AND operation with another bitmask that is all 1s, but it is not necessary to do so.
     if (range.first == range.second && range.first == this->timestamps_.size()) {
         // just skip
-        return nullptr;
+        return arrow::Datum(true);
     }
     // range == (0, 0). it means these data can not be used, directly set bitset_chunk to all 0s.
     // It can be thought of as an AND operation with another bitmask that is all 0s.
     if (range.first == range.second && range.first == 0) {
-        bitset_chunk.reset();
-        return nullptr;
+        return arrow::Datum(false);
     }
     return TimestampIndex::GenerateBitmask(timestamp, range, this->timestamps_.data(), this->timestamps_.size());
 }

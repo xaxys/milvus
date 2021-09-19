@@ -498,10 +498,10 @@ SegmentGrowingImpl::get_active_count(Timestamp ts) const {
     return *iter;
 }
 
-std::shared_ptr<arrow::Array>
+arrow::Datum
 SegmentGrowingImpl::generate_timestamp_mask(Timestamp timestamp) const {
     // DO NOTHING
-    return nullptr;
+    return arrow::Datum(true);
 }
 
 }  // namespace milvus::segcore

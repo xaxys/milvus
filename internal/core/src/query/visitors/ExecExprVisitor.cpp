@@ -571,7 +571,6 @@ ExecExprVisitor::BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset
         default:
             PanicInfo("unsupported datatype");
     }
-    AssertInfo(res.length() == row_count_, "[ExecExprVisitor]Size of results not equal row count");
     return res;
 }
 
@@ -602,6 +601,7 @@ ExecExprVisitor::visit(BinaryArithExpr& expr) {
     auto op = expr.op_type_;
     auto left_res = call_child(*expr.left_);
     auto right_res = call_child(*expr.right_);
+    // TODO: implement modulo
     static const std::map<BinaryArithOp, std::string> op_name = {
         {BinaryArithOp::Add, "add"},
         {BinaryArithOp::Subtract, "subtract"},

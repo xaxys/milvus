@@ -40,7 +40,7 @@ class ExecPlanNodeVisitor : public PlanNodeVisitor {
     }
 
     ExecPlanNodeVisitor(const segcore::SegmentInterface& segment, Timestamp timestamp)
-            : segment_(segment), timestamp_(timestamp) {
+        : segment_(segment), timestamp_(timestamp) {
     }
 
     RetType
@@ -65,7 +65,7 @@ class ExecPlanNodeVisitor : public PlanNodeVisitor {
         return retrieve_ret;
     }
 
-private:
+ private:
     template <typename VectorType>
     void
     VectorVisitorImpl(VectorPlanNode& node);

@@ -163,7 +163,7 @@ class SegmentGrowingImpl : public SegmentGrowing {
           indexing_record_(*schema_, segcore_config_) {
     }
 
-    std::shared_ptr<arrow::Array>
+    arrow::Datum
     generate_timestamp_mask(Timestamp timestamp) const override;
 
     void

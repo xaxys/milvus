@@ -106,7 +106,7 @@ class SegmentInternalInterface : public SegmentInterface {
     virtual int64_t
     num_chunk_index(FieldOffset field_offset) const = 0;
 
-    virtual std::shared_ptr<arrow::Array>
+    virtual arrow::Datum
     generate_timestamp_mask(Timestamp timestamp) const = 0;
 
     // count of chunks

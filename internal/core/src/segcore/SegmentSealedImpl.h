@@ -106,7 +106,7 @@ class SegmentSealedImpl : public SegmentSealed {
         }
     }
 
-    std::shared_ptr<arrow::Array>
+    arrow::Datum
     generate_timestamp_mask(Timestamp timestamp) const override;
 
     void

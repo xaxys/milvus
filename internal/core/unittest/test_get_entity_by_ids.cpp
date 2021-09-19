@@ -176,11 +176,16 @@ TEST(Retrieve2, LargeTimestamp) {
 
     auto plan = std::make_unique<query::RetrievePlan>(*schema);
 
-    auto term_expr = std::make_unique<query::TermExprImpl<int64_t>>();
-    term_expr->field_offset_ = FieldOffset(0);
-    term_expr->data_type_ = DataType::INT64;
+    auto term_expr = std::make_unique<query::TermExpr>();
+    auto column_expr = std::make_unique<query::ColumnExpr>();
+    column_expr->field_offset_ = FieldOffset(0);
+    column_expr->data_type_ = DataType::INT64;
+    term_expr->child_ = std::move(column_expr);
     for (int i = 0; i < req_size; ++i) {
-        term_expr->terms_.emplace_back(i64_col[choose(i)]);
+        auto gv = std::make_unique<query::GenericValueImpl<int64_t>>();
+        gv->data_type_ = DataType::INT64;
+        gv->value_ = i64_col[choose(i)];
+        term_expr->terms_.emplace_back(std::move(gv));
     }
     plan->plan_node_ = std::make_unique<query::RetrievePlanNode>();
     plan->plan_node_->predicate_ = std::move(term_expr);

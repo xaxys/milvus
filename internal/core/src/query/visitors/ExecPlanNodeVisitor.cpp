@@ -36,7 +36,7 @@ class ExecPlanNodeVisitor : PlanNodeVisitor {
     }
 
     ExecPlanNodeVisitor(const segcore::SegmentInterface& segment, Timestamp timestamp)
-            : segment_(segment), timestamp_(timestamp) {
+        : segment_(segment), timestamp_(timestamp) {
     }
 
     RetType
@@ -60,7 +60,7 @@ class ExecPlanNodeVisitor : PlanNodeVisitor {
         return retrieve_ret;
     }
 
-private:
+ private:
     template <typename VectorType>
     void
     VectorVisitorImpl(VectorPlanNode& node);
@@ -102,7 +102,7 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
     auto src_data = ph.get_blob<EmbeddedType<VectorType>>();
     auto num_queries = ph.num_of_queries_;
 
-    arrow::Datum bitset;
+    auto bitset = arrow::Datum(true);
     BitsetView view;
     // TODO: add API to unify row_count
     // auto row_count = segment->get_row_count();
@@ -117,26 +117,23 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
     if (node.predicate_.has_value()) {
         auto expr_ret = ExecExprVisitor(*segment, active_count, timestamp_).call_child(*node.predicate_.value());
         Assert(expr_ret.type()->Equals(arrow::BooleanType()));
-        if (expr_ret.is_scalar()) {
-            if (!expr_ret.scalar_as<arrow::BooleanScalar>().value) {
-                ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.metric_type_);
-                return;
-            }
-        } else {
-            Assert(expr_ret.is_array());
-            bitset = std::move(expr_ret);
-        }
+        bitset = std::move(expr_ret);
     }
 
-    if (auto bitmask = segment->generate_timestamp_mask(timestamp_); bitmask) {
-        if (bitset.kind() != arrow::Datum::NONE) {
-            bitset = cp::And(bitset, bitmask).ValueOrDie();
-        } else {
-            bitset = std::move(bitmask);
-        }
+    if (bitset.is_scalar() && !bitset.scalar_as<arrow::BooleanScalar>().value) {
+        ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.metric_type_);
+        return;
     }
 
-    if (bitset.kind() != arrow::Datum::NONE) {
+    auto bitmask = segment->generate_timestamp_mask(timestamp_);
+    bitset = cp::And(bitset, bitmask).ValueOrDie();
+
+    if (bitset.is_scalar()) {
+        if (!bitmask.scalar_as<arrow::BooleanScalar>().value) {
+            ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.metric_type_);
+            return;
+        }
+    } else {
         bitset = cp::Invert(bitset).ValueOrDie();
         const uint8_t* data = bitset.array()->GetValuesSafe<uint8_t>(1, 0);
         view = BitsetView(data, bitset.length());
@@ -154,8 +151,7 @@ ExecPlanNodeVisitor::visit(RetrievePlanNode& node) {
     AssertInfo(segment, "Support SegmentSmallIndex Only");
     RetrieveRetType ret;
 
-    arrow::Datum bitset;
-    BitsetView view;
+    auto bitset = arrow::Datum(true);
     auto active_count = segment->get_active_count(timestamp_);
     if (active_count == 0) {
         retrieve_ret_ = ret;
@@ -165,29 +161,29 @@ ExecPlanNodeVisitor::visit(RetrievePlanNode& node) {
     if (node.predicate_ != nullptr) {
         auto expr_ret = ExecExprVisitor(*segment, active_count, timestamp_).call_child(*node.predicate_);
         Assert(expr_ret.type()->Equals(arrow::BooleanType()));
-        if (expr_ret.is_scalar()) {
-            if (!expr_ret.scalar_as<arrow::BooleanScalar>().value) {
-                return;
-            }
+        bitset = std::move(expr_ret);
+    }
+
+    if (bitset.is_scalar() && !bitset.scalar_as<arrow::BooleanScalar>().value) {
+        retrieve_ret_ = ret;
+        return;
+    }
+
+    auto bitmask = segment->generate_timestamp_mask(timestamp_);
+    bitset = cp::And(bitset, bitmask).ValueOrDie();
+
+    if (bitset.is_scalar()) {
+        if (!bitset.scalar_as<arrow::BooleanScalar>().value) {
+            retrieve_ret_ = ret;
+            return;
         } else {
-            Assert(expr_ret.is_array());
-            bitset = std::move(expr_ret);
+            arrow::BooleanBuilder builder;
+            builder.AppendValues(segment->get_row_count(), true);
+            bitset = builder.Finish().ValueOrDie();
         }
     }
 
-    if (auto bitmask = segment->generate_timestamp_mask(timestamp_); bitmask) {
-        if (bitset.kind() != arrow::Datum::NONE) {
-            bitset = cp::And(bitset, bitmask).ValueOrDie();
-        } else {
-            bitset = std::move(bitmask);
-        }
-    }
-
-    if (bitset.kind() == arrow::Datum::NONE) {
-        bitset = arrow::BooleanBuilder().Finish().ValueOrDie();
-    }
-
-    auto seg_offsets = std::move(segment->search_ids(bitset.array_as<arrow::BooleanArray>(), MAX_TIMESTAMP));
+    auto seg_offsets = segment->search_ids(bitset.array_as<arrow::BooleanArray>(), MAX_TIMESTAMP);
     ret.result_offsets_.assign((int64_t*)seg_offsets.data(), (int64_t*)seg_offsets.data() + seg_offsets.size());
     retrieve_ret_ = ret;
 }
