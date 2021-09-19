@@ -986,9 +986,15 @@ func genSimpleRetrievePlanExpr() ([]byte, error) {
 			Predicates: &planpb.Expr{
 				Expr: &planpb.Expr_TermExpr{
 					TermExpr: &planpb.TermExpr{
-						ColumnInfo: &planpb.ColumnInfo{
-							FieldId:  simpleConstField.id,
-							DataType: simpleConstField.dataType,
+						Child: &planpb.Expr{
+							Expr: &planpb.Expr_ColumnExpr{
+								ColumnExpr: &planpb.ColumnExpr{
+									ColumnInfo: &planpb.ColumnInfo{
+										FieldId:  simpleConstField.id,
+										DataType: simpleConstField.dataType,
+									},
+								},
+							},
 						},
 						Values: []*planpb.GenericValue{
 							{

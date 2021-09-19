@@ -207,7 +207,6 @@ ProtoParser::ParseGenericValue(const proto::plan::GenericValue& gv_pb) {
         case pgv::kInt64Val: {
             auto result = std::make_unique<GenericValueImpl<int64_t>>();
             result->value_ = static_cast<int64_t>(gv_pb.int64_val());
-            ;
             result->data_type_ = DataType::INT64;
             return result;
         }

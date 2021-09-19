@@ -199,8 +199,9 @@ Parser::ParseGenericValue(const Json& value) {
         result->value_ = static_cast<double>(value);
         result->data_type_ = DataType::DOUBLE;
         return result;
-    } else
+    } else {
         PanicInfo("unsupported type");
+    }
 }
 
 ExprPtr

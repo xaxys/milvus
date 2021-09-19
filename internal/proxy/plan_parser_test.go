@@ -139,10 +139,10 @@ func TestExprMultiRange_Str(t *testing.T) {
 		"0.1 ** 1.1 < FloatN < 3.1 / 4",
 		"0.0 / 5.0 < FloatN < 4.1 / 3",
 		"BoolN1 == True",
-        "True == BoolN1",
-        "BoolN1 == False",
-        "BoolN1 == 1",
-        "BoolN1 == 0",
+		"True == BoolN1",
+		"BoolN1 == False",
+		"BoolN1 == 1",
+		"BoolN1 == 0",
 	}
 
 	fields := []*schemapb.FieldSchema{

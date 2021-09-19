@@ -18,6 +18,9 @@
 #include <boost/dynamic_bitset.hpp>
 #include <utility>
 #include <deque>
+#include <vector>
+#include <memory>
+#include <tuple>
 #include <boost_ext/dynamic_bitset_ext.hpp>
 #include "segcore/SegmentGrowingImpl.h"
 #include "query/ExprImpl.h"
@@ -68,9 +71,9 @@ class ExecExprVisitor : public ExprVisitor {
     }
     RetType
     call_child(Expr& expr) {
-        Assert(!ret_.has_value());
+        AssertInfo(!ret_.has_value(), "[ExecExprVisitor]Bitset already has value before accept");
         expr.accept(*this);
-        Assert(ret_.has_value());
+        AssertInfo(ret_.has_value(), "[ExecExprVisitor]Bitset doesn't have value after accept");
         auto res = std::move(ret_);
         ret_ = std::nullopt;
         return std::move(res.value());

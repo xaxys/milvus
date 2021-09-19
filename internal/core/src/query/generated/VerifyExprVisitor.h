@@ -18,6 +18,9 @@
 #include <boost/dynamic_bitset.hpp>
 #include <utility>
 #include <deque>
+#include <vector>
+#include <memory>
+#include <tuple>
 #include <boost_ext/dynamic_bitset_ext.hpp>
 #include "segcore/SegmentGrowingImpl.h"
 #include "query/ExprImpl.h"

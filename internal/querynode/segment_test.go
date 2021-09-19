@@ -182,9 +182,15 @@ func TestSegment_retrieve(t *testing.T) {
 			Predicates: &planpb.Expr{
 				Expr: &planpb.Expr_TermExpr{
 					TermExpr: &planpb.TermExpr{
-						ColumnInfo: &planpb.ColumnInfo{
-							FieldId:  101,
-							DataType: schemapb.DataType_Int32,
+						Child: &planpb.Expr{
+							Expr: &planpb.Expr_ColumnExpr{
+								ColumnExpr: &planpb.ColumnExpr{
+									ColumnInfo: &planpb.ColumnInfo{
+										FieldId:  101,
+										DataType: schemapb.DataType_Int32,
+									},
+								},
+							},
 						},
 						Values: []*planpb.GenericValue{
 							{

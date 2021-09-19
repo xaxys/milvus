@@ -14,6 +14,7 @@
 #include <vector>
 #include <arrow/api.h>
 #include <utility>
+#include <memory>
 
 namespace milvus::segcore {
 class TimestampIndex {
