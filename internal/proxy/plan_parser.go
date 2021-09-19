@@ -393,9 +393,8 @@ func (v *Visitor) VisitUnary(ctx *parser.UnaryContext) interface{} {
 			n, err := BitNot(childNumber)
 			if err != nil {
 				return err
-			} else {
-				return n
 			}
+			return n
 		case parser.PlanParserNOT:
 			return Not(childNumber)
 		default:
@@ -517,16 +516,14 @@ func (v *Visitor) VisitMulDivMod(ctx *parser.MulDivModContext) interface{} {
 			n, err := Divide(leftNumber, rightNumber)
 			if err != nil {
 				return err
-			} else {
-				return n
 			}
+			return n
 		case parser.PlanParserMOD:
 			n, err := Modulo(leftNumber, rightNumber)
 			if err != nil {
 				return err
-			} else {
-				return n
 			}
+			return n
 		default:
 			return fmt.Errorf("unexpected op: %s", ctx.GetOp().GetText())
 		}
