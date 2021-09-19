@@ -2733,11 +2733,11 @@ func TestInsertTask_all(t *testing.T) {
 	dbName := ""
 	collectionName := prefix + funcutil.GenRandomStr()
 	partitionName := prefix + funcutil.GenRandomStr()
-	boolField := "bool"
-	int32Field := "int32"
-	int64Field := "int64"
-	floatField := "float"
-	doubleField := "double"
+	boolField := "boolField"
+	int32Field := "int32Field"
+	int64Field := "int64Field"
+	floatField := "floatField"
+	doubleField := "doubleField"
 	floatVecField := "fvec"
 	binaryVecField := "bvec"
 	fieldsLen := len([]string{boolField, int32Field, int64Field, floatField, doubleField, floatVecField, binaryVecField})
