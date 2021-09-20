@@ -697,16 +697,14 @@ func (v *Visitor) VisitShift(ctx *parser.ShiftContext) interface{} {
 			n, err := ShiftLeft(leftNumber, rightNumber)
 			if err != nil {
 				return err
-			} else {
-				return n
 			}
+			return n
 		case parser.PlanParserSHR:
 			n, err := ShiftRight(leftNumber, rightNumber)
 			if err != nil {
 				return err
-			} else {
-				return n
 			}
+			return n
 		}
 
 	}
@@ -1067,9 +1065,8 @@ func (v *Visitor) VisitBitAnd(ctx *parser.BitAndContext) interface{} {
 		n, err := BitAnd(leftNumber, rightNumber)
 		if err != nil {
 			return err
-		} else {
-			return n
 		}
+		return n
 	}
 
 	var leftExpr *ExprWithType
@@ -1118,9 +1115,8 @@ func (v *Visitor) VisitBitXor(ctx *parser.BitXorContext) interface{} {
 		n, err := BitXor(leftNumber, rightNumber)
 		if err != nil {
 			return err
-		} else {
-			return n
 		}
+		return n
 	}
 
 	var leftExpr *ExprWithType
@@ -1169,9 +1165,8 @@ func (v *Visitor) VisitBitOr(ctx *parser.BitOrContext) interface{} {
 		n, err := BitOr(leftNumber, rightNumber)
 		if err != nil {
 			return err
-		} else {
-			return n
 		}
+		return n
 	}
 
 	var leftExpr *ExprWithType
@@ -1220,9 +1215,8 @@ func (v *Visitor) VisitLogicalAnd(ctx *parser.LogicalAndContext) interface{} {
 		n, err := And(leftNumber, rightNumber)
 		if err != nil {
 			return err
-		} else {
-			return n
 		}
+		return n
 	}
 
 	var leftExpr *ExprWithType
@@ -1271,9 +1265,8 @@ func (v *Visitor) VisitLogicalOr(ctx *parser.LogicalOrContext) interface{} {
 		n, err := Or(leftNumber, rightNumber)
 		if err != nil {
 			return err
-		} else {
-			return n
 		}
+		return n
 	}
 
 	var leftExpr *ExprWithType
@@ -1367,9 +1360,8 @@ func (n *number) Int() int64 {
 	case Bool:
 		if n.boolValue {
 			return 1
-		} else {
-			return 0
 		}
+		return 0
 	case Int:
 		return n.intValue
 	case Float:
@@ -1384,9 +1376,8 @@ func (n *number) Float() float64 {
 	case Bool:
 		if n.boolValue {
 			return 1
-		} else {
-			return 0
 		}
+		return 0
 	case Int:
 		return float64(n.intValue)
 	case Float:
@@ -1406,9 +1397,8 @@ func Add(a, b *number) *number {
 		return NewFloat(a.Float() + float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewFloat(float64(a.Int()) + b.Float())
-	} else {
-		return NewInt(a.Int() + b.Int())
 	}
+	return NewInt(a.Int() + b.Int())
 }
 
 func Subtract(a, b *number) *number {
@@ -1419,9 +1409,8 @@ func Subtract(a, b *number) *number {
 		return NewFloat(a.Float() - float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewFloat(float64(a.Int()) - b.Float())
-	} else {
-		return NewInt(a.Int() - b.Int())
 	}
+	return NewInt(a.Int() - b.Int())
 }
 
 func Multiply(a, b *number) *number {
@@ -1432,9 +1421,8 @@ func Multiply(a, b *number) *number {
 		return NewFloat(a.Float() * float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewFloat(float64(a.Int()) * b.Float())
-	} else {
-		return NewInt(a.Int() * b.Int())
 	}
+	return NewInt(a.Int() * b.Int())
 }
 
 func Divide(a, b *number) (*number, error) {
@@ -1454,12 +1442,11 @@ func Divide(a, b *number) (*number, error) {
 			return nil, fmt.Errorf("zero can not divide by zero")
 		}
 		return NewFloat(float64(a.Int()) / b.Float()), nil
-	} else {
-		if b.Int() == 0 {
-			return nil, fmt.Errorf("integer can not divide by zero")
-		}
-		return NewInt(a.Int() / b.Int()), nil
 	}
+	if b.Int() == 0 {
+		return nil, fmt.Errorf("integer can not divide by zero")
+	}
+	return NewInt(a.Int() / b.Int()), nil
 }
 
 func Modulo(a, b *number) (*number, error) {
@@ -1468,9 +1455,8 @@ func Modulo(a, b *number) (*number, error) {
 			return nil, fmt.Errorf("number can not modulo by zero")
 		}
 		return NewInt(a.Int() / b.Int()), nil
-	} else {
-		return nil, fmt.Errorf("'modulo' can only be used between integer expressions")
 	}
+	return nil, fmt.Errorf("'modulo' can only be used between integer expressions")
 }
 
 func Power(a, b *number) *number {
@@ -1481,9 +1467,8 @@ func Power(a, b *number) *number {
 		return NewFloat(math.Pow(a.Float(), float64(b.Int())))
 	} else if !aFloat && bFloat {
 		return NewFloat(math.Pow(float64(a.Int()), b.Float()))
-	} else {
-		return NewInt(int64(math.Pow(float64(a.Int()), float64(b.Int()))))
 	}
+	return NewInt(int64(math.Pow(float64(a.Int()), float64(b.Int()))))
 }
 
 func BitAnd(a, b *number) (*number, error) {
@@ -1491,9 +1476,8 @@ func BitAnd(a, b *number) (*number, error) {
 		return NewBool(a.Bool() && b.Bool()), nil
 	} else if !a.IsFloat() && !b.IsFloat() {
 		return NewInt(a.Int() & b.Int()), nil
-	} else {
-		return nil, fmt.Errorf("'bitand' can only be used between integer expressions")
 	}
+	return nil, fmt.Errorf("'bitand' can only be used between integer expressions")
 }
 
 func BitOr(a, b *number) (*number, error) {
@@ -1501,9 +1485,8 @@ func BitOr(a, b *number) (*number, error) {
 		return NewBool(a.Bool() || b.Bool()), nil
 	} else if !a.IsFloat() && !b.IsFloat() {
 		return NewInt(a.Int() | b.Int()), nil
-	} else {
-		return nil, fmt.Errorf("'bitor' can only be used between integer expressions")
 	}
+	return nil, fmt.Errorf("'bitor' can only be used between integer expressions")
 }
 
 func BitXor(a, b *number) (*number, error) {
@@ -1511,57 +1494,50 @@ func BitXor(a, b *number) (*number, error) {
 		return NewBool(a.Bool() != b.Bool()), nil
 	} else if !a.IsFloat() && !b.IsFloat() {
 		return NewInt(a.Int() ^ b.Int()), nil
-	} else {
-		return nil, fmt.Errorf("'bitxor' can only be used between integer expressions")
 	}
+	return nil, fmt.Errorf("'bitxor' can only be used between integer expressions")
 }
 
 func ShiftLeft(a, b *number) (*number, error) {
 	if !a.IsFloat() && !b.IsFloat() {
 		return NewInt(a.Int() << b.Int()), nil
-	} else {
-		return nil, fmt.Errorf("'shiftleft' can only be used between integer expressions")
 	}
+	return nil, fmt.Errorf("'shiftleft' can only be used between integer expressions")
 }
 
 func ShiftRight(a, b *number) (*number, error) {
 	if !a.IsFloat() && !b.IsFloat() {
 		return NewInt(a.Int() >> b.Int()), nil
-	} else {
-		return nil, fmt.Errorf("'shiftright' can only be used between integer expressions")
 	}
+	return nil, fmt.Errorf("'shiftright' can only be used between integer expressions")
 }
 
 func And(a, b *number) (*number, error) {
 	if !a.IsFloat() && !b.IsFloat() {
 		return NewBool(a.Bool() && b.Bool()), nil
-	} else {
-		return nil, fmt.Errorf("'and' can only be used between integer expressions")
 	}
+	return nil, fmt.Errorf("'and' can only be used between integer expressions")
 }
 
 func Or(a, b *number) (*number, error) {
 	if !a.IsFloat() && !b.IsFloat() {
 		return NewBool(a.Bool() || b.Bool()), nil
-	} else {
-		return nil, fmt.Errorf("'or' can only be used between integer expressions")
 	}
+	return nil, fmt.Errorf("'or' can only be used between integer expressions")
 }
 
 func BitNot(a *number) (*number, error) {
 	if !a.IsFloat() {
 		return NewInt(^a.Int()), nil
-	} else {
-		return nil, fmt.Errorf("bitnot' can only be used on integer expression")
 	}
+	return nil, fmt.Errorf("bitnot' can only be used on integer expression")
 }
 
 func Negative(a *number) *number {
 	if !a.IsFloat() {
 		return NewInt(-a.Int())
-	} else {
-		return NewFloat(-a.Float())
 	}
+	return NewFloat(-a.Float())
 }
 
 func Not(a *number) *number {
@@ -1576,9 +1552,8 @@ func Less(a, b *number) *number {
 		return NewBool(a.Float() < float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewBool(float64(a.Int()) < b.Float())
-	} else {
-		return NewBool(a.Int() < b.Int())
 	}
+	return NewBool(a.Int() < b.Int())
 }
 
 func LessEqual(a, b *number) *number {
@@ -1589,9 +1564,8 @@ func LessEqual(a, b *number) *number {
 		return NewBool(a.Float() <= float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewBool(float64(a.Int()) <= b.Float())
-	} else {
-		return NewBool(a.Int() <= b.Int())
 	}
+	return NewBool(a.Int() <= b.Int())
 }
 
 func Greater(a, b *number) *number {
@@ -1602,9 +1576,8 @@ func Greater(a, b *number) *number {
 		return NewBool(a.Float() > float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewBool(float64(a.Int()) > b.Float())
-	} else {
-		return NewBool(a.Int() > b.Int())
 	}
+	return NewBool(a.Int() > b.Int())
 }
 
 func GreaterEqual(a, b *number) *number {
@@ -1615,9 +1588,8 @@ func GreaterEqual(a, b *number) *number {
 		return NewBool(a.Float() > float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewBool(float64(a.Int()) > b.Float())
-	} else {
-		return NewBool(a.Int() > b.Int())
 	}
+	return NewBool(a.Int() > b.Int())
 }
 
 func Equal(a, b *number) *number {
@@ -1628,9 +1600,8 @@ func Equal(a, b *number) *number {
 		return NewBool(a.Float() == float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewBool(float64(a.Int()) == b.Float())
-	} else {
-		return NewBool(a.Int() == b.Int())
 	}
+	return NewBool(a.Int() == b.Int())
 }
 
 func NotEqual(a, b *number) *number {
@@ -1641,7 +1612,6 @@ func NotEqual(a, b *number) *number {
 		return NewBool(a.Float() != float64(b.Int()))
 	} else if !aFloat && bFloat {
 		return NewBool(float64(a.Int()) != b.Float())
-	} else {
-		return NewBool(a.Int() != b.Int())
 	}
+	return NewBool(a.Int() != b.Int())
 }
