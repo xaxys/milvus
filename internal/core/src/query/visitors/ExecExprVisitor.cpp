@@ -365,7 +365,12 @@ ExecExprVisitor::visit(UnaryRangeExpr& expr) {
     };
     RetType child_res;
     ArrayPtr index_res;
-    if (const auto child = dynamic_cast<ColumnExpr*>(expr.child_.get()); child) {
+    UnaryExprBase* column_expr = &expr;
+    for (auto child = dynamic_cast<CastExpr*>(column_expr->child_.get()); child;
+         child = dynamic_cast<CastExpr*>(child->child_.get())) {
+        column_expr = child;
+    }
+    if (const auto child = dynamic_cast<ColumnExpr*>(column_expr->child_.get()); child) {
         // get bitmask from index
         switch (child->data_type_) {
             case DataType::BOOL: {
@@ -417,7 +422,12 @@ ExecExprVisitor::visit(BinaryRangeExpr& expr) {
     bool upper_inclusive = expr.upper_inclusive_;
     RetType child_res;
     ArrayPtr index_res;
-    if (const auto child = dynamic_cast<ColumnExpr*>(expr.child_.get()); child) {
+    UnaryExprBase* column_expr = &expr;
+    for (auto child = dynamic_cast<CastExpr*>(column_expr->child_.get()); child;
+         child = dynamic_cast<CastExpr*>(child->child_.get())) {
+        column_expr = child;
+    }
+    if (const auto child = dynamic_cast<ColumnExpr*>(column_expr->child_.get()); child) {
         // get bitmask from index
         switch (child->data_type_) {
             case DataType::BOOL: {
@@ -531,24 +541,18 @@ ExecExprVisitor::BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset
             auto builder = arrow::Int8Builder();
             ExtractFieldData<int8_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
-            // TODO: remove cast
-            res = cp::Cast(res, cp::CastOptions::Unsafe(arrow::int64())).ValueOrDie();
             break;
         }
         case DataType::INT16: {
             auto builder = arrow::Int16Builder();
             ExtractFieldData<int16_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
-            // TODO: remove cast
-            res = cp::Cast(res, cp::CastOptions::Unsafe(arrow::int64())).ValueOrDie();
             break;
         }
         case DataType::INT32: {
             auto builder = arrow::Int32Builder();
             ExtractFieldData<int32_t>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
-            // TODO: remove cast
-            res = cp::Cast(res, cp::CastOptions::Unsafe(arrow::int64())).ValueOrDie();
             break;
         }
         case DataType::INT64: {
@@ -561,8 +565,6 @@ ExecExprVisitor::BuildFieldArray(const FieldOffset& offset, int64_t chunk_offset
             auto builder = arrow::FloatBuilder();
             ExtractFieldData<float>(offset, builder, chunk_offset);
             res = builder.Finish().ValueOrDie();
-            // TODO: remove cast
-            res = cp::Cast(res, cp::CastOptions::Unsafe(arrow::float64())).ValueOrDie();
             break;
         }
         case DataType::DOUBLE: {

@@ -9,7 +9,7 @@ expr:
 	| '(' expr ')'											# Parens
 	| expr POW expr											# Power
 	| op = (ADD | SUB | BNOT | NOT) expr					# Unary
-	| '(' typeName ')' expr									# Cast
+//	| '(' typeName ')' expr									# Cast
 	| expr op = (MUL | DIV | MOD) expr						# MulDivMod
 	| expr op = (ADD | SUB) expr							# AddSub
 	| expr op = (SHL | SHR) expr							# Shift
@@ -23,15 +23,15 @@ expr:
 	| expr AND expr											# LogicalAnd
 	| expr OR expr											# LogicalOr;
 
-typeName: ty = (BOOL | INT8 | INT16 | INT32 | INT64 | FLOAT | DOUBLE);
+// typeName: ty = (BOOL | INT8 | INT16 | INT32 | INT64 | FLOAT | DOUBLE);
 
-BOOL: 'bool';
-INT8: 'int8';
-INT16: 'int16';
-INT32: 'int32';
-INT64: 'int64';
-FLOAT: 'float';
-DOUBLE: 'double';
+// BOOL: 'bool';
+// INT8: 'int8';
+// INT16: 'int16';
+// INT32: 'int32';
+// INT64: 'int64';
+// FLOAT: 'float';
+// DOUBLE: 'double';
 
 LT: '<';
 LE: '<=';

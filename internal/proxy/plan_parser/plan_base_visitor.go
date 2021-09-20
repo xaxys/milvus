@@ -8,10 +8,6 @@ type BasePlanVisitor struct {
 	*antlr.BaseParseTreeVisitor
 }
 
-func (v *BasePlanVisitor) VisitCast(ctx *CastContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BasePlanVisitor) VisitShift(ctx *ShiftContext) interface{} {
 	return v.VisitChildren(ctx)
 }
@@ -89,9 +85,5 @@ func (v *BasePlanVisitor) VisitBoolean(ctx *BooleanContext) interface{} {
 }
 
 func (v *BasePlanVisitor) VisitPower(ctx *PowerContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePlanVisitor) VisitTypeName(ctx *TypeNameContext) interface{} {
 	return v.VisitChildren(ctx)
 }

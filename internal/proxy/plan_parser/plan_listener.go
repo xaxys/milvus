@@ -8,9 +8,6 @@ import "github.com/antlr/antlr4/runtime/Go/antlr"
 type PlanListener interface {
 	antlr.ParseTreeListener
 
-	// EnterCast is called when entering the Cast production.
-	EnterCast(c *CastContext)
-
 	// EnterShift is called when entering the Shift production.
 	EnterShift(c *ShiftContext)
 
@@ -71,12 +68,6 @@ type PlanListener interface {
 	// EnterPower is called when entering the Power production.
 	EnterPower(c *PowerContext)
 
-	// EnterTypeName is called when entering the typeName production.
-	EnterTypeName(c *TypeNameContext)
-
-	// ExitCast is called when exiting the Cast production.
-	ExitCast(c *CastContext)
-
 	// ExitShift is called when exiting the Shift production.
 	ExitShift(c *ShiftContext)
 
@@ -136,7 +127,4 @@ type PlanListener interface {
 
 	// ExitPower is called when exiting the Power production.
 	ExitPower(c *PowerContext)
-
-	// ExitTypeName is called when exiting the typeName production.
-	ExitTypeName(c *TypeNameContext)
 }

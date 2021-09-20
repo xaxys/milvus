@@ -8,9 +8,6 @@ import "github.com/antlr/antlr4/runtime/Go/antlr"
 type PlanVisitor interface {
 	antlr.ParseTreeVisitor
 
-	// Visit a parse tree produced by PlanParser#Cast.
-	VisitCast(ctx *CastContext) interface{}
-
 	// Visit a parse tree produced by PlanParser#Shift.
 	VisitShift(ctx *ShiftContext) interface{}
 
@@ -70,7 +67,4 @@ type PlanVisitor interface {
 
 	// Visit a parse tree produced by PlanParser#Power.
 	VisitPower(ctx *PowerContext) interface{}
-
-	// Visit a parse tree produced by PlanParser#typeName.
-	VisitTypeName(ctx *TypeNameContext) interface{}
 }

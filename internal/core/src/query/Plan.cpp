@@ -97,6 +97,35 @@ class Parser {
     std::optional<std::unique_ptr<VectorPlanNode>> vector_node_opt_;
 };
 
+static ExprPtr
+HandleColumn(const FieldOffset& offset, DataType data_type) {
+    ExprPtr child;
+    auto column_expr = std::make_unique<ColumnExpr>();
+    column_expr->field_offset_ = offset;
+    column_expr->data_type_ = data_type;
+    child = std::move(column_expr);
+
+    switch (data_type) {
+        case DataType::INT8:
+        case DataType::INT16:
+        case DataType::INT32: {
+            auto cast_expr = std::make_unique<CastExpr>();
+            cast_expr->child_ = std::move(child);
+            cast_expr->data_type_ = DataType::INT64;
+            child = std::move(cast_expr);
+            break;
+        }
+        case DataType::FLOAT: {
+            auto cast_expr = std::make_unique<CastExpr>();
+            cast_expr->child_ = std::move(child);
+            cast_expr->data_type_ = DataType::DOUBLE;
+            child = std::move(cast_expr);
+            break;
+        }
+    }
+    return child;
+}
+
 ExprPtr
 Parser::ParseCompareNode(const Json& out_body) {
     Assert(out_body.is_object());
@@ -217,9 +246,7 @@ Parser::ParseTermNode(const Json& out_body) {
     Assert(body.is_object());
     auto values = body["values"];
 
-    auto child = std::make_unique<ColumnExpr>();
-    child->field_offset_ = field_offset;
-    child->data_type_ = data_type;
+    auto child = HandleColumn(field_offset, data_type);
     expr->child_ = std::move(child);
     for (auto& value : values) {
         switch (data_type) {
@@ -297,9 +324,7 @@ Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
             static_assert(always_false<T>, "unsupported type");
             __builtin_unreachable();
         }
-        auto child = std::make_unique<ColumnExpr>();
-        child->field_offset_ = schema.get_offset(field_name);
-        child->data_type_ = schema[field_name].get_data_type();
+        auto child = HandleColumn(schema.get_offset(field_name), schema[field_name].get_data_type());
 
         auto expr = std::make_unique<UnaryRangeExpr>();
         expr->child_ = std::move(child);
@@ -345,9 +370,7 @@ Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
             }
         }
         AssertInfo(has_lower_value && has_upper_value, "illegal binary-range node");
-        auto child = std::make_unique<ColumnExpr>();
-        child->field_offset_ = schema.get_offset(field_name);
-        child->data_type_ = schema[field_name].get_data_type();
+        auto child = HandleColumn(schema.get_offset(field_name), schema[field_name].get_data_type());
 
         auto expr = std::make_unique<BinaryRangeExpr>();
         expr->child_ = std::move(child);

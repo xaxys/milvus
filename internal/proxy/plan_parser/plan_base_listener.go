@@ -21,12 +21,6 @@ func (s *BasePlanListener) EnterEveryRule(ctx antlr.ParserRuleContext) {}
 // ExitEveryRule is called when any rule is exited.
 func (s *BasePlanListener) ExitEveryRule(ctx antlr.ParserRuleContext) {}
 
-// EnterCast is called when production Cast is entered.
-func (s *BasePlanListener) EnterCast(ctx *CastContext) {}
-
-// ExitCast is called when production Cast is exited.
-func (s *BasePlanListener) ExitCast(ctx *CastContext) {}
-
 // EnterShift is called when production Shift is entered.
 func (s *BasePlanListener) EnterShift(ctx *ShiftContext) {}
 
@@ -146,9 +140,3 @@ func (s *BasePlanListener) EnterPower(ctx *PowerContext) {}
 
 // ExitPower is called when production Power is exited.
 func (s *BasePlanListener) ExitPower(ctx *PowerContext) {}
-
-// EnterTypeName is called when production typeName is entered.
-func (s *BasePlanListener) EnterTypeName(ctx *TypeNameContext) {}
-
-// ExitTypeName is called when production typeName is exited.
-func (s *BasePlanListener) ExitTypeName(ctx *TypeNameContext) {}

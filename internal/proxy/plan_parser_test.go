@@ -236,10 +236,6 @@ func TestExprArith_Str(t *testing.T) {
 		"(Int64Field | Int8Field) == 0",
 		"BoolField and true",
 		"BoolField or false",
-		"(bool)Int64Field or false",
-		"(bool)FloatField or false",
-		"(int64)FloatField == Int64Field",
-		"(int64)FloatField == Int8Field",
 	}
 
 	invalidExprStrs := []string{
@@ -271,7 +267,6 @@ func TestExprArith_Str(t *testing.T) {
 		"Int64Field and FloatField",
 		"Int64Field or false",
 		"FloatField or false",
-		"(int64)FloatField == false",
 	}
 
 	fields := []*schemapb.FieldSchema{

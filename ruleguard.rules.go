@@ -280,19 +280,19 @@ func oddmathbits(m fluent.Matcher) {
 }
 
 func floateq(m fluent.Matcher) {
-	m.Match(
-		"$x == $y",
-		"$x != $y",
-	).
-		Where(m["x"].Type.Is("float32") && !m["x"].Const && !m["y"].Text.Matches("0(.0+)?")).
-		Report("floating point tested for equality")
+	// m.Match(
+	// 	"$x == $y",
+	// 	"$x != $y",
+	// ).
+	// 	Where(m["x"].Type.Is("float32") && !m["x"].Const && !m["y"].Text.Matches("0(.0+)?")).
+	// 	Report("floating point tested for equality")
 
-	m.Match(
-		"$x == $y",
-		"$x != $y",
-	).
-		Where(m["x"].Type.Is("float64") && !m["x"].Const && !m["y"].Text.Matches("0(.0+)?")).
-		Report("floating point tested for equality")
+	// m.Match(
+	// 	"$x == $y",
+	// 	"$x != $y",
+	// ).
+	// 	Where(m["x"].Type.Is("float64") && !m["x"].Const && !m["y"].Text.Matches("0(.0+)?")).
+	// 	Report("floating point tested for equality")
 
 	m.Match("switch $x { $*_ }", "switch $*_; $x { $*_ }").
 		Where(m["x"].Type.Is("float32")).
