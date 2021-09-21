@@ -75,22 +75,50 @@ TEST_P(PlanProtoTest, Range) {
         value_tag = "int64_val";
     }
 
+    auto column_str = boost::format(R"(
+column_expr: <
+  column_info: <
+    field_id: %1%
+    data_type: %2%
+  >
+>)") % field_id % data_type_str;
+
+    switch ((DataType)data_type) {
+        case DataType::INT8:
+        case DataType::INT16:
+        case DataType::INT32: {
+            column_str = boost::format(R"(
+cast_expr: <
+  child: <
+    %1%
+  >
+  data_type: Int64
+>)") % column_str;
+            break;
+        }
+        case DataType::FLOAT: {
+            column_str = boost::format(R"(
+cast_expr: <
+  child: <
+    %1%
+  >
+  data_type: Double
+>)") % column_str;
+            break;
+        }
+    }
+
     auto fmt1 = boost::format(R"(
 vector_anns: <
   field_id: 201
   predicates: <
     unary_range_expr: <
       child: <
-        column_expr: <
-          column_info: <
-            field_id: %1%
-            data_type: %2%
-          >
-        >
+        %1%
       >
       op: GreaterThan
       value: <
-        %3%: 3
+        %2%: 3
       >
     >
   >
@@ -101,8 +129,7 @@ vector_anns: <
   >
   placeholder_tag: "$0"
 >
-)") % field_id % data_type_str %
-                value_tag;
+)") % column_str % value_tag;
 
     auto proto_text = fmt1.str();
     planpb::PlanNode node_proto;
@@ -160,27 +187,55 @@ TEST_P(PlanProtoTest, TermExpr) {
         value_tag = "int64_val";
     }
 
+    auto column_str = boost::format(R"(
+column_expr: <
+  column_info: <
+    field_id: %1%
+    data_type: %2%
+  >
+>)") % field_id % data_type_str;
+
+    switch ((DataType)data_type) {
+        case DataType::INT8:
+        case DataType::INT16:
+        case DataType::INT32: {
+            column_str = boost::format(R"(
+cast_expr: <
+  child: <
+    %1%
+  >
+  data_type: Int64
+>)") % column_str;
+            break;
+        }
+        case DataType::FLOAT: {
+            column_str = boost::format(R"(
+cast_expr: <
+  child: <
+    %1%
+  >
+  data_type: Double
+>)") % column_str;
+            break;
+        }
+    }
+
     auto fmt1 = boost::format(R"(
 vector_anns: <
   field_id: 201
   predicates: <
     term_expr: <
       child: <
-        column_expr: <
-          column_info: <
-            field_id: %1%
-            data_type: %2%
-          >
-        >
+        %1%
       >
       values: <
-        %3%: 1
+        %2%: 1
       >
       values: <
-        %3%: 2
+        %2%: 2
       >
       values: <
-        %3%: 3
+        %2%: 3
       >
     >
   >
@@ -191,8 +246,7 @@ vector_anns: <
   >
   placeholder_tag: "$0"
 >
-)") % field_id % data_type_str %
-                value_tag;
+)") % column_str % value_tag;
 
     auto proto_text = fmt1.str();
     planpb::PlanNode node_proto;
