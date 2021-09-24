@@ -129,7 +129,8 @@ vector_anns: <
   >
   placeholder_tag: "$0"
 >
-)") % column_str % value_tag;
+)") % column_str %
+                value_tag;
 
     auto proto_text = fmt1.str();
     planpb::PlanNode node_proto;
@@ -246,7 +247,8 @@ vector_anns: <
   >
   placeholder_tag: "$0"
 >
-)") % column_str % value_tag;
+)") % column_str %
+                value_tag;
 
     auto proto_text = fmt1.str();
     planpb::PlanNode node_proto;
