@@ -24,9 +24,10 @@ macro( build_arrow )
     message( STATUS "Building ARROW-${ARROW_VERSION} from source" )
 
     set( ARROW_CMAKE_ARGS
+        "-DARROW_PARQUET=ON"
         "-DARROW_COMPUTE=ON"
-        "-DARROW_BUILD_STATIC=ON"
-        "-DARROW_BUILD_SHARED=OFF"
+        "-DARROW_BUILD_STATIC=OFF"
+        "-DARROW_BUILD_SHARED=ON"
         "-DARROW_BUILD_TESTS=OFF"
         "-DARROW_TEST_MEMCHECK=OFF"
         "-DARROW_BUILD_BENCHMARKS=OFF"
@@ -53,26 +54,38 @@ macro( build_arrow )
         file( MAKE_DIRECTORY "${INSTALL_DIR}/include" )
     endif()
 
-    add_library( arrow_bundled_dependencies STATIC IMPORTED )
-    set_target_properties( arrow_bundled_dependencies
-            PROPERTIES
-                IMPORTED_GLOBAL                 TRUE
-                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
-                INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
-    add_dependencies(arrow_bundled_dependencies arrow_ep)
-
-    add_library( arrow STATIC IMPORTED )
+    add_library( arrow SHARED IMPORTED )
     set_target_properties( arrow
             PROPERTIES
                 IMPORTED_GLOBAL                 TRUE
-                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.a
+                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.so
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
-    add_dependencies(arrow arrow_ep)
+    add_dependencies( arrow arrow_ep )
 
-    target_link_libraries(arrow INTERFACE arrow_bundled_dependencies)
+    add_library( parquet SHARED IMPORTED )
+    set_target_properties( parquet
+            PROPERTIES
+            IMPORTED_GLOBAL                 TRUE
+            IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libparquet.so
+            INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
+    add_dependencies( parquet arrow-ep )
+    target_link_libraries( parquet INTERFACE arrow )
+
 endmacro()
 
 build_arrow()
+
+install( FILES ${INSTALL_DIR}/lib/libarrow.so
+               ${INSTALL_DIR}/lib/libarrow.so.500
+               ${INSTALL_DIR}/lib/libarrow.so.500.0.0
+               ${INSTALL_DIR}/lib/libparquet.so
+               ${INSTALL_DIR}/lib/libparquet.so.500
+               ${INSTALL_DIR}/lib/libparquet.so.500.0.0
+        DESTINATION lib )
+
+install( DIRECTORY ${INSTALL_DIR}/include/arrow
+                   ${INSTALL_DIR}/include/parquet
+        DESTINATION include )
 
 get_target_property( var arrow INTERFACE_INCLUDE_DIRECTORIES )
 message( STATUS ${var} )
