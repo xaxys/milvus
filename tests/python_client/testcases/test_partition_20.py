@@ -382,6 +382,7 @@ class TestPartitionOperations(TestcaseBase):
             assert collection_w.has_partition(partition_name)[0]
 
     @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.skip(reason="skip temporarily for debug")
     def test_partition_maximum_partitions(self):
         """
         target: verify create maximum partitions
@@ -601,8 +602,6 @@ class TestPartitionOperations(TestcaseBase):
                             check_items={ct.err_code: 1, ct.err_msg: "can't find collection"})
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("partition_name, search_vectors",
-    #                          [(cf.gen_unique_str(prefix), cf.gen_vectors(1, ct.default_dim))])
     def test_partition_release_after_collection_released(self):
         """
         target: verify release a partition after the collection released
