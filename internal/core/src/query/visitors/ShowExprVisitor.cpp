@@ -62,7 +62,7 @@ ShowExprVisitor::visit(UnaryLogicalExpr& expr) {
     AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
 
     // TODO: use magic_enum if available
-    AssertInfo(expr.op_type_ == UnaryLogicalOp::LogicalNot,  "[ShowExprVisitor]Expr op type isn't LogicNot");
+    AssertInfo(expr.op_type_ == UnaryLogicalOp::LogicalNot, "[ShowExprVisitor]Expr op type isn't LogicNot");
     auto op_name = "LogicalNot";
 
     Json extra{
