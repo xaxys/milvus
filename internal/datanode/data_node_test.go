@@ -17,6 +17,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,9 @@ func TestMain(t *testing.M) {
 	rand.Seed(time.Now().Unix())
 	Params.InitAlias("datanode-alias-1")
 	Params.Init()
-	refreshChannelNames()
+	// change to specific channel for test
+	Params.TimeTickChannelName = Params.TimeTickChannelName + strconv.Itoa(rand.Int())
+	Params.SegmentStatisticsChannelName = Params.SegmentStatisticsChannelName + strconv.Itoa(rand.Int())
 	code := t.Run()
 	os.Exit(code)
 }
@@ -115,6 +118,41 @@ func TestDataNode(t *testing.T) {
 				assert.Equal(t, testcase.failReason, resp.Reason)
 			}
 		}
+	})
+
+	t.Run("Test WatchDmChannels fails", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		node := newIDLEDataNodeMock(ctx)
+
+		// before healthy
+		status, err := node.WatchDmChannels(ctx, &datapb.WatchDmChannelsRequest{})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+
+		node.Init()
+		node.Start()
+		node.Register()
+		defer func() {
+			err := node.Stop()
+			assert.Nil(t, err)
+		}()
+
+		node.msFactory = &FailMessageStreamFactory{
+			Factory: node.msFactory,
+		}
+
+		status, err = node.WatchDmChannels(ctx, &datapb.WatchDmChannelsRequest{
+			Vchannels: []*datapb.VchannelInfo{
+				{
+					CollectionID: collectionID0,
+					ChannelName:  "test_channel_name",
+				},
+			},
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
 	})
 
 	t.Run("Test GetComponentStates", func(t *testing.T) {
@@ -411,6 +449,31 @@ func TestDataNode(t *testing.T) {
 	node.Stop()
 }
 
+func TestDataNodeEtcdAlive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	node := newIDLEDataNodeMock(ctx)
+	node.Init()
+	node.Start()
+
+	mockCh := make(chan bool)
+	go node.etcdAliveCheck(ctx, mockCh)
+
+	mockCh <- true
+	flag := false
+	select {
+	case <-node.ctx.Done():
+		flag = true
+	default:
+	}
+	assert.False(t, flag)
+
+	close(mockCh)
+
+	_, ok := <-node.ctx.Done()
+	assert.False(t, ok)
+}
+
 func TestWatchChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	node := newIDLEDataNodeMock(ctx)
@@ -476,5 +539,9 @@ func TestWatchChannel(t *testing.T) {
 		_, has = node.vchan2SyncService[ch]
 		node.chanMut.RUnlock()
 		assert.False(t, has)
+	})
+
+	t.Run("watch dm channel fails", func(t *testing.T) {
+		node.WatchDmChannels(context.Background(), &datapb.WatchDmChannelsRequest{})
 	})
 }

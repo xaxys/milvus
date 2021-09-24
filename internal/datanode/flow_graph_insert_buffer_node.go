@@ -40,14 +40,12 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 )
 
-const (
-	CollectionPrefix = "/collection/"
-	SegmentPrefix    = "/segment/"
-)
-
 type (
+	// InsertData of storage
 	InsertData = storage.InsertData
-	Blob       = storage.Blob
+
+	// Blob of storage
+	Blob = storage.Blob
 )
 
 type insertBufferNode struct {
@@ -58,8 +56,9 @@ type insertBufferNode struct {
 	replica     Replica
 	idAllocator allocatorInterface
 
-	flushMap  sync.Map
-	flushChan <-chan *flushMsg
+	flushMap         sync.Map
+	flushChan        <-chan *flushMsg
+	flushingSegCache *Cache
 
 	minIOKV kv.BaseKV
 
@@ -83,6 +82,7 @@ type segmentFlushUnit struct {
 	flushed        bool
 }
 
+// BufferData buffers insert data, monitoring buffer size and limit
 type BufferData struct {
 	buffer *InsertData
 	size   int64
@@ -299,7 +299,6 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 				flushed:    true,
 			})
 			ibNode.replica.segmentFlushed(currentSegID)
-			fmsg.dmlFlushedCh <- []*datapb.FieldBinlog{{FieldID: currentSegID, Binlogs: []string{}}}
 		} else { //insertBuffer(not empty) -> binLogs -> minIO/S3
 			log.Debug(".. Buffer not empty, flushing ..")
 			finishCh := make(chan segmentFlushUnit, 1)
@@ -311,7 +310,6 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 				log.Debug(".. Clearing flush Buffer ..")
 				ibNode.flushMap.Delete(currentSegID)
 				close(finishCh)
-				fmsg.dmlFlushedCh <- []*datapb.FieldBinlog{{FieldID: currentSegID, Binlogs: nil}}
 			}
 
 			collID, partitionID, err := ibNode.getCollectionandPartitionIDbySegID(currentSegID)
@@ -341,15 +339,14 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 					log.Debug("Data service save binlog path failed", zap.Error(err))
 				} else {
 					ibNode.replica.segmentFlushed(fu.segID)
+					ibNode.flushingSegCache.Remove(fu.segID)
 				}
 			}
-			fmsg.dmlFlushedCh <- []*datapb.FieldBinlog{{FieldID: currentSegID, Binlogs: []string{}}}
 		}
 
 	default:
 	}
 
-	// TODO write timetick
 	if err := ibNode.writeHardTimeTick(iMsg.timeRange.timestampMax); err != nil {
 		log.Error("send hard time tick into pulsar channel failed", zap.Error(err))
 	}
@@ -858,6 +855,7 @@ func newInsertBufferNode(
 	flushCh <-chan *flushMsg,
 	saveBinlog func(*segmentFlushUnit) error,
 	channelName string,
+	flushingSegCache *Cache,
 ) (*insertBufferNode, error) {
 
 	maxQueueLength := Params.FlowGraphMaxQueueLength
@@ -917,10 +915,11 @@ func newInsertBufferNode(
 		timeTickStream:          wTtMsgStream,
 		segmentStatisticsStream: segStatisticsMsgStream,
 
-		replica:      replica,
-		flushMap:     sync.Map{},
-		flushChan:    flushCh,
-		idAllocator:  idAllocator,
-		dsSaveBinlog: saveBinlog,
+		replica:          replica,
+		flushMap:         sync.Map{},
+		flushChan:        flushCh,
+		idAllocator:      idAllocator,
+		dsSaveBinlog:     saveBinlog,
+		flushingSegCache: flushingSegCache,
 	}, nil
 }

@@ -11,14 +11,27 @@
 
 package indexnode
 
+/*
+
+#cgo CFLAGS: -I${SRCDIR}/../core/output/include
+
+#cgo LDFLAGS: -L${SRCDIR}/../core/output/lib -lmilvus_indexbuilder -Wl,-rpath=${SRCDIR}/../core/output/lib
+
+#include <stdlib.h>
+#include "indexbuilder/init_c.h"
+
+*/
+import "C"
 import (
 	"context"
 	"errors"
 	"io"
 	"math/rand"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 
@@ -51,6 +64,7 @@ type IndexNode struct {
 
 	kv      kv.BaseKV
 	session *sessionutil.Session
+	liveCh  <-chan bool
 
 	// Add callback functions at different stages
 	startCallbacks []func()
@@ -60,6 +74,8 @@ type IndexNode struct {
 	finishedTasks map[UniqueID]commonpb.IndexState
 
 	closer io.Closer
+
+	initOnce sync.Once
 }
 
 func NewIndexNode(ctx context.Context) (*IndexNode, error) {
@@ -71,11 +87,12 @@ func NewIndexNode(ctx context.Context) (*IndexNode, error) {
 		loopCancel: cancel,
 	}
 	b.UpdateStateCode(internalpb.StateCode_Abnormal)
-	var err error
-	b.sched, err = NewTaskScheduler(b.loopCtx, b.kv)
+	sc, err := NewTaskScheduler(b.loopCtx, b.kv)
 	if err != nil {
 		return nil, err
 	}
+
+	b.sched = sc
 	return b, nil
 }
 
@@ -85,47 +102,71 @@ func (i *IndexNode) Register() error {
 	if i.session == nil {
 		return errors.New("failed to initialize session")
 	}
-	i.session.Init(typeutil.IndexNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
+	i.liveCh = i.session.Init(typeutil.IndexNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
 	Params.NodeID = i.session.ServerID
 	return nil
 }
 
-func (i *IndexNode) Init() error {
-	Params.Init()
-	i.UpdateStateCode(internalpb.StateCode_Initializing)
-	log.Debug("IndexNode", zap.Any("State", internalpb.StateCode_Initializing))
-	connectEtcdFn := func() error {
-		etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
-		i.etcdKV = etcdKV
-		return err
-	}
-	err := retry.Do(i.loopCtx, connectEtcdFn, retry.Attempts(300))
-	if err != nil {
-		log.Debug("IndexNode try connect etcd failed", zap.Error(err))
-		return err
-	}
-	log.Debug("IndexNode try connect etcd success")
+func (i *IndexNode) initKnowhere() {
+	C.IndexBuilderInit()
 
-	option := &miniokv.Option{
-		Address:           Params.MinIOAddress,
-		AccessKeyID:       Params.MinIOAccessKeyID,
-		SecretAccessKeyID: Params.MinIOSecretAccessKey,
-		UseSSL:            Params.MinIOUseSSL,
-		BucketName:        Params.MinioBucketName,
-		CreateBucket:      true,
-	}
-	i.kv, err = miniokv.NewMinIOKV(i.loopCtx, option)
-	if err != nil {
-		log.Debug("IndexNode NewMinIOKV failed", zap.Error(err))
-		return err
-	}
-	log.Debug("IndexNode NewMinIOKV success")
-	i.closer = trace.InitTracing("index_node")
-	return nil
+	// override segcore SIMD type
+	cSimdType := C.CString(Params.SimdType)
+	C.IndexBuilderSetSimdType(cSimdType)
+	C.free(unsafe.Pointer(cSimdType))
+}
+
+func (i *IndexNode) Init() error {
+	var initErr error = nil
+	i.initOnce.Do(func() {
+		Params.Init()
+		i.UpdateStateCode(internalpb.StateCode_Initializing)
+		log.Debug("IndexNode", zap.Any("State", internalpb.StateCode_Initializing))
+		connectEtcdFn := func() error {
+			etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
+			i.etcdKV = etcdKV
+			return err
+		}
+		err := retry.Do(i.loopCtx, connectEtcdFn, retry.Attempts(300))
+		if err != nil {
+			log.Debug("IndexNode try connect etcd failed", zap.Error(err))
+			initErr = err
+			return
+		}
+		log.Debug("IndexNode try connect etcd success")
+
+		option := &miniokv.Option{
+			Address:           Params.MinIOAddress,
+			AccessKeyID:       Params.MinIOAccessKeyID,
+			SecretAccessKeyID: Params.MinIOSecretAccessKey,
+			UseSSL:            Params.MinIOUseSSL,
+			BucketName:        Params.MinioBucketName,
+			CreateBucket:      true,
+		}
+		i.kv, err = miniokv.NewMinIOKV(i.loopCtx, option)
+		if err != nil {
+			log.Debug("IndexNode NewMinIOKV failed", zap.Error(err))
+			initErr = err
+			return
+		}
+		log.Debug("IndexNode NewMinIOKV success")
+		i.closer = trace.InitTracing("index_node")
+
+		i.initKnowhere()
+	})
+
+	log.Debug("Init IndexNode finished", zap.Error(initErr))
+
+	return initErr
 }
 
 func (i *IndexNode) Start() error {
 	i.sched.Start()
+
+	//start liveness check
+	go i.session.LivenessCheck(i.loopCtx, i.liveCh, func() {
+		i.Stop()
+	})
 
 	i.UpdateStateCode(internalpb.StateCode_Healthy)
 	log.Debug("IndexNode", zap.Any("State", i.stateCode.Load()))

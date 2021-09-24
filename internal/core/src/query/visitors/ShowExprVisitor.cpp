@@ -59,10 +59,10 @@ class ShowExprNodeVisitor : ExprVisitor {
 
 void
 ShowExprVisitor::visit(UnaryLogicalExpr& expr) {
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
 
     // TODO: use magic_enum if available
-    Assert(expr.op_type_ == UnaryLogicalOp::LogicalNot);
+    AssertInfo(expr.op_type_ == UnaryLogicalOp::LogicalNot,  "[ShowExprVisitor]Expr op type isn't LogicNot");
     auto op_name = "LogicalNot";
 
     Json extra{
@@ -74,7 +74,7 @@ ShowExprVisitor::visit(UnaryLogicalExpr& expr) {
 
 void
 ShowExprVisitor::visit(BinaryLogicalExpr& expr) {
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
 
     // TODO: use magic_enum if available
     auto op_name = [](BinaryLogicalOp op) {
@@ -103,7 +103,7 @@ GenericValueImplExtract(const GenericValue& gv_raw) {
     using proto::plan::CompareOp;
     using proto::plan::CompareOp_Name;
     auto gv = dynamic_cast<const GenericValueImpl<T>*>(&gv_raw);
-    Assert(gv);
+    AssertInfo(gv, "[ShowExprVisitor]GenericValue cast to GenericValueImpl failed");
     Json res{
         {"expr_type", "GenericValue"},
         {"data_type", datatype_name(gv->data_type_)},
@@ -148,7 +148,7 @@ GenericValueExtract(const GenericValue& gv) {
 
 void
 ShowExprVisitor::visit(TermExpr& expr) {
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
     Json terms;
     for (const auto& term : expr.terms_) {
         terms.push_back(GenericValueExtract(*term));
@@ -163,7 +163,7 @@ ShowExprVisitor::visit(TermExpr& expr) {
 
 void
 ShowExprVisitor::visit(UnaryRangeExpr& expr) {
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
     using proto::plan::CompareOp;
     using proto::plan::CompareOp_Name;
     Json res{
@@ -176,7 +176,7 @@ ShowExprVisitor::visit(UnaryRangeExpr& expr) {
 
 void
 ShowExprVisitor::visit(BinaryRangeExpr& expr) {
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
     Json res{
         {"expr_type", "BinaryRange"},
         {"lower_inclusive", expr.lower_inclusive_},
@@ -191,7 +191,7 @@ void
 ShowExprVisitor::visit(CompareExpr& expr) {
     using proto::plan::CompareOp;
     using proto::plan::CompareOp_Name;
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
 
     Json res{
         {"expr_type", "Compare"},
@@ -202,8 +202,8 @@ ShowExprVisitor::visit(CompareExpr& expr) {
 
 void
 ShowExprVisitor::visit(ColumnExpr& expr) {
-    Assert(!ret_.has_value());
-    Assert(!datatype_is_vector(expr.data_type_));
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
+    AssertInfo(!datatype_is_vector(expr.data_type_), "[ShowExprVisitor]Data type of column isn't vector type");
     Json res{
         {"expr_type", "Column"},
         {"data_type", datatype_name(expr.data_type_)},
@@ -216,7 +216,7 @@ void
 ShowExprVisitor::visit(UnaryArithExpr& expr) {
     using proto::plan::UnaryArithOp;
     using proto::plan::UnaryArithOp_Name;
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
     Json res{{"expr_type", "UnaryArith"}, {"op", UnaryArithOp_Name(static_cast<UnaryArithOp>(expr.op_type_))}};
     ret_ = combine(std::move(res), expr);
 }
@@ -225,14 +225,14 @@ void
 ShowExprVisitor::visit(BinaryArithExpr& expr) {
     using proto::plan::BinaryArithOp;
     using proto::plan::BinaryArithOp_Name;
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
     Json res{{"expr_type", "BinaryArith"}, {"op", BinaryArithOp_Name(static_cast<BinaryArithOp>(expr.op_type_))}};
     ret_ = combine(std::move(res), expr);
 }
 
 void
 ShowExprVisitor::visit(ValueExpr& expr) {
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
     Json res{
         {"expr_type", "Value"},
         {"value", GenericValueExtract(*expr.value_)},
@@ -242,7 +242,7 @@ ShowExprVisitor::visit(ValueExpr& expr) {
 
 void
 ShowExprVisitor::visit(CastExpr& expr) {
-    Assert(!ret_.has_value());
+    AssertInfo(!ret_.has_value(), "[ShowExprVisitor]Ret json already has value before visit");
     Json res{
         {"expr_type", "Cast"},
         {"data_type", datatype_name(expr.data_type_)},

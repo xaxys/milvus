@@ -99,11 +99,6 @@ func makeNewChannelNames(names []string, suffix string) []string {
 	return ret
 }
 
-func refreshChannelNames() {
-	Params.SegmentStatisticsChannelName = "datanode-refresh-segment-statistics"
-	Params.TimeTickChannelName = "datanode-refresh-hard-timetick"
-}
-
 func clearEtcd(rootPath string) error {
 	etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, rootPath)
 	if err != nil {
@@ -547,4 +542,17 @@ func (m *RootCoordFactory) GetComponentStates(ctx context.Context) (*internalpb.
 			ErrorCode: commonpb.ErrorCode_Success,
 		},
 	}, nil
+}
+
+// FailMessageStreamFactory mock MessageStreamFactory failure
+type FailMessageStreamFactory struct {
+	msgstream.Factory
+}
+
+func (f *FailMessageStreamFactory) NewMsgStream(ctx context.Context) (msgstream.MsgStream, error) {
+	return nil, errors.New("mocked failure")
+}
+
+func (f *FailMessageStreamFactory) NewTtMsgStream(ctx context.Context) (msgstream.MsgStream, error) {
+	return nil, errors.New("mocked failure")
 }

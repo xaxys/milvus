@@ -24,14 +24,11 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
-func parseQueryExpr(schema *typeutil.SchemaHelper, exprStr string) (*planpb.Expr, error) {
+func parseExpr(schema *typeutil.SchemaHelper, exprStr string) (*planpb.Expr, error) {
 	if exprStr == "" {
 		return nil, nil
 	}
-	return parseQueryExprAdvanced(schema, exprStr)
-}
 
-func parseQueryExprAdvanced(schema *typeutil.SchemaHelper, exprStr string) (*planpb.Expr, error) {
 	inputStream := antlr.NewInputStream(exprStr)
 	lexer := parser.NewPlanLexer(inputStream)
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
@@ -61,13 +58,13 @@ func parseQueryExprAdvanced(schema *typeutil.SchemaHelper, exprStr string) (*pla
 	return predicate.expr, nil
 }
 
-func CreateExprQueryPlan(schemaPb *schemapb.CollectionSchema, exprStr string) (*planpb.PlanNode, error) {
+func CreateExprPlan(schemaPb *schemapb.CollectionSchema, exprStr string) (*planpb.PlanNode, error) {
 	schema, err := typeutil.CreateSchemaHelper(schemaPb)
 	if err != nil {
 		return nil, err
 	}
 
-	expr, err := parseQueryExpr(schema, exprStr)
+	expr, err := parseExpr(schema, exprStr)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +83,7 @@ func CreateQueryPlan(schemaPb *schemapb.CollectionSchema, exprStr string, vector
 		return nil, err
 	}
 
-	expr, err := parseQueryExpr(schema, exprStr)
+	expr, err := parseExpr(schema, exprStr)
 	if err != nil {
 		return nil, err
 	}

@@ -299,7 +299,7 @@ TEST(Expr, TestRange) {
     schema->AddDebugField("age", DataType::INT32);
 
     auto seg = CreateGrowingSegment(schema);
-    int N = 10000;
+    int N = 1000;
     std::vector<int> age_col;
     int num_iters = 100;
     for (int iter = 0; iter < num_iters; ++iter) {
@@ -384,7 +384,7 @@ TEST(Expr, TestTerm) {
     schema->AddDebugField("age", DataType::INT32);
 
     auto seg = CreateGrowingSegment(schema);
-    int N = 10000;
+    int N = 1000;
     std::vector<int> age_col;
     int num_iters = 100;
     for (int iter = 0; iter < num_iters; ++iter) {
@@ -569,7 +569,7 @@ TEST(Expr, TestCompare) {
     schema->AddDebugField("age2", DataType::INT64);
 
     auto seg = CreateGrowingSegment(schema);
-    int N = 10000;
+    int N = 1000;
     std::vector<int> age1_col;
     std::vector<int64_t> age2_col;
     int num_iters = 100;

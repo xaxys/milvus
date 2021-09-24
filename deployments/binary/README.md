@@ -6,30 +6,24 @@ Before installing etcd and MinIO, you can refer to [docker-compose.yml](https://
 
 ## Start etcd service
 
-### Refer: https://github.com/etcd-io/etcd/releases
+#### Refer: https://github.com/etcd-io/etcd/releases
 
 ```bash
 wget https://github.com/etcd-io/etcd/releases/download/v3.5.0/etcd-v3.5.0-linux-amd64.tar.gz
 tar zxvf etcd-v3.5.0-linux-amd64.tar.gz
 cd etcd-v3.5.0-linux-amd64
-# start etcd service
 ./etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
 ```
 
-
-
 ## Start MinIO service
 
-### Refer: https://min.io/download#/linux
+#### Refer: https://min.io/download#/linux
 
 ```bash
 wget https://dl.min.io/server/minio/release/linux-amd64/minio
 chmod +x minio
-#start minio service
 ./minio server /minio
 ```
-
-
 
 ## Start Milvus standalone service
 
@@ -53,6 +47,5 @@ sudo apt-get install libtbb2
 ```bash
 cd milvus
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD/lib
-# Start Milvus service
 ./bin/milvus run standalone
 ```
