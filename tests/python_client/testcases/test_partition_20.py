@@ -97,8 +97,6 @@ class TestPartitionParams(TestcaseBase):
                                  )
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("collection_name, partition_name, description",
-                             # [(cf.gen_unique_str(), cf.gen_unique_str(prefix), cf.gen_unique_str())])
     def test_partition_dup_name(self):
         """
         target: verify create partitions with duplicate name
@@ -198,7 +196,6 @@ class TestPartitionParams(TestcaseBase):
         # TODO: need an error code issue #5144 and assert independently
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("partition_name", [cf.gen_unique_str(prefix)])
     def test_partition_none_collection(self):
         """
         target: verify create a partition with none collection
@@ -213,7 +210,6 @@ class TestPartitionParams(TestcaseBase):
                                                         ct.err_msg: "must be pymilvus.Collection"})
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("partition_name", [cf.gen_unique_str(prefix)])
     def test_partition_drop(self):
         """
         target: verify drop a partition in one collection
@@ -238,7 +234,6 @@ class TestPartitionParams(TestcaseBase):
         assert not collection_w.has_partition(partition_name)[0]
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("search_vectors", [cf.gen_vectors(1, ct.default_dim)])
     def test_partition_release(self):
         """
         target: verify release partition
@@ -290,7 +285,6 @@ class TestPartitionParams(TestcaseBase):
         assert len(res2) == 1
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("partition_name", [cf.gen_unique_str(prefix)])
     @pytest.mark.parametrize("data", [cf.gen_default_dataframe_data(10),
                                       cf.gen_default_list_data(10),
                                       cf.gen_default_tuple_data(10)])
@@ -583,7 +577,6 @@ class TestPartitionOperations(TestcaseBase):
                             check_items={ct.err_code: 1, ct.err_msg: PartitionErrorMessage.PartitionNotExist})
 
     @pytest.mark.tags(CaseLabel.L1)
-    # @pytest.mark.parametrize("partition_name", [cf.gen_unique_str(prefix)])
     def test_partition_release_dropped_collection(self):
         """
         target: verify release an dropped collection

@@ -1,4 +1,5 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.//
+// Copyright (C) 2019-2020 Zilliz. All rights reserved.
+//
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
@@ -7,6 +8,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
+
 package datacoord
 
 import (
@@ -44,11 +46,13 @@ type ParamTable struct {
 	FlushStreamPosSubPath string
 	StatsStreamPosSubPath string
 
-	// segment
+	// --- SEGMENTS ---
 	SegmentMaxSize          float64
 	SegmentSealProportion   float64
 	SegAssignmentExpiration int64
 
+	// --- Channels ---
+	ClusterChannelPrefix      string
 	InsertChannelPrefixName   string
 	StatisticsChannelName     string
 	TimeTickChannelName       string
@@ -61,37 +65,46 @@ type ParamTable struct {
 var Params ParamTable
 var once sync.Once
 
+/* Init params from base table as well as data coord yaml*/
 func (p *ParamTable) Init() {
+	// load yaml
+	p.BaseTable.Init()
+
+	if err := p.LoadYaml("advanced/data_coord.yaml"); err != nil {
+		panic(err)
+	}
+
+	// set members
+	p.initEtcdEndpoints()
+	p.initMetaRootPath()
+	p.initKvRootPath()
+	p.initSegmentBinlogSubPath()
+	p.initCollectionBinlogSubPath()
+
+	p.initPulsarAddress()
+	p.initRocksmqPath()
+
+	p.initSegmentMaxSize()
+	p.initSegmentSealProportion()
+	p.initSegAssignmentExpiration()
+
+	// Has to init global msgchannel prefix before other channel names
+	p.initClusterMsgChannelPrefix()
+	p.initInsertChannelPrefixName()
+	p.initStatisticsChannelName()
+	p.initTimeTickChannelName()
+	p.initSegmentInfoChannelName()
+	p.initDataCoordSubscriptionName()
+	p.initLogCfg()
+
+	p.initFlushStreamPosSubPath()
+	p.initStatsStreamPosSubPath()
+}
+
+// Init once ensure param table is a singleton
+func (p *ParamTable) InitOnce() {
 	once.Do(func() {
-		// load yaml
-		p.BaseTable.Init()
-
-		if err := p.LoadYaml("advanced/data_coord.yaml"); err != nil {
-			panic(err)
-		}
-
-		// set members
-		p.initEtcdEndpoints()
-		p.initMetaRootPath()
-		p.initKvRootPath()
-		p.initSegmentBinlogSubPath()
-		p.initCollectionBinlogSubPath()
-
-		p.initPulsarAddress()
-		p.initRocksmqPath()
-
-		p.initSegmentMaxSize()
-		p.initSegmentSealProportion()
-		p.initSegAssignmentExpiration()
-		p.initInsertChannelPrefixName()
-		p.initStatisticsChannelName()
-		p.initTimeTickChannelName()
-		p.initSegmentInfoChannelName()
-		p.initDataCoordSubscriptionName()
-		p.initLogCfg()
-
-		p.initFlushStreamPosSubPath()
-		p.initStatsStreamPosSubPath()
+		p.Init()
 	})
 }
 
@@ -171,44 +184,57 @@ func (p *ParamTable) initSegAssignmentExpiration() {
 	p.SegAssignmentExpiration = p.ParseInt64("datacoord.segment.assignmentExpiration")
 }
 
-func (p *ParamTable) initInsertChannelPrefixName() {
-	var err error
-	p.InsertChannelPrefixName, err = p.Load("msgChannel.chanNamePrefix.dataCoordInsertChannel")
+func (p *ParamTable) initClusterMsgChannelPrefix() {
+	config, err := p.Load("msgChannel.chanNamePrefix.cluster")
 	if err != nil {
 		panic(err)
 	}
+	p.ClusterChannelPrefix = config
+}
+
+func (p *ParamTable) initInsertChannelPrefixName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.dataCoordInsertChannel")
+	if err != nil {
+		panic(err)
+	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.InsertChannelPrefixName = strings.Join(s, "-")
 }
 
 func (p *ParamTable) initStatisticsChannelName() {
-	var err error
-	p.StatisticsChannelName, err = p.Load("msgChannel.chanNamePrefix.dataCoordStatistic")
+	config, err := p.Load("msgChannel.chanNamePrefix.dataCoordStatistic")
 	if err != nil {
 		panic(err)
 	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.StatisticsChannelName = strings.Join(s, "-")
 }
 
 func (p *ParamTable) initTimeTickChannelName() {
-	var err error
-	p.TimeTickChannelName, err = p.Load("msgChannel.chanNamePrefix.dataCoordTimeTick")
+	config, err := p.Load("msgChannel.chanNamePrefix.dataCoordTimeTick")
 	if err != nil {
 		panic(err)
 	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.TimeTickChannelName = strings.Join(s, "-")
 }
 
 func (p *ParamTable) initSegmentInfoChannelName() {
-	var err error
-	p.SegmentInfoChannelName, err = p.Load("msgChannel.chanNamePrefix.dataCoordSegmentInfo")
+	config, err := p.Load("msgChannel.chanNamePrefix.dataCoordSegmentInfo")
 	if err != nil {
 		panic(err)
 	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.SegmentInfoChannelName = strings.Join(s, "-")
 }
 
 func (p *ParamTable) initDataCoordSubscriptionName() {
-	var err error
-	p.DataCoordSubscriptionName, err = p.Load("msgChannel.subNamePrefix.dataCoordSubNamePrefix")
+	config, err := p.Load("msgChannel.subNamePrefix.dataCoordSubNamePrefix")
 	if err != nil {
 		panic(err)
 	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.DataCoordSubscriptionName = strings.Join(s, "-")
 }
 
 func (p *ParamTable) initLogCfg() {

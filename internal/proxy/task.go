@@ -46,6 +46,7 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
+	"github.com/milvus-io/milvus/internal/util/trace"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
@@ -83,6 +84,8 @@ const (
 	CreateAliasTaskName             = "CreateAliasTask"
 	DropAliasTaskName               = "DropAliasTask"
 	AlterAliasTaskName              = "AlterAliasTask"
+
+	minFloat32 = -1 * float32(math.MaxFloat32)
 )
 
 type task interface {
@@ -729,6 +732,8 @@ func (it *insertTask) checkFieldAutoID() error {
 }
 
 func (it *insertTask) PreExecute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(it.ctx, "Proxy-Insert-PreExecute")
+	defer sp.Finish()
 	it.Base.MsgType = commonpb.MsgType_Insert
 	it.Base.SourceID = Params.ProxyID
 
@@ -998,6 +1003,8 @@ func (it *insertTask) _assignSegmentID(stream msgstream.MsgStream, pack *msgstre
 }
 
 func (it *insertTask) Execute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(it.ctx, "Proxy-Insert-Execute")
+	defer sp.Finish()
 	collectionName := it.BaseInsertTask.CollectionName
 	collID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
 	if err != nil {
@@ -1432,6 +1439,8 @@ func (st *searchTask) getVChannels() ([]vChan, error) {
 }
 
 func (st *searchTask) PreExecute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(st.TraceCtx(), "Proxy-Search-PreExecute")
+	defer sp.Finish()
 	st.Base.MsgType = commonpb.MsgType_Search
 	st.Base.SourceID = Params.ProxyID
 
@@ -1623,6 +1632,8 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 }
 
 func (st *searchTask) Execute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(st.TraceCtx(), "Proxy-Search-Execute")
+	defer sp.Finish()
 	var tsMsg msgstream.TsMsg = &msgstream.SearchMsg{
 		SearchRequest: *st.SearchRequest,
 		BaseMsg: msgstream.BaseMsg{
@@ -1755,8 +1766,6 @@ func reduceSearchResultDataParallel(searchResultData []*schemapb.SearchResultDat
 		}
 	}
 
-	const minFloat32 = -1 * float32(math.MaxFloat32)
-
 	// TODO(yukun): Use parallel function
 	var realTopK int64 = -1
 	var idx int64
@@ -1766,17 +1775,14 @@ func reduceSearchResultDataParallel(searchResultData []*schemapb.SearchResultDat
 
 		j = 0
 		for ; j < topk; j++ {
-			valid := true
-			choice, maxDistance := 0, minFloat32
+			choice, maxDistance := -1, minFloat32
 			for q, loc := range locs { // query num, the number of ways to merge
 				if loc >= topk {
 					continue
 				}
 				curIdx := idx*topk + loc
 				id := searchResultData[q].Ids.GetIntId().Data[curIdx]
-				if id == -1 {
-					valid = false
-				} else {
+				if id != -1 {
 					distance := searchResultData[q].Scores[curIdx]
 					if distance > maxDistance {
 						choice = q
@@ -1784,7 +1790,7 @@ func reduceSearchResultDataParallel(searchResultData []*schemapb.SearchResultDat
 					}
 				}
 			}
-			if !valid {
+			if choice == -1 {
 				break
 			}
 			choiceOffset := locs[choice]
@@ -1955,6 +1961,8 @@ func reduceSearchResultData(searchResultData []*schemapb.SearchResultData, avail
 //}
 
 func (st *searchTask) PostExecute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(st.TraceCtx(), "Proxy-Search-PostExecute")
+	defer sp.Finish()
 	t0 := time.Now()
 	defer func() {
 		log.Debug("WaitAndPostExecute", zap.Any("time cost", time.Since(t0)))
@@ -2218,7 +2226,7 @@ func (qt *queryTask) PreExecute(ctx context.Context) error {
 		return fmt.Errorf(errMsg)
 	}
 
-	plan, err := CreateExprQueryPlan(schema, qt.query.Expr)
+	plan, err := CreateExprPlan(schema, qt.query.Expr)
 	if err != nil {
 		return err
 	}

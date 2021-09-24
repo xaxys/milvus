@@ -10,7 +10,7 @@ As for everything else in the project, the contributions to Milvus are governed 
 
 | Suitable for                             | Projects                                                     | Resources                                                    |
 | ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| Go developers                            | [milvus](https://github.com/milvus-io/milvus), [milvus-sdk-go](https://github.com/milvus-io/milvus-sdk-go),       |                                                              |
+| Go developers                            | [milvus](https://github.com/milvus-io/milvus), [milvus-sdk-go](https://github.com/milvus-io/milvus-sdk-go)       |                                                              |
 | CPP developers                           | [milvus](https://github.com/milvus-io/milvus)                |                                                              |
 | Developers interested in other languages | [pymilvus](https://github.com/milvus-io/pymilvus), [milvus-sdk-node](https://github.com/milvus-io/milvus-sdk-node), [milvus-sdk-java](https://github.com/milvus-io/milvus-sdk-java) | [Contributing to PyMilvus](https://github.com/milvus-io/pymilvus/blob/master/CONTRIBUTING.md) |
 | Kubernetes enthusiasts                   | [milvus-helm](https://github.com/milvus-io/milvus-helm)      |                                                              |
@@ -160,22 +160,3 @@ Run unit test and generate code for code coverage check
 ```shell 
 $ ./build.sh -u -c
 ```
-
-Run MySQL docker
-```shell 
-docker pull mysql:latest
-docker run -p 3306:3306 -e MYSQL_ROOT_PASSWORD=123456 -d mysql:latest
-```
-
-Run code coverage
-
-```shell  
-$ ./coverage.sh -u root -p 123456 -t 127.0.0.1
-```
-
-Or start your own MySQL server, and then run code coverage
-
-```shell
-$ ./coverage.sh -u ${MYSQL_USERNAME} -p ${MYSQL_PASSWORD} -t ${MYSQL_SERVER_IP}
-```
-
