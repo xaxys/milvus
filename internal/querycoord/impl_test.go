@@ -320,15 +320,12 @@ func TestGrpcTask(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, res.Status.ErrorCode)
 	})
 
-	//nodes, err := queryCoord.cluster.getOnServiceNodes()
-	//assert.Nil(t, err)
-
 	err = node.stop()
-	//assert.Nil(t, err)
-
-	//allNodeOffline := waitAllQueryNodeOffline(queryCoord.cluster, nodes)
-	//assert.Equal(t, allNodeOffline, true)
+	err = removeNodeSession(node.queryNodeID)
+	assert.Nil(t, err)
 	queryCoord.Stop()
+	err = removeAllSession()
+	assert.Nil(t, err)
 }
 
 func TestLoadBalanceTask(t *testing.T) {
@@ -344,7 +341,7 @@ func TestLoadBalanceTask(t *testing.T) {
 	queryNode2, err := startQueryNodeServer(baseCtx)
 	assert.Nil(t, err)
 
-	time.Sleep(time.Second)
+	time.Sleep(100 * time.Millisecond)
 	res, err := queryCoord.LoadCollection(baseCtx, &querypb.LoadCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_LoadCollection,
@@ -355,7 +352,7 @@ func TestLoadBalanceTask(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, commonpb.ErrorCode_Success, res.ErrorCode)
 
-	time.Sleep(time.Second)
+	time.Sleep(100 * time.Millisecond)
 	for {
 		collectionInfo := queryCoord.meta.showCollections()
 		if collectionInfo[0].InMemoryPercentage == 100 {
@@ -398,6 +395,8 @@ func TestLoadBalanceTask(t *testing.T) {
 	queryNode1.stop()
 	queryNode2.stop()
 	queryCoord.Stop()
+	err = removeAllSession()
+	assert.Nil(t, err)
 }
 
 func TestGrpcTaskBeforeHealthy(t *testing.T) {
@@ -550,4 +549,7 @@ func TestGrpcTaskBeforeHealthy(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, res.Status.ErrorCode)
 	})
 
+	unHealthyCoord.Stop()
+	err = removeAllSession()
+	assert.Nil(t, err)
 }

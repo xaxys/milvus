@@ -41,8 +41,8 @@ class TestPartitionParams(TestcaseBase):
     @pytest.mark.parametrize("partition_name", [""])
     def test_partition_empty_name(self, partition_name):
         """
-        target: verify create a partition with empyt name
-        method: 1. create a partition empty none name
+        target: verify create a partition with empty name
+        method: 1. create a partition with empty name
         expected: 1. raise exception
         """
         # create a collection
@@ -99,10 +99,10 @@ class TestPartitionParams(TestcaseBase):
     @pytest.mark.tags(CaseLabel.L1)
     def test_partition_dup_name(self):
         """
-        target: verify create partitions with duplicate name
-        method: 1. create partitions with duplicate name
+        target: verify create partitions with duplicate names
+        method: 1. create partitions with duplicate names
         expected: 1. create successfully
-                  2. the same partition returned with diff object id
+                  2. the same partition returned with diff object ids
         """
         # create a collection
         collection_w = self.init_collection_wrap()
@@ -161,10 +161,10 @@ class TestPartitionParams(TestcaseBase):
         assert collection.name == partition_w.name
 
     @pytest.mark.tags(CaseLabel.L1)
-    def test_partition_maxlength_name(self):
+    def test_partition_max_length_name(self):
         """
-        target: verify create a partition with maxlength(256) name
-        method: 1. create a partition with max length names
+        target: verify create a partition with max length(256) name
+        method: 1. create a partition with max length name
         expected: 1. raise exception
         """
         # create collection
@@ -237,13 +237,13 @@ class TestPartitionParams(TestcaseBase):
     def test_partition_release(self):
         """
         target: verify release partition
-        method: 1. create a collection and several partitions
+        method: 1. create a collection and two partitions
                 2. insert data into each partition
-                3. flush and load the partitions
+                3. flush and load the both partitions
                 4. release partition1
                 5. release partition1 twice
-        expected: 1. the released partition is released
-                  2. the other partition is not released
+        expected: 1. the 1st partition is released
+                  2. the 2nd partition is not released
         """
         # create collection
         collection_w = self.init_collection_wrap()

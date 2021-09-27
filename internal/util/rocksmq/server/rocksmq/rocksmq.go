@@ -16,7 +16,7 @@ type ProducerMessage struct {
 	Payload []byte
 }
 
-// Rocksmq consumer
+// Consumer is rocksmq consumer
 type Consumer struct {
 	Topic     string
 	GroupName string
@@ -29,7 +29,7 @@ type ConsumerMessage struct {
 	Payload []byte
 }
 
-// Rocksmq is an interface thatmay be implemented by the application
+// RocksMQ is an interface thatmay be implemented by the application
 // to do message queue operations based ion rocksdb
 type RocksMQ interface {
 	CreateTopic(topicName string) error
@@ -40,7 +40,7 @@ type RocksMQ interface {
 
 	RegisterConsumer(consumer *Consumer)
 
-	Produce(topicName string, messages []ProducerMessage) error
+	Produce(topicName string, messages []ProducerMessage) ([]UniqueID, error)
 	Consume(topicName string, groupName string, n int) ([]ConsumerMessage, error)
 	Seek(topicName string, groupName string, msgID UniqueID) error
 	ExistConsumerGroup(topicName string, groupName string) (bool, *Consumer)

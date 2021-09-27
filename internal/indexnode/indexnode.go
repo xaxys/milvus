@@ -62,6 +62,8 @@ type IndexNode struct {
 
 	sched *TaskScheduler
 
+	once sync.Once
+
 	kv      kv.BaseKV
 	session *sessionutil.Session
 	liveCh  <-chan bool
@@ -104,6 +106,8 @@ func (i *IndexNode) Register() error {
 	}
 	i.liveCh = i.session.Init(typeutil.IndexNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
 	Params.NodeID = i.session.ServerID
+	//TODO reset logger
+	//Params.initLogCfg()
 	return nil
 }
 
@@ -129,7 +133,7 @@ func (i *IndexNode) Init() error {
 		}
 		err := retry.Do(i.loopCtx, connectEtcdFn, retry.Attempts(300))
 		if err != nil {
-			log.Debug("IndexNode try connect etcd failed", zap.Error(err))
+			log.Error("IndexNode try connect etcd failed", zap.Error(err))
 			initErr = err
 			return
 		}
@@ -145,7 +149,7 @@ func (i *IndexNode) Init() error {
 		}
 		i.kv, err = miniokv.NewMinIOKV(i.loopCtx, option)
 		if err != nil {
-			log.Debug("IndexNode NewMinIOKV failed", zap.Error(err))
+			log.Error("IndexNode NewMinIOKV failed", zap.Error(err))
 			initErr = err
 			return
 		}
@@ -161,20 +165,28 @@ func (i *IndexNode) Init() error {
 }
 
 func (i *IndexNode) Start() error {
-	i.sched.Start()
+	var startErr error = nil
+	i.once.Do(func() {
+		startErr = i.sched.Start()
 
-	//start liveness check
-	go i.session.LivenessCheck(i.loopCtx, i.liveCh, func() {
-		i.Stop()
+		Params.CreatedTime = time.Now()
+		Params.UpdatedTime = time.Now()
+
+		//start liveness check
+		go i.session.LivenessCheck(i.loopCtx, i.liveCh, func() {
+			i.Stop()
+		})
+
+		i.UpdateStateCode(internalpb.StateCode_Healthy)
+		log.Debug("IndexNode", zap.Any("State", i.stateCode.Load()))
 	})
-
-	i.UpdateStateCode(internalpb.StateCode_Healthy)
-	log.Debug("IndexNode", zap.Any("State", i.stateCode.Load()))
 	// Start callbacks
 	for _, cb := range i.startCallbacks {
 		cb()
 	}
-	return nil
+
+	log.Debug("IndexNode start finished", zap.Error(startErr))
+	return startErr
 }
 
 // Stop Close closes the server.

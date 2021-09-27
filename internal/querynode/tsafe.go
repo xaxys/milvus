@@ -34,7 +34,6 @@ func newTSafeWatcher() *tSafeWatcher {
 func (watcher *tSafeWatcher) notify() {
 	if len(watcher.notifyChan) == 0 {
 		watcher.notifyChan <- true
-		//log.Debug("tSafe watcher notify done")
 	}
 }
 
@@ -70,6 +69,7 @@ type tSafe struct {
 	watcherList []*tSafeWatcher
 	tSafeChan   chan tSafeMsg
 	tSafeRecord map[UniqueID]Timestamp
+	isClose     bool
 }
 
 func newTSafe(ctx context.Context, channel Channel) tSafer {
@@ -92,11 +92,22 @@ func (ts *tSafe) start() {
 		for {
 			select {
 			case <-ts.ctx.Done():
+				ts.tSafeMu.Lock()
+				ts.isClose = true
 				log.Debug("tSafe context done",
 					zap.Any("channel", ts.channel),
 				)
+				for _, watcher := range ts.watcherList {
+					close(watcher.notifyChan)
+				}
+				close(ts.tSafeChan)
+				ts.tSafeMu.Unlock()
 				return
-			case m := <-ts.tSafeChan:
+			case m, ok := <-ts.tSafeChan:
+				if !ok {
+					// should not happen!!
+					return
+				}
 				ts.tSafeMu.Lock()
 				ts.tSafeRecord[m.id] = m.t
 				var tmpT Timestamp = math.MaxUint64
@@ -151,7 +162,13 @@ func (ts *tSafe) get() Timestamp {
 func (ts *tSafe) set(id UniqueID, t Timestamp) {
 	ts.tSafeMu.Lock()
 	defer ts.tSafeMu.Unlock()
-
+	if ts.isClose {
+		// should not happen if tsafe_replica guard correctly
+		log.Warn("Try to set id with ts close ",
+			zap.Any("channel", ts.channel),
+			zap.Any("it", id))
+		return
+	}
 	msg := tSafeMsg{
 		t:  t,
 		id: id,
@@ -160,11 +177,5 @@ func (ts *tSafe) set(id UniqueID, t Timestamp) {
 }
 
 func (ts *tSafe) close() {
-	ts.tSafeMu.Lock()
-	defer ts.tSafeMu.Unlock()
-
 	ts.cancel()
-	for _, watcher := range ts.watcherList {
-		close(watcher.notifyChan)
-	}
 }

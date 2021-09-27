@@ -32,6 +32,8 @@ import (
 	"github.com/milvus-io/milvus/internal/util/trace"
 )
 
+var _ MsgStream = (*mqMsgStream)(nil)
+
 type mqMsgStream struct {
 	ctx              context.Context
 	client           mqclient.Client
@@ -217,8 +219,8 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 		switch msgType {
 		case commonpb.MsgType_Insert:
 			result, err = InsertRepackFunc(tsMsgs, reBucketValues)
-		//case commonpb.MsgType_Delete:
-		//	result, err = DeleteRepackFunc(tsMsgs, reBucketValues)
+		case commonpb.MsgType_Delete:
+			result, err = DeleteRepackFunc(tsMsgs, reBucketValues)
 		default:
 			result, err = DefaultRepackFunc(tsMsgs, reBucketValues)
 		}
@@ -236,7 +238,7 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 				return err
 			}
 
-			m, err := ConvertToByteArray(mb)
+			m, err := convertToByteArray(mb)
 			if err != nil {
 				return err
 			}
@@ -246,7 +248,7 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 			trace.InjectContextToPulsarMsgProperties(sp.Context(), msg.Properties)
 
 			ms.producerLock.Lock()
-			if err := ms.producers[channel].Send(
+			if _, err := ms.producers[channel].Send(
 				spanCtx,
 				msg,
 			); err != nil {
@@ -262,6 +264,8 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 	return nil
 }
 
+// Broadcast put msgPack to all producer in current msgstream
+// which ignores repackFunc logic
 func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) error {
 	if msgPack == nil || len(msgPack.Msgs) <= 0 {
 		log.Debug("Warning: Receive empty msgPack")
@@ -275,7 +279,7 @@ func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) error {
 			return err
 		}
 
-		m, err := ConvertToByteArray(mb)
+		m, err := convertToByteArray(mb)
 		if err != nil {
 			return err
 		}
@@ -286,7 +290,7 @@ func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) error {
 
 		ms.producerLock.Lock()
 		for _, producer := range ms.producers {
-			if err := producer.Send(
+			if _, err := producer.Send(
 				spanCtx,
 				msg,
 			); err != nil {
@@ -300,6 +304,47 @@ func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) error {
 		sp.Finish()
 	}
 	return nil
+}
+
+// BroadcastMark broadcast msg pack to all producers and returns corresponding msg id
+// the returned message id serves as marking
+func (ms *mqMsgStream) BroadcastMark(msgPack *MsgPack) (map[string][]MessageID, error) {
+	ids := make(map[string][]MessageID)
+	if msgPack == nil || len(msgPack.Msgs) <= 0 {
+		return ids, errors.New("empty msgs")
+	}
+	for _, v := range msgPack.Msgs {
+		sp, spanCtx := MsgSpanFromCtx(v.TraceCtx(), v)
+
+		mb, err := v.Marshal(v)
+		if err != nil {
+			return ids, err
+		}
+
+		m, err := convertToByteArray(mb)
+		if err != nil {
+			return ids, err
+		}
+
+		msg := &mqclient.ProducerMessage{Payload: m, Properties: map[string]string{}}
+
+		trace.InjectContextToPulsarMsgProperties(sp.Context(), msg.Properties)
+
+		ms.producerLock.Lock()
+		for channel, producer := range ms.producers {
+			id, err := producer.Send(spanCtx, msg)
+			if err != nil {
+				ms.producerLock.Unlock()
+				trace.LogError(sp, err)
+				sp.Finish()
+				return ids, err
+			}
+			ids[channel] = append(ids[channel], id)
+		}
+		ms.producerLock.Unlock()
+		sp.Finish()
+	}
+	return ids, nil
 }
 
 func (ms *mqMsgStream) Consume() *MsgPack {
@@ -417,6 +462,8 @@ func (ms *mqMsgStream) Seek(msgPositions []*internalpb.MsgPosition) error {
 	}
 	return nil
 }
+
+var _ MsgStream = (*MqTtMsgStream)(nil)
 
 // MqTtMsgStream is a msgstream that contains timeticks
 type MqTtMsgStream struct {

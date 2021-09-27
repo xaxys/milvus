@@ -49,6 +49,7 @@ import (
 )
 
 const (
+	// RPCConnectionTimeout used to set the timeout for rpc request
 	RPCConnectionTimeout = 30 * time.Second
 
 	// MetricRequestsTotal used to count the num of total requests
@@ -75,7 +76,6 @@ const illegalRequestErrStr = "Illegal request"
 //  `vchan2SyncService` is a map of vchannlName to dataSyncService, so that datanode
 //  has ability to scale flowgraph.
 //  `vchan2FlushCh` holds flush-signal channels for every flowgraph.
-
 //  `clearSignal` is a signal channel for releasing the flowgraph resources.
 //  `segmentCache` stores all flushing and flushed segments.
 type DataNode struct {
@@ -157,6 +157,8 @@ func (node *DataNode) Register() error {
 	go node.StartWatchChannels(node.ctx)
 
 	Params.initMsgChannelSubName()
+	//TODO reset
+	//Params.initLogCfg()
 	log.Debug("DataNode Init",
 		zap.String("MsgChannelSubName", Params.MsgChannelSubName),
 	)
@@ -325,6 +327,7 @@ func (node *DataNode) ReleaseDataSyncService(vchanName string) {
 	log.Debug("Release flowgraph resources end", zap.String("Vchannel", vchanName))
 }
 
+// FilterThreshold is the start time ouf DataNode
 var FilterThreshold Timestamp
 
 // Start will update DataNode state to HEALTHY
@@ -548,6 +551,7 @@ func (node *DataNode) FlushSegments(ctx context.Context, req *datapb.FlushSegmen
 	return status, nil
 }
 
+// Stop will release DataNode resources and shutdown datanode
 func (node *DataNode) Stop() error {
 	node.cancel()
 
@@ -566,6 +570,7 @@ func (node *DataNode) Stop() error {
 	return nil
 }
 
+// GetTimeTickChannel currently do nothing
 func (node *DataNode) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
 	return &milvuspb.StringResponse{
 		Status: &commonpb.Status{
@@ -576,6 +581,7 @@ func (node *DataNode) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringR
 	}, nil
 }
 
+// GetStatisticsChannel currently do nothing
 func (node *DataNode) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
 	return &milvuspb.StringResponse{
 		Status: &commonpb.Status{
