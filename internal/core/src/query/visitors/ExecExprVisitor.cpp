@@ -505,7 +505,7 @@ void
 ExecExprVisitor::visit(TermExpr& expr) {
     auto child_res = call_child(*expr.child_);
     auto terms = ExecGenericValueListVisitor(expr.terms_);
-    if (terms.is_scalar()) { // terms is empty
+    if (terms.is_scalar()) {  // terms is empty
         ret_ = std::move(terms);
         return;
     }
