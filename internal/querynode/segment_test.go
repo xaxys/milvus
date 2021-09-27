@@ -183,12 +183,19 @@ func TestSegment_retrieve(t *testing.T) {
 				Expr: &planpb.Expr_TermExpr{
 					TermExpr: &planpb.TermExpr{
 						Child: &planpb.Expr{
-							Expr: &planpb.Expr_ColumnExpr{
-								ColumnExpr: &planpb.ColumnExpr{
-									ColumnInfo: &planpb.ColumnInfo{
-										FieldId:  101,
-										DataType: schemapb.DataType_Int32,
+							Expr: &planpb.Expr_CastExpr{
+								CastExpr: &planpb.CastExpr{
+									Child: &planpb.Expr{
+										Expr: &planpb.Expr_ColumnExpr{
+											ColumnExpr: &planpb.ColumnExpr{
+												ColumnInfo: &planpb.ColumnInfo{
+													FieldId:  101,
+													DataType: schemapb.DataType_Int32,
+												},
+											},
+										},
 									},
+									DataType: schemapb.DataType_Int64,
 								},
 							},
 						},

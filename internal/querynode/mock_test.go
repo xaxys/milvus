@@ -981,21 +981,42 @@ func genSimpleSearchPlanAndRequests() (*SearchPlan, []*searchRequest, error) {
 }
 
 func genSimpleRetrievePlanExpr() ([]byte, error) {
+	child := &planpb.Expr{
+		Expr: &planpb.Expr_ColumnExpr{
+			ColumnExpr: &planpb.ColumnExpr{
+				ColumnInfo: &planpb.ColumnInfo{
+					FieldId:  simpleConstField.id,
+					DataType: simpleConstField.dataType,
+				},
+			},
+		},
+	}
+	switch simpleConstField.dataType {
+	case schemapb.DataType_Int8, schemapb.DataType_Int16, schemapb.DataType_Int32:
+		child = &planpb.Expr{
+			Expr: &planpb.Expr_CastExpr{
+				CastExpr: &planpb.CastExpr{
+					Child:    child,
+					DataType: schemapb.DataType_Int64,
+				},
+			},
+		}
+	case schemapb.DataType_Float:
+		child = &planpb.Expr{
+			Expr: &planpb.Expr_CastExpr{
+				CastExpr: &planpb.CastExpr{
+					Child:    child,
+					DataType: schemapb.DataType_Double,
+				},
+			},
+		}
+	}
 	planNode := &planpb.PlanNode{
 		Node: &planpb.PlanNode_Predicates{
 			Predicates: &planpb.Expr{
 				Expr: &planpb.Expr_TermExpr{
 					TermExpr: &planpb.TermExpr{
-						Child: &planpb.Expr{
-							Expr: &planpb.Expr_ColumnExpr{
-								ColumnExpr: &planpb.ColumnExpr{
-									ColumnInfo: &planpb.ColumnInfo{
-										FieldId:  simpleConstField.id,
-										DataType: simpleConstField.dataType,
-									},
-								},
-							},
-						},
+						Child: child,
 						Values: []*planpb.GenericValue{
 							{
 								Val: &planpb.GenericValue_Int64Val{
