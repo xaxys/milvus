@@ -35,13 +35,11 @@ class MilvusSys:
 
     @property
     def simd_type(self):
-        raise NotImplementedError()
-        # TODO: get simd_type when milvus metrics implemented
-        # """get the first query node's simd type"""
-        # for node in self.nodes:
-        #     if 'QueryNode' == node.get('infos').get('type'):
-        #         return node.get('infos').get('simd_type')
-        # raise Exception("No query node found")
+        """get the first query node's simd type"""
+        for node in self.nodes:
+            if 'QueryNode' == node.get('infos').get('type'):
+                return node.get('infos').get('system_configurations').get('simd_type')
+        raise Exception("No query node found")
 
     @property
     def query_nodes(self):
@@ -72,4 +70,5 @@ class MilvusSys:
 
     @property
     def nodes(self):
+        """get all the nodes in Milvus deployment"""
         return json.loads(self.sys_info.response).get('nodes_info')

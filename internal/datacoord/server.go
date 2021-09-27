@@ -236,8 +236,13 @@ func (s *Server) Start() error {
 	if err := helper.Execute(); err != nil {
 		return err
 	}
+
+	Params.CreatedTime = time.Now()
+	Params.UpdatedTime = time.Now()
+
 	atomic.StoreInt64(&s.isServing, ServerStateHealthy)
 	log.Debug("dataCoordinator startup success")
+
 	return nil
 }
 
@@ -626,9 +631,10 @@ func (s *Server) loadCollectionFromRootCoord(ctx context.Context, collectionID i
 		return err
 	}
 	collInfo := &datapb.CollectionInfo{
-		ID:         resp.CollectionID,
-		Schema:     resp.Schema,
-		Partitions: presp.PartitionIDs,
+		ID:             resp.CollectionID,
+		Schema:         resp.Schema,
+		Partitions:     presp.PartitionIDs,
+		StartPositions: resp.GetStartPositions(),
 	}
 	s.meta.AddCollection(collInfo)
 	return nil

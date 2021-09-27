@@ -923,7 +923,7 @@ func (it *insertTask) _assignSegmentID(stream msgstream.MsgStream, pack *msgstre
 		size += int(unsafe.Sizeof(msg.CollectionID))
 		size += int(unsafe.Sizeof(msg.PartitionID))
 		size += int(unsafe.Sizeof(msg.SegmentID))
-		size += int(unsafe.Sizeof(msg.ChannelID))
+		size += int(unsafe.Sizeof(msg.ShardName))
 		size += int(unsafe.Sizeof(msg.Timestamps))
 		size += int(unsafe.Sizeof(msg.RowIDs))
 		return size
@@ -962,8 +962,7 @@ func (it *insertTask) _assignSegmentID(stream msgstream.MsgStream, pack *msgstre
 					CollectionName: collectionName,
 					PartitionName:  partitionName,
 					SegmentID:      segmentID,
-					// todo rename to ChannelName
-					ChannelID: channelNames[key],
+					ShardName:      channelNames[key],
 				}
 				insertMsg := &msgstream.InsertMsg{
 					BaseMsg: msgstream.BaseMsg{
@@ -2348,21 +2347,15 @@ func (qt *queryTask) Execute(ctx context.Context) error {
 	}
 	msgPack.Msgs[0] = tsMsg
 
-	collectionName := qt.query.CollectionName
-	collID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
+	stream, err := qt.chMgr.getDQLStream(qt.CollectionID)
 	if err != nil {
-		return err
-	}
-
-	stream, err := qt.chMgr.getDQLStream(collID)
-	if err != nil {
-		err = qt.chMgr.createDQLStream(collID)
+		err = qt.chMgr.createDQLStream(qt.CollectionID)
 		if err != nil {
 			qt.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 			qt.result.Status.Reason = err.Error()
 			return err
 		}
-		stream, err = qt.chMgr.getDQLStream(collID)
+		stream, err = qt.chMgr.getDQLStream(qt.CollectionID)
 		if err != nil {
 			qt.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 			qt.result.Status.Reason = err.Error()

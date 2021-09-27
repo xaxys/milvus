@@ -12,12 +12,11 @@
 package indexcoord
 
 import (
-	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 )
 
@@ -37,7 +36,8 @@ type ParamTable struct {
 	MinIOUseSSL          bool
 	MinioBucketName      string
 
-	Log log.Config
+	CreatedTime time.Time
+	UpdatedTime time.Time
 }
 
 var Params ParamTable
@@ -144,27 +144,5 @@ func (pt *ParamTable) initMinioBucketName() {
 }
 
 func (pt *ParamTable) initLogCfg() {
-	pt.Log = log.Config{}
-	format, err := pt.Load("log.format")
-	if err != nil {
-		panic(err)
-	}
-	pt.Log.Format = format
-	level, err := pt.Load("log.level")
-	if err != nil {
-		panic(err)
-	}
-	pt.Log.Level = level
-	pt.Log.File.MaxSize = pt.ParseInt("log.file.maxSize")
-	pt.Log.File.MaxBackups = pt.ParseInt("log.file.maxBackups")
-	pt.Log.File.MaxDays = pt.ParseInt("log.file.maxAge")
-	rootPath, err := pt.Load("log.file.rootPath")
-	if err != nil {
-		panic(err)
-	}
-	if len(rootPath) != 0 {
-		pt.Log.File.Filename = path.Join(rootPath, "indexcoord.log")
-	} else {
-		pt.Log.File.Filename = ""
-	}
+	pt.InitLogCfg("indexcoord", 0)
 }

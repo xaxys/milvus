@@ -51,6 +51,21 @@ type DataCoord interface {
 	Component
 	TimeTickProvider
 
+	// Flush notifies DataCoord to flush all current growing segments of specified Collection
+	// ctx is the context to control request deadline and cancelation
+	// req contains the request params, which are database name(not used for now) and collection id
+	//
+	// response struct `FlushResponse` contains related db & collection meta
+	// and the affected segment ids
+	// error is returned only when some communication issue occurs
+	// if some error occurs in the process of `Flush`, it will be recorded and returned in `Status` field of response
+	//
+	// `Flush` returns when all growing segments of specified collection is "sealed"
+	// the flush procedure will wait corresponding data node(s) proceeds to the safe timestamp
+	// and the `Flush` operation will be truly invoked
+	// If the Datacoord or Datanode crashes in the flush procedure, recovery process will replay the ts check until all requirement is met
+	//
+	// Flushed segments can be check via `GetFlushedSegments` API
 	Flush(ctx context.Context, req *datapb.FlushRequest) (*datapb.FlushResponse, error)
 
 	AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest) (*datapb.AssignSegmentIDResponse, error)
@@ -141,7 +156,31 @@ type RootCoordComponent interface {
 type Proxy interface {
 	Component
 
+	// InvalidateCollectionMetaCache notifies Proxy to clear all the meta cache of specific collection.
+	//
+	// InvalidateCollectionMetaCache should be called when there are any meta changes in specific collection.
+	// Such as `DropCollection`, `CreatePartition`, `DropPartition`, etc.
+	//
+	// ctx is the request to control request deadline and cancellation.
+	// request contains the request params, which are database name(not used now) and collection name.
+	//
+	// InvalidateCollectionMetaCache should always succeed even though the specific collection doesn't exist in Proxy.
+	// So the code of response `Status` should be always `Success`.
+	//
+	// error is returned only when some communication issue occurs.
 	InvalidateCollectionMetaCache(ctx context.Context, request *proxypb.InvalidateCollMetaCacheRequest) (*commonpb.Status, error)
+
+	// ReleaseDQLMessageStream notifies Proxy to release and close the search message stream of specific collection.
+	//
+	// ReleaseDQLMessageStream should be called when the specific collection was released.
+	//
+	// ctx is the request to control request deadline and cancellation.
+	// request contains the request params, which are database id(not used now) and collection id.
+	//
+	// ReleaseDQLMessageStream should always succeed even though the specific collection doesn't exist in Proxy.
+	// So the code of response `Status` should be always `Success`.
+	//
+	// error is returned only when some communication issue occurs.
 	ReleaseDQLMessageStream(ctx context.Context, in *proxypb.ReleaseDQLMessageStreamRequest) (*commonpb.Status, error)
 
 	//TODO: move to milvus service

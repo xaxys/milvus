@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -44,12 +45,21 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+// QueryNode communicates with outside services and union all
+// services in querynode package.
+//
+// QueryNode implements `types.Component`, `types.QueryNode` interfaces.
+//  `rootCoord` is a grpc client of root coordinator.
+//  `indexCoord` is a grpc client of index coordinator.
+//  `stateCode` is current statement of this query node, indicating whether it's healthy.
 type QueryNode struct {
 	queryNodeLoopCtx    context.Context
 	queryNodeLoopCancel context.CancelFunc
 
 	stateCode atomic.Value
 
+	//call once
+	initOnce sync.Once
 	// liveness channel with etcd
 	liveCh <-chan bool
 
@@ -73,6 +83,7 @@ type QueryNode struct {
 	etcdKV  *etcdkv.EtcdKV
 }
 
+// NewQueryNode will return a QueryNode with abnormal state.
 func NewQueryNode(ctx context.Context, factory msgstream.Factory) *QueryNode {
 	ctx1, cancel := context.WithCancel(ctx)
 	node := &QueryNode{
@@ -99,6 +110,8 @@ func (node *QueryNode) Register() error {
 
 	// This param needs valid QueryNodeID
 	Params.initMsgChannelSubName()
+	//TODO Reset the logger
+	//Params.initLogCfg()
 	return nil
 }
 
@@ -116,41 +129,51 @@ func (node *QueryNode) InitSegcore() {
 }
 
 func (node *QueryNode) Init() error {
-	//ctx := context.Background()
-	connectEtcdFn := func() error {
-		etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
-		if err != nil {
+	var initError error = nil
+	node.initOnce.Do(func() {
+		//ctx := context.Background()
+		connectEtcdFn := func() error {
+			etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
+			if err != nil {
+				return err
+			}
+			node.etcdKV = etcdKV
 			return err
 		}
-		node.etcdKV = etcdKV
-		return err
-	}
-	log.Debug("queryNode try to connect etcd")
-	err := retry.Do(node.queryNodeLoopCtx, connectEtcdFn, retry.Attempts(300))
-	if err != nil {
-		log.Debug("queryNode try to connect etcd failed", zap.Error(err))
-		return err
-	}
-	log.Debug("queryNode try to connect etcd success")
+		log.Debug("queryNode try to connect etcd",
+			zap.Any("EtcdEndpoints", Params.EtcdEndpoints),
+			zap.Any("MetaRootPath", Params.MetaRootPath),
+		)
+		err := retry.Do(node.queryNodeLoopCtx, connectEtcdFn, retry.Attempts(300))
+		if err != nil {
+			log.Debug("queryNode try to connect etcd failed", zap.Error(err))
+			initError = err
+			return
+		}
+		log.Debug("queryNode try to connect etcd success",
+			zap.Any("EtcdEndpoints", Params.EtcdEndpoints),
+			zap.Any("MetaRootPath", Params.MetaRootPath),
+		)
 
-	node.historical = newHistorical(node.queryNodeLoopCtx,
-		node.rootCoord,
-		node.indexCoord,
-		node.msFactory,
-		node.etcdKV)
-	node.streaming = newStreaming(node.queryNodeLoopCtx, node.msFactory, node.etcdKV)
+		node.historical = newHistorical(node.queryNodeLoopCtx,
+			node.rootCoord,
+			node.indexCoord,
+			node.msFactory,
+			node.etcdKV)
+		node.streaming = newStreaming(node.queryNodeLoopCtx, node.msFactory, node.etcdKV)
 
-	node.InitSegcore()
+		node.InitSegcore()
 
-	if node.rootCoord == nil {
-		log.Error("null root coordinator detected")
-	}
+		if node.rootCoord == nil {
+			log.Error("null root coordinator detected")
+		}
 
-	if node.indexCoord == nil {
-		log.Error("null index coordinator detected")
-	}
+		if node.indexCoord == nil {
+			log.Error("null index coordinator detected")
+		}
+	})
 
-	return nil
+	return initError
 }
 
 func (node *QueryNode) Start() error {

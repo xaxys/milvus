@@ -51,10 +51,9 @@ type (
 type insertBufferNode struct {
 	BaseNode
 	channelName  string
-	insertBuffer *insertBuffer
-	// insertBuffer map[UniqueID]*BufferData // SegmentID to BufferData
-	replica     Replica
-	idAllocator allocatorInterface
+	insertBuffer sync.Map // SegmentID to BufferData
+	replica      Replica
+	idAllocator  allocatorInterface
 
 	flushMap         sync.Map
 	flushChan        <-chan *flushMsg
@@ -83,71 +82,44 @@ type segmentFlushUnit struct {
 }
 
 // BufferData buffers insert data, monitoring buffer size and limit
+// size and limit both indicate numOfRows
 type BufferData struct {
 	buffer *InsertData
 	size   int64
-	limit  int64 // Num of rows
+	limit  int64
 }
 
+// newBufferData needs an input dimension to calculate the limit of this buffer
+//
+// `limit` is the segment numOfRows a buffer can buffer at most.
+//
+// For a float32 vector field:
+//  limit = 16 * 2^20 Byte [By default] / (dimension * 4 Byte)
+//
+// For a binary vector field:
+//  limit = 16 * 2^20 Byte [By default]/ (dimension / 8 Byte)
+//
+// But since the buffer of binary vector fields is larger than the float32 one
+//   with the same dimension, newBufferData takes the smaller buffer limit
+//   to fit in both types of vector fields
+//
+// * This need to change for string field support and multi-vector fields support.
 func newBufferData(dimension int64) (*BufferData, error) {
 	if dimension == 0 {
 		return nil, errors.New("Invalid dimension")
 	}
 
-	limit := Params.FlushInsertBufferSize * (1 << 18) / dimension
+	limit := Params.FlushInsertBufferSize / (dimension * 4)
 
-	return &BufferData{&InsertData{}, 0, limit}, nil
+	return &BufferData{&InsertData{Data: make(map[UniqueID]storage.FieldData)}, 0, limit}, nil
 }
 
-type insertBuffer struct {
-	insertData map[UniqueID]*InsertData // SegmentID to InsertData
-	maxSize    int64
+func (bd *BufferData) effectiveCap() int64 {
+	return bd.limit - bd.size
 }
 
-func (ib *insertBuffer) size(segmentID UniqueID) int64 {
-	if ib.insertData == nil || len(ib.insertData) <= 0 {
-		return 0
-	}
-	idata, ok := ib.insertData[segmentID]
-	if !ok {
-		return 0
-	}
-
-	var maxSize int64 = 0
-	for _, data := range idata.Data {
-		fdata, ok := data.(*storage.FloatVectorFieldData)
-		if ok {
-			totalNumRows := int64(0)
-			if fdata.NumRows != nil {
-				for _, numRow := range fdata.NumRows {
-					totalNumRows += numRow
-				}
-			}
-			if totalNumRows > maxSize {
-				maxSize = totalNumRows
-			}
-		}
-
-		bdata, ok := data.(*storage.BinaryVectorFieldData)
-		if ok {
-			totalNumRows := int64(0)
-			if bdata.NumRows != nil {
-				for _, numRow := range bdata.NumRows {
-					totalNumRows += numRow
-				}
-			}
-			if totalNumRows > maxSize {
-				maxSize = totalNumRows
-			}
-		}
-
-	}
-	return maxSize
-}
-
-func (ib *insertBuffer) full(segmentID UniqueID) bool {
-	log.Debug("Segment size", zap.Any("segment", segmentID), zap.Int64("size", ib.size(segmentID)), zap.Int64("maxsize", ib.maxSize))
-	return ib.size(segmentID) >= ib.maxSize
+func (bd *BufferData) updateSize(no int64) {
+	bd.size += no
 }
 
 func (ibNode *insertBufferNode) Name() string {
@@ -165,7 +137,6 @@ func (ibNode *insertBufferNode) Close() {
 }
 
 func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
-
 	// log.Debug("InsertBufferNode Operating")
 
 	if len(in) != 1 {
@@ -173,36 +144,36 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 		return []Msg{}
 	}
 
-	iMsg, ok := in[0].(*insertMsg)
+	fgMsg, ok := in[0].(*flowGraphMsg)
 	if !ok {
-		log.Error("type assertion failed for insertMsg")
+		log.Error("type assertion failed for flowGraphMsg")
 		ibNode.Close()
 		return []Msg{}
 	}
 
 	var spans []opentracing.Span
-	for _, msg := range iMsg.insertMessages {
+	for _, msg := range fgMsg.insertMessages {
 		sp, ctx := trace.StartSpanFromContext(msg.TraceCtx())
 		spans = append(spans, sp)
 		msg.SetTraceCtx(ctx)
 	}
 
 	// replace pchannel with vchannel
-	startPositions := make([]*internalpb.MsgPosition, 0, len(iMsg.startPositions))
-	for idx := range iMsg.startPositions {
-		pos := proto.Clone(iMsg.startPositions[idx]).(*internalpb.MsgPosition)
+	startPositions := make([]*internalpb.MsgPosition, 0, len(fgMsg.startPositions))
+	for idx := range fgMsg.startPositions {
+		pos := proto.Clone(fgMsg.startPositions[idx]).(*internalpb.MsgPosition)
 		pos.ChannelName = ibNode.channelName
 		startPositions = append(startPositions, pos)
 	}
-	endPositions := make([]*internalpb.MsgPosition, 0, len(iMsg.endPositions))
-	for idx := range iMsg.endPositions {
-		pos := proto.Clone(iMsg.endPositions[idx]).(*internalpb.MsgPosition)
+	endPositions := make([]*internalpb.MsgPosition, 0, len(fgMsg.endPositions))
+	for idx := range fgMsg.endPositions {
+		pos := proto.Clone(fgMsg.endPositions[idx]).(*internalpb.MsgPosition)
 		pos.ChannelName = ibNode.channelName
 		endPositions = append(endPositions, pos)
 	}
 
 	// Updating segment statistics in replica
-	seg2Upload, err := ibNode.updateSegStatesInReplica(iMsg.insertMessages, startPositions[0], endPositions[0])
+	seg2Upload, err := ibNode.updateSegStatesInReplica(fgMsg.insertMessages, startPositions[0], endPositions[0])
 	if err != nil {
 		log.Warn("update segment states in Replica wrong", zap.Error(err))
 		return []Msg{}
@@ -216,25 +187,33 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 	}
 
 	// insert messages -> buffer
-	for _, msg := range iMsg.insertMessages {
+	for _, msg := range fgMsg.insertMessages {
 		err := ibNode.bufferInsertMsg(msg, endPositions[0])
 		if err != nil {
 			log.Warn("msg to buffer failed", zap.Error(err))
 		}
 	}
 
-	// TODO GOOSE: log updated segments' states
-	if len(iMsg.insertMessages) > 0 {
-		log.Debug("---insert buffer status---")
-		var stopSign int = 0
-		for k := range ibNode.insertBuffer.insertData {
-			if stopSign >= 10 {
-				log.Debug("......")
-				break
-			}
-			log.Debug("seg buffer status", zap.Int64("segmentID", k), zap.Int64("buffer size", ibNode.insertBuffer.size(k)))
-			stopSign++
+	// Find and return the smaller input
+	min := func(former, latter int) (smaller int) {
+		if former <= latter {
+			return former
 		}
+		return latter
+	}
+
+	displaySize := min(10, len(seg2Upload))
+
+	for k, segID := range seg2Upload[:displaySize] {
+		bd, ok := ibNode.insertBuffer.Load(segID)
+		if !ok {
+			continue
+		}
+
+		log.Debug("insert seg buffer status", zap.Int("No.", k),
+			zap.Int64("segmentID", segID),
+			zap.Int64("buffer size", bd.(*BufferData).size),
+			zap.Int64("buffer limit", bd.(*BufferData).limit))
 	}
 
 	// Auto Flush
@@ -242,18 +221,20 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 	finishCnt := sync.WaitGroup{}
 	for _, segToFlush := range seg2Upload {
 		// If full, auto flush
-		if ibNode.insertBuffer.full(segToFlush) {
-			log.Debug(". Insert Buffer full, auto flushing ",
-				zap.Int64("num of rows", ibNode.insertBuffer.size(segToFlush)))
+		if bd, ok := ibNode.insertBuffer.Load(segToFlush); ok && bd.(*BufferData).effectiveCap() <= 0 {
 
-			collMeta, err := ibNode.getCollMetabySegID(segToFlush, iMsg.timeRange.timestampMax)
+			// Move data from insertBuffer to flushBuffer
+			ibuffer := bd.(*BufferData)
+			ibNode.flushMap.Store(segToFlush, ibuffer.buffer)
+			ibNode.insertBuffer.Delete(segToFlush)
+
+			log.Debug(". Insert Buffer full, auto flushing ", zap.Int64("num of rows", ibuffer.size))
+
+			collMeta, err := ibNode.getCollMetabySegID(segToFlush, fgMsg.timeRange.timestampMax)
 			if err != nil {
 				log.Error("Auto flush failed .. cannot get collection meta ..", zap.Error(err))
 				continue
 			}
-
-			ibNode.flushMap.Store(segToFlush, ibNode.insertBuffer.insertData[segToFlush])
-			delete(ibNode.insertBuffer.insertData, segToFlush)
 
 			collID, partitionID, err := ibNode.getCollectionandPartitionIDbySegID(segToFlush)
 			if err != nil {
@@ -289,7 +270,12 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 			zap.Int64("collectionID", fmsg.collectionID),
 		)
 
-		if ibNode.insertBuffer.size(currentSegID) <= 0 {
+		bd, ok := ibNode.insertBuffer.Load(currentSegID)
+		if !ok {
+			break
+		}
+
+		if bd.(*BufferData).size <= 0 { // Buffer empty
 			log.Debug(".. Buffer empty ...")
 			ibNode.dsSaveBinlog(&segmentFlushUnit{
 				collID:     fmsg.collectionID,
@@ -299,12 +285,14 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 				flushed:    true,
 			})
 			ibNode.replica.segmentFlushed(currentSegID)
-		} else { //insertBuffer(not empty) -> binLogs -> minIO/S3
+		} else { // Buffer not empty
 			log.Debug(".. Buffer not empty, flushing ..")
 			finishCh := make(chan segmentFlushUnit, 1)
 
-			ibNode.flushMap.Store(currentSegID, ibNode.insertBuffer.insertData[currentSegID])
-			delete(ibNode.insertBuffer.insertData, currentSegID)
+			// Since buffer is not empty, so there must be data for key currentSegID
+			bd, _ := ibNode.insertBuffer.LoadAndDelete(currentSegID)
+
+			ibNode.flushMap.Store(currentSegID, bd.(*BufferData).buffer)
 			clearFn := func() {
 				finishCh <- segmentFlushUnit{field2Path: nil}
 				log.Debug(".. Clearing flush Buffer ..")
@@ -320,7 +308,7 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 				// TODO add error handling
 			}
 
-			collMeta, err := ibNode.getCollMetabySegID(currentSegID, iMsg.timeRange.timestampMax)
+			collMeta, err := ibNode.getCollMetabySegID(currentSegID, fgMsg.timeRange.timestampMax)
 			if err != nil {
 				log.Error("Flush failed .. cannot get collection schema ..", zap.Error(err))
 				clearFn()
@@ -347,7 +335,7 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 	default:
 	}
 
-	if err := ibNode.writeHardTimeTick(iMsg.timeRange.timestampMax); err != nil {
+	if err := ibNode.writeHardTimeTick(fgMsg.timeRange.timestampMax); err != nil {
 		log.Error("send hard time tick into pulsar channel failed", zap.Error(err))
 	}
 
@@ -367,14 +355,14 @@ func (ibNode *insertBufferNode) updateSegStatesInReplica(insertMsgs []*msgstream
 		partitionID := msg.GetPartitionID()
 
 		if !ibNode.replica.hasSegment(currentSegID, true) {
-			err = ibNode.replica.addNewSegment(currentSegID, collID, partitionID, msg.GetChannelID(),
+			err = ibNode.replica.addNewSegment(currentSegID, collID, partitionID, msg.GetShardName(),
 				startPos, endPos)
 			if err != nil {
 				log.Error("add segment wrong",
 					zap.Int64("segID", currentSegID),
 					zap.Int64("collID", collID),
 					zap.Int64("partID", partitionID),
-					zap.String("chanName", msg.GetChannelID()),
+					zap.String("chanName", msg.GetShardName()),
 					zap.Error(err))
 				return
 			}
@@ -406,19 +394,41 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 	currentSegID := msg.GetSegmentID()
 	collectionID := msg.GetCollectionID()
 
-	idata, ok := ibNode.insertBuffer.insertData[currentSegID]
-	if !ok {
-		idata = &InsertData{
-			Data: make(map[UniqueID]storage.FieldData),
-		}
-	}
-
-	// 1.1 Get Collection Schema
 	collSchema, err := ibNode.replica.getCollectionSchema(collectionID, msg.EndTs())
 	if err != nil {
 		log.Error("Get schema wrong:", zap.Error(err))
 		return err
 	}
+
+	// Get Dimension
+	// TODO GOOSE: under assumption that there's only 1 Vector field in one collection schema
+	var dimension int
+	for _, field := range collSchema.Fields {
+		if field.DataType == schemapb.DataType_FloatVector ||
+			field.DataType == schemapb.DataType_BinaryVector {
+
+			for _, t := range field.TypeParams {
+				if t.Key == "dim" {
+					dimension, err = strconv.Atoi(t.Value)
+					if err != nil {
+						log.Error("strconv wrong on get dim", zap.Error(err))
+						return err
+					}
+					break
+				}
+			}
+			break
+		}
+	}
+
+	newbd, err := newBufferData(int64(dimension))
+	if err != nil {
+		return err
+	}
+	bd, _ := ibNode.insertBuffer.LoadOrStore(currentSegID, newbd)
+
+	buffer := bd.(*BufferData)
+	idata := buffer.buffer
 
 	// 1.2 Get Fields
 	var pos int = 0 // Record position of blob
@@ -438,13 +448,10 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 					dim, err = strconv.Atoi(t.Value)
 					if err != nil {
 						log.Error("strconv wrong on get dim", zap.Error(err))
+						break
 					}
 					break
 				}
-			}
-			if dim <= 0 {
-				log.Error("invalid dim")
-				continue
 			}
 
 			if _, ok := idata.Data[field.FieldID]; !ok {
@@ -476,14 +483,11 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 				if t.Key == "dim" {
 					dim, err = strconv.Atoi(t.Value)
 					if err != nil {
-						log.Error("strconv wrong")
+						log.Error("strconv wrong on get dim", zap.Error(err))
+						return err
 					}
 					break
 				}
-			}
-			if dim <= 0 {
-				log.Error("invalid dim")
-				continue
 			}
 
 			if _, ok := idata.Data[field.FieldID]; !ok {
@@ -637,8 +641,11 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 		}
 	}
 
-	// 1.3 store in buffer
-	ibNode.insertBuffer.insertData[currentSegID] = idata
+	// update buffer size
+	buffer.updateSize(int64(len(msg.RowData)))
+
+	// store in buffer
+	ibNode.insertBuffer.Store(currentSegID, buffer)
 
 	// store current endPositions as Segment->EndPostion
 	ibNode.replica.updateSegmentEndPosition(currentSegID, endPos)
@@ -865,12 +872,6 @@ func newInsertBufferNode(
 	baseNode.SetMaxQueueLength(maxQueueLength)
 	baseNode.SetMaxParallelism(maxParallelism)
 
-	maxSize := Params.FlushInsertBufferSize
-	iBuffer := &insertBuffer{
-		insertData: make(map[UniqueID]*InsertData),
-		maxSize:    maxSize,
-	}
-
 	// MinIO
 	option := &miniokv.Option{
 		Address:           Params.MinioAddress,
@@ -908,7 +909,7 @@ func newInsertBufferNode(
 
 	return &insertBufferNode{
 		BaseNode:     baseNode,
-		insertBuffer: iBuffer,
+		insertBuffer: sync.Map{},
 		minIOKV:      minIOKV,
 		channelName:  channelName,
 

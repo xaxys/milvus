@@ -62,7 +62,6 @@ type Proxy struct {
 	chMgr channelsMgr
 
 	sched *taskScheduler
-	tick  *timeTick
 
 	chTicker channelsTimeTicker
 
@@ -101,6 +100,8 @@ func (node *Proxy) Register() error {
 	node.session.Init(typeutil.ProxyRole, Params.NetworkAddress, false)
 	Params.ProxyID = node.session.ServerID
 	Params.initProxySubName()
+	// TODO Reset the logger
+	//Params.initLogCfg()
 	return nil
 }
 
@@ -196,8 +197,6 @@ func (node *Proxy) Init() error {
 	if err != nil {
 		return err
 	}
-
-	node.tick = newTimeTick(node.ctx, node.tsoAllocator, time.Millisecond*200, node.sched.TaskDoneTest, node.msFactory)
 
 	node.chTicker = newChannelsTimeTicker(node.ctx, channelMgrTickerInterval, []string{}, node.sched.getPChanStatistics, tsoAllocator)
 
@@ -299,11 +298,6 @@ func (node *Proxy) Start() error {
 	}
 	log.Debug("start seg assigner ...")
 
-	if err := node.tick.Start(); err != nil {
-		return err
-	}
-	log.Debug("start time tick ...")
-
 	err = node.chTicker.start()
 	if err != nil {
 		return err
@@ -335,9 +329,6 @@ func (node *Proxy) Stop() error {
 	if node.sched != nil {
 		node.sched.Close()
 	}
-	if node.tick != nil {
-		node.tick.Close()
-	}
 	if node.chTicker != nil {
 		err := node.chTicker.close()
 		if err != nil {
@@ -360,7 +351,7 @@ func (node *Proxy) AddStartCallback(callbacks ...func()) {
 }
 
 func (node *Proxy) lastTick() Timestamp {
-	return node.tick.LastTick()
+	return node.chTicker.getMinTick()
 }
 
 // AddCloseCallback adds a callback in the Close phase.

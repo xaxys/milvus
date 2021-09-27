@@ -13,6 +13,7 @@ package msgstream
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand"
 	"os"
@@ -42,6 +43,51 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
+func Test_NewMqMsgStream(t *testing.T) {
+	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	factory := &ProtoUDFactory{}
+	pulsarClient, err := mqclient.GetPulsarClientInstance(pulsar.ClientOptions{URL: pulsarAddress})
+	assert.Nil(t, err)
+
+	rocksdbName := "/tmp/rocksmq_unittest_" + t.Name()
+	endpoints := os.Getenv("ETCD_ENDPOINTS")
+	if endpoints == "" {
+		endpoints = "localhost:2379"
+	}
+	etcdEndpoints := strings.Split(endpoints, ",")
+	etcdKV, err := etcdkv.NewEtcdKV(etcdEndpoints, "/etcd/test/root")
+	if err != nil {
+		log.Fatalf("New clientv3 error = %v", err)
+	}
+	idAllocator := allocator.NewGlobalIDAllocator("dummy", etcdKV)
+	_ = idAllocator.Initialize()
+	err = rocksmq.InitRmq(rocksdbName, idAllocator)
+	if err != nil {
+		log.Fatalf("InitRmq error = %v", err)
+	}
+
+	rmqClient, _ := mqclient.NewRmqClient(client.ClientOptions{Server: rocksmq.Rmq})
+
+	parameters := []struct {
+		client mqclient.Client
+	}{
+		{pulsarClient}, {rmqClient},
+	}
+
+	for i := range parameters {
+		func(client mqclient.Client) {
+			_, err := NewMqMsgStream(context.Background(), 100, 100, client, factory.NewUnmarshalDispatcher())
+			assert.Nil(t, err)
+		}(parameters[i].client)
+	}
+
+	rocksmq.CloseRocksMQ()
+	etcdKV.Close()
+	_ = os.RemoveAll(rocksdbName)
+	_ = os.RemoveAll(rocksdbName + "_meta_kv")
+}
+
+/* ========================== Pulsar & RocksMQ Tests ========================== */
 func TestStream_PulsarMsgStream_Insert(t *testing.T) {
 	pulsarAddress, _ := Params.Load("_PulsarAddress")
 	c1, c2 := funcutil.RandomString(8), funcutil.RandomString(8)
@@ -222,7 +268,7 @@ func TestStream_PulsarMsgStream_InsertRepackFunc(t *testing.T) {
 		CollectionName: "Collection",
 		PartitionName:  "Partition",
 		SegmentID:      1,
-		ChannelID:      "1",
+		ShardName:      "1",
 		Timestamps:     []Timestamp{1, 1},
 		RowIDs:         []int64{1, 3},
 		RowData:        []*commonpb.Blob{{}, {}},
@@ -257,59 +303,59 @@ func TestStream_PulsarMsgStream_InsertRepackFunc(t *testing.T) {
 	(*outputStream).Close()
 }
 
-//func TestStream_PulsarMsgStream_DeleteRepackFunc(t *testing.T) {
-//	pulsarAddress, _ := Params.Load("_PulsarAddress")
-//	c1, c2 := funcutil.RandomString(8), funcutil.RandomString(8)
-//	producerChannels := []string{c1, c2}
-//	consumerChannels := []string{c1, c2}
-//	consumerSubName := funcutil.RandomString(8)
-//
-//	baseMsg := BaseMsg{
-//		BeginTimestamp: 0,
-//		EndTimestamp:   0,
-//		HashValues:     []uint32{1, 3},
-//	}
-//
-//	deleteRequest := internalpb.DeleteRequest{
-//		Base: &commonpb.MsgBase{
-//			MsgType:   commonpb.MsgType_Delete,
-//			MsgID:     1,
-//			Timestamp: 1,
-//			SourceID:  1,
-//		},
-//		CollectionName: "Collection",
-//		ChannelID:      "1",
-//		Timestamps:     []Timestamp{1, 1},
-//		PrimaryKeys:    []int64{1, 3},
-//	}
-//	deleteMsg := &DeleteMsg{
-//		BaseMsg:       baseMsg,
-//		DeleteRequest: deleteRequest,
-//	}
-//
-//	msgPack := MsgPack{}
-//	msgPack.Msgs = append(msgPack.Msgs, deleteMsg)
-//
-//	factory := ProtoUDFactory{}
-//	pulsarClient, _ := mqclient.GetPulsarClientInstance(pulsar.ClientOptions{URL: pulsarAddress})
-//	inputStream, _ := NewMqMsgStream(context.Background(), 100, 100, pulsarClient, factory.NewUnmarshalDispatcher())
-//	inputStream.AsProducer(producerChannels)
-//	inputStream.Start()
-//
-//	pulsarClient2, _ := mqclient.GetPulsarClientInstance(pulsar.ClientOptions{URL: pulsarAddress})
-//	outputStream, _ := NewMqMsgStream(context.Background(), 100, 100, pulsarClient2, factory.NewUnmarshalDispatcher())
-//	outputStream.AsConsumer(consumerChannels, consumerSubName)
-//	outputStream.Start()
-//	var output MsgStream = outputStream
-//
-//	err := (*inputStream).Produce(&msgPack)
-//	if err != nil {
-//		log.Fatalf("produce error = %v", err)
-//	}
-//	receiveMsg(output, len(msgPack.Msgs)*2)
-//	(*inputStream).Close()
-//	(*outputStream).Close()
-//}
+func TestStream_PulsarMsgStream_DeleteRepackFunc(t *testing.T) {
+	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	c1, c2 := funcutil.RandomString(8), funcutil.RandomString(8)
+	producerChannels := []string{c1, c2}
+	consumerChannels := []string{c1, c2}
+	consumerSubName := funcutil.RandomString(8)
+
+	baseMsg := BaseMsg{
+		BeginTimestamp: 0,
+		EndTimestamp:   0,
+		HashValues:     []uint32{1},
+	}
+
+	deleteRequest := internalpb.DeleteRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_Delete,
+			MsgID:     1,
+			Timestamp: 1,
+			SourceID:  1,
+		},
+		CollectionName: "Collection",
+		ShardName:      "chan-1",
+		Timestamp:      Timestamp(1),
+		PrimaryKeys:    []int64{},
+	}
+	deleteMsg := &DeleteMsg{
+		BaseMsg:       baseMsg,
+		DeleteRequest: deleteRequest,
+	}
+
+	msgPack := MsgPack{}
+	msgPack.Msgs = append(msgPack.Msgs, deleteMsg)
+
+	factory := ProtoUDFactory{}
+	pulsarClient, _ := mqclient.GetPulsarClientInstance(pulsar.ClientOptions{URL: pulsarAddress})
+	inputStream, _ := NewMqMsgStream(context.Background(), 100, 100, pulsarClient, factory.NewUnmarshalDispatcher())
+	inputStream.AsProducer(producerChannels)
+	inputStream.Start()
+
+	pulsarClient2, _ := mqclient.GetPulsarClientInstance(pulsar.ClientOptions{URL: pulsarAddress})
+	outputStream, _ := NewMqMsgStream(context.Background(), 100, 100, pulsarClient2, factory.NewUnmarshalDispatcher())
+	outputStream.AsConsumer(consumerChannels, consumerSubName)
+	outputStream.Start()
+	var output MsgStream = outputStream
+
+	err := (*inputStream).Produce(&msgPack)
+	if err != nil {
+		log.Fatalf("produce error = %v", err)
+	}
+	receiveMsg(output, len(msgPack.Msgs)*1)
+	(*inputStream).Close()
+	(*outputStream).Close()
+}
 
 func TestStream_PulsarMsgStream_DefaultRepackFunc(t *testing.T) {
 	pulsarAddress, _ := Params.Load("_PulsarAddress")
@@ -906,6 +952,105 @@ func TestStream_RmqTtMsgStream_Insert(t *testing.T) {
 	Close(rocksdbName, inputStream, outputStream, etcdKV)
 }
 
+func TestStream_BroadcastMark(t *testing.T) {
+	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	c1 := funcutil.RandomString(8)
+	c2 := funcutil.RandomString(8)
+	producerChannels := []string{c1, c2}
+
+	factory := ProtoUDFactory{}
+	pulsarClient, err := mqclient.GetPulsarClientInstance(pulsar.ClientOptions{URL: pulsarAddress})
+	assert.Nil(t, err)
+	outputStream, err := NewMqMsgStream(context.Background(), 100, 100, pulsarClient, factory.NewUnmarshalDispatcher())
+	assert.Nil(t, err)
+
+	// add producer channels
+	outputStream.AsProducer(producerChannels)
+	outputStream.Start()
+
+	msgPack0 := MsgPack{}
+	msgPack0.Msgs = append(msgPack0.Msgs, getTimeTickMsg(0))
+
+	ids, err := outputStream.BroadcastMark(&msgPack0)
+	assert.Nil(t, err)
+	assert.NotNil(t, ids)
+	assert.Equal(t, len(producerChannels), len(ids))
+	for _, c := range producerChannels {
+		ids, ok := ids[c]
+		assert.True(t, ok)
+		assert.Equal(t, len(msgPack0.Msgs), len(ids))
+	}
+
+	msgPack1 := MsgPack{}
+	msgPack1.Msgs = append(msgPack1.Msgs, getTsMsg(commonpb.MsgType_Insert, 1))
+	msgPack1.Msgs = append(msgPack1.Msgs, getTsMsg(commonpb.MsgType_Insert, 3))
+
+	ids, err = outputStream.BroadcastMark(&msgPack1)
+	assert.Nil(t, err)
+	assert.NotNil(t, ids)
+	assert.Equal(t, len(producerChannels), len(ids))
+	for _, c := range producerChannels {
+		ids, ok := ids[c]
+		assert.True(t, ok)
+		assert.Equal(t, len(msgPack1.Msgs), len(ids))
+	}
+
+	// edge cases
+	_, err = outputStream.BroadcastMark(nil)
+	assert.NotNil(t, err)
+
+	msgPack2 := MsgPack{}
+	msgPack2.Msgs = append(msgPack2.Msgs, &MarshalFailTsMsg{})
+	_, err = outputStream.BroadcastMark(&msgPack2)
+	assert.NotNil(t, err)
+
+	// mock send fail
+	for k, p := range outputStream.producers {
+		outputStream.producers[k] = &mockSendFailProducer{Producer: p}
+	}
+	_, err = outputStream.BroadcastMark(&msgPack1)
+	assert.NotNil(t, err)
+
+	outputStream.Close()
+
+}
+
+var _ TsMsg = (*MarshalFailTsMsg)(nil)
+
+type MarshalFailTsMsg struct {
+	BaseMsg
+}
+
+func (t *MarshalFailTsMsg) ID() UniqueID {
+	return 0
+}
+
+func (t *MarshalFailTsMsg) Type() MsgType {
+	return commonpb.MsgType_Undefined
+}
+
+func (t *MarshalFailTsMsg) SourceID() int64 {
+	return -1
+}
+
+func (t *MarshalFailTsMsg) Marshal(_ TsMsg) (MarshalType, error) {
+	return nil, errors.New("mocked error")
+}
+
+func (t *MarshalFailTsMsg) Unmarshal(_ MarshalType) (TsMsg, error) {
+	return nil, errors.New("mocked error")
+}
+
+var _ mqclient.Producer = (*mockSendFailProducer)(nil)
+
+type mockSendFailProducer struct {
+	mqclient.Producer
+}
+
+func (p *mockSendFailProducer) Send(_ context.Context, _ *mqclient.ProducerMessage) (MessageID, error) {
+	return nil, errors.New("mocked error")
+}
+
 /* ========================== Utility functions ========================== */
 func repackFunc(msgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, error) {
 	result := make(map[int32]*MsgPack)
@@ -943,7 +1088,7 @@ func getTsMsg(msgType MsgType, reqID UniqueID) TsMsg {
 			CollectionName: "Collection",
 			PartitionName:  "Partition",
 			SegmentID:      1,
-			ChannelID:      "0",
+			ShardName:      "0",
 			Timestamps:     []Timestamp{time},
 			RowIDs:         []int64{1},
 			RowData:        []*commonpb.Blob{{}},
@@ -962,7 +1107,7 @@ func getTsMsg(msgType MsgType, reqID UniqueID) TsMsg {
 				SourceID:  reqID,
 			},
 			CollectionName: "Collection",
-			ChannelID:      "1",
+			ShardName:      "1",
 			Timestamp:      Timestamp(1),
 		}
 		deleteMsg := &DeleteMsg{

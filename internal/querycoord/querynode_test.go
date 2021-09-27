@@ -70,8 +70,20 @@ func waitAllQueryNodeOffline(cluster Cluster, nodes map[int64]Node) bool {
 			return true
 		}
 		log.Debug("wait all queryNode offline")
-		time.Sleep(time.Second)
+		time.Sleep(100 * time.Millisecond)
 		reDoCount--
+	}
+}
+
+func waitQueryNodeOnline(cluster Cluster, nodeID int64) {
+	for {
+		online, err := cluster.isOnline(nodeID)
+		if err != nil {
+			continue
+		}
+		if online {
+			return
+		}
 	}
 }
 
@@ -84,11 +96,12 @@ func TestQueryNode_MultiNode_stop(t *testing.T) {
 
 	queryNode1, err := startQueryNodeServer(baseCtx)
 	assert.Nil(t, err)
+	waitQueryNodeOnline(queryCoord.cluster, queryNode1.queryNodeID)
 
-	queryNode5, err := startQueryNodeServer(baseCtx)
+	queryNode2, err := startQueryNodeServer(baseCtx)
 	assert.Nil(t, err)
+	waitQueryNodeOnline(queryCoord.cluster, queryNode2.queryNodeID)
 
-	time.Sleep(2 * time.Second)
 	queryNode1.stop()
 	err = removeNodeSession(queryNode1.queryNodeID)
 	assert.Nil(t, err)
@@ -100,7 +113,6 @@ func TestQueryNode_MultiNode_stop(t *testing.T) {
 		CollectionID: defaultCollectionID,
 		Schema:       genCollectionSchema(defaultCollectionID, false),
 	})
-	time.Sleep(2 * time.Second)
 	_, err = queryCoord.ReleaseCollection(baseCtx, &querypb.ReleaseCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_ReleaseCollection,
@@ -108,11 +120,11 @@ func TestQueryNode_MultiNode_stop(t *testing.T) {
 		CollectionID: defaultCollectionID,
 	})
 	assert.Nil(t, err)
-	time.Sleep(2 * time.Second)
+	time.Sleep(100 * time.Millisecond)
 	nodes, err := queryCoord.cluster.onlineNodes()
 	assert.Nil(t, err)
-	queryNode5.stop()
-	err = removeNodeSession(queryNode5.queryNodeID)
+	queryNode2.stop()
+	err = removeNodeSession(queryNode2.queryNodeID)
 	assert.Nil(t, err)
 
 	allNodeOffline := waitAllQueryNodeOffline(queryCoord.cluster, nodes)
@@ -131,8 +143,9 @@ func TestQueryNode_MultiNode_reStart(t *testing.T) {
 
 	queryNode1, err := startQueryNodeServer(baseCtx)
 	assert.Nil(t, err)
+	waitQueryNodeOnline(queryCoord.cluster, queryNode1.queryNodeID)
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(100 * time.Millisecond)
 	queryCoord.LoadCollection(baseCtx, &querypb.LoadCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_LoadCollection,
@@ -146,7 +159,7 @@ func TestQueryNode_MultiNode_reStart(t *testing.T) {
 	queryNode3, err := startQueryNodeServer(baseCtx)
 	assert.Nil(t, err)
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(100 * time.Millisecond)
 	_, err = queryCoord.ReleaseCollection(baseCtx, &querypb.ReleaseCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_ReleaseCollection,

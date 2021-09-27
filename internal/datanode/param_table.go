@@ -18,10 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 )
 
+// ParamTable in DataNode contains all configs for DataNode
 type ParamTable struct {
 	paramtable.BaseTable
 
@@ -34,7 +34,6 @@ type ParamTable struct {
 	FlushInsertBufferSize   int64
 	InsertBinlogRootPath    string
 	StatsBinlogRootPath     string
-	Log                     log.Config
 	Alias                   string // Different datanode in one machine
 
 	// === DataNode External Components Configs ===
@@ -71,19 +70,23 @@ type ParamTable struct {
 	UpdatedTime time.Time
 }
 
+// Params is global var in DataNode
 var Params ParamTable
 var once sync.Once
 
+// InitAlias init this DataNode alias
 func (p *ParamTable) InitAlias(alias string) {
 	p.Alias = alias
 }
 
+// InitOnce call params Init only once
 func (p *ParamTable) InitOnce() {
 	once.Do(func() {
 		p.Init()
 	})
 }
 
+// Init initializes DataNode configs
 func (p *ParamTable) Init() {
 	p.BaseTable.Init()
 	err := p.LoadYaml("advanced/data_node.yaml")
@@ -97,7 +100,6 @@ func (p *ParamTable) Init() {
 	p.initFlushInsertBufferSize()
 	p.initInsertBinlogRootPath()
 	p.initStatsBinlogRootPath()
-	p.initLogCfg()
 
 	// === DataNode External Components Configs ===
 	// --- Pulsar ---
@@ -124,6 +126,8 @@ func (p *ParamTable) Init() {
 	p.initMinioSecretAccessKey()
 	p.initMinioUseSSL()
 	p.initMinioBucketName()
+
+	p.initLogCfg()
 }
 
 // ==== DataNode internal components configs ====
@@ -143,7 +147,7 @@ func (p *ParamTable) initFlushInsertBufferSize() {
 
 func (p *ParamTable) initInsertBinlogRootPath() {
 	// GOOSE TODO: rootPath change to  TenentID
-	rootPath, err := p.Load("etcd.rootPath")
+	rootPath, err := p.Load("minio.rootPath")
 	if err != nil {
 		panic(err)
 	}
@@ -151,7 +155,7 @@ func (p *ParamTable) initInsertBinlogRootPath() {
 }
 
 func (p *ParamTable) initStatsBinlogRootPath() {
-	rootPath, err := p.Load("etcd.rootPath")
+	rootPath, err := p.Load("minio.rootPath")
 	if err != nil {
 		panic(err)
 	}
@@ -274,27 +278,5 @@ func (p *ParamTable) initMinioBucketName() {
 }
 
 func (p *ParamTable) initLogCfg() {
-	p.Log = log.Config{}
-	format, err := p.Load("log.format")
-	if err != nil {
-		panic(err)
-	}
-	p.Log.Format = format
-	level, err := p.Load("log.level")
-	if err != nil {
-		panic(err)
-	}
-	p.Log.Level = level
-	p.Log.File.MaxSize = p.ParseInt("log.file.maxSize")
-	p.Log.File.MaxBackups = p.ParseInt("log.file.maxBackups")
-	p.Log.File.MaxDays = p.ParseInt("log.file.maxAge")
-	rootPath, err := p.Load("log.file.rootPath")
-	if err != nil {
-		panic(err)
-	}
-	if len(rootPath) != 0 {
-		p.Log.File.Filename = path.Join(rootPath, "datanode"+p.Alias+".log")
-	} else {
-		p.Log.File.Filename = ""
-	}
+	p.InitLogCfg("datanode", p.NodeID)
 }
