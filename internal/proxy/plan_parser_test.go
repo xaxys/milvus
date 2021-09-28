@@ -119,29 +119,14 @@ func TestParseExpr_Naive(t *testing.T) {
 
 	t.Run("test BinaryNode invalid", func(t *testing.T) {
 		exprStrs := []string{
-			// "+"
-			"FloatField > 1 + aa",
-			"FloatField > aa + 2.0",
-			// "-"
-			"FloatField > 1 - aa",
-			"FloatField > aa - 2.0",
-			// "*"
-			"FloatField > 1 * aa",
-			"FloatField > aa * 2.0",
 			// "/"
 			"FloatField > 1 / 0",
-			"FloatField > 1 / 0.0",
-			"FloatField > 1.0 / 0",
-			"FloatField > 1.0 / 0.0",
-			"FloatField > 1 / aa",
-			"FloatField > aa / 2.0",
+			"FloatField > aa / 0",
+			"FloatField > aa / 0.0",
 			// "%"
-			"FloatField > 1 % aa",
 			"FloatField > 1 % 0",
 			"FloatField > 1 % 0.0",
-			// "**"
-			"FloatField > 1 ** aa",
-			"FloatField > aa ** 2.0",
+			"FloatField > aa % 0",
 		}
 		for _, exprStr := range exprStrs {
 			exprProto, err := parseExpr(schema, exprStr)
@@ -220,7 +205,7 @@ func TestExprPlan_Str(t *testing.T) {
 	}
 }
 
-func TestExprMultiRange_Str(t *testing.T) {
+func TestExprRange_Str(t *testing.T) {
 	exprStrs := []string{
 		"3 < FloatN < 4.0",
 		"3 < age2 < 4.0",
