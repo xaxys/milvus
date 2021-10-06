@@ -6,36 +6,53 @@ The following are a set of guidelines for contributing to Milvus. Following thes
 
 As for everything else in the project, the contributions to Milvus are governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## What contributions can I make?
+**Content**
+
+- [Contributing to Milvus](#contributing-to-milvus)
+  - [What contributions can you make?](#what-contributions-can-you-make)
+  - [How can you contribute?](#how-can-you-contribute)
+    - [Contributing code](#contributing-code)
+    - [GitHub workflow](#github-workflow)
+    - [General guidelines](#general-guidelines)
+    - [Developer Certificate of Origin (DCO)](#developer-certificate-of-origin-dco)
+  - [Coding Style](#coding-style)
+    - [Golang coding style](#golang-coding-style)
+    - [C++ coding style](#c-coding-style)
+  - [Run unit test with code coverage](#run-unit-test-with-code-coverage)
+    - [Golang](#golang)
+    - [C++](#c)
+  - [Commits and PRs](#commits-and-prs)
+
+## What contributions can you make?
 
 | Suitable for                             | Projects                                                     | Resources                                                    |
 | ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| Go developers                            | [milvus](https://github.com/milvus-io/milvus), [milvus-sdk-go](https://github.com/milvus-io/milvus-sdk-go)       |                                                              |
-| CPP developers                           | [milvus](https://github.com/milvus-io/milvus)                |                                                              |
+| Go developers                            | [milvus](https://github.com/milvus-io/milvus), [milvus-sdk-go](https://github.com/milvus-io/milvus-sdk-go)||
+| CPP developers                           | [milvus](https://github.com/milvus-io/milvus)                ||
 | Developers interested in other languages | [pymilvus](https://github.com/milvus-io/pymilvus), [milvus-sdk-node](https://github.com/milvus-io/milvus-sdk-node), [milvus-sdk-java](https://github.com/milvus-io/milvus-sdk-java) | [Contributing to PyMilvus](https://github.com/milvus-io/pymilvus/blob/master/CONTRIBUTING.md) |
-| Kubernetes enthusiasts                   | [milvus-helm](https://github.com/milvus-io/milvus-helm)      |                                                              |
+| Kubernetes enthusiasts                   | [milvus-helm](https://github.com/milvus-io/milvus-helm)      ||
 | Tech writers and docs enthusiasts        | [milvus-docs](https://github.com/milvus-io/milvus-docs)      | [Contributing to milvus docs](https://github.com/milvus-io/milvus-docs/blob/v2.0.0/CONTRIBUTING.md) |
-| Web developers                           | [milvus-insight](https://github.com/milvus-io/milvus-insight)                                                         |                                                              |
+| Web developers                           | [milvus-insight](https://github.com/zilliztech/milvus-insight)||
 
-## How can I contribute?
+## How can you contribute?
 ### Contributing code
 
 **If you encountered a bug, you can**
 - (**Recommended**) File an issue about the bug.
-- (*Optional*) Provide clear and concrete ways/scripts to reproduce the bug.
-- (*Optional*) Provide possible solutions for the bug.
-- (*Optional*) Pull a request to fix the bug.
+- Provide clear and concrete ways/scripts to reproduce the bug.
+- Provide possible solutions for the bug.
+- Pull a request to fix the bug.
 
 **If you're interested in existing issues, you can**
 - (**Recommended**) Provide answers for issue labeled `question`.
 - Provide help for issues labeled `bug`, `improvement`, and `enhancement` by
-    - (**Recommended**) Asking questions, reproducing the issue, or providing solutions.
-    - Pulling a request to fix the issue.
+    - (**Recommended**) Ask questions, reproduce the issue, or providie solutions.
+    - Pull a request to fix the issue.
 
 **If you require new feature or major enhancement, you can**
 - (**Recommended**) File an issue about the feature/enhancement with reasons.
-- (*Optional*) Provide a MEP for the feature/enhancement.
-- (*Optional*) Pull a request to implement the MEP.
+- Provide a MEP for the feature/enhancement.
+- Pull a request to implement the MEP.
 
 **If you are a reviewer/approver of Milvus, you can**
 - Participate in [PR review](CODE_REVIEW.md) process.
@@ -45,7 +62,7 @@ If you want to become a contributor of Milvus, send us your pull requests! For t
 
 All submissions will be reviewed as quickly as possible.
 There will be a reviewer to review the codes, and an approver to review everything aside the codes, see [code review](CODE_REVIEW.md) for details.
-If everything is perfect, the reviewer will label `/lgtm`, and the approver will label `/approve`. 
+If everything is perfect, the reviewer will label `/lgtm`, and the approver will label `/approve`.
 Once the 2 labels are on your PR, and all actions pass, your PR will be merged into base branch automaticaly by our @sre-ci-robot
 
 ### GitHub workflow
@@ -99,9 +116,10 @@ $ git commit -s -m 'This is my commit message'
 
 ## Coding Style
 
-Keeping a consistent style for code, code comments, commit messages, and PR descriptions will greatly accelerate your PR review process. We highly recommend you refer to and comply to the following style guides when you put together your pull requests:
+Keeping a consistent style for code, code comments, commit messages, and PR descriptions will greatly accelerate your PR review process.
+We highly recommend you refer to and comply to the following style guides when you put together your pull requests:
 
-### Go
+### Golang coding style
 - Coding style: refer to the [Effictive Go Style Guide](https://golang.org/doc/effective_go)
 
 We also use `golangci-lint` to perform code check. Run the following command before submit your pull request and make sure there is no issue reported:
@@ -109,8 +127,13 @@ We also use `golangci-lint` to perform code check. Run the following command bef
 $ make static-check
 ```
 
-###C++
-The c++ coding style used in Milvus generally follow [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html).
+To format code
+```shell
+$ make fmt
+```
+
+### C++ coding style
+The C++ coding style used in Milvus generally follows [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html).
 And we made the following changes based on the guide:
 
 -   4 spaces for indentation
@@ -118,45 +141,52 @@ And we made the following changes based on the guide:
 -   120-character line length
 -   Camel-Cased file names
 
-### Commits and PRs
-- Commit message and PR description style: refer to [good commit messages](https://chris.beams.io/posts/git-commit)
-
-### Format code
-#### Go
-```shell
-$ make fmt
-```
-
-####C++
 Install clang-format
 ```shell
 $ sudo apt-get install clang-format
-$ rm cmake_build/CMakeCache.txt
 ```
+
 Check code style
 ```shell
-$ ./build.sh -l
-```
-To format the code
-```shell
-$ cd cmake_build
-$ make clang-format
+$ make cppcheck
 ```
 
 ## Run unit test with code coverage
 Before submitting your Pull Request, make sure you have run unit test, and your code coverage rate is >= 90%.
 
-### Go
+### Golang
+
+You can run all the Golang unit tests using make.
 ```shell
-$ go test -coverprofile fmtcoverage.html  ./internal/allocator
-ok  	github.com/milvus-io/milvus/internal/allocator 0.048s	coverage: 69.6% of statements
+$ make test-go
 ```
+
+You can also run unit tests in package level.
+
+```shell
+# run unit tests in datanode package
+$ go test ./internal/datanode -cover
+ok  	github.com/milvus-io/milvus/internal/datanode 3.874s	coverage: 88.2% of statements
+```
+
+You can run a sub unit test.
+
+In this case, we only concern about the tests with name "SegmentReplica" and
+sub tests with name "segmentFlushed". When running sub tests, the coverage is not concerned.
+```shell
+$ go test ./internale/datanode -run SegmentReplica/segmentFlushed
+ok  	github.com/milvus-io/milvus/internal/datanode 0.019s
+```
+
 ### C++
 Install lcov
 ```shell
 $ sudo apt-get install lcov
 ```
 Run unit test and generate code for code coverage check
-```shell 
-$ ./build.sh -u -c
+```shell
+$ make codecov-cpp
 ```
+
+## Commits and PRs
+- Commit message and PR description style: refer to [good commit messages](https://chris.beams.io/posts/git-commit)

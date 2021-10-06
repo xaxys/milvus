@@ -13,10 +13,16 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/milvus-io/milvus/internal/log"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
@@ -29,6 +35,14 @@ const (
 	DDL             = "ddl"
 	IndexParamsFile = "indexParams"
 )
+
+// when the blob of index file is too large, we can split blob into several rows,
+// fortunately, the blob has no other semantics which differs from other binlog type,
+// we then assemble these several rows into a whole blob when deserialize index binlog.
+// num rows = math.Ceil(len(blob) / maxLengthPerRowOfIndexFile)
+// There is only a string row in the past version index file which is a subset case of splitting into several rows.
+// So splitting index file won't introduce incompatibility with past version.
+const maxLengthPerRowOfIndexFile = 4 * 1024 * 1024
 
 type (
 	UniqueID  = typeutil.UniqueID
@@ -247,13 +261,15 @@ func (insertCodec *InsertCodec) Serialize(partitionID UniqueID, segmentID Unique
 	return blobs, statsBlobs, nil
 }
 
-// Deserialize transfer blob back to insert data.
-// From schema, it get all fields.
-// For each field, it will create a binlog reader, and read all event to the buffer.
-// It returns origin @InsertData in the end.
-func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID, segmentID UniqueID, data *InsertData, err error) {
+func (insertCodec *InsertCodec) DeserializeAll(blobs []*Blob) (
+	collectionID UniqueID,
+	partitionID UniqueID,
+	segmentID UniqueID,
+	data *InsertData,
+	err error,
+) {
 	if len(blobs) == 0 {
-		return InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("blobs is empty")
+		return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("blobs is empty")
 	}
 	readerClose := func(reader *BinlogReader) func() error {
 		return func() error { return reader.Close() }
@@ -262,6 +278,7 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 	var blobList BlobList = blobs
 	sort.Sort(blobList)
 
+	var cID UniqueID
 	var pID UniqueID
 	var sID UniqueID
 	resultData := &InsertData{}
@@ -269,11 +286,11 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 	for _, blob := range blobList {
 		binlogReader, err := NewBinlogReader(blob.Value)
 		if err != nil {
-			return InvalidUniqueID, InvalidUniqueID, nil, err
+			return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 		}
 
 		// read partitionID and SegmentID
-		pID, sID = binlogReader.PartitionID, binlogReader.SegmentID
+		cID, pID, sID = binlogReader.CollectionID, binlogReader.PartitionID, binlogReader.SegmentID
 
 		dataType := binlogReader.PayloadDataType
 		fieldID := binlogReader.FieldID
@@ -281,7 +298,7 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 		for {
 			eventReader, err := binlogReader.NextEventReader()
 			if err != nil {
-				return InvalidUniqueID, InvalidUniqueID, nil, err
+				return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 			}
 			if eventReader == nil {
 				break
@@ -294,12 +311,12 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				boolFieldData := resultData.Data[fieldID].(*BoolFieldData)
 				singleData, err := eventReader.GetBoolFromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				boolFieldData.Data = append(boolFieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				boolFieldData.NumRows = append(boolFieldData.NumRows, int64(length))
@@ -311,12 +328,12 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				int8FieldData := resultData.Data[fieldID].(*Int8FieldData)
 				singleData, err := eventReader.GetInt8FromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				int8FieldData.Data = append(int8FieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				int8FieldData.NumRows = append(int8FieldData.NumRows, int64(length))
@@ -328,12 +345,12 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				int16FieldData := resultData.Data[fieldID].(*Int16FieldData)
 				singleData, err := eventReader.GetInt16FromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				int16FieldData.Data = append(int16FieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				int16FieldData.NumRows = append(int16FieldData.NumRows, int64(length))
@@ -345,12 +362,12 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				int32FieldData := resultData.Data[fieldID].(*Int32FieldData)
 				singleData, err := eventReader.GetInt32FromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				int32FieldData.Data = append(int32FieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				int32FieldData.NumRows = append(int32FieldData.NumRows, int64(length))
@@ -362,12 +379,12 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				int64FieldData := resultData.Data[fieldID].(*Int64FieldData)
 				singleData, err := eventReader.GetInt64FromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				int64FieldData.Data = append(int64FieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				int64FieldData.NumRows = append(int64FieldData.NumRows, int64(length))
@@ -379,12 +396,12 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				floatFieldData := resultData.Data[fieldID].(*FloatFieldData)
 				singleData, err := eventReader.GetFloatFromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				floatFieldData.Data = append(floatFieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				floatFieldData.NumRows = append(floatFieldData.NumRows, int64(length))
@@ -396,12 +413,12 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				doubleFieldData := resultData.Data[fieldID].(*DoubleFieldData)
 				singleData, err := eventReader.GetDoubleFromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				doubleFieldData.Data = append(doubleFieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				doubleFieldData.NumRows = append(doubleFieldData.NumRows, int64(length))
@@ -413,14 +430,14 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				stringFieldData := resultData.Data[fieldID].(*StringFieldData)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				stringFieldData.NumRows = append(stringFieldData.NumRows, int64(length))
 				for i := 0; i < length; i++ {
 					singleString, err := eventReader.GetOneStringFromPayload(i)
 					if err != nil {
-						return InvalidUniqueID, InvalidUniqueID, nil, err
+						return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 					}
 					stringFieldData.Data = append(stringFieldData.Data, singleString)
 				}
@@ -433,12 +450,12 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				var singleData []byte
 				singleData, binaryVectorFieldData.Dim, err = eventReader.GetBinaryVectorFromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				binaryVectorFieldData.Data = append(binaryVectorFieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				binaryVectorFieldData.NumRows = append(binaryVectorFieldData.NumRows, int64(length))
@@ -451,18 +468,18 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				var singleData []float32
 				singleData, floatVectorFieldData.Dim, err = eventReader.GetFloatVectorFromPayload()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				floatVectorFieldData.Data = append(floatVectorFieldData.Data, singleData...)
 				length, err := eventReader.GetPayloadLengthFromReader()
 				if err != nil {
-					return InvalidUniqueID, InvalidUniqueID, nil, err
+					return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, err
 				}
 				totalLength += length
 				floatVectorFieldData.NumRows = append(floatVectorFieldData.NumRows, int64(length))
 				resultData.Data[fieldID] = floatVectorFieldData
 			default:
-				return InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("undefined data type %d", dataType)
+				return InvalidUniqueID, InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("undefined data type %d", dataType)
 			}
 		}
 		if fieldID == rootcoord.TimeStampField {
@@ -474,7 +491,16 @@ func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 		insertCodec.readerCloseFunc = append(insertCodec.readerCloseFunc, readerClose(binlogReader))
 	}
 
-	return pID, sID, resultData, nil
+	return cID, pID, sID, resultData, nil
+}
+
+// Deserialize transfer blob back to insert data.
+// From schema, it get all fields.
+// For each field, it will create a binlog reader, and read all event to the buffer.
+// It returns origin @InsertData in the end.
+func (insertCodec *InsertCodec) Deserialize(blobs []*Blob) (partitionID UniqueID, segmentID UniqueID, data *InsertData, err error) {
+	_, partitionID, segmentID, data, err = insertCodec.DeserializeAll(blobs)
+	return partitionID, segmentID, data, err
 }
 
 func (insertCodec *InsertCodec) Close() error {
@@ -485,6 +511,99 @@ func (insertCodec *InsertCodec) Close() error {
 		}
 	}
 	return nil
+}
+
+// DeleteData saves each entity delete message represented as <primarykey,timestamp> map.
+// timestamp represents the time when this instance was deleted
+type DeleteData struct {
+	Data map[string]int64 // primary key to timestamp
+}
+
+type DeleteCodec struct {
+	Schema          *etcdpb.CollectionMeta
+	readerCloseFunc []func() error
+}
+
+func NewDeleteCodec(schema *etcdpb.CollectionMeta) *DeleteCodec {
+	return &DeleteCodec{Schema: schema}
+}
+
+// Serialize transfer delete data to blob. .
+// For each delete message, it will save "pk,ts" string to binlog.
+func (deleteCodec *DeleteCodec) Serialize(partitionID UniqueID, segmentID UniqueID, data *DeleteData) (*Blob, error) {
+	binlogWriter := NewDeleteBinlogWriter(schemapb.DataType_String, deleteCodec.Schema.ID, partitionID, segmentID)
+	eventWriter, err := binlogWriter.NextDeleteEventWriter()
+	if err != nil {
+		return nil, err
+	}
+	startTs, endTs := math.MaxInt64, math.MinInt64
+	for key, value := range data.Data {
+		if value < int64(startTs) {
+			startTs = int(value)
+		}
+		if value > int64(endTs) {
+			endTs = int(value)
+		}
+		err := eventWriter.AddOneStringToPayload(fmt.Sprintf("%s,%d", key, value))
+		if err != nil {
+			return nil, err
+		}
+	}
+	eventWriter.SetEventTimestamp(uint64(startTs), uint64(endTs))
+	binlogWriter.SetEventTimeStamp(uint64(startTs), uint64(endTs))
+	err = binlogWriter.Close()
+	if err != nil {
+		return nil, err
+	}
+	buffer, err := binlogWriter.GetBuffer()
+	if err != nil {
+		return nil, err
+	}
+	blob := &Blob{
+		Value: buffer,
+	}
+	return blob, nil
+
+}
+
+func (deleteCodec *DeleteCodec) Deserialize(blob *Blob) (partitionID UniqueID, segmentID UniqueID, data *DeleteData, err error) {
+	if blob == nil {
+		return InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("blobs is empty")
+	}
+	readerClose := func(reader *BinlogReader) func() error {
+		return func() error { return reader.Close() }
+	}
+	binlogReader, err := NewBinlogReader(blob.Value)
+	if err != nil {
+		return InvalidUniqueID, InvalidUniqueID, nil, err
+	}
+	pid, sid := binlogReader.PartitionID, binlogReader.SegmentID
+	eventReader, err := binlogReader.NextEventReader()
+	if err != nil {
+		return InvalidUniqueID, InvalidUniqueID, nil, err
+	}
+	result := &DeleteData{
+		Data: make(map[string]int64),
+	}
+	length, err := eventReader.GetPayloadLengthFromReader()
+	for i := 0; i < length; i++ {
+		singleString, err := eventReader.GetOneStringFromPayload(i)
+		if err != nil {
+			return InvalidUniqueID, InvalidUniqueID, nil, err
+		}
+		splits := strings.Split(singleString, ",")
+		if len(splits) != 2 {
+			return InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("the format of delta log is incorrect")
+		}
+		ts, err := strconv.ParseInt(splits[1], 10, 64)
+		if err != nil {
+			return -1, -1, nil, err
+		}
+		result.Data[splits[0]] = ts
+	}
+	deleteCodec.readerCloseFunc = append(deleteCodec.readerCloseFunc, readerClose(binlogReader))
+	return pid, sid, result, nil
+
 }
 
 // Blob key example:
@@ -672,16 +791,251 @@ func (dataDefinitionCodec *DataDefinitionCodec) Close() error {
 	return nil
 }
 
-//type IndexCodec struct {
-//	Base
-//	readerCloseFunc []func() error
-//}
-//
-////func (builder *IndexBuilder) Build(fieldData FieldData, typeParams map[string]string, indexParams map[string]string) ([]*Blob, error) {}
-//func (indexCodec *IndexCodec) Serialize(indexSlices []*Blob) ([]*Blob, error) {}
-//
-//// TODO: describe inputs and return
-//func (indexCodec *IndexCodec) Deserialize(blobs []*Blob) ([]*Blob, error) {}
+type IndexFileBinlogCodec struct {
+	readerCloseFuncs []func() error
+}
+
+func NewIndexFileBinlogCodec() *IndexFileBinlogCodec {
+	return &IndexFileBinlogCodec{
+		readerCloseFuncs: make([]func() error, 0),
+	}
+}
+
+func (codec *IndexFileBinlogCodec) Serialize(
+	indexBuildID UniqueID,
+	version int64,
+	collectionID UniqueID,
+	partitionID UniqueID,
+	segmentID UniqueID,
+	fieldID UniqueID,
+	indexParams map[string]string,
+	indexName string,
+	indexID UniqueID,
+	datas []*Blob,
+) ([]*Blob, error) {
+
+	var err error
+
+	var blobs []*Blob
+
+	ts := Timestamp(time.Now().UnixNano())
+
+	for pos := range datas {
+		writer := NewIndexFileBinlogWriter(indexBuildID, version, collectionID, partitionID, segmentID, fieldID, indexName, indexID, datas[pos].Key)
+
+		eventWriter, err := writer.NextIndexFileEventWriter()
+		if err != nil {
+			return nil, err
+		}
+
+		length := (len(datas[pos].Value) + maxLengthPerRowOfIndexFile - 1) / maxLengthPerRowOfIndexFile
+		for i := 0; i < length; i++ {
+			start := i * maxLengthPerRowOfIndexFile
+			end := (i + 1) * maxLengthPerRowOfIndexFile
+			if end > len(datas[pos].Value) {
+				end = len(datas[pos].Value)
+			}
+			err = eventWriter.AddOneStringToPayload(string(datas[pos].Value[start:end]))
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		eventWriter.SetEventTimestamp(ts, ts)
+
+		writer.SetEventTimeStamp(ts, ts)
+
+		err = writer.Close()
+		if err != nil {
+			return nil, err
+		}
+		buffer, err := writer.GetBuffer()
+		if err != nil {
+			return nil, err
+		}
+
+		blobs = append(blobs, &Blob{
+			Key: datas[pos].Key,
+			//Key:   strconv.Itoa(pos),
+			Value: buffer,
+		})
+	}
+
+	// save index params
+	writer := NewIndexFileBinlogWriter(indexBuildID, version, collectionID, partitionID, segmentID, fieldID, indexName, indexID, "indexParams")
+
+	eventWriter, err := writer.NextIndexFileEventWriter()
+	if err != nil {
+		return nil, err
+	}
+
+	params, _ := json.Marshal(indexParams)
+	length := (len(params) + maxLengthPerRowOfIndexFile - 1) / maxLengthPerRowOfIndexFile
+	for i := 0; i < length; i++ {
+		start := i * maxLengthPerRowOfIndexFile
+		end := (i + 1) * maxLengthPerRowOfIndexFile
+		if end > len(params) {
+			end = len(params)
+		}
+		err = eventWriter.AddOneStringToPayload(string(params[start:end]))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	eventWriter.SetEventTimestamp(ts, ts)
+
+	writer.SetEventTimeStamp(ts, ts)
+
+	err = writer.Close()
+	if err != nil {
+		return nil, err
+	}
+	buffer, err := writer.GetBuffer()
+	if err != nil {
+		return nil, err
+	}
+
+	blobs = append(blobs, &Blob{
+		Key: "indexParams",
+		//Key:   strconv.Itoa(len(datas)),
+		Value: buffer,
+	})
+
+	return blobs, nil
+}
+
+func (codec *IndexFileBinlogCodec) DeserializeImpl(blobs []*Blob) (
+	indexBuildID UniqueID,
+	version int64,
+	collectionID UniqueID,
+	partitionID UniqueID,
+	segmentID UniqueID,
+	fieldID UniqueID,
+	indexParams map[string]string,
+	indexName string,
+	indexID UniqueID,
+	datas []*Blob,
+	err error,
+) {
+	if len(blobs) == 0 {
+		return 0, 0, 0, 0, 0, 0, nil, "", 0, nil, errors.New("blobs is empty")
+	}
+	readerClose := func(reader *BinlogReader) func() error {
+		return func() error { return reader.Close() }
+	}
+
+	indexParams = make(map[string]string)
+	datas = make([]*Blob, 0)
+
+	for _, blob := range blobs {
+		binlogReader, err := NewBinlogReader(blob.Value)
+		if err != nil {
+			log.Warn("failed to read binlog",
+				zap.Error(err))
+			return 0, 0, 0, 0, 0, 0, nil, "", 0, nil, err
+		}
+		dataType := binlogReader.PayloadDataType
+
+		//desc, err := binlogReader.readDescriptorEvent()
+		//if err != nil {
+		//	log.Warn("failed to read descriptor event",
+		//		zap.Error(err))
+		//	return 0, 0, 0, 0, 0, 0, nil, "", 0, nil, err
+		//}
+		desc := binlogReader.descriptorEvent
+		extraBytes := desc.ExtraBytes
+		extra := make(map[string]interface{})
+		_ = json.Unmarshal(extraBytes, &extra)
+
+		var value int
+
+		value, _ = strconv.Atoi(extra["indexBuildID"].(string))
+		indexBuildID = UniqueID(value)
+
+		value, _ = strconv.Atoi(extra["version"].(string))
+		version = int64(value)
+
+		collectionID = desc.CollectionID
+		partitionID = desc.PartitionID
+		segmentID = desc.SegmentID
+		fieldID = desc.FieldID
+
+		indexName = extra["indexName"].(string)
+
+		value, _ = strconv.Atoi(extra["indexID"].(string))
+		indexID = UniqueID(value)
+
+		key := extra["key"].(string)
+
+		for {
+			eventReader, err := binlogReader.NextEventReader()
+			if err != nil {
+				log.Warn("failed to get next event reader",
+					zap.Error(err))
+				return 0, 0, 0, 0, 0, 0, nil, "", 0, nil, err
+			}
+			if eventReader == nil {
+				break
+			}
+			switch dataType {
+			case schemapb.DataType_String:
+				length, err := eventReader.GetPayloadLengthFromReader()
+				if err != nil {
+					log.Warn("failed to get payload length",
+						zap.Error(err))
+					return 0, 0, 0, 0, 0, 0, nil, "", 0, nil, err
+				}
+
+				var content []byte
+				for i := 0; i < length; i++ {
+					singleString, err := eventReader.GetOneStringFromPayload(i)
+					if err != nil {
+						log.Warn("failed to get string from payload",
+							zap.Error(err))
+						return 0, 0, 0, 0, 0, 0, nil, "", 0, nil, err
+					}
+
+					content = append(content, []byte(singleString)...)
+				}
+
+				if key == "indexParams" {
+					_ = json.Unmarshal(content, &indexParams)
+				} else {
+					datas = append(datas, &Blob{
+						Key:   key,
+						Value: content,
+					})
+				}
+			}
+		}
+
+		codec.readerCloseFuncs = append(codec.readerCloseFuncs, readerClose(binlogReader))
+	}
+
+	return indexBuildID, version, collectionID, partitionID, segmentID, fieldID, indexParams, indexName, indexID, datas, nil
+}
+
+func (codec *IndexFileBinlogCodec) Deserialize(blobs []*Blob) (
+	datas []*Blob,
+	indexParams map[string]string,
+	indexName string,
+	indexID UniqueID,
+	err error,
+) {
+	_, _, _, _, _, _, indexParams, indexName, indexID, datas, err = codec.DeserializeImpl(blobs)
+	return datas, indexParams, indexName, indexID, err
+}
+
+func (codec *IndexFileBinlogCodec) Close() error {
+	for _, closeFunc := range codec.readerCloseFuncs {
+		err := closeFunc()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type IndexCodec struct {
 }

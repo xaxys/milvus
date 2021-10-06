@@ -44,7 +44,9 @@ type BaseTable struct {
 	params    *memkv.MemoryKV
 	configDir string
 
-	Log log.Config
+	RoleName          string
+	Log               log.Config
+	LogConfigFunction func(log.Config)
 }
 
 func (gp *BaseTable) Init() {
@@ -57,9 +59,10 @@ func (gp *BaseTable) Init() {
 
 	// TODO remove once we change helm deployment
 	gp.loadFromCommonYaml()
-	gp.loadFromChannelYaml()
 
 	gp.tryloadFromEnv()
+
+	gp.InitLogCfg()
 }
 
 func (gp *BaseTable) GetConfigDir() string {
@@ -109,18 +112,6 @@ func (gp *BaseTable) loadFromCommonYaml() bool {
 		return true
 	}
 	log.Debug("failed to find common.yaml in config, skip..")
-	return false
-}
-
-func (gp *BaseTable) loadFromChannelYaml() bool {
-	configFile := gp.configDir + "advanced/channel.yaml"
-	if _, err := os.Stat(configFile); err == nil {
-		if err := gp.LoadYaml("advanced/channel.yaml"); err != nil {
-			panic(err)
-		}
-		return true
-	}
-	log.Debug("failed to find channel.yaml in config, skip..")
 	return false
 }
 
@@ -248,6 +239,22 @@ func (gp *BaseTable) tryloadFromEnv() {
 		dataCoordAddress = serviceHost + ":" + port
 	}
 	err = gp.Save("_DataCoordAddress", dataCoordAddress)
+	if err != nil {
+		panic(err)
+	}
+
+	insertBufferFlushSize := os.Getenv("DATA_NODE_IBUFSIZE")
+	if insertBufferFlushSize == "" {
+		//var err error
+		insertBufferFlushSize, err = gp.Load("datanode.flush.insertBufSize")
+		if err != nil {
+			panic(err)
+		}
+	}
+	if insertBufferFlushSize == "" {
+		insertBufferFlushSize = "16777216" //use default
+	}
+	err = gp.Save("_DATANODE_INSERTBUFSIZE", insertBufferFlushSize)
 	if err != nil {
 		panic(err)
 	}
@@ -416,7 +423,7 @@ func ConvertRangeToIntSlice(rangeStr, sep string) []int {
 	return ret
 }
 
-func (gp *BaseTable) InitLogCfg(role string, id UniqueID) {
+func (gp *BaseTable) InitLogCfg() {
 	gp.Log = log.Config{}
 	format, err := gp.Load("log.format")
 	if err != nil {
@@ -431,13 +438,29 @@ func (gp *BaseTable) InitLogCfg(role string, id UniqueID) {
 	gp.Log.File.MaxSize = gp.ParseInt("log.file.maxSize")
 	gp.Log.File.MaxBackups = gp.ParseInt("log.file.maxBackups")
 	gp.Log.File.MaxDays = gp.ParseInt("log.file.maxAge")
+}
+
+func (gp *BaseTable) SetLogConfig(f func(log.Config)) {
+	gp.LogConfigFunction = f
+}
+
+func (gp *BaseTable) SetLogger(id UniqueID) {
 	rootPath, err := gp.Load("log.file.rootPath")
 	if err != nil {
 		panic(err)
 	}
 	if len(rootPath) != 0 {
-		gp.Log.File.Filename = path.Join(rootPath, role+"-"+strconv.FormatInt(id, 10)+".log")
+		log.Debug("Set logger ", zap.Int64("id", id), zap.String("role", gp.RoleName))
+		if id < 0 {
+			gp.Log.File.Filename = path.Join(rootPath, gp.RoleName+".log")
+		} else {
+			gp.Log.File.Filename = path.Join(rootPath, gp.RoleName+"-"+strconv.FormatInt(id, 10)+".log")
+		}
 	} else {
 		gp.Log.File.Filename = ""
+	}
+
+	if gp.LogConfigFunction != nil {
+		gp.LogConfigFunction(gp.Log)
 	}
 }

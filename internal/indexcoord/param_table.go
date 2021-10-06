@@ -12,6 +12,7 @@
 package indexcoord
 
 import (
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 )
 
+// ParamTable is used to record configuration items.
 type ParamTable struct {
 	paramtable.BaseTable
 
@@ -29,6 +31,7 @@ type ParamTable struct {
 	EtcdEndpoints []string
 	KvRootPath    string
 	MetaRootPath  string
+	IndexRootPath string
 
 	MinIOAddress         string
 	MinIOAccessKeyID     string
@@ -40,9 +43,11 @@ type ParamTable struct {
 	UpdatedTime time.Time
 }
 
+// Params is an alias for ParamTable.
 var Params ParamTable
 var once sync.Once
 
+// Init is used to initialize configuration items.
 func (pt *ParamTable) Init() {
 	pt.BaseTable.Init()
 	// TODO, load index_node.yaml
@@ -51,7 +56,6 @@ func (pt *ParamTable) Init() {
 		panic(err)
 	}*/
 
-	pt.initLogCfg()
 	pt.initEtcdEndpoints()
 	pt.initMetaRootPath()
 	pt.initKvRootPath()
@@ -60,8 +64,11 @@ func (pt *ParamTable) Init() {
 	pt.initMinIOSecretAccessKey()
 	pt.initMinIOUseSSL()
 	pt.initMinioBucketName()
+	pt.initIndexRootPath()
+	pt.initRoleName()
 }
 
+// InitOnce is used to initialize configuration items, and it will only be called once.
 func (pt *ParamTable) InitOnce() {
 	once.Do(func() {
 		pt.Init()
@@ -143,6 +150,14 @@ func (pt *ParamTable) initMinioBucketName() {
 	pt.MinioBucketName = bucketName
 }
 
-func (pt *ParamTable) initLogCfg() {
-	pt.InitLogCfg("indexcoord", 0)
+func (pt *ParamTable) initIndexRootPath() {
+	rootPath, err := pt.Load("minio.rootPath")
+	if err != nil {
+		panic(err)
+	}
+	pt.IndexRootPath = path.Join(rootPath, "index_files")
+}
+
+func (pt *ParamTable) initRoleName() {
+	pt.RoleName = "indexcoord"
 }

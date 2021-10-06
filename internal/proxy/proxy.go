@@ -43,6 +43,9 @@ type Timestamp = typeutil.Timestamp
 const sendTimeTickMsgInterval = 200 * time.Millisecond
 const channelMgrTickerInterval = 100 * time.Millisecond
 
+// make sure Proxy implements types.Proxy
+var _ types.Proxy = (*Proxy)(nil)
+
 type Proxy struct {
 	ctx    context.Context
 	cancel func()
@@ -67,7 +70,7 @@ type Proxy struct {
 
 	idAllocator  *allocator.IDAllocator
 	tsoAllocator *TimestampAllocator
-	segAssigner  *SegIDAssigner
+	segAssigner  *segIDAssigner
 
 	metricsCacheManager *metricsinfo.MetricsCacheManager
 
@@ -99,6 +102,7 @@ func (node *Proxy) Register() error {
 	node.session = sessionutil.NewSession(node.ctx, Params.MetaRootPath, Params.EtcdEndpoints)
 	node.session.Init(typeutil.ProxyRole, Params.NetworkAddress, false)
 	Params.ProxyID = node.session.ServerID
+	Params.SetLogger(Params.ProxyID)
 	Params.initProxySubName()
 	// TODO Reset the logger
 	//Params.initLogCfg()
@@ -181,7 +185,7 @@ func (node *Proxy) Init() error {
 	}
 	node.tsoAllocator = tsoAllocator
 
-	segAssigner, err := NewSegIDAssigner(node.ctx, node.dataCoord, node.lastTick)
+	segAssigner, err := newSegIDAssigner(node.ctx, node.dataCoord, node.lastTick)
 	if err != nil {
 		panic(err)
 	}

@@ -18,6 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// GetCPUCoreCount returns the count of cpu core.
 func GetCPUCoreCount(logical bool) int {
 	c, err := cpu.Counts(logical)
 	if err != nil {
@@ -29,6 +30,7 @@ func GetCPUCoreCount(logical bool) int {
 	return c
 }
 
+// GetCPUUsage returns the cpu usage in percentage.
 func GetCPUUsage() float64 {
 	percents, err := cpu.Percent(0, false)
 	if err != nil {
@@ -46,6 +48,7 @@ func GetCPUUsage() float64 {
 	return percents[0]
 }
 
+// GetMemoryCount returns the memory count in bytes.
 func GetMemoryCount() uint64 {
 	stats, err := mem.VirtualMemory()
 	if err != nil {
@@ -57,6 +60,7 @@ func GetMemoryCount() uint64 {
 	return stats.Total
 }
 
+// GetUsedMemoryCount returns the memory usage in bytes.
 func GetUsedMemoryCount() uint64 {
 	stats, err := mem.VirtualMemory()
 	if err != nil {

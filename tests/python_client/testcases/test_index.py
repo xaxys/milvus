@@ -484,7 +484,7 @@ class TestIndexBase:
         expected: raise exception
         """
         with pytest.raises(Exception) as e:
-            dis_connect.create_index(collection, field_name, get_simple_index)
+            dis_connect.create_index(collection, field_name, default_index)
 
     @pytest.mark.tags(CaseLabel.L0)
     @pytest.mark.timeout(BUILD_TIMEOUT)
@@ -595,7 +595,6 @@ class TestIndexBase:
             connect.release_collection(collection)
             connect.load_collection(collection)
         index = connect.describe_index(collection, "")
-        # assert index == indexs[-1]
         assert not index    # FLAT is the last index_type, drop all indexes in server
 
     @pytest.mark.tags(CaseLabel.L2)

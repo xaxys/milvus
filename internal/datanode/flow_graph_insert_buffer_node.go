@@ -261,7 +261,7 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 		}
 	}
 
-	// Manul Flush
+	// Manual Flush
 	select {
 	case fmsg := <-ibNode.flushChan:
 		currentSegID := fmsg.segmentID
@@ -271,11 +271,8 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 		)
 
 		bd, ok := ibNode.insertBuffer.Load(currentSegID)
-		if !ok {
-			break
-		}
 
-		if bd.(*BufferData).size <= 0 { // Buffer empty
+		if !ok || bd.(*BufferData).size <= 0 { // Buffer empty
 			log.Debug(".. Buffer empty ...")
 			ibNode.dsSaveBinlog(&segmentFlushUnit{
 				collID:     fmsg.collectionID,
@@ -290,7 +287,7 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 			finishCh := make(chan segmentFlushUnit, 1)
 
 			// Since buffer is not empty, so there must be data for key currentSegID
-			bd, _ := ibNode.insertBuffer.LoadAndDelete(currentSegID)
+			bd, _ := ibNode.insertBuffer.Load(currentSegID)
 
 			ibNode.flushMap.Store(currentSegID, bd.(*BufferData).buffer)
 			clearFn := func() {
@@ -327,9 +324,11 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 					log.Debug("Data service save binlog path failed", zap.Error(err))
 				} else {
 					ibNode.replica.segmentFlushed(fu.segID)
-					ibNode.flushingSegCache.Remove(fu.segID)
+					ibNode.insertBuffer.Delete(fu.segID)
 				}
 			}
+			//always remove from flushing seg cache
+			ibNode.flushingSegCache.Remove(fu.segID)
 		}
 
 	default:

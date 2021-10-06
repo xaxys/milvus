@@ -1,4 +1,4 @@
-<img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/readme_ch_69fbf0fc45.png" alt="Milvus banner">
+<img src="https://assets.zilliz.com/readme_ch_69fbf0fc45.png" alt="Milvus banner">
 
 <div class="column" align="middle">
   <a href="https://join.slack.com/t/milvusio/shared_invite/zt-e0u4qu3k-bI2GDNys3ZqX1YCJ9OM~GQ">
@@ -23,7 +23,7 @@
 
 Milvus 是一款全球领先的开源向量数据库，赋能 AI 应用和向量相似度搜索，加速非结构化数据检索。用户在任何部署环境中均可获得始终如一的用户体验。
 
-Milvus 2.0 是一款云原生向量数据库，采用存储与计算分离的架构设计。该重构版本的所有组件均为无状态组件，极大地增强了系统弹性和灵活性。更多系统架构细节，参考 [Milvus 系统架构](https://milvus.io/cn/docs/v2.0.0/architecture_overview.md)。
+Milvus 2.0 是一款云原生向量数据库，采用存储与计算分离的架构设计。该重构版本的所有组件均为无状态组件，极大地增强了系统弹性和灵活性。更多系统架构细节，参考 [Milvus 系统架构](https://milvus.io/cn/docs/architecture_overview.md)。
 
 Milvus 基于 [Apache 2.0 License](https://github.com/milvus-io/milvus/blob/master/LICENSE) 协议发布，于 2019 年 10 月正式开源，是 [LF AI & Data 基金会](https://lfaidata.foundation/) 的毕业项目。
 
@@ -61,7 +61,7 @@ Milvus 基于 [Apache 2.0 License](https://github.com/milvus-io/milvus/blob/mast
 
 <details>
   <summary><b>广受社区支持和业界认可</b></summary>
-  Milvus 项目在 GitHub 上获星超 7900，拥有逾 1000 家企业用户，还有活跃的开源社区。Milvus 由 <a href="https://lfaidata.foundation/">LF AI & Data 基金会</a> 背书，是该基金会的毕业项目。
+  Milvus 项目在 GitHub 上获星超 8000，拥有逾 1000 家企业用户，还有活跃的开源社区。Milvus 由 <a href="https://lfaidata.foundation/">LF AI & Data 基金会</a> 背书，是该基金会的毕业项目。
   </details>
 
 ## 快速开始
@@ -73,6 +73,16 @@ Milvus 基于 [Apache 2.0 License](https://github.com/milvus-io/milvus/blob/mast
 - [安装 Milvus 分布式版本](https://milvus.io/cn/docs/v2.0.0/install_cluster-docker.md)
 
 ### 源码编译 Milvus
+
+请先安装相关依赖。
+
+```
+go: 1.15
+cmake: >=3.18
+gcc: 7.5
+```
+
+克隆 Milvus 项目并编译。
 
 ```bash
 # 克隆项目
@@ -102,17 +112,17 @@ $ make milvus
   <tr>
     <td width="30%">
       <a href="https://zilliz.com/milvus-demos">
-        <img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/image_search_59a64e4f22.gif" />
+        <img src="https://assets.zilliz.com/image_search_59a64e4f22.gif" />
       </a>
     </td>
     <td width="30%">
 <a href="https://zilliz.com/milvus-demos">
-<img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/qa_df5ee7bd83.gif" />
+<img src="https://assets.zilliz.com/qa_df5ee7bd83.gif" />
 </a>
     </td>
     <td width="30%">
 <a href="https://zilliz.com/milvus-demos">
-<img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/mole_search_76f8340572.gif" />
+<img src="https://assets.zilliz.com/mole_search_76f8340572.gif" />
 </a>
     </td>
   </tr>
@@ -152,11 +162,12 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 ### All contributors
 
 <br><!-- Do not remove start of hero-bot -->
-<img src="https://img.shields.io/badge/all--contributors-173-orange"><br>
+<img src="https://img.shields.io/badge/all--contributors-178-orange"><br>
 <a href="https://github.com/ABNER-1"><img src="https://avatars.githubusercontent.com/u/24547351?v=4" width="30px" /></a>
 <a href="https://github.com/Accagain2014"><img src="https://avatars.githubusercontent.com/u/9635216?v=4" width="30px" /></a>
 <a href="https://github.com/AllenYu1987"><img src="https://avatars.githubusercontent.com/u/12489985?v=4" width="30px" /></a>
 <a href="https://github.com/Aredcap"><img src="https://avatars.githubusercontent.com/u/40494761?v=4" width="30px" /></a>
+<a href="https://github.com/BUPTAnderson"><img src="https://avatars.githubusercontent.com/u/13449703?v=4" width="30px" /></a>
 <a href="https://github.com/Ben-Aaron-Bio-Rad"><img src="https://avatars.githubusercontent.com/u/54123439?v=4" width="30px" /></a>
 <a href="https://github.com/Bennu-Li"><img src="https://avatars.githubusercontent.com/u/53458891?v=4" width="30px" /></a>
 <a href="https://github.com/BossZou"><img src="https://avatars.githubusercontent.com/u/40255591?v=4" width="30px" /></a>
@@ -164,6 +175,8 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 <a href="https://github.com/CrossRaynor"><img src="https://avatars.githubusercontent.com/u/3909908?v=4" width="30px" /></a>
 <a href="https://github.com/Cupchen"><img src="https://avatars.githubusercontent.com/u/34762375?v=4" width="30px" /></a>
 <a href="https://github.com/DanielHuang1983"><img src="https://avatars.githubusercontent.com/u/4417873?v=4" width="30px" /></a>
+<a href="https://github.com/Deep1Shikha"><img src="https://avatars.githubusercontent.com/u/47516502?v=4" width="30px" /></a>
+<a href="https://github.com/DiptoChakrabarty"><img src="https://avatars.githubusercontent.com/u/45638240?v=4" width="30px" /></a>
 <a href="https://github.com/DragonDriver"><img src="https://avatars.githubusercontent.com/u/31589260?v=4" width="30px" /></a>
 <a href="https://github.com/Emma-Song"><img src="https://avatars.githubusercontent.com/u/64460989?v=4" width="30px" /></a>
 <a href="https://github.com/Fierralin"><img src="https://avatars.githubusercontent.com/u/8857059?v=4" width="30px" /></a>
@@ -228,9 +241,11 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 <a href="https://github.com/dd-He"><img src="https://avatars.githubusercontent.com/u/24242249?v=4" width="30px" /></a>
 <a href="https://github.com/dddddai"><img src="https://avatars.githubusercontent.com/u/41563853?v=4" width="30px" /></a>
 <a href="https://github.com/del-zhenwu"><img src="https://avatars.githubusercontent.com/u/56623710?v=4" width="30px" /></a>
+<a href="https://github.com/donno2048"><img src="https://avatars.githubusercontent.com/u/61805754?v=4" width="30px" /></a>
 <a href="https://github.com/douglarek"><img src="https://avatars.githubusercontent.com/u/1488134?v=4" width="30px" /></a>
 <a href="https://github.com/dvzubarev"><img src="https://avatars.githubusercontent.com/u/14878830?v=4" width="30px" /></a>
 <a href="https://github.com/dyhyfu"><img src="https://avatars.githubusercontent.com/u/64584368?v=4" width="30px" /></a>
+<a href="https://github.com/elfisworking"><img src="https://avatars.githubusercontent.com/u/37609214?v=4" width="30px" /></a>
 <a href="https://github.com/erdustiggen"><img src="https://avatars.githubusercontent.com/u/25433850?v=4" width="30px" /></a>
 <a href="https://github.com/feisiyicl"><img src="https://avatars.githubusercontent.com/u/64510805?v=4" width="30px" /></a>
 <a href="https://github.com/filip-halt"><img src="https://avatars.githubusercontent.com/u/81822489?v=4" width="30px" /></a>
@@ -339,9 +354,14 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 - [Go SDK](https://github.com/milvus-io/milvus-sdk-go)(开发中)
 - [Node SDK](https://github.com/milvus-io/milvus-sdk-node)
 
+### Milvus insight
+
+Milvus insight 提供了好用的图形化界面，帮助您更好的管理数据和Milvus.
+- [快速开始](https://github.com/milvus-io/milvus-insight#quick-start)
+
 ## 社区
 
-欢迎加入 [Slack](https://join.slack.com/t/milvusio/shared_invite/zt-e0u4qu3k-bI2GDNys3ZqX1YCJ9OM~GQ) 频道分享你的建议与问题。你也可以通过 [FAQ](https://milvus.io/cn/docs/v1.0.0/performance_faq.md) 页面，查看常见问题及解答。
+欢迎加入 [Slack](https://join.slack.com/t/milvusio/shared_invite/zt-e0u4qu3k-bI2GDNys3ZqX1YCJ9OM~GQ) 频道分享你的建议与问题。你也可以通过 [FAQ](https://milvus.io/cn/docs/performance_faq.md) 页面，查看常见问题及解答。
 
 订阅 Milvus 邮件：
 
@@ -351,12 +371,15 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 
 关注 Milvus 社交媒体：
 
-- [知乎](https://zilliz.atlassian.net/wiki/spaces/TC/pages/251658753/CN%2BTranslation%2BWhat%2Bis%2BMilvus#)
+- [知乎](https://www.zhihu.com/org/zilliz-11)
 - [CSDN](http://zilliz.blog.csdn.net/)
 - [Bilibili](http://space.bilibili.com/478166626)
+- [Medium](https://medium.com/@milvusio)
+- [Twitter](https://twitter.com/milvusio)
+- [Youtube](https://www.youtube.com/channel/UCMCo_F7pKjMHBlfyxwOPw-g)
 - Zilliz 技术交流微信群
 
-<img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/wechat_2abac21f5a.png" alt="Wechat QR Code">
+<img src="https://assets.zilliz.com/wechat_2abac21f5a.png" alt="Wechat QR Code">
 
 ## 加入我们
 

@@ -98,7 +98,7 @@ func TestDataSyncService_newDataSyncService(te *testing.T) {
 			}
 
 			ds, err := newDataSyncService(ctx,
-				make(chan *flushMsg),
+				&flushChans{make(chan *flushMsg), make(chan *flushMsg)},
 				replica,
 				NewAllocatorFactory(),
 				test.inMsgFactory,
@@ -163,7 +163,7 @@ func TestDataSyncService_Start(t *testing.T) {
 	mockRootCoord := &RootCoordFactory{}
 	collectionID := UniqueID(1)
 
-	flushChan := make(chan *flushMsg, 100)
+	flushChan := &flushChans{make(chan *flushMsg, 100), make(chan *flushMsg, 100)}
 	replica := newReplica(mockRootCoord, collectionID)
 
 	allocFactory := NewAllocatorFactory(1)
@@ -191,7 +191,7 @@ func TestDataSyncService_Start(t *testing.T) {
 
 	assert.Nil(t, err)
 	// sync.replica.addCollection(collMeta.ID, collMeta.Schema)
-	go sync.start()
+	sync.start()
 
 	timeRange := TimeRange{
 		timestampMin: 0,

@@ -12,7 +12,6 @@
 package proxy
 
 import (
-	"fmt"
 	"path"
 	"strconv"
 	"strings"
@@ -23,7 +22,6 @@ import (
 )
 
 const (
-	PulsarMaxMessageSizeKey        = "maxMessageSize"
 	SuggestPulsarMaxMessageSizeKey = 5 * 1024 * 1024
 )
 
@@ -67,7 +65,6 @@ type ParamTable struct {
 	MaxTaskNum int64
 
 	PulsarMaxMessageSize int
-	RoleName             string
 }
 
 var Params ParamTable
@@ -108,7 +105,7 @@ func (pt *ParamTable) Init() {
 
 	pt.initMaxTaskNum()
 
-	Params.initLogCfg()
+	pt.initRoleName()
 }
 
 func (pt *ParamTable) InitAlias(alias string) {
@@ -274,12 +271,8 @@ func (pt *ParamTable) initPulsarMaxMessageSize() {
 	}
 }
 
-func (pt *ParamTable) initLogCfg() {
-	pt.InitLogCfg("proxy", pt.ProxyID)
-}
-
 func (pt *ParamTable) initRoleName() {
-	pt.RoleName = fmt.Sprintf("%s-%s", "Proxy", pt.Alias)
+	pt.RoleName = "proxy"
 }
 
 func (pt *ParamTable) initEtcdEndpoints() {

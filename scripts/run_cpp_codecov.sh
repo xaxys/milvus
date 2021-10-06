@@ -37,13 +37,13 @@ rm -rf ${DIR_LCOV_OUTPUT}
 # generate baseline
 ${LCOV_CMD} -c -i -d ${DIR_GCNO} -o ${FILE_INFO_BASE}
 if [ $? -ne 0 ]; then
-    echo "gen baseline coverage run failed"
+    echo "Failed to generate coverage baseline"
     exit -1
 fi
 
 # run unittest
 for test in `ls ${MILVUS_CORE_UNITTEST_DIR}`; do
-    echo "${MILVUS_CORE_UNITTEST_DIR}/$test"
+    echo "Running cpp unittest: ${MILVUS_CORE_UNITTEST_DIR}/$test"
     # run unittest
     ${MILVUS_CORE_UNITTEST_DIR}/${test}
     if [ $? -ne 0 ]; then
@@ -71,5 +71,6 @@ ${LCOV_CMD} -r "${FILE_INFO_COMBINE}" -o "${FILE_INFO_OUTPUT}" \
 
 # generate html report
 ${LCOV_GEN_CMD} ${FILE_INFO_OUTPUT} --output-directory ${DIR_LCOV_OUTPUT}/
+echo "Generate cpp code coverage report to ${DIR_LCOV_OUTPUT}"
 
 

@@ -9,6 +9,7 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
+// Package grpcdatacoordclient contains grpc interfaces of datacoord
 package grpcdatacoordclient
 
 import (
@@ -38,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
 
+// Server is the grpc server of datacoord
 type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -141,6 +143,8 @@ func (s *Server) start() error {
 	return s.dataCoord.Start()
 }
 
+// Stop stops the DataCoord server gracefully.
+// Need to call the GracefulStop interface of grpc server and call the stop method of the inner DataCoord object.
 func (s *Server) Stop() error {
 	var err error
 	if s.closer != nil {
@@ -164,6 +168,7 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+// Run starts the Server. Need to call inner init and start method.
 func (s *Server) Run() error {
 	if err := s.init(); err != nil {
 		return err
@@ -191,6 +196,7 @@ func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetSt
 	return s.dataCoord.GetStatisticsChannel(ctx)
 }
 
+// GetSegmentInfo gets segment information according to segment id
 func (s *Server) GetSegmentInfo(ctx context.Context, req *datapb.GetSegmentInfoRequest) (*datapb.GetSegmentInfoResponse, error) {
 	return s.dataCoord.GetSegmentInfo(ctx, req)
 }
@@ -225,6 +231,7 @@ func (s *Server) GetPartitionStatistics(ctx context.Context, req *datapb.GetPart
 	return s.dataCoord.GetPartitionStatistics(ctx, req)
 }
 
+// GetSegmentInfoChannel gets channel to which datacoord sends segment information
 func (s *Server) GetSegmentInfoChannel(ctx context.Context, req *datapb.GetSegmentInfoChannelRequest) (*milvuspb.StringResponse, error) {
 	return s.dataCoord.GetSegmentInfoChannel(ctx)
 }

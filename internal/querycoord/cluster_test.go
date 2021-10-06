@@ -90,9 +90,10 @@ func TestReloadClusterFromKV(t *testing.T) {
 		collectionInfo := &querypb.CollectionInfo{
 			CollectionID: defaultCollectionID,
 		}
-		collectionBlobs := proto.MarshalTextString(collectionInfo)
+		collectionBlobs, err := proto.Marshal(collectionInfo)
+		assert.Nil(t, err)
 		nodeKey := fmt.Sprintf("%s/%d", queryNodeMetaPrefix, 100)
-		kvs[nodeKey] = collectionBlobs
+		kvs[nodeKey] = string(collectionBlobs)
 
 		err = kv.MultiSave(kvs)
 		assert.Nil(t, err)
@@ -165,26 +166,28 @@ func TestGrpcRequest(t *testing.T) {
 	})
 
 	t.Run("Test AddQueryChannel", func(t *testing.T) {
-		reqChannel, resChannel := cluster.clusterMeta.GetQueryChannel(defaultCollectionID)
+		reqChannel, resChannel, err := cluster.clusterMeta.GetQueryChannel(defaultCollectionID)
+		assert.Nil(t, err)
 		addQueryChannelReq := &querypb.AddQueryChannelRequest{
 			NodeID:           nodeID,
 			CollectionID:     defaultCollectionID,
 			RequestChannelID: reqChannel,
 			ResultChannelID:  resChannel,
 		}
-		err := cluster.addQueryChannel(baseCtx, nodeID, addQueryChannelReq)
+		err = cluster.addQueryChannel(baseCtx, nodeID, addQueryChannelReq)
 		assert.Nil(t, err)
 	})
 
 	t.Run("Test RemoveQueryChannel", func(t *testing.T) {
-		reqChannel, resChannel := cluster.clusterMeta.GetQueryChannel(defaultCollectionID)
+		reqChannel, resChannel, err := cluster.clusterMeta.GetQueryChannel(defaultCollectionID)
+		assert.Nil(t, err)
 		removeQueryChannelReq := &querypb.RemoveQueryChannelRequest{
 			NodeID:           nodeID,
 			CollectionID:     defaultCollectionID,
 			RequestChannelID: reqChannel,
 			ResultChannelID:  resChannel,
 		}
-		err := cluster.removeQueryChannel(baseCtx, nodeID, removeQueryChannelReq)
+		err = cluster.removeQueryChannel(baseCtx, nodeID, removeQueryChannelReq)
 		assert.Nil(t, err)
 	})
 

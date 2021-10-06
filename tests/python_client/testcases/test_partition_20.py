@@ -290,7 +290,7 @@ class TestPartitionParams(TestcaseBase):
                                       cf.gen_default_tuple_data(10)])
     def test_partition_insert(self, data):
         """
-        target: verify insert multi entities by dataFrame
+        target: verify insert multi entities
         method: 1. create a collection and a partition
                 2. partition.insert(data)
                 3. insert data again
@@ -561,7 +561,7 @@ class TestPartitionOperations(TestcaseBase):
     @pytest.mark.tags(CaseLabel.L1)
     def test_partition_release_dropped_partition(self):
         """
-        target: verify release an dropped partition
+        target: verify release a dropped partition
         method: 1.create a partition
                 2. drop the partition
                 3. release the partition
@@ -580,7 +580,7 @@ class TestPartitionOperations(TestcaseBase):
     @pytest.mark.tags(CaseLabel.L1)
     def test_partition_release_dropped_collection(self):
         """
-        target: verify release an dropped collection
+        target: verify release a dropped collection
         method: 1.create a collection and partition
                 2. drop the collection
                 3. release the partition
@@ -674,9 +674,9 @@ class TestPartitionOperations(TestcaseBase):
     @pytest.mark.tags(CaseLabel.L1)
     def test_partition_insert_dropped_partition(self):
         """
-        target: verify insert data into dropped partition
+        target: verify insert data into a dropped partition
         method: 1.create a collection
-                2. insert some data into dropped partition
+                2. insert some data into a dropped partition
         expected: raise exception
         """
         # create partition
@@ -694,9 +694,9 @@ class TestPartitionOperations(TestcaseBase):
     @pytest.mark.tags(CaseLabel.L1)
     def test_partition_insert_dropped_collection(self):
         """
-        target: verify insert data into dropped collection
+        target: verify insert data into a dropped collection
         method: 1.create a collection
-                2. insert some data into dropped collection
+                2. insert some data into a dropped collection
         expected: raise exception
         """
         # create collection

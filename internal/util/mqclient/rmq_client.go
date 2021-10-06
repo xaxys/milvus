@@ -24,6 +24,7 @@ type rmqClient struct {
 	client rocksmq.Client
 }
 
+// NewRmqClient returns a new rmqClient object
 func NewRmqClient(opts rocksmq.ClientOptions) (*rmqClient, error) {
 	c, err := rocksmq.NewClient(opts)
 	if err != nil {
@@ -47,9 +48,10 @@ func (rc *rmqClient) Subscribe(options ConsumerOptions) (Consumer, error) {
 	receiveChannel := make(chan rocksmq.ConsumerMessage, options.BufSize)
 
 	cli, err := rc.client.Subscribe(rocksmq.ConsumerOptions{
-		Topic:            options.Topic,
-		SubscriptionName: options.SubscriptionName,
-		MessageChannel:   receiveChannel,
+		Topic:                       options.Topic,
+		SubscriptionName:            options.SubscriptionName,
+		MessageChannel:              receiveChannel,
+		SubscriptionInitialPosition: rocksmq.SubscriptionInitialPosition(options.SubscriptionInitialPosition),
 	})
 	if err != nil {
 		return nil, err

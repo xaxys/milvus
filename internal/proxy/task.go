@@ -121,7 +121,7 @@ type insertTask struct {
 
 	result         *milvuspb.MutationResult
 	rowIDAllocator *allocator.IDAllocator
-	segIDAssigner  *SegIDAssigner
+	segIDAssigner  *segIDAssigner
 	chMgr          channelsMgr
 	chTicker       channelsTimeTicker
 	vChannels      []vChan
@@ -1505,12 +1505,12 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 	st.query.OutputFields = outputFields
 
 	if st.query.GetDslType() == commonpb.DslType_BoolExprV1 {
-		annsField, err := GetAttrByKeyFromRepeatedKV(AnnsFieldKey, st.query.SearchParams)
+		annsField, err := funcutil.GetAttrByKeyFromRepeatedKV(AnnsFieldKey, st.query.SearchParams)
 		if err != nil {
 			return errors.New(AnnsFieldKey + " not found in search_params")
 		}
 
-		topKStr, err := GetAttrByKeyFromRepeatedKV(TopKKey, st.query.SearchParams)
+		topKStr, err := funcutil.GetAttrByKeyFromRepeatedKV(TopKKey, st.query.SearchParams)
 		if err != nil {
 			return errors.New(TopKKey + " not found in search_params")
 		}
@@ -1519,12 +1519,12 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 			return errors.New(TopKKey + " " + topKStr + " is not invalid")
 		}
 
-		metricType, err := GetAttrByKeyFromRepeatedKV(MetricTypeKey, st.query.SearchParams)
+		metricType, err := funcutil.GetAttrByKeyFromRepeatedKV(MetricTypeKey, st.query.SearchParams)
 		if err != nil {
 			return errors.New(MetricTypeKey + " not found in search_params")
 		}
 
-		searchParams, err := GetAttrByKeyFromRepeatedKV(SearchParamsKey, st.query.SearchParams)
+		searchParams, err := funcutil.GetAttrByKeyFromRepeatedKV(SearchParamsKey, st.query.SearchParams)
 		if err != nil {
 			return errors.New(SearchParamsKey + " not found in search_params")
 		}
@@ -1659,14 +1659,22 @@ func (st *searchTask) Execute(ctx context.Context) error {
 	if err != nil {
 		err = st.chMgr.createDQLStream(collID)
 		if err != nil {
-			st.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
-			st.result.Status.Reason = err.Error()
+			st.result = &milvuspb.SearchResults{
+				Status: &commonpb.Status{
+					ErrorCode: commonpb.ErrorCode_UnexpectedError,
+					Reason:    err.Error(),
+				},
+			}
 			return err
 		}
 		stream, err = st.chMgr.getDQLStream(collID)
 		if err != nil {
-			st.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
-			st.result.Status.Reason = err.Error()
+			st.result = &milvuspb.SearchResults{
+				Status: &commonpb.Status{
+					ErrorCode: commonpb.ErrorCode_UnexpectedError,
+					Reason:    err.Error(),
+				},
+			}
 			return err
 		}
 	}

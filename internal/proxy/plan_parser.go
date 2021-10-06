@@ -480,47 +480,6 @@ func (v *Visitor) VisitUnary(ctx *parser.UnaryContext) interface{} {
 	}
 }
 
-// var castExprMap = map[int]schemapb.DataType{
-// 	parser.PlanParserBOOL:   schemapb.DataType_Bool,
-// 	parser.PlanParserINT8:   schemapb.DataType_Int8,
-// 	parser.PlanParserINT16:  schemapb.DataType_Int16,
-// 	parser.PlanParserINT32:  schemapb.DataType_Int32,
-// 	parser.PlanParserINT64:  schemapb.DataType_Int64,
-// 	parser.PlanParserFLOAT:  schemapb.DataType_Float,
-// 	parser.PlanParserDOUBLE: schemapb.DataType_Double,
-// }
-
-// func (v *Visitor) VisitTypeName(ctx *parser.TypeNameContext) interface{} {
-// 	return castExprMap[ctx.GetTy().GetTokenType()]
-// }
-
-// func (v *Visitor) VisitCast(ctx *parser.CastContext) interface{} {
-// 	child := ctx.Expr().Accept(v)
-// 	if getError(child) != nil {
-// 		return child
-// 	}
-
-// 	childNumber := getNumber(child)
-// 	if childNumber != nil {
-// 		return fmt.Errorf("'cast' can only be used on non-const expressions")
-// 	}
-
-// 	childExpr := getExpr(child)
-// 	dataType := ctx.TypeName().Accept(v).(schemapb.DataType)
-// 	expr := &planpb.Expr{
-// 		Expr: &planpb.Expr_CastExpr{
-// 			CastExpr: &planpb.CastExpr{
-// 				Child:    childExpr.expr,
-// 				DataType: dataType,
-// 			},
-// 		},
-// 	}
-// 	return &ExprWithType{
-// 		expr:     expr,
-// 		dataType: dataType,
-// 	}
-// }
-
 func (v *Visitor) VisitMulDivMod(ctx *parser.MulDivModContext) interface{} {
 	left := ctx.Expr(0).Accept(v)
 	if getError(left) != nil {

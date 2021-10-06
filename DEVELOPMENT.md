@@ -1,6 +1,6 @@
 # Development
 
-This document will help to setup your development environment and running tests. If you encounter a problem, please file an issue.
+This document will help to setup your development environment and run tests. If you encounter a problem, please file an issue.
 
 Table of contents
 =================
@@ -9,7 +9,7 @@ Table of contents
   - [Building Milvus with Docker](#building-milvus-with-docker)
   - [Building Milvus on a local OS/shell environment](#building-milvus-on-a-local-osshell-environment)
     - [Hardware Requirements](#hardware-requirements)
-    - [Installing Required Software](#installing-required-software)
+    - [Software Requirements](#software-requirements)
       - [Dependencies](#dependencies)
       - [CMake](#cmake)
       - [Go](#go)
@@ -20,6 +20,9 @@ Table of contents
     - [Unit Tests](#unit-tests)
     - [Code coverage](#code-coverage)
     - [E2E Tests](#e2e-tests)
+    - [Test on local branch](#test-on-local-branch)
+      - [On Linux](#on-linux)
+      - [With docker](#with-docker)
   - [GitHub Flow](#github-flow)
 
 
@@ -40,9 +43,9 @@ Milvus is written in Go and C++, compiling it can use a lot of resources. We rec
 - 50GB of free disk space
 ```
 
-### Installing Required Software
+### Software Requirements
 
-In fact, all Linux distributions is available to develop Milvus. The following only contains commands on Ubuntu, because we mainly use it. If you develop Milvus on other distributions, you are welcome to improve this document.
+In fact, all Linux distributions are available to develop Milvus. The following only contains commands on Ubuntu and CentOS, because we mainly use them. If you develop Milvus on other distributions, you are welcome to improve this document.
 
 #### Dependencies
 - Debian/Ubuntu
@@ -102,6 +105,7 @@ Confirm that cmake is available:
 ```shell
 $ cmake --version
 ```
+Note: 3.18 or higher cmake version is required to build Milvus. 
 
 #### Go
 
@@ -112,6 +116,7 @@ Confirm that your `GOPATH` and `GOBIN` environment variables are correctly set a
 ```shell
 $ go version
 ```
+Note: go1.15 is required to build Milvus.
 
 #### Docker & Docker Compose
 
@@ -129,6 +134,13 @@ $ make all
 ```
 
 If this command succeed, you will now have an executable at `bin/milvus` off of your Milvus project directory.
+
+If you want to update proto file before make, we can use the following command:
+```shell
+$ make generated-proto-go
+```
+
+If you want to know more, you can read Makefile.
 
 ## A Quick Start for Testing Milvus
 
@@ -150,6 +162,30 @@ Pull requests need to pass all unit tests. To run every unit test, use this comm
 $ make unittest
 ```
 
+Before using `make unittest` command, we should run a milvus's deployment environment which helps us to do go test. Here we use local docker environment, use the following commands:
+```shell
+# Using cluster environment
+$ cd deployments/docker/dev
+$ docker-compose up -d
+$ cd ../../../
+$ make unittest
+
+# Or using standalone environment
+$ cd deployments/docker/standalone
+$ docker-compose up -d
+$ cd ../../../
+$ make unittest
+```
+To run only cpp test, we can use this command:
+```shell
+make test-cpp
+```
+
+To run only go test, we can use this command:
+```shell
+make test-go
+```
+
 To run single test case, for instance, run TestSearchTask in /internal/proxy directory, use
 ```shell
 $ go test -v ./internal/proxy/ -test.run TestSearchTask
@@ -159,12 +195,12 @@ $ go test -v ./internal/proxy/ -test.run TestSearchTask
 
 Before submitting your Pull Request, make sure your code change is covered by unit test. Use the following commands to check code coverage rate:
 
-Install lcov(cpp code coverage tool)
+Install lcov(cpp code coverage tool):
 ```shell
 $ sudo apt-get install lcov
 ```
 
-Run unit test and generate report for code coverage
+Run unit test and generate code coverage report:
 ```shell
 $ make codecov
 ```
@@ -186,14 +222,17 @@ $ make codecov-cpp
 Milvus uses Python SDK to write test cases to verify the correctness of Milvus functions. Before run E2E tests, you need a running Milvus:
 
 ```shell
+# Running Milvus cluster
 $ cd deployments/docker/dev
 $ docker-compose up -d
 $ cd ../../../
-# Running Milvus standalone
-$ ./scripts/start_standalone.sh
-
-# or running running a Milvus cluster
 $ ./scripts/start_cluster.sh
+
+# Or running Milvus standalone
+$ cd deployments/docker/standalone
+$ docker-compose up -d
+$ cd ../../../
+$ ./scripts/start_standalone.sh
 ```
 
 To run E2E tests, use these command:
@@ -203,6 +242,26 @@ $ cd tests/python_client
 $ pip install -r requirements.txt
 $ pytest --tags=L0 -n auto
 ```
+
+### Test on local branch
+#### On Linux
+After preparing deployment environment, we can start the cluster on your host machine
+
+```shell
+$ ./scripts/start_cluster.sh
+```
+
+#### With docker
+start the cluster on your host machine
+```shell
+$ ./build/builder.sh make install // build milvus
+$ ./build/build_image.sh // build milvus lastest docker
+$ docker images // check if milvus latest image is ready
+REPOSITORY                 TAG                                 IMAGE ID       CREATED          SIZE
+milvusdb/milvus            latest                              63c62ff7c1b7   52 minutes ago   570MB
+$ install with docker compose
+```
+
 
 ## GitHub Flow
 

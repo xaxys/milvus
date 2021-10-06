@@ -3,9 +3,9 @@
 All PRs are checked in automatically by the sre-robot, with the following condition:
 
 1. DCO check passed
-2. All test passed and code coverage check passed, with a "ci-passed" label
-4. Reviewe passed, with a "lgtm" label
-5. Approver passed, with a "approved" label
+2. All test passed and code coverage check passed, with a `ci-passed` label
+4. Reviewe passed, with a `lgtm` label
+5. Approver passed, with a `approved` label
 
 Generally speaking, reviewer is volunteered and can be anyone in the community who is familiar with the packages the PR modifies.
 Reviewers are responsible for the logic correctness, error handling, unit test coverage and code readability.
@@ -76,4 +76,4 @@ Besides All the reviewer's responsibility listed above, Approvers should also ma
 
 * The variable names appearing in the source code need to be readable. Comments are necessary if it is a unusual abbreviations
 
-Thanks for [Code Review guide](https://github.com/pingcap/tidb/blob/master/code_review_guide.md) from Pingcap commutity.
+Thanks for [Code Review guide](https://github.com/pingcap/tidb/blob/master/code_review_guide.md) from Pingcap community.

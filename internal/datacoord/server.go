@@ -76,6 +76,12 @@ type DataNodeCreatorFunc func(ctx context.Context, addr string) (types.DataNode,
 // RootCoordCreatorFunc creator function for rootcoord
 type RootCoordCreatorFunc func(ctx context.Context, metaRootPath string, etcdEndpoints []string) (types.RootCoord, error)
 
+// makes sure Server implements `DataCoord`
+var _ types.DataCoord = (*Server)(nil)
+
+// makes sure Server implements `positionProvider`
+var _ positionProvider = (*Server)(nil)
+
 // Server implements `types.Datacoord`
 // handles Data Cooridinator related jobs
 type Server struct {
@@ -98,9 +104,9 @@ type Server struct {
 	flushCh   chan UniqueID
 	msFactory msgstream.Factory
 
-	session  *sessionutil.Session
-	activeCh <-chan bool
-	eventCh  <-chan *sessionutil.SessionEvent
+	session *sessionutil.Session
+	liveCh  <-chan bool
+	eventCh <-chan *sessionutil.SessionEvent
 
 	dataNodeCreator        DataNodeCreatorFunc
 	rootCoordClientCreator RootCoordCreatorFunc
@@ -183,8 +189,9 @@ func (s *Server) Register() error {
 	if s.session == nil {
 		return errors.New("failed to initialize session")
 	}
-	s.activeCh = s.session.Init(typeutil.DataCoordRole, Params.IP, true)
+	s.liveCh = s.session.Init(typeutil.DataCoordRole, Params.IP, true)
 	Params.NodeID = s.session.ServerID
+	Params.SetLogger(typeutil.UniqueID(-1))
 	return nil
 }
 
@@ -231,15 +238,8 @@ func (s *Server) Start() error {
 	}
 
 	s.startServerLoop()
-
-	helper := NewMoveBinlogPathHelper(s.kvClient, s.meta)
-	if err := helper.Execute(); err != nil {
-		return err
-	}
-
 	Params.CreatedTime = time.Now()
 	Params.UpdatedTime = time.Now()
-
 	atomic.StoreInt64(&s.isServing, ServerStateHealthy)
 	log.Debug("dataCoordinator startup success")
 
@@ -293,7 +293,7 @@ func (s *Server) initMeta() error {
 		}
 
 		s.kvClient = etcdKV
-		s.meta, err = NewMeta(s.kvClient)
+		s.meta, err = newMeta(s.kvClient)
 		if err != nil {
 			return err
 		}
@@ -304,12 +304,17 @@ func (s *Server) initMeta() error {
 
 func (s *Server) startServerLoop() {
 	s.serverLoopCtx, s.serverLoopCancel = context.WithCancel(s.ctx)
-	s.serverLoopWg.Add(5)
+	s.serverLoopWg.Add(4)
 	go s.startStatsChannel(s.serverLoopCtx)
 	go s.startDataNodeTtLoop(s.serverLoopCtx)
 	go s.startWatchService(s.serverLoopCtx)
-	go s.startActiveCheck(s.serverLoopCtx)
 	go s.startFlushLoop(s.serverLoopCtx)
+	go s.session.LivenessCheck(s.serverLoopCtx, s.liveCh, func() {
+		err := s.Stop()
+		if err != nil {
+			log.Error("server stop fail", zap.Error(err))
+		}
+	})
 }
 
 func (s *Server) startStatsChannel(ctx context.Context) {
@@ -395,7 +400,11 @@ func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 
 			ch := ttMsg.ChannelName
 			ts := ttMsg.Timestamp
-			s.segmentManager.ExpireAllocations(ch, ts)
+			err = s.segmentManager.ExpireAllocations(ch, ts)
+			if err != nil {
+				log.Warn("expire allocations failed", zap.Error(err))
+				continue
+			}
 			segments, err := s.segmentManager.GetFlushableSegments(ctx, ch, ts)
 			if err != nil {
 				log.Warn("get flushable segments failed", zap.Error(err))
@@ -466,26 +475,6 @@ func (s *Server) handleSessionEvent(ctx context.Context, event *sessionutil.Sess
 	default:
 		log.Warn("receive unknown service event type",
 			zap.Any("type", event.EventType))
-	}
-}
-
-func (s *Server) startActiveCheck(ctx context.Context) {
-	defer logutil.LogPanic()
-	defer s.serverLoopWg.Done()
-
-	for {
-		select {
-		case _, ok := <-s.activeCh:
-			if ok {
-				continue
-			}
-			go func() { s.Stop() }()
-			log.Debug("disconnect with etcd and shutdown data coordinator")
-			return
-		case <-ctx.Done():
-			log.Debug("connection check shutdown")
-			return
-		}
 	}
 }
 

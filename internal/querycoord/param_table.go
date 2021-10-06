@@ -12,7 +12,6 @@
 package querycoord
 
 import (
-	"fmt"
 	"path"
 	"strconv"
 	"strings"
@@ -23,8 +22,10 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+// UniqueID is an alias for the Int64 type
 type UniqueID = typeutil.UniqueID
 
+// ParamTable maintains some of the environment variables that are required for the QuryCoord runtime
 type ParamTable struct {
 	paramtable.BaseTable
 
@@ -39,8 +40,6 @@ type ParamTable struct {
 
 	// timetick
 	TimeTickChannelName string
-
-	RoleName string
 
 	// channels
 	ClusterChannelPrefix      string
@@ -60,14 +59,18 @@ type ParamTable struct {
 	MinioBucketName      string
 }
 
+// Params are variables of the ParamTable type
 var Params ParamTable
 var once sync.Once
 
+// InitOnce guarantees that variables are initialized only once
 func (p *ParamTable) InitOnce() {
 	once.Do(func() {
 		p.Init()
 	})
 }
+
+//Init is used to initialize params
 func (p *ParamTable) Init() {
 	p.BaseTable.Init()
 	err := p.LoadYaml("advanced/query_node.yaml")
@@ -79,8 +82,6 @@ func (p *ParamTable) Init() {
 	if err != nil {
 		panic(err)
 	}
-
-	p.initLogCfg()
 
 	p.initQueryCoordAddress()
 	p.initRoleName()
@@ -111,10 +112,6 @@ func (p *ParamTable) initQueryCoordAddress() {
 		panic(err)
 	}
 	p.Address = url
-}
-
-func (p *ParamTable) initRoleName() {
-	p.RoleName = fmt.Sprintf("%s-%d", "QueryCoord", p.NodeID)
 }
 
 func (p *ParamTable) initClusterMsgChannelPrefix() {
@@ -238,6 +235,6 @@ func (p *ParamTable) initMinioBucketName() {
 	p.MinioBucketName = bucketName
 }
 
-func (p *ParamTable) initLogCfg() {
-	p.InitLogCfg("querycoord", 0)
+func (p *ParamTable) initRoleName() {
+	p.RoleName = "querycoord"
 }

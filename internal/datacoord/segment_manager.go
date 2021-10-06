@@ -86,6 +86,9 @@ type Allocation struct {
 	ExpireTime Timestamp
 }
 
+// make sure SegmentManager implements Manager
+var _ Manager = (*SegmentManager)(nil)
+
 // SegmentManager handles segment related logic
 type SegmentManager struct {
 	meta                *meta
@@ -327,8 +330,7 @@ func (s *SegmentManager) openNewSegment(ctx context.Context, collectionID Unique
 		zap.Int("Rows", maxNumOfRows),
 		zap.String("Channel", segmentInfo.InsertChannel))
 
-	s.helper.afterCreateSegment(segmentInfo)
-	return segment, nil
+	return segment, s.helper.afterCreateSegment(segmentInfo)
 }
 
 func (s *SegmentManager) estimateMaxNumOfRows(collectionID UniqueID) (int, error) {

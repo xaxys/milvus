@@ -1,5 +1,5 @@
 <a href="https://milvus.io/hacktoberfest-2021">
-    <img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/milvus_hacktoberfest_15ba8e5083.jpeg" alt="Join Hacktoberfest with Milvus">
+    <img src="https://assets.zilliz.com/milvus_hacktoberfest_15ba8e5083.jpeg" alt="Join Hacktoberfest with Milvus">
 </a>
 
 
@@ -24,7 +24,7 @@
 
 Milvus is an open-source vector database built to power embedding similarity search and AI applications. Milvus makes unstructured data search more accessible, and provides a consistent user experience regardless of the deployment environment.
 
-Milvus 2.0 is a cloud-native vector database with storage and computation separated by design. All components in this refactored version of Milvus are stateless to enhance elasticity and flexibility. For more architecture datails, see [Milvus Architecture Overview](https://milvus.io/docs/v2.0.0/architecture_overview.md).
+Milvus 2.0 is a cloud-native vector database with storage and computation separated by design. All components in this refactored version of Milvus are stateless to enhance elasticity and flexibility. For more architecture datails, see [Milvus Architecture Overview](https://milvus.io/docs/architecture_overview.md).
 
 Milvus was released under the [open-source Apache License 2.0](https://github.com/milvus-io/milvus/blob/master/LICENSE) in October 2019. It is currently a graduate project under [LF AI & Data Foundation](https://lfaidata.foundation/).
 
@@ -62,7 +62,7 @@ Milvus was released under the [open-source Apache License 2.0](https://github.co
 
 <details>
   <summary><b>Community supported, industry recognized</b></summary>
-  With over 1,000 enterprise users, 7,900+ stars on GitHub, and an active open-source community, you’re not alone when you use Milvus. As a graduate project under the <a href="https://lfaidata.foundation/">LF AI & Data Foundation</a>, Milvus has institutional support.
+  With over 1,000 enterprise users, 8,000+ stars on GitHub, and an active open-source community, you’re not alone when you use Milvus. As a graduate project under the <a href="https://lfaidata.foundation/">LF AI & Data Foundation</a>, Milvus has institutional support.
   </details>
 
 ## Quick start
@@ -79,7 +79,7 @@ Check the requirements first.
 
 ```bash
 go: 1.15
-cmake: >=3.16
+cmake: >=3.18
 gcc: 7.5
 ```
 
@@ -113,17 +113,17 @@ See [Milvus 2.0 vs. 1.x](https://github.com/milvus-io/milvus/blob/master/milvus2
   <tr>
     <td width="30%">
       <a href="https://zilliz.com/milvus-demos">
-        <img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/image_search_59a64e4f22.gif" />
+        <img src="https://assets.zilliz.com/image_search_59a64e4f22.gif" />
       </a>
     </td>
     <td width="30%">
 <a href="https://zilliz.com/milvus-demos">
-<img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/qa_df5ee7bd83.gif" />
+<img src="https://assets.zilliz.com/qa_df5ee7bd83.gif" />
 </a>
     </td>
     <td width="30%">
 <a href="https://zilliz.com/milvus-demos">
-<img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/mole_search_76f8340572.gif" />
+<img src="https://assets.zilliz.com/mole_search_76f8340572.gif" />
 </a>
     </td>
   </tr>
@@ -163,11 +163,12 @@ Contributions to Milvus are welcome from everyone. See [Guidelines for Contribut
 ### All contributors
 
 <br><!-- Do not remove start of hero-bot -->
-<img src="https://img.shields.io/badge/all--contributors-173-orange"><br>
+<img src="https://img.shields.io/badge/all--contributors-178-orange"><br>
 <a href="https://github.com/ABNER-1"><img src="https://avatars.githubusercontent.com/u/24547351?v=4" width="30px" /></a>
 <a href="https://github.com/Accagain2014"><img src="https://avatars.githubusercontent.com/u/9635216?v=4" width="30px" /></a>
 <a href="https://github.com/AllenYu1987"><img src="https://avatars.githubusercontent.com/u/12489985?v=4" width="30px" /></a>
 <a href="https://github.com/Aredcap"><img src="https://avatars.githubusercontent.com/u/40494761?v=4" width="30px" /></a>
+<a href="https://github.com/BUPTAnderson"><img src="https://avatars.githubusercontent.com/u/13449703?v=4" width="30px" /></a>
 <a href="https://github.com/Ben-Aaron-Bio-Rad"><img src="https://avatars.githubusercontent.com/u/54123439?v=4" width="30px" /></a>
 <a href="https://github.com/Bennu-Li"><img src="https://avatars.githubusercontent.com/u/53458891?v=4" width="30px" /></a>
 <a href="https://github.com/BossZou"><img src="https://avatars.githubusercontent.com/u/40255591?v=4" width="30px" /></a>
@@ -175,6 +176,8 @@ Contributions to Milvus are welcome from everyone. See [Guidelines for Contribut
 <a href="https://github.com/CrossRaynor"><img src="https://avatars.githubusercontent.com/u/3909908?v=4" width="30px" /></a>
 <a href="https://github.com/Cupchen"><img src="https://avatars.githubusercontent.com/u/34762375?v=4" width="30px" /></a>
 <a href="https://github.com/DanielHuang1983"><img src="https://avatars.githubusercontent.com/u/4417873?v=4" width="30px" /></a>
+<a href="https://github.com/Deep1Shikha"><img src="https://avatars.githubusercontent.com/u/47516502?v=4" width="30px" /></a>
+<a href="https://github.com/DiptoChakrabarty"><img src="https://avatars.githubusercontent.com/u/45638240?v=4" width="30px" /></a>
 <a href="https://github.com/DragonDriver"><img src="https://avatars.githubusercontent.com/u/31589260?v=4" width="30px" /></a>
 <a href="https://github.com/Emma-Song"><img src="https://avatars.githubusercontent.com/u/64460989?v=4" width="30px" /></a>
 <a href="https://github.com/Fierralin"><img src="https://avatars.githubusercontent.com/u/8857059?v=4" width="30px" /></a>
@@ -239,9 +242,11 @@ Contributions to Milvus are welcome from everyone. See [Guidelines for Contribut
 <a href="https://github.com/dd-He"><img src="https://avatars.githubusercontent.com/u/24242249?v=4" width="30px" /></a>
 <a href="https://github.com/dddddai"><img src="https://avatars.githubusercontent.com/u/41563853?v=4" width="30px" /></a>
 <a href="https://github.com/del-zhenwu"><img src="https://avatars.githubusercontent.com/u/56623710?v=4" width="30px" /></a>
+<a href="https://github.com/donno2048"><img src="https://avatars.githubusercontent.com/u/61805754?v=4" width="30px" /></a>
 <a href="https://github.com/douglarek"><img src="https://avatars.githubusercontent.com/u/1488134?v=4" width="30px" /></a>
 <a href="https://github.com/dvzubarev"><img src="https://avatars.githubusercontent.com/u/14878830?v=4" width="30px" /></a>
 <a href="https://github.com/dyhyfu"><img src="https://avatars.githubusercontent.com/u/64584368?v=4" width="30px" /></a>
+<a href="https://github.com/elfisworking"><img src="https://avatars.githubusercontent.com/u/37609214?v=4" width="30px" /></a>
 <a href="https://github.com/erdustiggen"><img src="https://avatars.githubusercontent.com/u/25433850?v=4" width="30px" /></a>
 <a href="https://github.com/feisiyicl"><img src="https://avatars.githubusercontent.com/u/64510805?v=4" width="30px" /></a>
 <a href="https://github.com/filip-halt"><img src="https://avatars.githubusercontent.com/u/81822489?v=4" width="30px" /></a>
@@ -356,17 +361,17 @@ The implemented SDK and its API documentation are listed below:
 
 Milvus insight provides an intuitive and efficient GUI for Milvus.
 
-- [Quick start](https://github.com/milvus-io/milvus-insight#quick-start)
+- [Quick start](https://github.com/zilliztech/milvus-insight#quick-start)
 
 ## Community
 
 Join the Milvus community on [Slack](https://join.slack.com/t/milvusio/shared_invite/zt-e0u4qu3k-bI2GDNys3ZqX1YCJ9OM~GQ) to share your suggestions, advice, and questions with our engineering team.
 
 <a href="https://join.slack.com/t/milvusio/shared_invite/zt-e0u4qu3k-bI2GDNys3ZqX1YCJ9OM~GQ">
-    <img src="https://zilliz-cms.s3.us-west-2.amazonaws.com/readme_slack_4a07c4c92f.png" alt="Miluvs Slack Channel"  height="150" width="500">
+    <img src="https://assets.zilliz.com/readme_slack_4a07c4c92f.png" alt="Miluvs Slack Channel"  height="150" width="500">
 </a>
 
-You can also check out our [FAQ page](https://milvus.io/docs/v2.0.0/performance_faq.md) to discover solutions or answers to your issues or questions.
+You can also check out our [FAQ page](https://milvus.io/docs/performance_faq.md) to discover solutions or answers to your issues or questions.
 
 Subscribe to Milvus mailing lists:
 
@@ -378,6 +383,7 @@ Follow Milvus on social media:
 
 - [Medium](https://medium.com/@milvusio)
 - [Twitter](https://twitter.com/milvusio)
+- [Youtube](https://www.youtube.com/channel/UCMCo_F7pKjMHBlfyxwOPw-g)
 
 ## Join Us
 

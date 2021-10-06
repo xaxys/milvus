@@ -84,6 +84,7 @@ func NewMqMsgStream(ctx context.Context,
 	return stream, nil
 }
 
+// AsProducer create producer to send message to channels
 func (ms *mqMsgStream) AsProducer(channels []string) {
 	for _, channel := range channels {
 		if len(channel) == 0 {
@@ -113,6 +114,7 @@ func (ms *mqMsgStream) AsProducer(channels []string) {
 	}
 }
 
+// Create consumer to receive message from channels
 func (ms *mqMsgStream) AsConsumer(channels []string, subName string) {
 	for _, channel := range channels {
 		if _, ok := ms.consumers[channel]; ok {
@@ -430,6 +432,7 @@ func (ms *mqMsgStream) Chan() <-chan *MsgPack {
 	return ms.receiveBuf
 }
 
+// Seek reset the subscription associated with this consumer to a specific position
 func (ms *mqMsgStream) Seek(msgPositions []*internalpb.MsgPosition) error {
 	for _, mp := range msgPositions {
 		consumer, ok := ms.consumers[mp.ChannelName]

@@ -279,7 +279,7 @@ func (ri *retentionInfo) retention() error {
 	for {
 		select {
 		case <-ri.ctx.Done():
-			log.Debug("aaaaaaaaaaaaa")
+			log.Debug("Rocksmq retention finish!")
 			return nil
 		case t := <-ticker.C:
 			timeNow := t.Unix()
@@ -499,13 +499,15 @@ func DeleteMessages(db *gorocksdb.DB, topic string, startID, endID UniqueID) err
 	}
 
 	writeBatch := gorocksdb.NewWriteBatch()
-	defer writeBatch.Clear()
+	defer writeBatch.Destroy()
 	if startID == endID {
 		writeBatch.Delete([]byte(startKey))
 	} else {
 		writeBatch.DeleteRange([]byte(startKey), []byte(endKey))
 	}
-	err = db.Write(gorocksdb.NewDefaultWriteOptions(), writeBatch)
+	opts := gorocksdb.NewDefaultWriteOptions()
+	defer opts.Destroy()
+	err = db.Write(opts, writeBatch)
 	if err != nil {
 		return err
 	}

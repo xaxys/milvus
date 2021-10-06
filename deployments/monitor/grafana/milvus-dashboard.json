@@ -16,7 +16,7 @@
   "gnetId": null,
   "graphTooltip": 0,
   "id": 25,
-  "iteration": 1632734664952,
+  "iteration": 1633509276925,
   "links": [],
   "panels": [
     {
@@ -149,7 +149,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Counter of create collection",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -206,7 +206,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Counter of create collection",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -263,7 +263,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Show collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -320,7 +320,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Show collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -682,7 +682,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord describe collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -739,7 +739,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of RootCoord describe collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -780,6 +780,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
+          "exemplar": true,
           "expr": "sum(milvus_rootcoord_describe_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"success\"}) by (pod)",
           "instant": false,
           "interval": "",
@@ -796,7 +797,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total  RootCoord drop collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -853,7 +854,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of RootCoord drop collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -910,7 +911,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total  RootCoord drop partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -951,6 +952,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
+          "exemplar": true,
           "expr": "sum(milvus_rootcoord_drop_partition_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"}) by (pod)",
           "instant": false,
           "interval": "",
@@ -967,7 +969,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful  RootCoord drop partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1332,7 +1334,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Show partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1389,7 +1391,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Show partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1446,7 +1448,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Create partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1503,7 +1505,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Create partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1560,7 +1562,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Has partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1617,7 +1619,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of RootCoord Has partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1977,7 +1979,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Create index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2034,7 +2036,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total  success of RootCoord Create index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2091,7 +2093,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Drop index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2148,7 +2150,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of RootCoord Drop index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2205,7 +2207,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Describe index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2262,7 +2264,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Describe index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -5714,7 +5716,7 @@
       {
         "allValue": null,
         "current": {
-          "selected": false,
+          "selected": true,
           "text": "default",
           "value": "default"
         },
@@ -5841,5 +5843,5 @@
   "timezone": "browser",
   "title": "Milvus2.0",
   "uid": "uLf5cJ3Gz",
-  "version": 116
+  "version": 143
 }

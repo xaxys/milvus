@@ -33,6 +33,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 
 	"go.uber.org/zap"
@@ -51,9 +52,13 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+// UniqueID is an alias of int64, is used as a unique identifier for the request.
 type UniqueID = typeutil.UniqueID
-type Timestamp = typeutil.Timestamp
 
+// make sure IndexNode implements types.IndexNode
+var _ types.IndexNode = (*IndexNode)(nil)
+
+// IndexNode is a component that executes the task of building indexes.
 type IndexNode struct {
 	stateCode atomic.Value
 
@@ -80,6 +85,7 @@ type IndexNode struct {
 	initOnce sync.Once
 }
 
+// NewIndexNode creates a new IndexNode component.
 func NewIndexNode(ctx context.Context) (*IndexNode, error) {
 	log.Debug("New IndexNode ...")
 	rand.Seed(time.Now().UnixNano())
@@ -98,7 +104,7 @@ func NewIndexNode(ctx context.Context) (*IndexNode, error) {
 	return b, nil
 }
 
-// Register register index node at etcd
+// Register register index node at etcd.
 func (i *IndexNode) Register() error {
 	i.session = sessionutil.NewSession(i.loopCtx, Params.MetaRootPath, Params.EtcdEndpoints)
 	if i.session == nil {
@@ -106,26 +112,28 @@ func (i *IndexNode) Register() error {
 	}
 	i.liveCh = i.session.Init(typeutil.IndexNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
 	Params.NodeID = i.session.ServerID
-	//TODO reset logger
-	//Params.initLogCfg()
+	Params.SetLogger(Params.NodeID)
 	return nil
 }
 
 func (i *IndexNode) initKnowhere() {
 	C.IndexBuilderInit()
 
-	// override segcore SIMD type
+	// override index builder SIMD type
 	cSimdType := C.CString(Params.SimdType)
-	C.IndexBuilderSetSimdType(cSimdType)
+	cRealSimdType := C.IndexBuilderSetSimdType(cSimdType)
+	Params.SimdType = C.GoString(cRealSimdType)
+	C.free(unsafe.Pointer(cRealSimdType))
 	C.free(unsafe.Pointer(cSimdType))
 }
 
+// Init initializes the IndexNode component.
 func (i *IndexNode) Init() error {
 	var initErr error = nil
 	i.initOnce.Do(func() {
 		Params.Init()
 		i.UpdateStateCode(internalpb.StateCode_Initializing)
-		log.Debug("IndexNode", zap.Any("State", internalpb.StateCode_Initializing))
+		log.Debug("IndexNode init", zap.Any("State", internalpb.StateCode_Initializing))
 		connectEtcdFn := func() error {
 			etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
 			i.etcdKV = etcdKV
@@ -137,7 +145,7 @@ func (i *IndexNode) Init() error {
 			initErr = err
 			return
 		}
-		log.Debug("IndexNode try connect etcd success")
+		log.Debug("IndexNode connect to etcd successfully")
 
 		option := &miniokv.Option{
 			Address:           Params.MinIOAddress,
@@ -147,13 +155,16 @@ func (i *IndexNode) Init() error {
 			BucketName:        Params.MinioBucketName,
 			CreateBucket:      true,
 		}
-		i.kv, err = miniokv.NewMinIOKV(i.loopCtx, option)
+		kv, err := miniokv.NewMinIOKV(i.loopCtx, option)
 		if err != nil {
 			log.Error("IndexNode NewMinIOKV failed", zap.Error(err))
 			initErr = err
 			return
 		}
-		log.Debug("IndexNode NewMinIOKV success")
+
+		i.kv = kv
+
+		log.Debug("IndexNode NewMinIOKV successfully")
 		i.closer = trace.InitTracing("index_node")
 
 		i.initKnowhere()
@@ -164,6 +175,7 @@ func (i *IndexNode) Init() error {
 	return initErr
 }
 
+// Start starts the IndexNode component.
 func (i *IndexNode) Start() error {
 	var startErr error = nil
 	i.once.Do(func() {
@@ -189,7 +201,7 @@ func (i *IndexNode) Start() error {
 	return startErr
 }
 
-// Stop Close closes the server.
+// Stop closes the server.
 func (i *IndexNode) Stop() error {
 	i.loopCancel()
 	if i.sched != nil {
@@ -198,10 +210,11 @@ func (i *IndexNode) Stop() error {
 	for _, cb := range i.closeCallbacks {
 		cb()
 	}
-	log.Debug("NodeImpl  closed.")
+	log.Debug("Index node stopped.")
 	return nil
 }
 
+// UpdateStateCode updates the component state of IndexNode.
 func (i *IndexNode) UpdateStateCode(code internalpb.StateCode) {
 	i.stateCode.Store(code)
 }
@@ -220,7 +233,7 @@ func (i *IndexNode) CreateIndex(ctx context.Context, request *indexpb.CreateInde
 			Reason:    "state code is not healthy",
 		}, nil
 	}
-	log.Debug("IndexNode building index ...",
+	log.Info("IndexNode building index ...",
 		zap.Int64("IndexBuildID", request.IndexBuildID),
 		zap.String("IndexName", request.IndexName),
 		zap.Int64("IndexID", request.IndexID),
@@ -251,15 +264,17 @@ func (i *IndexNode) CreateIndex(ctx context.Context, request *indexpb.CreateInde
 
 	err := i.sched.IndexBuildQueue.Enqueue(t)
 	if err != nil {
+		log.Warn("IndexNode failed to schedule", zap.Int64("indexBuildID", request.IndexBuildID), zap.Error(err))
 		ret.ErrorCode = commonpb.ErrorCode_UnexpectedError
 		ret.Reason = err.Error()
 		return ret, nil
 	}
-	log.Debug("IndexNode", zap.Int64("IndexNode successfully schedule with indexBuildID", request.IndexBuildID))
+	log.Info("IndexNode successfully schedule", zap.Int64("indexBuildID", request.IndexBuildID))
 
 	return ret, nil
 }
 
+// GetComponentStates gets the component states of IndexNode.
 func (i *IndexNode) GetComponentStates(ctx context.Context) (*internalpb.ComponentStates, error) {
 	log.Debug("get IndexNode components states ...")
 	stateInfo := &internalpb.ComponentInfo{
@@ -283,6 +298,7 @@ func (i *IndexNode) GetComponentStates(ctx context.Context) (*internalpb.Compone
 	return ret, nil
 }
 
+// GetTimeTickChannel gets the time tick channel of IndexNode.
 func (i *IndexNode) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
 	log.Debug("get IndexNode time tick channel ...")
 
@@ -293,6 +309,7 @@ func (i *IndexNode) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringRes
 	}, nil
 }
 
+// GetStatisticsChannel gets the statistics channel of IndexNode.
 func (i *IndexNode) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
 	log.Debug("get IndexNode statistics channel ...")
 	return &milvuspb.StringResponse{
@@ -302,6 +319,7 @@ func (i *IndexNode) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringR
 	}, nil
 }
 
+// GetMetrics gets the metrics info of IndexNode.
 // TODO(dragondriver): cache the Metrics and set a retention to the cache
 func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	log.Debug("IndexNode.GetMetrics",
@@ -339,9 +357,6 @@ func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequ
 		}, nil
 	}
 
-	log.Debug("IndexNode.GetMetrics",
-		zap.String("metric_type", metricType))
-
 	if metricType == metricsinfo.SystemInfoMetrics {
 		metrics, err := getSystemInfoMetrics(ctx, req, i)
 
@@ -355,7 +370,7 @@ func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequ
 		return metrics, err
 	}
 
-	log.Debug("IndexNode.GetMetrics failed, request metric type is not implemented yet",
+	log.Warn("IndexNode.GetMetrics failed, request metric type is not implemented yet",
 		zap.Int64("node_id", Params.NodeID),
 		zap.String("req", req.Request),
 		zap.String("metric_type", metricType))

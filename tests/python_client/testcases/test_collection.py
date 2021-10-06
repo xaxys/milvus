@@ -2398,6 +2398,11 @@ class TestDropCollectionInvalid(object):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_drop_collection_with_invalid_collection_name(self, connect, get_collection_name):
+        """
+        target: test drop invalid collection
+        method: drop collection with invalid collection name
+        expected: raise exception
+        """
         collection_name = get_collection_name
         with pytest.raises(Exception) as e:
             connect.has_collection(collection_name)
@@ -2405,6 +2410,11 @@ class TestDropCollectionInvalid(object):
     @pytest.mark.tags(CaseLabel.L2)
     @pytest.mark.parametrize("collection_name", ('', None))
     def test_drop_collection_with_empty_or_None_collection_name(self, connect, collection_name):
+        """
+        target: test drop invalid collection
+        method: drop collection with empty or None collection name
+        expected: raise exception
+        """
         with pytest.raises(Exception) as e:
             connect.has_collection(collection_name)
 
@@ -2479,18 +2489,33 @@ class TestHasCollectionInvalid(object):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_has_collection_with_invalid_collection_name(self, connect, get_collection_name):
+        """
+        target: test list collections with invalid scenario
+        method: show collection with invalid collection name
+        expected: raise exception
+        """
         collection_name = get_collection_name
         with pytest.raises(Exception) as e:
             connect.has_collection(collection_name)
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_has_collection_with_empty_collection_name(self, connect):
+        """
+        target: test list collections with invalid scenario
+        method: show collection with empty collection name
+        expected: raise exception
+        """
         collection_name = ''
         with pytest.raises(Exception) as e:
             connect.has_collection(collection_name)
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_has_collection_with_none_collection_name(self, connect):
+        """
+        target: test list collections with invalid scenario
+        method: show collection with no collection name
+        expected: raise exception
+        """
         collection_name = None
         with pytest.raises(Exception) as e:
             connect.has_collection(collection_name)
@@ -2677,7 +2702,7 @@ class TestLoadCollection:
     def test_release_collection_not_existed(self, connect, collection):
         """
         target: test release a not existed collection
-        method: release with a not existed collection anme
+        method: release with a not existed collection name
         expected: raise exception
         """
         collection_name = gen_unique_str(uid_load)
@@ -2731,6 +2756,12 @@ class TestLoadCollection:
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_load_release_collection(self, connect, collection):
+        """
+        target: test load, release non-exist collection
+        method: 1. load, release and drop collection
+                2. load and release dropped collection
+        expected: raise exception
+        """
         collection_name = gen_unique_str(uid_load)
         connect.create_collection(collection_name, cons.default_fields)
         connect.insert(collection_name, cons.default_entities)
@@ -2857,7 +2888,7 @@ class TestReleaseAdvanced:
         """
         target: test release collection during searching
         method: insert entities into collection, flush and load collection, release collection during searching
-        expected:
+        expected: raise exception
         """
         nq = 1000
         top_k = 1
@@ -2875,7 +2906,7 @@ class TestReleaseAdvanced:
         """
         target: test release partition during searching
         method: insert entities into partition, flush and load partition, release partition during searching
-        expected:
+        expected: raise exception
         """
         nq = 1000
         top_k = 1
@@ -2894,7 +2925,7 @@ class TestReleaseAdvanced:
         """
         target: test release collection during searching
         method: insert entities into partition, flush and load partition, release collection during searching
-        expected:
+        expected: raise exception
         """
         nq = 1000
         top_k = 1
@@ -2912,7 +2943,7 @@ class TestReleaseAdvanced:
         """
         target: test release collection during loading
         method: insert entities into collection, flush, release collection during loading
-        expected:
+        expected: raise exception
         """
         connect.insert(collection, cons.default_entities)
         connect.flush([collection])
@@ -3214,12 +3245,22 @@ class TestLoadPartitionInvalid(object):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_load_partition_with_invalid_partition_name(self, connect, collection, get_partition_name):
+        """
+        target: test load invalid partition
+        method: load partition with invalid partition name
+        expected: raise exception
+        """
         partition_name = get_partition_name
         with pytest.raises(Exception) as e:
             connect.load_partitions(collection, [partition_name])
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_release_partition_with_invalid_partition_name(self, connect, collection, get_partition_name):
+        """
+        target: test release invalid partition
+        method: release partition with invalid partition name
+        expected: raise exception
+        """
         partition_name = get_partition_name
         with pytest.raises(Exception) as e:
             connect.load_partitions(collection, [partition_name])

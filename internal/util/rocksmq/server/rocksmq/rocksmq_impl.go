@@ -49,6 +49,8 @@ const (
 	AckedTsTitle      = "acked_ts/"
 	AckedSizeTitle    = "acked_size/"
 	LastRetTsTitle    = "last_retention_ts/"
+
+	CurrentIDSuffix = "current_id"
 )
 
 /**
@@ -78,6 +80,13 @@ func combKey(channelName string, id UniqueID) (string, error) {
 	}
 
 	return fixName + "/" + strconv.FormatInt(id, 10), nil
+}
+
+/**
+ * Construct current id
+ */
+func constructCurrentID(topicName, groupName string) string {
+	return groupName + "/" + topicName + "/" + CurrentIDSuffix
 }
 
 /**
@@ -118,12 +127,13 @@ type rocksmq struct {
 // 3. Start retention goroutine
 func NewRocksMQ(name string, idAllocator allocator.GIDAllocator) (*rocksmq, error) {
 	bbto := gorocksdb.NewDefaultBlockBasedTableOptions()
+	bbto.SetCacheIndexAndFilterBlocks(true)
 	bbto.SetBlockCache(gorocksdb.NewLRUCache(RocksDBLRUCacheCapacity))
 	opts := gorocksdb.NewDefaultOptions()
 	opts.SetBlockBasedTableFactory(bbto)
 	opts.SetCreateIfMissing(true)
 	opts.SetPrefixExtractor(gorocksdb.NewFixedPrefixTransform(FixedChannelNameLen + 1))
-	opts.SetMaxOpenFiles(-1)
+	// opts.SetMaxOpenFiles(-1)
 
 	db, err := gorocksdb.OpenDb(opts, name)
 	if err != nil {
@@ -307,7 +317,7 @@ func (rmq *rocksmq) DestroyTopic(topicName string) error {
 }
 
 func (rmq *rocksmq) ExistConsumerGroup(topicName, groupName string) (bool, *Consumer) {
-	key := groupName + "/" + topicName + "/current_id"
+	key := constructCurrentID(topicName, groupName)
 	if rmq.checkKeyExist(key) {
 		if vals, ok := rmq.consumers.Load(topicName); ok {
 			for _, v := range vals.([]*Consumer) {
@@ -321,7 +331,7 @@ func (rmq *rocksmq) ExistConsumerGroup(topicName, groupName string) (bool, *Cons
 }
 
 func (rmq *rocksmq) CreateConsumerGroup(topicName, groupName string) error {
-	key := groupName + "/" + topicName + "/current_id"
+	key := constructCurrentID(topicName, groupName)
 	if rmq.checkKeyExist(key) {
 		log.Debug("RocksMQ: " + key + " existed.")
 		return nil
@@ -362,7 +372,7 @@ func (rmq *rocksmq) DestroyConsumerGroup(topicName, groupName string) error {
 	}
 	lock.Lock()
 	defer lock.Unlock()
-	key := groupName + "/" + topicName + "/current_id"
+	key := constructCurrentID(topicName, groupName)
 
 	err := rmq.kv.Remove(key)
 	if err != nil {
@@ -539,7 +549,7 @@ func (rmq *rocksmq) Consume(topicName string, groupName string, n int) ([]Consum
 	lock.Lock()
 	defer lock.Unlock()
 
-	metaKey := groupName + "/" + topicName + "/current_id"
+	metaKey := constructCurrentID(topicName, groupName)
 	currentID, err := rmq.kv.Load(metaKey)
 	if err != nil {
 		log.Debug("RocksMQ: load " + metaKey + " failed")
@@ -621,7 +631,7 @@ func (rmq *rocksmq) Seek(topicName string, groupName string, msgID UniqueID) err
 	/* Step I: Check if key exists */
 	rmq.storeMu.Lock()
 	defer rmq.storeMu.Unlock()
-	key := groupName + "/" + topicName + "/current_id"
+	key := constructCurrentID(topicName, groupName)
 	if !rmq.checkKeyExist(key) {
 		log.Debug("RocksMQ: channel " + key + " not exists")
 		return fmt.Errorf("ConsumerGroup %s, channel %s not exists", groupName, topicName)
@@ -650,6 +660,37 @@ func (rmq *rocksmq) Seek(topicName string, groupName string, msgID UniqueID) err
 	}
 
 	return nil
+}
+
+func (rmq *rocksmq) SeekToLatest(topicName, groupName string) error {
+	rmq.storeMu.Lock()
+	defer rmq.storeMu.Unlock()
+	key := groupName + "/" + topicName + "/current_id"
+	if !rmq.checkKeyExist(key) {
+		log.Debug("RocksMQ: channel " + key + " not exists")
+		return fmt.Errorf("ConsumerGroup %s, channel %s not exists", groupName, topicName)
+	}
+
+	readOpts := gorocksdb.NewDefaultReadOptions()
+	defer readOpts.Destroy()
+	readOpts.SetPrefixSameAsStart(true)
+	iter := rmq.store.NewIterator(readOpts)
+	defer iter.Close()
+
+	fixChanName, _ := fixChannelName(topicName)
+	iter.Seek([]byte(fixChanName + "/"))
+	if iter.Valid() {
+		iter.SeekToLast()
+	} else {
+		return fmt.Errorf("RocksMQ: can't get message key of channel %s", topicName)
+	}
+	msgKey := iter.Key()
+	msgID, err := strconv.ParseInt(string(msgKey.Data())[FixedChannelNameLen+1:], 10, 64)
+	if err != nil {
+		return err
+	}
+	err = rmq.kv.Save(key, strconv.FormatInt(msgID, 10))
+	return err
 }
 
 func (rmq *rocksmq) Notify(topicName, groupName string) {

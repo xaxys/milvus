@@ -64,6 +64,9 @@ const (
 
 const illegalRequestErrStr = "Illegal request"
 
+// makes sure DataNode implements types.DataNode
+var _ types.DataNode = (*DataNode)(nil)
+
 // DataNode communicates with outside services and unioun all
 // services in datanode package.
 //
@@ -87,19 +90,29 @@ type DataNode struct {
 
 	chanMut           sync.RWMutex
 	vchan2SyncService map[string]*dataSyncService // vchannel name
-	vchan2FlushCh     map[string]chan<- *flushMsg // vchannel name
-	clearSignal       chan UniqueID               // collection ID
-	segmentCache      *Cache
+	vchan2FlushChs    map[string]*flushChans      // vchannel name to flush channels
+
+	clearSignal  chan UniqueID // collection ID
+	segmentCache *Cache
 
 	rootCoord types.RootCoord
 	dataCoord types.DataCoord
 
 	session  *sessionutil.Session
+	liveCh   <-chan bool
 	kvClient *etcdkv.EtcdKV
 
 	closer io.Closer
 
 	msFactory msgstream.Factory
+}
+
+type flushChans struct {
+	// Flush signal for insert buffer
+	insertBufferCh chan *flushMsg
+
+	// Flush signal for delete buffer
+	deleteBufferCh chan *flushMsg
 }
 
 // NewDataNode will return a DataNode with abnormal state.
@@ -117,7 +130,7 @@ func NewDataNode(ctx context.Context, factory msgstream.Factory) *DataNode {
 		segmentCache: newCache(),
 
 		vchan2SyncService: make(map[string]*dataSyncService),
-		vchan2FlushCh:     make(map[string]chan<- *flushMsg),
+		vchan2FlushChs:    make(map[string]*flushChans),
 		clearSignal:       make(chan UniqueID, 100),
 	}
 	node.UpdateStateCode(internalpb.StateCode_Abnormal)
@@ -149,10 +162,10 @@ func (node *DataNode) SetDataCoordInterface(ds types.DataCoord) error {
 // Register register datanode to etcd
 func (node *DataNode) Register() error {
 	node.session = sessionutil.NewSession(node.ctx, Params.MetaRootPath, Params.EtcdEndpoints)
-	activeCh := node.session.Init(typeutil.DataNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
-	go node.etcdAliveCheck(node.ctx, activeCh)
+	node.liveCh = node.session.Init(typeutil.DataNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
 	Params.NodeID = node.session.ServerID
 	node.NodeID = node.session.ServerID
+	Params.SetLogger(Params.NodeID)
 	// Start node watch node
 	go node.StartWatchChannels(node.ctx)
 
@@ -202,26 +215,6 @@ func (node *DataNode) StartWatchChannels(ctx context.Context) {
 	}
 }
 
-// etcdAliveCheck performs alive check for etcd connection
-// will close datanode if check fails
-func (node *DataNode) etcdAliveCheck(ctx context.Context, ch <-chan bool) {
-	for {
-		select {
-		case _, ok := <-ch:
-			if ok { // ok means still alive do nothing
-				continue
-			}
-			// not ok, disconnect
-			go func() { node.Stop() }()
-			log.Warn("disconnected from etcd, shuting down datanode", zap.Int64("ServerID", node.NodeID))
-			return
-		case <-ctx.Done():
-			log.Warn("etcd alive check quit, due to ctx done")
-			return
-		}
-	}
-}
-
 // handleChannelEvt handles event from kv watch event
 func (node *DataNode) handleChannelEvt(evt *clientv3.Event) {
 	switch evt.Type {
@@ -245,7 +238,11 @@ func (node *DataNode) handleChannelEvt(evt *clientv3.Event) {
 			return
 		}
 		watchInfo.State = datapb.ChannelWatchState_Complete
-		v, _ := proto.Marshal(&watchInfo)
+		v, err := proto.Marshal(&watchInfo)
+		if err != nil {
+			log.Warn("fail to Marshal watchInfo", zap.String("key", string(evt.Kv.Key)), zap.Error(err))
+			return
+		}
 		err = node.kvClient.Save(fmt.Sprintf("channel/%d/%s", node.NodeID, watchInfo.Vchan.ChannelName), string(v))
 		if err != nil {
 			log.Warn("fail to change WatchState to complete", zap.String("key", string(evt.Kv.Key)), zap.Error(err))
@@ -276,20 +273,24 @@ func (node *DataNode) NewDataSyncService(vchan *datapb.VchannelInfo) error {
 		zap.Int("Flushed Segment Number", len(vchan.GetFlushedSegments())),
 	)
 
-	flushChan := make(chan *flushMsg, 100)
-	dataSyncService, err := newDataSyncService(node.ctx, flushChan, replica, alloc, node.msFactory, vchan, node.clearSignal, node.dataCoord, node.segmentCache)
+	flushChs := &flushChans{
+		insertBufferCh: make(chan *flushMsg, 100),
+		deleteBufferCh: make(chan *flushMsg, 100),
+	}
+
+	dataSyncService, err := newDataSyncService(node.ctx, flushChs, replica, alloc, node.msFactory, vchan, node.clearSignal, node.dataCoord, node.segmentCache)
 	if err != nil {
 		return err
 	}
 
 	node.vchan2SyncService[vchan.GetChannelName()] = dataSyncService
-	node.vchan2FlushCh[vchan.GetChannelName()] = flushChan
+	node.vchan2FlushChs[vchan.GetChannelName()] = flushChs
 
 	log.Info("Start New dataSyncService",
 		zap.Int64("Collection ID", vchan.GetCollectionID()),
 		zap.String("Vchannel name", vchan.GetChannelName()),
 	)
-	go dataSyncService.start()
+	dataSyncService.start()
 
 	return nil
 }
@@ -322,7 +323,7 @@ func (node *DataNode) ReleaseDataSyncService(vchanName string) {
 	}
 
 	delete(node.vchan2SyncService, vchanName)
-	delete(node.vchan2FlushCh, vchanName)
+	delete(node.vchan2FlushChs, vchanName)
 
 	log.Debug("Release flowgraph resources end", zap.String("Vchannel", vchanName))
 }
@@ -367,6 +368,10 @@ func (node *DataNode) Start() error {
 	FilterThreshold = rep.GetTimestamp()
 
 	go node.BackGroundGC(node.clearSignal)
+
+	go node.session.LivenessCheck(node.ctx, node.liveCh, func() {
+		node.Stop()
+	})
 
 	Params.CreatedTime = time.Now()
 	Params.UpdatedTime = time.Now()
@@ -471,14 +476,14 @@ func (node *DataNode) ReadyToFlush() error {
 
 	node.chanMut.RLock()
 	defer node.chanMut.RUnlock()
-	if len(node.vchan2SyncService) == 0 && len(node.vchan2FlushCh) == 0 {
+	if len(node.vchan2SyncService) == 0 && len(node.vchan2FlushChs) == 0 {
 		// Healthy but Idle
 		msg := "DataNode HEALTHY but IDLE, please try WatchDmChannels to make it work"
 		log.Warn(msg)
 		return errors.New(msg)
 	}
 
-	if len(node.vchan2SyncService) != len(node.vchan2FlushCh) {
+	if len(node.vchan2SyncService) != len(node.vchan2FlushChs) {
 		// TODO restart
 		msg := "DataNode HEALTHY but abnormal inside, restarting..."
 		log.Warn(msg)
@@ -527,20 +532,25 @@ func (node *DataNode) FlushSegments(ctx context.Context, req *datapb.FlushSegmen
 		node.segmentCache.Cache(id)
 
 		node.chanMut.RLock()
-		flushCh, ok := node.vchan2FlushCh[chanName]
+		flushChs, ok := node.vchan2FlushChs[chanName]
 		node.chanMut.RUnlock()
 		if !ok {
 			status.Reason = "DataNode abnormal, restarting"
 			return status, nil
 		}
 
-		flushmsg := &flushMsg{
+		insertFlushmsg := flushMsg{
 			msgID:        req.Base.MsgID,
 			timestamp:    req.Base.Timestamp,
 			segmentID:    id,
 			collectionID: req.CollectionID,
 		}
-		flushCh <- flushmsg
+
+		// Copy flushMsg to a different address
+		deleteFlushMsg := insertFlushmsg
+
+		flushChs.insertBufferCh <- &insertFlushmsg
+		flushChs.deleteBufferCh <- &deleteFlushMsg
 	}
 
 	log.Debug("FlushSegments tasks triggered",

@@ -316,7 +316,8 @@ func TestGetInsertBinlogPaths(t *testing.T) {
 				},
 			},
 		}
-		svr.meta.AddSegment(NewSegmentInfo(info))
+		err := svr.meta.AddSegment(NewSegmentInfo(info))
+		assert.Nil(t, err)
 		req := &datapb.GetInsertBinlogPathsRequest{
 			SegmentID: 0,
 		}
@@ -341,7 +342,8 @@ func TestGetInsertBinlogPaths(t *testing.T) {
 				},
 			},
 		}
-		svr.meta.AddSegment(NewSegmentInfo(info))
+		err := svr.meta.AddSegment(NewSegmentInfo(info))
+		assert.Nil(t, err)
 		req := &datapb.GetInsertBinlogPathsRequest{
 			SegmentID: 1,
 		}
@@ -419,7 +421,8 @@ func TestGetSegmentInfo(t *testing.T) {
 		segInfo := &datapb.SegmentInfo{
 			ID: 0,
 		}
-		svr.meta.AddSegment(NewSegmentInfo(segInfo))
+		err := svr.meta.AddSegment(NewSegmentInfo(segInfo))
+		assert.Nil(t, err)
 
 		req := &datapb.GetSegmentInfoRequest{
 			SegmentIDs: []int64{0},
@@ -435,7 +438,8 @@ func TestGetSegmentInfo(t *testing.T) {
 		segInfo := &datapb.SegmentInfo{
 			ID: 0,
 		}
-		svr.meta.AddSegment(NewSegmentInfo(segInfo))
+		err := svr.meta.AddSegment(NewSegmentInfo(segInfo))
+		assert.Nil(t, err)
 
 		req := &datapb.GetSegmentInfoRequest{
 			SegmentIDs: []int64{0, 1},
@@ -644,7 +648,8 @@ func TestChannel(t *testing.T) {
 		segInfo := &datapb.SegmentInfo{
 			ID: segID,
 		}
-		svr.meta.AddSegment(NewSegmentInfo(segInfo))
+		err := svr.meta.AddSegment(NewSegmentInfo(segInfo))
+		assert.Nil(t, err)
 
 		stats := &internalpb.SegmentStatisticsUpdates{
 			SegmentID: segID,
@@ -676,7 +681,7 @@ func TestChannel(t *testing.T) {
 		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentStatistics, 123))
 		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentInfo, 234))
 		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentStatistics, 345))
-		err := statsStream.Produce(&msgPack)
+		err = statsStream.Produce(&msgPack)
 		assert.Nil(t, err)
 	})
 }
@@ -866,7 +871,8 @@ func TestDataNodeTtChannel(t *testing.T) {
 		msgPack := msgstream.MsgPack{}
 		msg := genMsg(commonpb.MsgType_DataNodeTt, "ch-1", assign.ExpireTime)
 		msgPack.Msgs = append(msgPack.Msgs, msg)
-		ttMsgStream.Produce(&msgPack)
+		err = ttMsgStream.Produce(&msgPack)
+		assert.Nil(t, err)
 
 		flushMsg := <-ch
 		flushReq := flushMsg.(*datapb.FlushSegmentsRequest)
@@ -951,7 +957,8 @@ func TestDataNodeTtChannel(t *testing.T) {
 		msgPack := msgstream.MsgPack{}
 		msg := genMsg(commonpb.MsgType_DataNodeTt, "ch-1", assign.ExpireTime)
 		msgPack.Msgs = append(msgPack.Msgs, msg)
-		ttMsgStream.Produce(&msgPack)
+		err = ttMsgStream.Produce(&msgPack)
+		assert.Nil(t, err)
 		flushMsg := <-ch
 		flushReq := flushMsg.(*datapb.FlushSegmentsRequest)
 		assert.EqualValues(t, 1, len(flushReq.SegmentIDs))
@@ -1015,7 +1022,8 @@ func TestDataNodeTtChannel(t *testing.T) {
 		msgPack := msgstream.MsgPack{}
 		msg := genMsg(commonpb.MsgType_DataNodeTt, "ch-1", resp.SegIDAssignments[0].ExpireTime)
 		msgPack.Msgs = append(msgPack.Msgs, msg)
-		ttMsgStream.Produce(&msgPack)
+		err = ttMsgStream.Produce(&msgPack)
+		assert.Nil(t, err)
 
 		<-ch
 		segment = svr.meta.GetSegment(assignedSegmentID)

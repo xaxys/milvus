@@ -22,11 +22,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/kv"
-	"github.com/milvus-io/milvus/internal/util/metricsinfo"
-
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/allocator"
+	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
@@ -43,6 +41,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/tso"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
@@ -864,6 +863,7 @@ func (c *Core) Register() error {
 		return fmt.Errorf("session is nil, maybe the etcd client connection fails")
 	}
 	c.sessCloseCh = c.session.Init(typeutil.RootCoordRole, Params.Address, true)
+	Params.SetLogger(typeutil.UniqueID(-1))
 	return nil
 }
 
@@ -903,7 +903,7 @@ func (c *Core) Init() error {
 
 			return nil
 		}
-		log.Debug("RootCoord, Connect to Etcd")
+		log.Debug("RootCoord, Connect to Etcd", zap.String("kv root", Params.KvRootPath), zap.String("meta root", Params.MetaRootPath))
 		err := retry.Do(c.ctx, connectEtcdFn, retry.Attempts(300))
 		if err != nil {
 			return

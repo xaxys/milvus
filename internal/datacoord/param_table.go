@@ -19,6 +19,8 @@ import (
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 )
 
+// ParamTable is a derived struct of paramtable.BaseTable. It achieves Composition by
+// embedding paramtable.BaseTable. It is used to quickly and easily access the system configuration.
 type ParamTable struct {
 	paramtable.BaseTable
 
@@ -60,10 +62,12 @@ type ParamTable struct {
 	UpdatedTime time.Time
 }
 
+// Params is a package scoped variable of type ParamTable.
 var Params ParamTable
 var once sync.Once
 
-/* Init params from base table as well as data coord yaml*/
+// Init is an override method of BaseTable's Init. It mainly calls the
+// Init of BaseTable and do some other initialization.
 func (p *ParamTable) Init() {
 	// load yaml
 	p.BaseTable.Init()
@@ -93,13 +97,13 @@ func (p *ParamTable) Init() {
 	p.initTimeTickChannelName()
 	p.initSegmentInfoChannelName()
 	p.initDataCoordSubscriptionName()
-	p.initLogCfg()
+	p.initRoleName()
 
 	p.initFlushStreamPosSubPath()
 	p.initStatsStreamPosSubPath()
 }
 
-// Init once ensure param table is a singleton
+// InitOnce ensures param table is a singleton
 func (p *ParamTable) InitOnce() {
 	once.Do(func() {
 		p.Init()
@@ -235,8 +239,8 @@ func (p *ParamTable) initDataCoordSubscriptionName() {
 	p.DataCoordSubscriptionName = strings.Join(s, "-")
 }
 
-func (p *ParamTable) initLogCfg() {
-	p.InitLogCfg("datacoord", 0)
+func (p *ParamTable) initRoleName() {
+	p.RoleName = "datacoord"
 }
 
 func (p *ParamTable) initFlushStreamPosSubPath() {

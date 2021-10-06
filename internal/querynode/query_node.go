@@ -45,6 +45,20 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+type Base interface {
+	types.QueryNode
+
+	UpdateStateCode(code internalpb.StateCode)
+	SetRootCoord(rc types.RootCoord) error
+	SetIndexCoord(index types.IndexCoord) error
+}
+
+// make sure QueryNode implements types.QueryNode
+var _ types.QueryNode = (*QueryNode)(nil)
+
+// make sure QueryNode implements Base
+var _ Base = (*QueryNode)(nil)
+
 // QueryNode communicates with outside services and union all
 // services in querynode package.
 //
@@ -105,6 +119,7 @@ func (node *QueryNode) Register() error {
 	node.session = sessionutil.NewSession(node.queryNodeLoopCtx, Params.MetaRootPath, Params.EtcdEndpoints)
 	node.liveCh = node.session.Init(typeutil.QueryNodeRole, Params.QueryNodeIP+":"+strconv.FormatInt(Params.QueryNodePort, 10), false)
 	Params.QueryNodeID = node.session.ServerID
+	Params.SetLogger(Params.QueryNodeID)
 	log.Debug("query nodeID", zap.Int64("nodeID", Params.QueryNodeID))
 	log.Debug("query node address", zap.String("address", node.session.Address))
 
@@ -124,7 +139,9 @@ func (node *QueryNode) InitSegcore() {
 
 	// override segcore SIMD type
 	cSimdType := C.CString(Params.SimdType)
-	C.SegcoreSetSimdType(cSimdType)
+	cRealSimdType := C.SegcoreSetSimdType(cSimdType)
+	Params.SimdType = C.GoString(cRealSimdType)
+	C.free(unsafe.Pointer(cRealSimdType))
 	C.free(unsafe.Pointer(cSimdType))
 }
 

@@ -1,18 +1,14 @@
 # Support to retrieve the specified entity from a collection
 
-
-
 ## Background
 
 Milvus supports one entity containing multiple vector fields and multiple scalar fields.
 
-When creating a collection, you can specify using the primary key generated automatically or the primary key user provided. If the user sets to use the primary key user provided, each entity inserted must contain the primary key field, otherwise the insertion will fail. The primary keys will be returned after the insertion request is successful.
+When creating a collection, you can specify using the primary key generated automatically or the user-provided primary key. If the user sets to use the user-provided primary key, each entity inserted must contain the primary key field, otherwise, the insertion will fail. The primary keys will be returned after the insertion request is successful.
 
 Milvus currently only supports primary keys of int64 type.
 
-QueryNode subscribes to insert channel, and will determine whether to use the data extracted from insert channel or data processed by DataNode to provide services according to the status of a segment.
-
-
+QueryNode subscribes to the insert channel and will determine whether to use the data extracted from insert channel or data processed by DataNode to provide services according to the status of a segment.
 
 ## Goals
 
@@ -20,14 +16,10 @@ QueryNode subscribes to insert channel, and will determine whether to use the da
 - Support to retrieve only some fields of a entity
 - Consider backward file format compatibility if a new file is defined
 
-
-
 ## Non-Goals
 
 - How to deal with duplicate primary keys
 - How to retrieve entity by non-primary key
-
-
 
 ## Detailed design
 
@@ -79,8 +71,6 @@ BFBinlog Payload: Refer to https://github.com/milvus-io/milvus/blob/1.1/core/src
 
 StatsBinlog Payload: Json format string, currently only contains the keys `max`, `min`.
 
-
-
 ## Impact
 
 ### API
@@ -93,8 +83,6 @@ StatsBinlog Payload: Json format string, currently only contains the keys `max`,
 - The name of the binlog file has been changed from `${log_idx}` to `_${log_idx}`
 - Each binlog adds a stats file
 - Each binlog adds a bloomfilter file
-
-
 
 ## Test Plan
 

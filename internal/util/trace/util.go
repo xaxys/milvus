@@ -19,10 +19,12 @@ import (
 	"strings"
 	"sync"
 
+	slog "github.com/milvus-io/milvus/internal/log"
 	"github.com/opentracing/opentracing-go"
 	"github.com/opentracing/opentracing-go/log"
 	"github.com/uber/jaeger-client-go"
 	"github.com/uber/jaeger-client-go/config"
+	"go.uber.org/zap"
 )
 
 var tracingCloserMtx sync.Mutex
@@ -71,7 +73,7 @@ func initFromEnv(serviceName string) *config.Configuration {
 // StartSpanFromContext starts a opentracing span. The default operation name is
 // upper two call stacks of the function
 func StartSpanFromContext(ctx context.Context, opts ...opentracing.StartSpanOption) (opentracing.Span, context.Context) {
-	return StartSpanFromContextWithSkip(ctx, 2, opts...)
+	return StartSpanFromContextWithSkip(ctx, 3, opts...)
 }
 
 // StartSpanFromContextWithSkip starts a opentracing span with call skip. The operation
@@ -88,8 +90,9 @@ func StartSpanFromContextWithSkip(ctx context.Context, skip int, opts ...opentra
 		span.LogFields(log.Error(errors.New("runtime.Callers failed")))
 		return span, ctx
 	}
-	fn := runtime.FuncForPC(pcs[0])
-	name := fn.Name()
+	frames := runtime.CallersFrames(pcs[:])
+	frame, _ := frames.Next()
+	name := frame.Function
 	if lastSlash := strings.LastIndexByte(name, '/'); lastSlash > 0 {
 		name = name[lastSlash+1:]
 	}
@@ -99,7 +102,7 @@ func StartSpanFromContextWithSkip(ctx context.Context, skip int, opts ...opentra
 	}
 	span := opentracing.StartSpan(name, opts...)
 
-	file, line := fn.FileLine(pcs[0])
+	file, line := frame.File, frame.Line
 	span.LogFields(log.String("filename", file), log.Int("line", line))
 
 	return span, opentracing.ContextWithSpan(ctx, span)
@@ -108,7 +111,7 @@ func StartSpanFromContextWithSkip(ctx context.Context, skip int, opts ...opentra
 // StartSpanFromContextWithOperationName starts a opentracing span with specific operation name.
 // And will log print the current call line number and file name.
 func StartSpanFromContextWithOperationName(ctx context.Context, operationName string, opts ...opentracing.StartSpanOption) (opentracing.Span, context.Context) {
-	return StartSpanFromContextWithOperationNameWithSkip(ctx, operationName, 2, opts...)
+	return StartSpanFromContextWithOperationNameWithSkip(ctx, operationName, 3, opts...)
 }
 
 // StartSpanFromContextWithOperationNameWithSkip starts a opentracing span with specific operation name.
@@ -125,7 +128,9 @@ func StartSpanFromContextWithOperationNameWithSkip(ctx context.Context, operatio
 		span.LogFields(log.Error(errors.New("runtime.Callers failed")))
 		return span, ctx
 	}
-	file, line := runtime.FuncForPC(pcs[0]).FileLine(pcs[0])
+	frames := runtime.CallersFrames(pcs[:])
+	frame, _ := frames.Next()
+	file, line := frame.File, frame.Line
 
 	if parentSpan := opentracing.SpanFromContext(ctx); parentSpan != nil {
 		opts = append(opts, opentracing.ChildOf(parentSpan.Context()))
@@ -139,9 +144,9 @@ func StartSpanFromContextWithOperationNameWithSkip(ctx context.Context, operatio
 }
 
 // LogError is a method to log error with span.
-func LogError(span opentracing.Span, err error) error {
+func LogError(span opentracing.Span, err error) {
 	if err == nil {
-		return nil
+		return
 	}
 
 	// Get caller frame.
@@ -150,13 +155,13 @@ func LogError(span opentracing.Span, err error) error {
 	if n < 1 {
 		span.LogFields(log.Error(err))
 		span.LogFields(log.Error(errors.New("runtime.Callers failed")))
-		return err
+		slog.Warn("trace log error failed", zap.Error(err))
 	}
 
-	file, line := runtime.FuncForPC(pcs[0]).FileLine(pcs[0])
+	frames := runtime.CallersFrames(pcs[:])
+	frame, _ := frames.Next()
+	file, line := frame.File, frame.Line
 	span.LogFields(log.String("filename", file), log.Int("line", line), log.Error(err))
-
-	return err
 }
 
 // InfoFromSpan is a method return span details.

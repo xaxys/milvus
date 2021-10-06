@@ -78,7 +78,7 @@ func (s *SegmentsInfo) SetRowCount(segmentID UniqueID, rowCount int64) {
 	}
 }
 
-// SetStates sets Segment State info for SegmentInfo with provided segmentID
+// SetState sets Segment State info for SegmentInfo with provided segmentID
 // if SegmentInfo not found, do nothing
 func (s *SegmentsInfo) SetState(segmentID UniqueID, state commonpb.SegmentState) {
 	if segment, ok := s.segments[segmentID]; ok {
@@ -102,30 +102,45 @@ func (s *SegmentsInfo) SetStartPosition(segmentID UniqueID, pos *internalpb.MsgP
 	}
 }
 
+// SetAllocations sets allocations for segment with specified id
+// if the segment id is not found, do nothing
+// uses `ShadowClone` since internal SegmentInfo is not changed
 func (s *SegmentsInfo) SetAllocations(segmentID UniqueID, allocations []*Allocation) {
 	if segment, ok := s.segments[segmentID]; ok {
 		s.segments[segmentID] = segment.ShadowClone(SetAllocations(allocations))
 	}
 }
 
+// AddAllocation adds a new allocation to specified segment
+// if the segment is not found, do nothing
+// uses `Clone` since internal SegmentInfo's LastExpireTime is changed
 func (s *SegmentsInfo) AddAllocation(segmentID UniqueID, allocation *Allocation) {
 	if segment, ok := s.segments[segmentID]; ok {
 		s.segments[segmentID] = segment.Clone(AddAllocation(allocation))
 	}
 }
 
+// SetCurrentRows sets rows count for segment
+// if the segment is not found, do nothing
+// uses `ShadowClone` since internal SegmentInfo is not changed
 func (s *SegmentsInfo) SetCurrentRows(segmentID UniqueID, rows int64) {
 	if segment, ok := s.segments[segmentID]; ok {
 		s.segments[segmentID] = segment.ShadowClone(SetCurrentRows(rows))
 	}
 }
 
+// SetBinlogs sets binlog paths for segment
+// if the segment is not found, do nothing
+// uses `Clone` since internal SegmentInfo's Binlogs is changed
 func (s *SegmentsInfo) SetBinlogs(segmentID UniqueID, binlogs []*datapb.FieldBinlog) {
 	if segment, ok := s.segments[segmentID]; ok {
 		s.segments[segmentID] = segment.Clone(SetBinlogs(binlogs))
 	}
 }
 
+// SetFlushTime sets flush time for segment
+// if the segment is not found, do nothing
+// uses `ShadowClone` since internal SegmentInfo is not changed
 func (s *SegmentsInfo) SetFlushTime(segmentID UniqueID, t time.Time) {
 	if segment, ok := s.segments[segmentID]; ok {
 		s.segments[segmentID] = segment.ShadowClone(SetFlushTime(t))
