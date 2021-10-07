@@ -612,7 +612,7 @@ ExecExprVisitor::visit(BinaryArithExpr& expr) {
         {BinaryArithOp::Subtract, "subtract"},
         {BinaryArithOp::Multiply, "multiply"},
         {BinaryArithOp::Divide, "divide"},
-        {BinaryArithOp::Modulo, "modulo"},
+        {BinaryArithOp::Modulo, "modulo"},  // fake function name
         {BinaryArithOp::Power, "power"},
         {BinaryArithOp::BitAnd, "bit_wise_and"},
         {BinaryArithOp::BitOr, "bit_wise_or"},

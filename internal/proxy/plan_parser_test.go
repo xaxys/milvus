@@ -207,28 +207,104 @@ func TestExprPlan_Str(t *testing.T) {
 
 func TestExprRange_Str(t *testing.T) {
 	exprStrs := []string{
-		"3 < FloatN < 4.0",
-		"3 < age2 < 4.0",
-		"1 + 1 < age1 < 2 * 2",
-		"1 - 1 < age1 < 3 / 2",
-		"1.0 - 1 < FloatN < 3 / 2",
-		"7 % 4 <= FloatN <= 2 ** 10",
-		"0.1 ** 2 < FloatN < 2 ** 0.1",
-		"0.1 ** 1.1 < FloatN < 3.1 / 4",
-		"0.0 / 5.0 < FloatN < 4.1 / 3",
-		"BoolN1 == True",
-		"True == BoolN1",
-		"BoolN1 == False",
-		"BoolN1 == 1",
-		"BoolN1 == 0",
+		"1 == Int8Field",
+		"1.0 != Int8Field",
+		"1 < Int8Field",
+		"1.0 < Int8Field",
+		"1.0 >= Int8Field",
+		"Int8Field == 2",
+		"Int8Field != 2.0",
+		"Int8Field < 2",
+		"Int8Field < 2.0",
+		"Int8Field >= 2.0",
+		"1 == Int64Field",
+		"1.0 != Int64Field",
+		"1 < Int64Field",
+		"1.0 < Int64Field",
+		"1.0 >= Int64Field",
+		"Int64Field == 2",
+		"Int64Field != 2.0",
+		"Int64Field < 2",
+		"Int64Field < 2.0",
+		"Int64Field >= 2.0",
+		"1 == FloatField",
+		"1.0 != FloatField",
+		"1 < FloatField",
+		"1.0 < FloatField",
+		"1.0 >= FloatField",
+		"FloatField == 2",
+		"FloatField != 2.0",
+		"FloatField < 2",
+		"FloatField < 2.0",
+		"FloatField >= 2.0",
+		"1 == DoubleField",
+		"1.0 != DoubleField",
+		"1 < DoubleField",
+		"1.0 < DoubleField",
+		"1.0 >= DoubleField",
+		"DoubleField == 2",
+		"DoubleField != 2.0",
+		"DoubleField < 2",
+		"DoubleField < 2.0",
+		"DoubleField >= 2.0",
+		"1 < Int8Field < 2",
+		"1 < Int8Field < 2.0",
+		"1.0 < Int8Field < 2.0",
+		"1.0 <= Int8Field <= 2.0",
+		"1 < Int64Field < 2",
+		"1 < Int64Field < 2.0",
+		"1.0 < Int64Field < 2.0",
+		"1.0 <= Int64Field <= 2.0",
+		"1 < FloatField < 2",
+		"1 < FloatField < 2.0",
+		"1.0 < FloatField < 2.0",
+		"1.0 <= FloatField <= 2.0",
+		"1 < DoubleField < 2",
+		"1 < DoubleField < 2.0",
+		"1.0 < DoubleField < 2.0",
+		"1.0 <= DoubleField <= 2.0",
+		"BoolField == True",
+		"BoolField == true",
+		"BoolField == 1",
+		"True == BoolField",
+		"BoolField == False",
+		"BoolField == false",
+		"BoolField == 0",
+	}
+
+	invalidExprStrs := []string{
+		"1 < BoolField",
+		"1.0 < BoolField",
+		"1.0 >= BoolField",
+		"BoolField < 2",
+		"BoolField < 2.0",
+		"BoolField >= 2.0",
+		"1 < BoolField < 2",
+		"1 < BoolField < 2.0",
+		"1.0 < BoolField < 2.0",
+		"1.0 <= BoolField <= 2.0",
+		"1 < BoolField < 2",
+		"1 < BoolField < 2.0",
+		"1.0 < BoolField < 2.0",
+		"1.0 <= BoolField <= 2.0",
+		"1 > Int64Field > 2",
+		"1 > Int64Field > 2.0",
+		"1.0 > Int64Field > 2.0",
+		"1.0 >= Int64Field >= 2.0",
+		"1.0 < Int64Field > 2.0",
+		"0 < 1 < Int64Field < 2 < 3",
+		"Int8Field < 1 < Int64Field < 2.0 < FloatField",
+		"1.0 == Int64Field == 2.0",
+		"1.0 != Int64Field != 2.0",
 	}
 
 	fields := []*schemapb.FieldSchema{
 		{FieldID: 100, Name: "fakevec", DataType: schemapb.DataType_FloatVector},
-		{FieldID: 101, Name: "age1", DataType: schemapb.DataType_Int64},
-		{FieldID: 102, Name: "age2", DataType: schemapb.DataType_Int32},
-		{FieldID: 103, Name: "FloatN", DataType: schemapb.DataType_Float},
-		{FieldID: 104, Name: "BoolN1", DataType: schemapb.DataType_Bool},
+		{FieldID: 101, Name: "Int64Field", DataType: schemapb.DataType_Int64},
+		{FieldID: 102, Name: "Int8Field", DataType: schemapb.DataType_Int8},
+		{FieldID: 103, Name: "FloatField", DataType: schemapb.DataType_Float},
+		{FieldID: 104, Name: "DoubleField", DataType: schemapb.DataType_Double},
+		{FieldID: 105, Name: "BoolField", DataType: schemapb.DataType_Bool},
 	}
 
 	schema := &schemapb.CollectionSchema{
@@ -251,6 +327,14 @@ func TestExprRange_Str(t *testing.T) {
 		dbgStr := proto.MarshalTextString(planProto)
 		println(dbgStr)
 	}
+
+	for offset, invalidExprStr := range invalidExprStrs {
+		fmt.Printf("case %d: %s\n", offset, invalidExprStr)
+		planProto, err := CreateQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
+		assert.Error(t, err)
+		dbgStr := proto.MarshalTextString(planProto)
+		println(dbgStr)
+	}
 }
 
 func TestExprCompare_Str(t *testing.T) {
@@ -261,6 +345,12 @@ func TestExprCompare_Str(t *testing.T) {
 		"age1 >= age2",
 		"age1 != age2",
 		"age1 == age2",
+	}
+
+	invalidExprStrs := []string{
+		"age1 == age2 == age1",
+		"age1 < age2 < age1",
+		"age1 >= age2 >= age1",
 	}
 
 	fields := []*schemapb.FieldSchema{
@@ -286,6 +376,14 @@ func TestExprCompare_Str(t *testing.T) {
 		fmt.Printf("case %d: %s\n", offset, exprStr)
 		planProto, err := CreateQueryPlan(schema, exprStr, "fakevec", queryInfo)
 		assert.Nil(t, err)
+		dbgStr := proto.MarshalTextString(planProto)
+		println(dbgStr)
+	}
+
+	for offset, invalidExprStr := range invalidExprStrs {
+		fmt.Printf("case %d: %s\n", offset, invalidExprStr)
+		planProto, err := CreateQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
+		assert.Error(t, err)
 		dbgStr := proto.MarshalTextString(planProto)
 		println(dbgStr)
 	}
@@ -303,7 +401,7 @@ func TestExprArith_Str(t *testing.T) {
 		"FloatField / Int8Field == 0",
 		"Int8Field / DoubleField == 0",
 		"DoubleField / 0 == 0",
-		// "Int64Field % Int8Field == 0",
+		// "Int64Field % Int8Field == 0", // modulo unimplemented yet.
 		// "Int64Field % 3 == 0",
 		"Int64Field << Int8Field == 0",
 		"Int8Field >> Int8Field == 0",
@@ -379,56 +477,6 @@ func TestExprArith_Str(t *testing.T) {
 		fmt.Printf("case %d: %s\n", offset, invalidExprStr)
 		planProto, err := CreateQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
 		assert.Error(t, err)
-		dbgStr := proto.MarshalTextString(planProto)
-		println(dbgStr)
-	}
-}
-
-func TestExprTypePromotion_Str(t *testing.T) {
-	exprStrs := []string{
-		"Int64Field < Int8Field / 2",
-		"Int64Field < Int8Field + 128",
-		"Int8Field < Int8Field + 2147483648",
-		"0 <= Int8Field <= 1",
-		"2147483647 <= Int8Field <= 2147483648",
-		"0.0 <= Int64Field <= 1",
-		"0.0 <= FloatField <= 1",
-		"0.0 <= DoubleField <= 1",
-		"DoubleField < Int8Field / 2",
-		"DoubleField < FloatField + 0",
-		"DoubleField < FloatField + 0.0",
-		"0.0 + DoubleField < FloatField + 0.0",
-		"0.0 + FloatField < FloatField + 0.0",
-		"FloatField in [1, 2.0, 3.3 ** 1, (4 & 5), 128.0]",
-		"Int8Field not in [1, 2.0, 3.3 ** 1, (4 & 5), 128.0]",
-	}
-
-	fields := []*schemapb.FieldSchema{
-		{FieldID: 100, Name: "fakevec", DataType: schemapb.DataType_FloatVector},
-		{FieldID: 101, Name: "Int64Field", DataType: schemapb.DataType_Int64},
-		{FieldID: 102, Name: "Int8Field", DataType: schemapb.DataType_Int8},
-		{FieldID: 103, Name: "FloatField", DataType: schemapb.DataType_Float},
-		{FieldID: 104, Name: "DoubleField", DataType: schemapb.DataType_Double},
-		{FieldID: 105, Name: "BoolField", DataType: schemapb.DataType_Bool},
-	}
-
-	schema := &schemapb.CollectionSchema{
-		Name:        "default-collection",
-		Description: "",
-		AutoID:      true,
-		Fields:      fields,
-	}
-
-	queryInfo := &planpb.QueryInfo{
-		Topk:         10,
-		MetricType:   "L2",
-		SearchParams: "{\"nprobe\": 10}",
-	}
-
-	for offset, exprStr := range exprStrs {
-		fmt.Printf("case %d: %s\n", offset, exprStr)
-		planProto, err := CreateQueryPlan(schema, exprStr, "fakevec", queryInfo)
-		assert.Nil(t, err)
 		dbgStr := proto.MarshalTextString(planProto)
 		println(dbgStr)
 	}

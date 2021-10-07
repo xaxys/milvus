@@ -333,6 +333,86 @@ TEST(Expr, TestRange) {
     }
 }
 
+TEST(Expr, TestRangeBool) {
+    using namespace milvus::query;
+    using namespace milvus::segcore;
+    std::vector<std::tuple<std::string, std::string, std::function<bool(bool)>>> testcases = {
+        {"Equal", "true", [](bool f) { return f == true; }},
+        {"Equal", "false", [](bool f) { return f == false; }},
+        {"NotEqual", "true", [](bool f) { return f != true; }},
+        {"NotEqual", "false", [](bool f) { return f != false; }},
+    };
+
+    // f op bool_constant
+    auto string_tpl = R"(
+vector_anns: <
+  field_id: 20000
+  predicates: <
+    unary_range_expr: <
+      child: <
+        column_expr: <
+          column_info: <
+            field_id: 20001
+            data_type: Bool
+          >
+        >
+      >
+      value: <
+        bool_val: %2%
+      >
+      op: %1%
+    >
+  >
+  query_info: <
+    topk: 10
+    metric_type: "L2"
+    search_params: "{\"nprobe\": 10}"
+  >
+  placeholder_tag: "$0"
+>
+)";
+
+    auto schema = std::make_shared<Schema>();
+    schema->AddField(FieldName("fakevec"), FieldId(20000), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
+    schema->AddField(FieldName("BoolField"), FieldId(20001), DataType::BOOL);
+
+    auto seg = CreateGrowingSegment(schema);
+    int N = 10000;
+    std::vector<uint8_t> bool_col;
+    int num_iters = 100;
+    for (int iter = 0; iter < num_iters; ++iter) {
+        auto raw_data = DataGen(schema, N, iter);
+        auto new_bool_col = raw_data.get_col<uint8_t>(1);
+        bool_col.insert(bool_col.end(), new_bool_col.begin(), new_bool_col.end());
+        seg->PreInsert(N);
+        seg->Insert(iter * N, N, raw_data.row_ids_.data(), raw_data.timestamps_.data(), raw_data.raw_);
+    }
+
+    auto seg_promote = dynamic_cast<SegmentGrowingImpl*>(seg.get());
+    ExecExprVisitor visitor(*seg_promote, seg_promote->get_row_count(), MAX_TIMESTAMP);
+    for (auto [clause, bool_constant, ref_func] : testcases) {
+        auto proto_text = boost::str(boost::format(string_tpl) % clause % bool_constant);
+        proto::plan::PlanNode node_proto;
+        google::protobuf::TextFormat::ParseFromString(proto_text, &node_proto);
+        // std::cout << node_proto.DebugString();
+        auto plan = ProtoParser(*schema).CreatePlan(node_proto);
+        // std::cout << ShowPlanNodeVisitor().call_child(*plan->plan_node_) << std::endl;
+        auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
+        EXPECT_EQ(final.length(), N * num_iters);
+
+        Assert(final.is_array());
+        Assert(final.type()->Equals(arrow::BooleanType()));
+        const auto& array = final.array_as<arrow::BooleanArray>();
+        for (int i = 0; i < N * num_iters; ++i) {
+            auto ans = array->GetView(i);
+
+            auto val = bool_col[i];
+            auto ref = ref_func(val);
+            ASSERT_EQ(ans, ref) << clause << "@" << i << "!!" << boost::format("%1%") % val;
+        }
+    }
+}
+
 TEST(Expr, TestTerm) {
     using namespace milvus::query;
     using namespace milvus::segcore;
@@ -606,6 +686,94 @@ TEST(Expr, TestCompare) {
     }
 }
 
+TEST(Expr, TestCompareBool) {
+    using namespace milvus::query;
+    using namespace milvus::segcore;
+    std::vector<std::tuple<std::string, std::function<bool(bool, bool)>>> testcases = {
+        {"Equal", [](bool a, bool b) { return a == b; }},
+        {"NotEqual", [](bool a, bool b) { return a != b; }},
+    };
+
+    // f op bool_constant
+    auto string_tpl = R"(
+vector_anns: <
+  field_id: 20000
+  predicates: <
+    compare_expr: <
+      left: <
+        column_expr: <
+          column_info: <
+            field_id: 20001
+            data_type: Bool
+          >
+        >
+      >
+      right: <
+        column_expr: <
+          column_info: <
+            field_id: 20002
+            data_type: Bool
+          >
+        >
+      >
+      op: %1%
+    >
+  >
+  query_info: <
+    topk: 10
+    metric_type: "L2"
+    search_params: "{\"nprobe\": 10}"
+  >
+  placeholder_tag: "$0"
+>
+)";
+
+    auto schema = std::make_shared<Schema>();
+    schema->AddField(FieldName("fakevec"), FieldId(20000), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
+    schema->AddField(FieldName("BoolField1"), FieldId(20001), DataType::BOOL);
+    schema->AddField(FieldName("BoolField2"), FieldId(20002), DataType::BOOL);
+
+    auto seg = CreateGrowingSegment(schema);
+    int N = 10000;
+    std::vector<uint8_t> bool1_col;
+    std::vector<uint8_t> bool2_col;
+    int num_iters = 100;
+    for (int iter = 0; iter < num_iters; ++iter) {
+        auto raw_data = DataGen(schema, N, iter);
+        auto new_bool1_col = raw_data.get_col<uint8_t>(1);
+        auto new_bool2_col = raw_data.get_col<uint8_t>(2);
+        bool1_col.insert(bool1_col.end(), new_bool1_col.begin(), new_bool1_col.end());
+        bool2_col.insert(bool2_col.end(), new_bool2_col.begin(), new_bool2_col.end());
+        seg->PreInsert(N);
+        seg->Insert(iter * N, N, raw_data.row_ids_.data(), raw_data.timestamps_.data(), raw_data.raw_);
+    }
+
+    auto seg_promote = dynamic_cast<SegmentGrowingImpl*>(seg.get());
+    ExecExprVisitor visitor(*seg_promote, seg_promote->get_row_count(), MAX_TIMESTAMP);
+    for (auto [clause, ref_func] : testcases) {
+        auto proto_text = boost::str(boost::format(string_tpl) % clause);
+        proto::plan::PlanNode node_proto;
+        google::protobuf::TextFormat::ParseFromString(proto_text, &node_proto);
+        // std::cout << node_proto.DebugString();
+        auto plan = ProtoParser(*schema).CreatePlan(node_proto);
+        // std::cout << ShowPlanNodeVisitor().call_child(*plan->plan_node_) << std::endl;
+        auto final = visitor.call_child(*plan->plan_node_->predicate_.value());
+        EXPECT_EQ(final.length(), N * num_iters);
+
+        Assert(final.is_array());
+        Assert(final.type()->Equals(arrow::BooleanType()));
+        const auto& array = final.array_as<arrow::BooleanArray>();
+        for (int i = 0; i < N * num_iters; ++i) {
+            auto ans = array->GetView(i);
+
+            auto val1 = bool1_col[i];
+            auto val2 = bool2_col[i];
+            auto ref = ref_func(val1, val2);
+            ASSERT_EQ(ans, ref) << clause << "@" << i << "!!" << boost::format("[%1%, %2%]") % val1 % val2;
+        }
+    }
+}
+
 TEST(Expr, TestBinaryArith) {
     using namespace milvus::query;
     using namespace milvus::segcore;
@@ -622,7 +790,7 @@ TEST(Expr, TestBinaryArith) {
     // (age1 op age2) >= ((double)(age2) ** 2)
     auto string_tpl = R"(
 vector_anns: <
-  field_id: 2021
+  field_id: 20000
   predicates: <
     compare_expr: <
       left: <
@@ -630,7 +798,7 @@ vector_anns: <
           left: <
             column_expr: <
               column_info: <
-                field_id: 1070
+                field_id: 20001
                 data_type: Int64
               >
             >
@@ -638,7 +806,7 @@ vector_anns: <
           right: <
             column_expr: <
               column_info: <
-                field_id: 1080
+                field_id: 20002
                 data_type: Int16
               >
             >
@@ -653,7 +821,7 @@ vector_anns: <
               child: <
                 column_expr: <
                   column_info: <
-                    field_id: 1080
+                    field_id: 20002
                     data_type: Int16
                   >
                 >
@@ -684,9 +852,9 @@ vector_anns: <
 )";
 
     auto schema = std::make_shared<Schema>();
-    schema->AddField(FieldName("fakevec"), FieldId(2021), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
-    schema->AddField(FieldName("age1"), FieldId(1070), DataType::INT64);
-    schema->AddField(FieldName("age2"), FieldId(1080), DataType::INT16);
+    schema->AddField(FieldName("fakevec"), FieldId(20000), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
+    schema->AddField(FieldName("age1"), FieldId(20001), DataType::INT64);
+    schema->AddField(FieldName("age2"), FieldId(20002), DataType::INT16);
 
     auto seg = CreateGrowingSegment(schema);
     int N = 10000;
@@ -740,7 +908,7 @@ TEST(Expr, TestUnaryArith) {
     // op a > 1234
     auto string_tpl = R"(
 vector_anns: <
-  field_id: 2021
+  field_id: 20000
   predicates: <
     compare_expr: <
       left: <
@@ -748,7 +916,7 @@ vector_anns: <
           child: <
             column_expr: <
               column_info: <
-                field_id: 1070
+                field_id: 20001
                 data_type: Int64
               >
             >
@@ -776,8 +944,8 @@ vector_anns: <
 )";
 
     auto schema = std::make_shared<Schema>();
-    schema->AddField(FieldName("fakevec"), FieldId(2021), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
-    schema->AddField(FieldName("age1"), FieldId(1070), DataType::INT64);
+    schema->AddField(FieldName("fakevec"), FieldId(20000), DataType::VECTOR_FLOAT, 16, MetricType::METRIC_L2);
+    schema->AddField(FieldName("age1"), FieldId(20001), DataType::INT64);
 
     auto seg = CreateGrowingSegment(schema);
     int N = 10000;

@@ -191,6 +191,14 @@ DataGen(SchemaPtr schema, int64_t N, uint64_t seed = 42, uint64_t ts_offset = 0)
                 insert_cols(data);
                 break;
             }
+            case engine::DataType::BOOL: {
+                vector<uint8_t> data(N);
+                for (auto& x : data) {
+                    x = er() & 1;
+                }
+                insert_cols(data);
+                break;
+            }
             default: {
                 throw std::runtime_error("unimplemented");
             }
