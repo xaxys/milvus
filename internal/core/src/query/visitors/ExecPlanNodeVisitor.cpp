@@ -122,7 +122,8 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
     }
 
     if (bitset.is_scalar() && !bitset.scalar_as<arrow::BooleanScalar>().value) {
-        ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.metric_type_);
+        ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.round_decimal_,
+                                   node.search_info_.metric_type_);
         return;
     }
 
@@ -131,7 +132,8 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
 
     if (bitset.is_scalar()) {
         if (!bitmask.scalar_as<arrow::BooleanScalar>().value) {
-            ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.metric_type_);
+            ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.round_decimal_,
+                                       node.search_info_.metric_type_);
             return;
         }
     } else {
