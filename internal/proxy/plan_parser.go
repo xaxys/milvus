@@ -131,12 +131,6 @@ func calcDataType(left, right *ExprWithType) schemapb.DataType {
 	return dataType
 }
 
-func isSameOrder(op1, op2 planpb.CompareOp) bool {
-	isLess1 := op1 == planpb.CompareOp_LessThan || op2 == planpb.CompareOp_LessEqual
-	isLess2 := op2 == planpb.CompareOp_LessThan || op2 == planpb.CompareOp_LessEqual
-	return isLess1 == isLess2
-}
-
 func reverseOrder(op planpb.CompareOp) planpb.CompareOp {
 	switch op {
 	case planpb.CompareOp_LessThan:
