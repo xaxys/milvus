@@ -51,6 +51,8 @@ Run the lscpu command to check if your CPU supports the SIMD instruction sets me
 ```
 lscpu | grep -e sse4_2 -e avx -e avx2 -e avx512
 ```
+
+Check Wikipedia [CPU with AVX](https://en.wikipedia.org/wiki/Advanced_Vector_Extensions#CPUs_with_AVX) for more details.
 </details>
 
 
@@ -79,7 +81,7 @@ You can also get into the dev containers for development.
 Enter root path of Milvus project on your host machine, execute the following commands:
 
 ```shell
-$ ./scripts/devcontainer.sh up        # start Dev container
+$ ./scripts/devcontainer.sh up
 
 Creating network "milvus-dev" with the default driver
 Creating milvus_jaeger_1  ... done
@@ -203,7 +205,7 @@ Modify vscode go setups if necessary, the setting path is **code -> preference -
 
 ![image](../docs/imgs/settings.png)
 
-Enable Code debug by remot debugging with dlv, you can enable debugging by run the following command inside your docker:
+Enable Code debug by remote debugging with dlv, you can enable debugging by run the following command inside your docker:
 
 ```shell
 cp /go/bin/dlv /go/bin/dlv-dap

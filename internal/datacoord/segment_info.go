@@ -147,12 +147,16 @@ func (s *SegmentsInfo) SetFlushTime(segmentID UniqueID, t time.Time) {
 	}
 }
 
+// AddSegmentBinlogs adds binlogs for segment
+// if the segment is not found, do nothing
+// uses `Clone` since internal SegmentInfo's Binlogs is changed
 func (s *SegmentsInfo) AddSegmentBinlogs(segmentID UniqueID, field2Binlogs map[UniqueID][]string) {
 	if segment, ok := s.segments[segmentID]; ok {
 		s.segments[segmentID] = segment.Clone(addSegmentBinlogs(field2Binlogs))
 	}
 }
 
+// Clone deep clone the segment info and return a new instance
 func (s *SegmentInfo) Clone(opts ...SegmentInfoOption) *SegmentInfo {
 	info := proto.Clone(s.SegmentInfo).(*datapb.SegmentInfo)
 	cloned := &SegmentInfo{
@@ -167,6 +171,7 @@ func (s *SegmentInfo) Clone(opts ...SegmentInfoOption) *SegmentInfo {
 	return cloned
 }
 
+// ShadowClone shadow clone the segment and return a new instance
 func (s *SegmentInfo) ShadowClone(opts ...SegmentInfoOption) *SegmentInfo {
 	cloned := &SegmentInfo{
 		SegmentInfo:   s.SegmentInfo,
@@ -181,32 +186,38 @@ func (s *SegmentInfo) ShadowClone(opts ...SegmentInfoOption) *SegmentInfo {
 	return cloned
 }
 
+// SegmentInfoOption is the option to set fields in segment info
 type SegmentInfoOption func(segment *SegmentInfo)
 
+// SetRowCount is the option to set row count for segment info
 func SetRowCount(rowCount int64) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
 		segment.NumOfRows = rowCount
 	}
 }
 
+// SetExpireTime is the option to set expire time for segment info
 func SetExpireTime(expireTs Timestamp) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
 		segment.LastExpireTime = expireTs
 	}
 }
 
+// SetState is the option to set state for segment info
 func SetState(state commonpb.SegmentState) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
 		segment.State = state
 	}
 }
 
+// SetDmlPosition is the option to set dml position for segment info
 func SetDmlPosition(pos *internalpb.MsgPosition) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
 		segment.DmlPosition = pos
 	}
 }
 
+// SetStartPosition is the option to set start position for segment info
 func SetStartPosition(pos *internalpb.MsgPosition) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
 		segment.StartPosition = pos

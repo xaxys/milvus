@@ -44,6 +44,7 @@ func (rc *rmqClient) CreateProducer(options ProducerOptions) (Producer, error) {
 	return &rp, nil
 }
 
+// Subscribe subscribes a consumer in rmq client
 func (rc *rmqClient) Subscribe(options ConsumerOptions) (Consumer, error) {
 	receiveChannel := make(chan rocksmq.ConsumerMessage, options.BufSize)
 
@@ -62,6 +63,7 @@ func (rc *rmqClient) Subscribe(options ConsumerOptions) (Consumer, error) {
 	return rConsumer, nil
 }
 
+// EarliestMessageID returns the earliest message ID for rmq client
 func (rc *rmqClient) EarliestMessageID() MessageID {
 	rID := rocksmq.EarliestMessageID()
 	return &rmqID{messageID: rID}

@@ -195,10 +195,12 @@ func (c *Collection) setLoadType(l loadType) {
 	c.loadType = l
 }
 
+// getLoadType get the loadType of collection, which is loadTypeCollection or loadTypePartition
 func (c *Collection) getLoadType() loadType {
 	return c.loadType
 }
 
+// newCollection returns a new Collection
 func newCollection(collectionID UniqueID, schema *schemapb.CollectionSchema) *Collection {
 	/*
 		CCollection
@@ -225,6 +227,7 @@ func newCollection(collectionID UniqueID, schema *schemapb.CollectionSchema) *Co
 	return newCollection
 }
 
+// deleteCollection delete collection and free the collection memory
 func deleteCollection(collection *Collection) {
 	/*
 		void
