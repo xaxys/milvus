@@ -35,6 +35,7 @@ import (
 	oplog "github.com/opentracing/opentracing-go/log"
 )
 
+// TaskQueue is used to cache triggerTasks
 type TaskQueue struct {
 	tasks *list.List
 
@@ -110,6 +111,7 @@ func (queue *TaskQueue) PopTask() task {
 	return ft.Value.(task)
 }
 
+// NewTaskQueue creates a new task queue for scheduler to cache trigger tasks
 func NewTaskQueue() *TaskQueue {
 	return &TaskQueue{
 		tasks:    list.New(),
@@ -118,6 +120,7 @@ func NewTaskQueue() *TaskQueue {
 	}
 }
 
+// TaskScheduler controls the scheduling of trigger tasks and internal tasks
 type TaskScheduler struct {
 	triggerTaskQueue *TaskQueue
 	activateTaskChan chan task

@@ -224,12 +224,14 @@ func SetStartPosition(pos *internalpb.MsgPosition) SegmentInfoOption {
 	}
 }
 
+// SetAllocations is the option to set allocations for segment info
 func SetAllocations(allocations []*Allocation) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
 		segment.allocations = allocations
 	}
 }
 
+// AddAllocation is the option to add allocation info for segment info
 func AddAllocation(allocation *Allocation) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
 		segment.allocations = append(segment.allocations, allocation)
@@ -237,6 +239,7 @@ func AddAllocation(allocation *Allocation) SegmentInfoOption {
 	}
 }
 
+// SetCurrentRows is the option to set current row count for segment info
 func SetCurrentRows(rows int64) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
 		segment.currRows = rows
