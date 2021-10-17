@@ -17,17 +17,25 @@ import (
 )
 
 const (
+	// DefaultServiceRoot default root path used in kv by Session
 	DefaultServiceRoot = "session/"
-	DefaultIDKey       = "id"
-	DefaultRetryTimes  = 30
-	DefaultTTL         = 10
+	// DefaultIDKey default id key for Session
+	DefaultIDKey = "id"
+	// DefaultRetryTimes default retry times when registerService or getServerByID
+	DefaultRetryTimes = 30
+	// DefaultTTL default ttl value when granting a lease
+	DefaultTTL = 60
 )
 
+// SessionEventType session event type
 type SessionEventType int
 
 const (
+	// SessionNoneEvent place holder for zero value
 	SessionNoneEvent SessionEventType = iota
+	// SessionAddEvent event type for a new Session Added
 	SessionAddEvent
+	// SessionDelEvent event type for a Session deleted
 	SessionDelEvent
 )
 
@@ -41,6 +49,7 @@ type Session struct {
 	Address    string `json:"Address,omitempty"`
 	Exclusive  bool   `json:"Exclusive,omitempty"`
 
+	liveCh   <-chan bool
 	etcdCli  *clientv3.Client
 	leaseID  clientv3.LeaseID
 	cancel   context.CancelFunc
@@ -79,14 +88,14 @@ func NewSession(ctx context.Context, metaRoot string, etcdEndpoints []string) *S
 			zap.Error(err))
 		return nil
 	}
-	log.Debug("Sessiont connect to etcd success")
+	log.Debug("Session connect to etcd success")
 	return session
 }
 
 // Init will initialize base struct of the Session, including ServerName, ServerID,
 // Address, Exclusive. ServerID is obtained in getServerID.
 // Finally it will process keepAliveResponse to keep alive with etcd.
-func (s *Session) Init(serverName, address string, exclusive bool) <-chan bool {
+func (s *Session) Init(serverName, address string, exclusive bool) {
 	s.ServerName = serverName
 	s.Address = address
 	s.Exclusive = exclusive
@@ -100,7 +109,7 @@ func (s *Session) Init(serverName, address string, exclusive bool) <-chan bool {
 	if err != nil {
 		panic(err)
 	}
-	return s.processKeepAliveResponse(ch)
+	s.liveCh = s.processKeepAliveResponse(ch)
 }
 
 func (s *Session) getServerID() (int64, error) {
@@ -148,7 +157,7 @@ func (s *Session) getServerIDWithKey(key string, retryTimes uint) (int64, error)
 		}
 
 		if !txnResp.Succeeded {
-			log.Debug("Session Txn unsuccess", zap.String("key", key))
+			log.Debug("Session Txn unsuccessful", zap.String("key", key))
 			continue
 		}
 		log.Debug("Session get serverID success")
@@ -300,6 +309,12 @@ func (s *Session) WatchServices(prefix string, revision int64) (eventChannel <-c
 				if !ok {
 					return
 				}
+				if wresp.Err() != nil {
+					//close event channel
+					log.Warn("Watch service found error", zap.Error(wresp.Err()))
+					close(eventCh)
+					return
+				}
 				for _, ev := range wresp.Events {
 					session := &Session{}
 					var eventType SessionEventType
@@ -334,4 +349,29 @@ func (s *Session) WatchServices(prefix string, revision int64) (eventChannel <-c
 		}
 	}()
 	return eventCh
+}
+
+// LivenessCheck performs liveness check with provided context and channel
+// ctx controls the liveness check loop
+// ch is the liveness signal channel, ch is closed only when the session is expired
+// callback is the function to call when ch is closed, note that callback will not be invoked when loop exits due to context
+func (s *Session) LivenessCheck(ctx context.Context, callback func()) {
+	for {
+		select {
+		case _, ok := <-s.liveCh:
+			// ok, still alive
+			if ok {
+				continue
+			}
+			// not ok, connection lost
+			log.Warn("connection lost detected, shuting down")
+			if callback != nil {
+				go callback()
+			}
+			return
+		case <-ctx.Done():
+			log.Debug("liveness exits due to context done")
+			return
+		}
+	}
 }

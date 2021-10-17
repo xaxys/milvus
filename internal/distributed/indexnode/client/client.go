@@ -33,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 )
 
+// Client is the grpc client of IndexNode.
 type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -42,9 +43,15 @@ type Client struct {
 	grpcClientMtx sync.RWMutex
 
 	addr string
+
+	getGrpcClient func() (indexpb.IndexNodeClient, error)
 }
 
-func (c *Client) getGrpcClient() (indexpb.IndexNodeClient, error) {
+func (c *Client) setGetGrpcClientFunc() {
+	c.getGrpcClient = c.getGrpcClientFunc
+}
+
+func (c *Client) getGrpcClientFunc() (indexpb.IndexNodeClient, error) {
 	c.grpcClientMtx.RLock()
 	if c.grpcClient != nil {
 		defer c.grpcClientMtx.RUnlock()
@@ -80,22 +87,27 @@ func (c *Client) resetConnection() {
 	c.grpcClient = nil
 }
 
+// NewClient creates a new IndexNode client.
 func NewClient(ctx context.Context, addr string) (*Client, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("address is empty")
 	}
 	ctx, cancel := context.WithCancel(ctx)
 
-	return &Client{
+	client := &Client{
 		ctx:    ctx,
 		cancel: cancel,
 		addr:   addr,
-	}, nil
+	}
+
+	client.setGetGrpcClientFunc()
+	return client, nil
 }
 
+// Init initializes IndexNode's grpc client.
 func (c *Client) Init() error {
 	Params.Init()
-	return c.connect(retry.Attempts(20))
+	return nil
 }
 
 func (c *Client) connect(retryOptions ...retry.Option) error {
@@ -162,10 +174,12 @@ func (c *Client) recall(caller func() (interface{}, error)) (interface{}, error)
 	return ret, err
 }
 
+// Start starts IndexNode's client service. But it does nothing here.
 func (c *Client) Start() error {
 	return nil
 }
 
+// Stop stops IndexNode's grpc client.
 func (c *Client) Stop() error {
 	c.cancel()
 	c.grpcClientMtx.Lock()
@@ -181,6 +195,7 @@ func (c *Client) Register() error {
 	return nil
 }
 
+// GetComponentStates gets the component states of IndexNode.
 func (c *Client) GetComponentStates(ctx context.Context) (*internalpb.ComponentStates, error) {
 	ret, err := c.recall(func() (interface{}, error) {
 		client, err := c.getGrpcClient()
@@ -196,6 +211,7 @@ func (c *Client) GetComponentStates(ctx context.Context) (*internalpb.ComponentS
 	return ret.(*internalpb.ComponentStates), err
 }
 
+// GetTimeTickChannel gets the time tick channel of IndexNode.
 func (c *Client) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
 	ret, err := c.recall(func() (interface{}, error) {
 		client, err := c.getGrpcClient()
@@ -211,6 +227,7 @@ func (c *Client) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringRespon
 	return ret.(*milvuspb.StringResponse), err
 }
 
+// GetStatisticsChannel gets the statistics channel of IndexNode.
 func (c *Client) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
 	ret, err := c.recall(func() (interface{}, error) {
 		client, err := c.getGrpcClient()
@@ -226,6 +243,7 @@ func (c *Client) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResp
 	return ret.(*milvuspb.StringResponse), err
 }
 
+// CreateIndex sends the build index request to IndexNode.
 func (c *Client) CreateIndex(ctx context.Context, req *indexpb.CreateIndexRequest) (*commonpb.Status, error) {
 	ret, err := c.recall(func() (interface{}, error) {
 		client, err := c.getGrpcClient()
@@ -241,6 +259,7 @@ func (c *Client) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 	return ret.(*commonpb.Status), err
 }
 
+// GetMetrics gets the metrics info of IndexNode.
 func (c *Client) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	ret, err := c.recall(func() (interface{}, error) {
 		client, err := c.getGrpcClient()

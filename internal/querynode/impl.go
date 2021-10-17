@@ -95,35 +95,74 @@ func (node *QueryNode) AddQueryChannel(ctx context.Context, in *queryPb.AddQuery
 		return status, errors.New(errMsg)
 	}
 
-	//if _, ok := node.searchService.searchCollections[in.CollectionID]; !ok {
-	//	errMsg := "null search collection, collectionID = " + fmt.Sprintln(collectionID)
-	//	status := &commonpb.Status{
-	//		ErrorCode: commonpb.ErrorCode_UnexpectedError,
-	//		Reason:    errMsg,
-	//	}
-	//	return status, errors.New(errMsg)
-	//}
-
-	// add search collection
-	if !node.queryService.hasQueryCollection(collectionID) {
-		node.queryService.addQueryCollection(collectionID)
-		log.Debug("add query collection", zap.Any("collectionID", collectionID))
+	if node.queryService.hasQueryCollection(collectionID) {
+		log.Debug("queryCollection has been existed when addQueryChannel",
+			zap.Any("collectionID", collectionID),
+		)
+		status := &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		}
+		return status, nil
 	}
 
+	// add search collection
+	err := node.queryService.addQueryCollection(collectionID)
+	if err != nil {
+		status := &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+			Reason:    err.Error(),
+		}
+		return status, err
+	}
+	log.Debug("add query collection", zap.Any("collectionID", collectionID))
+
 	// add request channel
-	sc := node.queryService.queryCollections[in.CollectionID]
+	sc, err := node.queryService.getQueryCollection(in.CollectionID)
+	if err != nil {
+		status := &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+			Reason:    err.Error(),
+		}
+		return status, err
+	}
 	consumeChannels := []string{in.RequestChannelID}
-	//consumeSubName := Params.MsgChannelSubName
-	consumeSubName := Params.MsgChannelSubName + "-" + strconv.FormatInt(collectionID, 10) + "-" + strconv.Itoa(rand.Int())
-	sc.queryMsgStream.AsConsumer(consumeChannels, consumeSubName)
-	log.Debug("querynode AsConsumer: " + strings.Join(consumeChannels, ", ") + " : " + consumeSubName)
+	if in.SeekPosition == nil || len(in.SeekPosition.MsgID) == 0 {
+		// as consumer
+		consumeSubName := Params.MsgChannelSubName + "-" + strconv.FormatInt(collectionID, 10) + "-" + strconv.Itoa(rand.Int())
+		sc.queryMsgStream.AsConsumer(consumeChannels, consumeSubName)
+		log.Debug("querynode AsConsumer: " + strings.Join(consumeChannels, ", ") + " : " + consumeSubName)
+	} else {
+		// seek query channel
+		sc.queryMsgStream.AsConsumer(consumeChannels, in.SeekPosition.MsgGroup)
+		err = sc.queryMsgStream.Seek([]*internalpb.MsgPosition{in.SeekPosition})
+		if err != nil {
+			status := &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    err.Error(),
+			}
+			return status, err
+		}
+		log.Debug("querynode seek query channel: ", zap.Any("consumeChannels", consumeChannels))
+	}
 
 	// add result channel
 	producerChannels := []string{in.ResultChannelID}
 	sc.queryResultMsgStream.AsProducer(producerChannels)
 	log.Debug("querynode AsProducer: " + strings.Join(producerChannels, ", "))
 
-	// message stream need to asConsumer before start
+	// init global sealed segments
+	for _, segment := range in.GlobalSealedSegments {
+		err = sc.globalSegmentManager.addGlobalSegmentInfo(segment)
+		if err != nil {
+			status := &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    err.Error(),
+			}
+			return status, err
+		}
+	}
+
+	// start queryCollection, message stream need to asConsumer before start
 	sc.start()
 	log.Debug("start query collection", zap.Any("collectionID", collectionID))
 

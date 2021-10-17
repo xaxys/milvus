@@ -19,6 +19,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 )
 
+// InsertRepackFunc is used to repack messages after hash by primary key
 func InsertRepackFunc(tsMsgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, error) {
 	result := make(map[int32]*MsgPack)
 	for i, request := range tsMsgs {
@@ -56,7 +57,7 @@ func InsertRepackFunc(tsMsgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, e
 				CollectionName: insertRequest.CollectionName,
 				PartitionName:  insertRequest.PartitionName,
 				SegmentID:      insertRequest.SegmentID,
-				ChannelID:      insertRequest.ChannelID,
+				ShardName:      insertRequest.ShardName,
 				Timestamps:     []uint64{insertRequest.Timestamps[index]},
 				RowIDs:         []int64{insertRequest.RowIDs[index]},
 				RowData:        []*commonpb.Blob{insertRequest.RowData[index]},
@@ -74,6 +75,7 @@ func InsertRepackFunc(tsMsgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, e
 	return result, nil
 }
 
+// DeleteRepackFunc is used to repack messages after hash by primary key
 func DeleteRepackFunc(tsMsgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, error) {
 	result := make(map[int32]*MsgPack)
 	for i, request := range tsMsgs {
@@ -83,11 +85,15 @@ func DeleteRepackFunc(tsMsgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, e
 		deleteRequest := request.(*DeleteMsg)
 		keys := hashKeys[i]
 
+		if len(keys) != 1 {
+			return nil, errors.New("len(msg.hashValue) must equal 1, but it is: " + strconv.Itoa(len(keys)))
+		}
+
 		timestampLen := len(deleteRequest.Timestamps)
-		primaryKeysLen := len(deleteRequest.PrimaryKeys)
+		pkLen := len(deleteRequest.PrimaryKeys)
 		keysLen := len(keys)
 
-		if keysLen != timestampLen || keysLen != primaryKeysLen {
+		if keysLen != timestampLen || keysLen != pkLen {
 			return nil, errors.New("the length of hashValue, timestamps, primaryKeys are not equal")
 		}
 
@@ -105,8 +111,12 @@ func DeleteRepackFunc(tsMsgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, e
 					Timestamp: deleteRequest.Timestamps[index],
 					SourceID:  deleteRequest.Base.SourceID,
 				},
+				DbID:           deleteRequest.DbID,
+				CollectionID:   deleteRequest.CollectionID,
+				PartitionID:    deleteRequest.PartitionID,
 				CollectionName: deleteRequest.CollectionName,
-				ChannelID:      deleteRequest.ChannelID,
+				PartitionName:  deleteRequest.PartitionName,
+				ShardName:      deleteRequest.ShardName,
 				Timestamps:     []uint64{deleteRequest.Timestamps[index]},
 				PrimaryKeys:    []int64{deleteRequest.PrimaryKeys[index]},
 			}
@@ -123,6 +133,7 @@ func DeleteRepackFunc(tsMsgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, e
 	return result, nil
 }
 
+// DefaultRepackFunc is used to repack messages after hash by primary key
 func DefaultRepackFunc(tsMsgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, error) {
 	result := make(map[int32]*MsgPack)
 	for i, request := range tsMsgs {

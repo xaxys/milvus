@@ -44,6 +44,7 @@ type dataSyncService struct {
 }
 
 // collection flow graph
+// addCollectionFlowGraph add a collection flowGraph to collectionFlowGraphs
 func (dsService *dataSyncService) addCollectionFlowGraph(collectionID UniqueID, vChannels []string) {
 	dsService.mu.Lock()
 	defer dsService.mu.Unlock()
@@ -98,7 +99,7 @@ func (dsService *dataSyncService) startCollectionFlowGraph(collectionID UniqueID
 		if _, ok := dsService.collectionFlowGraphs[collectionID][channel]; ok {
 			// start flow graph
 			log.Debug("start collection flow graph", zap.Any("channel", channel))
-			go dsService.collectionFlowGraphs[collectionID][channel].flowGraph.Start()
+			dsService.collectionFlowGraphs[collectionID][channel].flowGraph.Start()
 		}
 	}
 	return nil
@@ -168,7 +169,7 @@ func (dsService *dataSyncService) startPartitionFlowGraph(partitionID UniqueID, 
 		if _, ok := dsService.partitionFlowGraphs[partitionID][channel]; ok {
 			// start flow graph
 			log.Debug("start partition flow graph", zap.Any("channel", channel))
-			go dsService.partitionFlowGraphs[partitionID][channel].flowGraph.Start()
+			dsService.partitionFlowGraphs[partitionID][channel].flowGraph.Start()
 		}
 	}
 	return nil
@@ -179,15 +180,22 @@ func (dsService *dataSyncService) removePartitionFlowGraph(partitionID UniqueID)
 	defer dsService.mu.Unlock()
 
 	if _, ok := dsService.partitionFlowGraphs[partitionID]; ok {
-		for _, nodeFG := range dsService.partitionFlowGraphs[partitionID] {
+		for channel, nodeFG := range dsService.partitionFlowGraphs[partitionID] {
 			// close flow graph
 			nodeFG.close()
+			// remove tSafe record
+			// no tSafe in tSafeReplica, don't return error
+			err := dsService.tSafeReplica.removeRecord(channel, partitionID)
+			if err != nil {
+				log.Warn(err.Error())
+			}
 		}
 		dsService.partitionFlowGraphs[partitionID] = nil
 	}
 	delete(dsService.partitionFlowGraphs, partitionID)
 }
 
+// newDataSyncService returns a new dataSyncService
 func newDataSyncService(ctx context.Context,
 	streamingReplica ReplicaInterface,
 	tSafeReplica TSafeReplicaInterface,
@@ -204,6 +212,7 @@ func newDataSyncService(ctx context.Context,
 }
 
 func (dsService *dataSyncService) close() {
+	// close collection flow graphs
 	for _, nodeFGs := range dsService.collectionFlowGraphs {
 		for _, nodeFG := range nodeFGs {
 			if nodeFG != nil {
@@ -211,6 +220,7 @@ func (dsService *dataSyncService) close() {
 			}
 		}
 	}
+	// close partition flow graphs
 	for _, nodeFGs := range dsService.partitionFlowGraphs {
 		for _, nodeFG := range nodeFGs {
 			if nodeFG != nil {

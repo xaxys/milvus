@@ -295,7 +295,6 @@ func (s *Segment) search(plan *SearchPlan,
 	log.Debug("do search on segment", zap.Int64("segmentID", s.segmentID), zap.Int32("segmentType", int32(s.segmentType)))
 	var status = C.Search(s.segmentPtr, plan.cSearchPlan, cPlaceHolderGroup, ts, &searchResult.cSearchResult)
 	errorCode := status.error_code
-
 	if errorCode != 0 {
 		errorMsg := C.GoString(status.error_msg)
 		defer C.free(unsafe.Pointer(status.error_msg))
@@ -599,6 +598,9 @@ func (s *Segment) segmentInsert(offset int64, entityIDs *[]UniqueID, timestamps 
 	var sizeofPerRow = len((*records)[0].Value)
 
 	assert.Equal(nil, numOfRow, len(*records))
+	if numOfRow != len(*records) {
+		return errors.New("EntityIDs row num not equal to length of records")
+	}
 
 	var rawData = make([]byte, numOfRow*sizeofPerRow)
 	var copyOffset = 0
@@ -652,6 +654,11 @@ func (s *Segment) segmentDelete(offset int64, entityIDs *[]UniqueID, timestamps 
 	if s.segmentPtr == nil {
 		return errors.New("null seg core pointer")
 	}
+
+	if len(*entityIDs) != len(*timestamps) {
+		return errors.New("Length of entityIDs not equal to length of timestamps")
+	}
+
 	var cOffset = C.long(offset)
 	var cSize = C.long(len(*entityIDs))
 	var cEntityIdsPtr = (*C.long)(&(*entityIDs)[0])

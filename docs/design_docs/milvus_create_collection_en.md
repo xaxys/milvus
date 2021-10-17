@@ -1,6 +1,6 @@
 # Create Collections
 
-`Milvus 2.0` use `Collection` to represent a set of data, like `Table` in a traditional database. Users can create or drop `Collection`. Altering the `Schema` of `Collection` is not supported yet. This article introduces the execution path of `CreateCollection`, at the end of this article, you should know which components are involved in `CreateCollection`.
+`Milvus 2.0` uses `Collection` to represent a set of data, like `Table` in a traditional database. Users can create or drop `Collection`. Altering the `Schema` of `Collection` is not supported yet. This article introduces the execution path of `CreateCollection`, at the end of this article, you should know which components are involved in `CreateCollection`.
 
 
 The execution flow of `CreateCollection` is shown in the following figure:
@@ -40,7 +40,7 @@ message CollectionSchema {
 
 ```
 
-1. When received the `CreateCollection` request, the `Proxy` would wraps this request into `CreateCollectionTask`, and pushes this task into `DdTaskQueue` queue. After that, `Proxy` would call method of `WatiToFinish`  to wait until the task is finished.
+1. When received the `CreateCollection` request, the `Proxy` would wrap this request into `CreateCollectionTask`, and pushes this task into `DdTaskQueue` queue. After that, `Proxy` would call `WaitToFinish` method to wait until the task is finished.
 ```go
 type task interface {
 	TraceCtx() context.Context
@@ -122,7 +122,7 @@ message CreateCollectionRequest {
 
 ```
 
-9. After all these operations, `RootCoord` would update internal timestamp and return, so the `Proxy` would get the response.
+9. After all these operations, `RootCoord` would update the internal timestamp and return, so the `Proxy` would get the response.
 
 *Notes:*
 1. In the `Proxy`, all `DDL` requests will be wrapped into `task`, and push the `task` into `DdTaskQueue`, the background service will read a new `task` from `DdTaskQueue` only when the previous one is finished. So all the `DDL` requests are executed serially on the `Proxy`

@@ -22,7 +22,7 @@ uid = "test_index"
 BUILD_TIMEOUT = 300
 field_name = default_float_vec_field_name
 binary_field_name = default_binary_vec_field_name
-query, query_vecs = gen_query_vectors(field_name, default_entities, default_top_k, 1)
+# query = gen_search_vectors_params(field_name, default_entities, default_top_k, 1)
 default_index = {"index_type": "IVF_FLAT", "params": {"nlist": 128}, "metric_type": "L2"}
 
 
@@ -263,6 +263,7 @@ class TestIndexOperation(TestcaseBase):
         pass
 
     @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.tags(CaseLabel.L1)
     def test_index_drop_index(self):
         """
         target: test index.drop
@@ -484,7 +485,7 @@ class TestIndexBase:
         expected: raise exception
         """
         with pytest.raises(Exception) as e:
-            dis_connect.create_index(collection, field_name, get_simple_index)
+            dis_connect.create_index(collection, field_name, default_index)
 
     @pytest.mark.tags(CaseLabel.L0)
     @pytest.mark.timeout(BUILD_TIMEOUT)
@@ -501,9 +502,9 @@ class TestIndexBase:
         nq = get_nq
         index_type = get_simple_index["index_type"]
         search_param = get_search_param(index_type)
-        query, vecs = gen_query_vectors(field_name, default_entities, default_top_k, nq, search_params=search_param)
+        params, _ = gen_search_vectors_params(field_name, default_entities, default_top_k, nq, search_params=search_param)
         connect.load_collection(collection)
-        res = connect.search(collection, query)
+        res = connect.search(collection, **params)
         assert len(res) == nq
 
     @pytest.mark.timeout(BUILD_TIMEOUT)
@@ -595,7 +596,6 @@ class TestIndexBase:
             connect.release_collection(collection)
             connect.load_collection(collection)
         index = connect.describe_index(collection, "")
-        # assert index == indexs[-1]
         assert not index    # FLAT is the last index_type, drop all indexes in server
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -702,8 +702,9 @@ class TestIndexBase:
         nq = get_nq
         index_type = get_simple_index["index_type"]
         search_param = get_search_param(index_type)
-        query, vecs = gen_query_vectors(field_name, default_entities, default_top_k, nq, metric_type=metric_type, search_params=search_param)
-        res = connect.search(collection, query)
+        params, _ = gen_search_vectors_params(field_name, default_entities, default_top_k, nq,
+                                              metric_type=metric_type, search_params=search_param)
+        res = connect.search(collection, **params)
         assert len(res) == nq
 
     @pytest.mark.timeout(BUILD_TIMEOUT)
@@ -1045,10 +1046,11 @@ class TestIndexBinary:
         connect.flush([binary_collection])
         connect.create_index(binary_collection, binary_field_name, get_jaccard_index)
         connect.load_collection(binary_collection)
-        query, vecs = gen_query_vectors(binary_field_name, default_binary_entities, default_top_k, nq, metric_type="JACCARD")
         search_param = get_search_param(get_jaccard_index["index_type"], metric_type="JACCARD")
-        logging.getLogger().info(search_param)
-        res = connect.search(binary_collection, query, search_params=search_param)
+        params, _ = gen_search_vectors_params(binary_field_name, default_binary_entities, default_top_k, nq,
+                                              search_params=search_param, metric_type="JACCARD")
+        logging.getLogger().info(params)
+        res = connect.search(binary_collection, **params)
         assert len(res) == nq
 
     @pytest.mark.timeout(BUILD_TIMEOUT)
@@ -1056,7 +1058,7 @@ class TestIndexBinary:
     def test_create_index_invalid_metric_type_binary(self, connect, binary_collection, get_l2_index):
         """
         target: test create index interface with invalid metric type
-        method: add entitys into binary connection, flash, create index with L2 metric type.
+        method: add entities into binary collection, flush, create index with L2 metric type.
         expected: return create_index failure
         """
         # insert 6000 vectors

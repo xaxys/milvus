@@ -37,6 +37,7 @@ const (
 	queryNodeInfoPrefix = "queryCoord-queryNodeInfo"
 )
 
+// Cluster manages all query node connections and grpc requests
 type Cluster interface {
 	reloadFromKV() error
 	getComponentInfos(ctx context.Context) ([]*internalpb.ComponentInfo, error)
@@ -114,6 +115,8 @@ func newQueryNodeCluster(ctx context.Context, clusterMeta Meta, kv *etcdkv.EtcdK
 	return c, nil
 }
 
+// Reload trigger task, trigger task states, internal task, internal task state from etcd
+// Assign the internal task to the corresponding trigger task as a child task
 func (c *queryNodeCluster) reloadFromKV() error {
 	toLoadMetaNodeIDs := make([]int64, 0)
 	// get current online session
@@ -171,7 +174,7 @@ func (c *queryNodeCluster) reloadFromKV() error {
 		}
 		for _, value := range collectionValues {
 			collectionInfo := &querypb.CollectionInfo{}
-			err = proto.UnmarshalText(value, collectionInfo)
+			err = proto.Unmarshal([]byte(value), collectionInfo)
 			if err != nil {
 				return err
 			}
@@ -371,6 +374,7 @@ func (c *queryNodeCluster) releasePartitions(ctx context.Context, nodeID int64, 
 			log.Debug("ReleasePartitions: queryNode release partitions error", zap.String("error", err.Error()))
 			return err
 		}
+
 		for _, partitionID := range in.PartitionIDs {
 			err = c.clusterMeta.releasePartition(in.CollectionID, partitionID)
 			if err != nil {

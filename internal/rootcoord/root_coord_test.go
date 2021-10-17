@@ -362,17 +362,18 @@ func createCollectionInMeta(dbName, collName string, core *Core, shardsNum int32
 		PhysicalChannelNames: chanNames,
 	}
 
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddCollReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddCollReq, CreateCollectionDDType)
-	}
-
 	reason := fmt.Sprintf("create collection %d", collID)
 	ts, err := core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
+	}
+
+	// build DdOperation and save it into etcd, when ddmsg send fail,
+	// system can restore ddmsg from etcd and re-send
+	ddCollReq.Base.Timestamp = ts
+	ddOpStr, err := EncodeDdOperation(&ddCollReq, CreateCollectionDDType)
+	if err != nil {
+		return fmt.Errorf("EncodeDdOperation fail, error = %w", err)
 	}
 
 	// use lambda function here to guarantee all resources to be released
@@ -385,7 +386,7 @@ func createCollectionInMeta(dbName, collName string, core *Core, shardsNum int32
 		// clear ddl timetick in all conditions
 		defer core.chanTimeTick.RemoveDdlTimeTick(ts, reason)
 
-		err = core.MetaTable.AddCollection(&collInfo, ts, idxInfo, ddOp)
+		err = core.MetaTable.AddCollection(&collInfo, ts, idxInfo, ddOpStr)
 		if err != nil {
 			return fmt.Errorf("meta table add collection failed,error = %w", err)
 		}
@@ -715,7 +716,6 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, pt.in.Timestamps[0], pt.in.DefaultTimestamp)
 		assert.Equal(t, pt.timeTick[pt.in.ChannelNames[0]], pt.in.DefaultTimestamp)
 		assert.Equal(t, pt.timeTick[pt.in.ChannelNames[1]], pt.in.DefaultTimestamp)
-		assert.LessOrEqual(t, createMsg.BeginTimestamp, pt.in.Timestamps[0])
 		core.chanTimeTick.lock.Unlock()
 
 		// check DD operation info
@@ -730,7 +730,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, CreateCollectionDDType, ddOp.Type)
 
 		var ddCollReq = internalpb.CreateCollectionRequest{}
-		err = proto.UnmarshalText(ddOp.Body, &ddCollReq)
+		err = proto.Unmarshal(ddOp.Body, &ddCollReq)
 		assert.Nil(t, err)
 		assert.Equal(t, createMeta.ID, ddCollReq.CollectionID)
 		assert.Equal(t, createMeta.PartitionIDs[0], ddCollReq.PartitionID)
@@ -900,7 +900,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, CreatePartitionDDType, ddOp.Type)
 
 		var ddReq = internalpb.CreatePartitionRequest{}
-		err = proto.UnmarshalText(ddOp.Body, &ddReq)
+		err = proto.Unmarshal(ddOp.Body, &ddReq)
 		assert.Nil(t, err)
 		assert.Equal(t, collMeta.ID, ddReq.CollectionID)
 		assert.Equal(t, collMeta.PartitionIDs[1], ddReq.PartitionID)
@@ -1235,7 +1235,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, DropPartitionDDType, ddOp.Type)
 
 		var ddReq = internalpb.DropPartitionRequest{}
-		err = proto.UnmarshalText(ddOp.Body, &ddReq)
+		err = proto.Unmarshal(ddOp.Body, &ddReq)
 		assert.Nil(t, err)
 		assert.Equal(t, collMeta.ID, ddReq.CollectionID)
 		assert.Equal(t, dropPartID, ddReq.PartitionID)
@@ -1325,7 +1325,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, DropCollectionDDType, ddOp.Type)
 
 		var ddReq = internalpb.DropCollectionRequest{}
-		err = proto.UnmarshalText(ddOp.Body, &ddReq)
+		err = proto.Unmarshal(ddOp.Body, &ddReq)
 		assert.Nil(t, err)
 		assert.Equal(t, collMeta.ID, ddReq.CollectionID)
 
@@ -1813,6 +1813,23 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
 	})
 
+	t.Run("describe collection2", func(t *testing.T) {
+		req := &milvuspb.DescribeCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_DescribeCollection,
+				MsgID:     3013,
+				Timestamp: 3013,
+				SourceID:  3013,
+			},
+			DbName:         dbName,
+			CollectionName: collName,
+		}
+		rsp, err := core.DescribeCollection(ctx, req)
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
+		assert.Equal(t, rsp.Aliases, []string{aliasName})
+	})
+
 	// temporarily create collName2
 	schema = schemapb.CollectionSchema{
 		Name: collName2,
@@ -1822,9 +1839,9 @@ func TestRootCoord(t *testing.T) {
 	req2 := &milvuspb.CreateCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_CreateCollection,
-			MsgID:     3013,
-			Timestamp: 3013,
-			SourceID:  3013,
+			MsgID:     3014,
+			Timestamp: 3014,
+			SourceID:  3014,
 		},
 		DbName:         dbName,
 		CollectionName: collName2,
@@ -1838,9 +1855,9 @@ func TestRootCoord(t *testing.T) {
 		req := &milvuspb.AlterAliasRequest{
 			Base: &commonpb.MsgBase{
 				MsgType:   commonpb.MsgType_AlterAlias,
-				MsgID:     3014,
-				Timestamp: 3014,
-				SourceID:  3014,
+				MsgID:     3015,
+				Timestamp: 3015,
+				SourceID:  3015,
 			},
 			CollectionName: collName2,
 			Alias:          aliasName,
@@ -1850,13 +1867,28 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
 	})
 
+	t.Run("drop collection with alias", func(t *testing.T) {
+		req := &milvuspb.DropCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_DropAlias,
+				MsgID:     3016,
+				Timestamp: 3016,
+				SourceID:  3016,
+			},
+			CollectionName: aliasName,
+		}
+		rsp, err := core.DropCollection(ctx, req)
+		assert.Nil(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
+	})
+
 	t.Run("drop alias", func(t *testing.T) {
 		req := &milvuspb.DropAliasRequest{
 			Base: &commonpb.MsgBase{
 				MsgType:   commonpb.MsgType_DropAlias,
-				MsgID:     3015,
-				Timestamp: 3015,
-				SourceID:  3015,
+				MsgID:     3017,
+				Timestamp: 3017,
+				SourceID:  3017,
 			},
 			Alias: aliasName,
 		}
@@ -1868,9 +1900,9 @@ func TestRootCoord(t *testing.T) {
 	status, err = core.DropCollection(ctx, &milvuspb.DropCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_DropCollection,
-			MsgID:     3016,
-			Timestamp: 3016,
-			SourceID:  3016,
+			MsgID:     3018,
+			Timestamp: 3018,
+			SourceID:  3018,
 		},
 		DbName:         dbName,
 		CollectionName: collName,
@@ -1881,9 +1913,9 @@ func TestRootCoord(t *testing.T) {
 	status, err = core.DropCollection(ctx, &milvuspb.DropCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_DropCollection,
-			MsgID:     3017,
-			Timestamp: 3017,
-			SourceID:  3017,
+			MsgID:     3019,
+			Timestamp: 3019,
+			SourceID:  3019,
 		},
 		DbName:         dbName,
 		CollectionName: collName2,
@@ -2289,7 +2321,7 @@ func TestCheckInit(t *testing.T) {
 	err = c.checkInit()
 	assert.NotNil(t, err)
 
-	c.MetaTable = &metaTable{}
+	c.MetaTable = &MetaTable{}
 	err = c.checkInit()
 	assert.NotNil(t, err)
 
@@ -2325,8 +2357,8 @@ func TestCheckInit(t *testing.T) {
 	err = c.checkInit()
 	assert.NotNil(t, err)
 
-	c.SendDdCreateCollectionReq = func(context.Context, *internalpb.CreateCollectionRequest, []string) error {
-		return nil
+	c.SendDdCreateCollectionReq = func(context.Context, *internalpb.CreateCollectionRequest, []string) (map[string][]byte, error) {
+		return map[string][]byte{}, nil
 	}
 	err = c.checkInit()
 	assert.NotNil(t, err)

@@ -8,12 +8,17 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
+
+// Package datacoord contains core functions in datacoord
 package datacoord
 
 import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/milvus-io/milvus/internal/log"
+	"go.uber.org/zap"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/kv"
@@ -35,7 +40,7 @@ type meta struct {
 }
 
 // NewMeta create meta from provided `kv.TxnKV`
-func NewMeta(kv kv.TxnKV) (*meta, error) {
+func newMeta(kv kv.TxnKV) (*meta, error) {
 	mt := &meta{
 		client:      kv,
 		collections: make(map[UniqueID]*datapb.CollectionInfo),
@@ -48,7 +53,7 @@ func NewMeta(kv kv.TxnKV) (*meta, error) {
 	return mt, nil
 }
 
-// realodFromKV load meta from KV storage
+// reloadFromKV load meta from KV storage
 func (m *meta) reloadFromKV() error {
 	_, values, err := m.client.LoadWithPrefix(segmentPrefix)
 	if err != nil {
@@ -57,10 +62,9 @@ func (m *meta) reloadFromKV() error {
 
 	for _, value := range values {
 		segmentInfo := &datapb.SegmentInfo{}
-		// TODO deprecate all proto text marshal/unmarsahl
-		err = proto.UnmarshalText(value, segmentInfo)
+		err = proto.Unmarshal([]byte(value), segmentInfo)
 		if err != nil {
-			return fmt.Errorf("DataCoord reloadFromKV UnMarshalText datapb.SegmentInfo err:%w", err)
+			return fmt.Errorf("DataCoord reloadFromKV UnMarshal datapb.SegmentInfo err:%w", err)
 		}
 		m.segments.SetSegment(segmentInfo.GetID(), NewSegmentInfo(segmentInfo))
 	}
@@ -160,15 +164,18 @@ func (m *meta) UpdateFlushSegmentsInfo(segmentID UniqueID, flushed bool,
 		return nil
 	}
 
+	clonedSegment := segment.Clone()
+
 	kv := make(map[string]string)
-	modSegments := make(map[UniqueID]struct{})
+	modSegments := make(map[UniqueID]*SegmentInfo)
 
 	if flushed {
-		m.segments.SetState(segmentID, commonpb.SegmentState_Flushing)
-		modSegments[segmentID] = struct{}{}
+		clonedSegment.State = commonpb.SegmentState_Flushing
+		modSegments[segmentID] = clonedSegment
 	}
 
-	currBinlogs := segment.Clone().SegmentInfo.GetBinlogs()
+	currBinlogs := clonedSegment.GetBinlogs()
+
 	var getFieldBinlogs = func(id UniqueID, binlogs []*datapb.FieldBinlog) *datapb.FieldBinlog {
 		for _, binlog := range binlogs {
 			if id == binlog.GetFieldID() {
@@ -177,6 +184,7 @@ func (m *meta) UpdateFlushSegmentsInfo(segmentID UniqueID, flushed bool,
 		}
 		return nil
 	}
+
 	for _, tBinlogs := range binlogs {
 		fieldBinlogs := getFieldBinlogs(tBinlogs.GetFieldID(), currBinlogs)
 		if fieldBinlogs == nil {
@@ -185,37 +193,67 @@ func (m *meta) UpdateFlushSegmentsInfo(segmentID UniqueID, flushed bool,
 			fieldBinlogs.Binlogs = append(fieldBinlogs.Binlogs, tBinlogs.Binlogs...)
 		}
 	}
-	m.segments.SetBinlogs(segmentID, currBinlogs)
-	modSegments[segmentID] = struct{}{}
+
+	clonedSegment.Binlogs = currBinlogs
+	modSegments[segmentID] = clonedSegment
 
 	for _, pos := range startPositions {
 		if len(pos.GetStartPosition().GetMsgID()) == 0 {
 			continue
 		}
-		m.segments.SetStartPosition(pos.GetSegmentID(), pos.GetStartPosition())
-		modSegments[segmentID] = struct{}{}
+		s := modSegments[pos.GetSegmentID()]
+		if s == nil {
+			s = m.segments.GetSegment(pos.GetSegmentID())
+		}
+		if s == nil {
+			continue
+		}
+
+		s.StartPosition = pos.GetStartPosition()
+		modSegments[pos.GetSegmentID()] = s
 	}
 
 	for _, cp := range checkpoints {
-		if segment.DmlPosition != nil && segment.DmlPosition.Timestamp >= cp.Position.Timestamp {
+		s := modSegments[cp.GetSegmentID()]
+		if s == nil {
+			s = m.segments.GetSegment(cp.GetSegmentID())
+		}
+		if s == nil {
+			continue
+		}
+
+		if s.DmlPosition != nil && s.DmlPosition.Timestamp >= cp.Position.Timestamp {
 			// segment position in etcd is larger than checkpoint, then dont change it
 			continue
 		}
-		m.segments.SetDmlPosition(cp.GetSegmentID(), cp.GetPosition())
-		m.segments.SetRowCount(cp.GetSegmentID(), cp.GetNumOfRows())
-		modSegments[segmentID] = struct{}{}
+
+		s.DmlPosition = cp.GetPosition()
+		s.NumOfRows = cp.GetNumOfRows()
+		modSegments[cp.GetSegmentID()] = s
 	}
 
 	for id := range modSegments {
 		if segment := m.segments.GetSegment(id); segment != nil {
-			segBytes := proto.MarshalTextString(segment.SegmentInfo)
+			segBytes, err := proto.Marshal(segment.SegmentInfo)
+			if err != nil {
+				return fmt.Errorf("DataCoord UpdateFlushSegmentsInfo segmentID:%d, marshal failed:%w", segment.GetID(), err)
+			}
 			key := buildSegmentPath(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
-			kv[key] = segBytes
+			kv[key] = string(segBytes)
 		}
+	}
+
+	if len(kv) == 0 {
+		return nil
 	}
 
 	if err := m.saveKvTxn(kv); err != nil {
 		return err
+	}
+
+	// update memory status
+	for id, s := range modSegments {
+		m.segments.SetSegment(id, s)
 	}
 	return nil
 }
@@ -366,18 +404,25 @@ func (m *meta) MoveSegmentBinlogs(segmentID UniqueID, oldPathPrefix string, fiel
 
 	if segment := m.segments.GetSegment(segmentID); segment != nil {
 		k := buildSegmentPath(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
-		kv[k] = proto.MarshalTextString(segment.SegmentInfo)
+		v, err := proto.Marshal(segment.SegmentInfo)
+		if err != nil {
+			log.Error("DataCoord MoveSegmentBinlogs marshal failed", zap.Int64("segmentID", segment.GetID()), zap.Error(err))
+			return fmt.Errorf("DataCoord MoveSegmentBinlogs segmentID:%d, marshal failed:%w", segment.GetID(), err)
+		}
+		kv[k] = string(v)
 	}
-	m.client.MultiSaveAndRemoveWithPrefix(kv, removals)
-	return nil
+	return m.client.MultiSaveAndRemoveWithPrefix(kv, removals)
 }
 
 // saveSegmentInfo utility function saving segment info into kv store
 func (m *meta) saveSegmentInfo(segment *SegmentInfo) error {
-	segBytes := proto.MarshalTextString(segment.SegmentInfo)
-
+	segBytes, err := proto.Marshal(segment.SegmentInfo)
+	if err != nil {
+		log.Error("DataCoord saveSegmentInfo marshal failed", zap.Int64("segmentID", segment.GetID()), zap.Error(err))
+		return fmt.Errorf("DataCoord saveSegmentInfo segmentID:%d, marshal failed:%w", segment.GetID(), err)
+	}
 	key := buildSegmentPath(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
-	return m.client.Save(key, segBytes)
+	return m.client.Save(key, string(segBytes))
 }
 
 // removeSegmentInfo utility function removing segment info from kv store

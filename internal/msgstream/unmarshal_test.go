@@ -52,7 +52,7 @@ func Test_ProtoUnmarshalDispatcher(t *testing.T) {
 			CollectionName: "Collection",
 			PartitionName:  "Partition",
 			SegmentID:      1,
-			ChannelID:      "0",
+			ShardName:      "0",
 			Timestamps:     []Timestamp{uint64(1)},
 			RowIDs:         []int64{1},
 			RowData:        []*commonpb.Blob{{}},
@@ -70,7 +70,7 @@ func Test_ProtoUnmarshalDispatcher(t *testing.T) {
 		headerMsg := commonpb.MsgHeader{}
 		payload, err := v.Marshal(v)
 		assert.Nil(t, err)
-		p, err := ConvertToByteArray(payload)
+		p, err := convertToByteArray(payload)
 		assert.Nil(t, err)
 		err = proto.Unmarshal(p, &headerMsg)
 		assert.Nil(t, err)

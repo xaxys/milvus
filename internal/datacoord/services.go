@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"sync/atomic"
 
+	"github.com/milvus-io/milvus/internal/util/trace"
+
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -45,6 +47,8 @@ func (s *Server) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResp
 // these segments will be flushed only after the Flush policy is fulfilled
 func (s *Server) Flush(ctx context.Context, req *datapb.FlushRequest) (*datapb.FlushResponse, error) {
 	log.Debug("receive flush request", zap.Int64("dbID", req.GetDbID()), zap.Int64("collectionID", req.GetCollectionID()))
+	sp, ctx := trace.StartSpanFromContextWithOperationName(ctx, "DataCoord-Flush")
+	defer sp.Finish()
 	resp := &datapb.FlushResponse{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -63,7 +67,9 @@ func (s *Server) Flush(ctx context.Context, req *datapb.FlushRequest) (*datapb.F
 		resp.Status.Reason = fmt.Sprintf("failed to flush %d, %s", req.CollectionID, err)
 		return resp, nil
 	}
-	log.Debug("flush response with segments", zap.Any("segments", sealedSegments))
+	log.Debug("flush response with segments",
+		zap.Int64("collectionID", req.GetCollectionID()),
+		zap.Any("segments", sealedSegments))
 	resp.Status.ErrorCode = commonpb.ErrorCode_Success
 	resp.DbID = req.GetDbID()
 	resp.CollectionID = req.GetCollectionID()
@@ -274,14 +280,34 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	resp := &commonpb.Status{
 		ErrorCode: commonpb.ErrorCode_UnexpectedError,
 	}
+
 	if s.isClosed() {
 		resp.Reason = serverNotServingErrMsg
 		return resp, nil
 	}
+
 	log.Debug("receive SaveBinlogPaths request",
 		zap.Int64("collectionID", req.GetCollectionID()),
 		zap.Int64("segmentID", req.GetSegmentID()),
+		zap.Bool("isFlush", req.GetFlushed()),
 		zap.Any("checkpoints", req.GetCheckPoints()))
+
+	// validate
+	nodeID := req.GetBase().GetSourceID()
+	segmentID := req.GetSegmentID()
+	segment := s.meta.GetSegment(segmentID)
+
+	if segment == nil {
+		FailResponse(resp, fmt.Sprintf("failed to get segment %d", segmentID))
+		log.Error("failed to get segment", zap.Int64("segmentID", segmentID))
+		return resp, nil
+	}
+
+	channel := segment.GetInsertChannel()
+	if !s.channelManager.Match(nodeID, channel) {
+		FailResponse(resp, fmt.Sprintf("channel %s is not watched on node %d", channel, nodeID))
+		log.Warn("node is not matched with channel", zap.String("channel", channel), zap.Int64("nodeID", nodeID))
+	}
 
 	// set segment to SegmentState_Flushing and save binlogs and checkpoints
 	err := s.meta.UpdateFlushSegmentsInfo(req.GetSegmentID(), req.GetFlushed(),
@@ -293,6 +319,7 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 		resp.Reason = err.Error()
 		return resp, nil
 	}
+
 	log.Debug("flush segment with meta", zap.Int64("id", req.SegmentID),
 		zap.Any("meta", req.GetField2BinlogPaths()))
 
@@ -304,7 +331,7 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	return resp, nil
 }
 
-// todo deprecated rpc
+// GetComponentStates returns DataCoord's current state
 func (s *Server) GetComponentStates(ctx context.Context) (*internalpb.ComponentStates, error) {
 	resp := &internalpb.ComponentStates{
 		State: &internalpb.ComponentInfo{
@@ -404,21 +431,10 @@ func (s *Server) GetRecoveryInfo(ctx context.Context, req *datapb.GetRecoveryInf
 	}
 
 	channels := dresp.GetVirtualChannelNames()
-	vchans := make([]vchannel, 0, len(channels))
+	channelInfos := make([]*datapb.VchannelInfo, 0, len(channels))
 	for _, c := range channels {
-		vchans = append(vchans, vchannel{
-			CollectionID: collectionID,
-			DmlChannel:   c,
-		})
-	}
-
-	channelInfos, err := s.GetVChanPositions(vchans, false)
-	if err != nil {
-		log.Error("get channel positions failed",
-			zap.Strings("channels", channels),
-			zap.Error(err))
-		resp.Status.Reason = err.Error()
-		return resp, nil
+		channelInfo := s.GetVChanPositions(c, collectionID, false)
+		channelInfos = append(channelInfos, channelInfo)
 	}
 
 	resp.Binlogs = binlogs

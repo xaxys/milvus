@@ -32,6 +32,8 @@ import (
 	"github.com/milvus-io/milvus/internal/util/trace"
 )
 
+var _ MsgStream = (*mqMsgStream)(nil)
+
 type mqMsgStream struct {
 	ctx              context.Context
 	client           mqclient.Client
@@ -49,6 +51,7 @@ type mqMsgStream struct {
 	consumerLock     *sync.Mutex
 }
 
+// NewMqMsgStream is used to generate a new mqMsgStream object
 func NewMqMsgStream(ctx context.Context,
 	receiveBufSize int64,
 	bufSize int64,
@@ -81,6 +84,7 @@ func NewMqMsgStream(ctx context.Context,
 	return stream, nil
 }
 
+// AsProducer create producer to send message to channels
 func (ms *mqMsgStream) AsProducer(channels []string) {
 	for _, channel := range channels {
 		if len(channel) == 0 {
@@ -110,7 +114,13 @@ func (ms *mqMsgStream) AsProducer(channels []string) {
 	}
 }
 
+// Create consumer to receive message from channels
 func (ms *mqMsgStream) AsConsumer(channels []string, subName string) {
+	ms.AsConsumerWithPosition(channels, subName, mqclient.SubscriptionPositionEarliest)
+}
+
+// Create consumer to receive message from channels, with initial position
+func (ms *mqMsgStream) AsConsumerWithPosition(channels []string, subName string, position mqclient.SubscriptionInitialPosition) {
 	for _, channel := range channels {
 		if _, ok := ms.consumers[channel]; ok {
 			continue
@@ -121,7 +131,7 @@ func (ms *mqMsgStream) AsConsumer(channels []string, subName string) {
 				Topic:                       channel,
 				SubscriptionName:            subName,
 				Type:                        mqclient.KeyShared,
-				SubscriptionInitialPosition: mqclient.SubscriptionPositionEarliest,
+				SubscriptionInitialPosition: position,
 				MessageChannel:              receiveChannel,
 			})
 			if err != nil {
@@ -235,7 +245,7 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 				return err
 			}
 
-			m, err := ConvertToByteArray(mb)
+			m, err := convertToByteArray(mb)
 			if err != nil {
 				return err
 			}
@@ -245,7 +255,7 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 			trace.InjectContextToPulsarMsgProperties(sp.Context(), msg.Properties)
 
 			ms.producerLock.Lock()
-			if err := ms.producers[channel].Send(
+			if _, err := ms.producers[channel].Send(
 				spanCtx,
 				msg,
 			); err != nil {
@@ -261,6 +271,76 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 	return nil
 }
 
+// ProduceMark send msg pack to all producers and returns corresponding msg id
+// the returned message id serves as marking
+func (ms *mqMsgStream) ProduceMark(msgPack *MsgPack) (map[string][]MessageID, error) {
+	ids := make(map[string][]MessageID)
+	if msgPack == nil || len(msgPack.Msgs) <= 0 {
+		return ids, errors.New("empty msgs")
+	}
+	if len(ms.producers) <= 0 {
+		return ids, errors.New("nil producer in msg stream")
+	}
+	tsMsgs := msgPack.Msgs
+	reBucketValues := ms.ComputeProduceChannelIndexes(msgPack.Msgs)
+	var result map[int32]*MsgPack
+	var err error
+	if ms.repackFunc != nil {
+		result, err = ms.repackFunc(tsMsgs, reBucketValues)
+	} else {
+		msgType := (tsMsgs[0]).Type()
+		switch msgType {
+		case commonpb.MsgType_Insert:
+			result, err = InsertRepackFunc(tsMsgs, reBucketValues)
+		case commonpb.MsgType_Delete:
+			result, err = DeleteRepackFunc(tsMsgs, reBucketValues)
+		default:
+			result, err = DefaultRepackFunc(tsMsgs, reBucketValues)
+		}
+	}
+	if err != nil {
+		return ids, err
+	}
+	for k, v := range result {
+		channel := ms.producerChannels[k]
+		for i, tsMsg := range v.Msgs {
+			sp, spanCtx := MsgSpanFromCtx(v.Msgs[i].TraceCtx(), tsMsg)
+
+			mb, err := tsMsg.Marshal(tsMsg)
+			if err != nil {
+				return ids, err
+			}
+
+			m, err := convertToByteArray(mb)
+			if err != nil {
+				return ids, err
+			}
+
+			msg := &mqclient.ProducerMessage{Payload: m, Properties: map[string]string{}}
+
+			trace.InjectContextToPulsarMsgProperties(sp.Context(), msg.Properties)
+
+			ms.producerLock.Lock()
+			id, err := ms.producers[channel].Send(
+				spanCtx,
+				msg,
+			)
+			if err != nil {
+				ms.producerLock.Unlock()
+				trace.LogError(sp, err)
+				sp.Finish()
+				return ids, err
+			}
+			ids[channel] = append(ids[channel], id)
+			sp.Finish()
+			ms.producerLock.Unlock()
+		}
+	}
+	return ids, nil
+}
+
+// Broadcast put msgPack to all producer in current msgstream
+// which ignores repackFunc logic
 func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) error {
 	if msgPack == nil || len(msgPack.Msgs) <= 0 {
 		log.Debug("Warning: Receive empty msgPack")
@@ -274,7 +354,7 @@ func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) error {
 			return err
 		}
 
-		m, err := ConvertToByteArray(mb)
+		m, err := convertToByteArray(mb)
 		if err != nil {
 			return err
 		}
@@ -285,7 +365,7 @@ func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) error {
 
 		ms.producerLock.Lock()
 		for _, producer := range ms.producers {
-			if err := producer.Send(
+			if _, err := producer.Send(
 				spanCtx,
 				msg,
 			); err != nil {
@@ -299,6 +379,47 @@ func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) error {
 		sp.Finish()
 	}
 	return nil
+}
+
+// BroadcastMark broadcast msg pack to all producers and returns corresponding msg id
+// the returned message id serves as marking
+func (ms *mqMsgStream) BroadcastMark(msgPack *MsgPack) (map[string][]MessageID, error) {
+	ids := make(map[string][]MessageID)
+	if msgPack == nil || len(msgPack.Msgs) <= 0 {
+		return ids, errors.New("empty msgs")
+	}
+	for _, v := range msgPack.Msgs {
+		sp, spanCtx := MsgSpanFromCtx(v.TraceCtx(), v)
+
+		mb, err := v.Marshal(v)
+		if err != nil {
+			return ids, err
+		}
+
+		m, err := convertToByteArray(mb)
+		if err != nil {
+			return ids, err
+		}
+
+		msg := &mqclient.ProducerMessage{Payload: m, Properties: map[string]string{}}
+
+		trace.InjectContextToPulsarMsgProperties(sp.Context(), msg.Properties)
+
+		ms.producerLock.Lock()
+		for channel, producer := range ms.producers {
+			id, err := producer.Send(spanCtx, msg)
+			if err != nil {
+				ms.producerLock.Unlock()
+				trace.LogError(sp, err)
+				sp.Finish()
+				return ids, err
+			}
+			ids[channel] = append(ids[channel], id)
+		}
+		ms.producerLock.Unlock()
+		sp.Finish()
+	}
+	return ids, nil
 }
 
 func (ms *mqMsgStream) Consume() *MsgPack {
@@ -384,6 +505,7 @@ func (ms *mqMsgStream) Chan() <-chan *MsgPack {
 	return ms.receiveBuf
 }
 
+// Seek reset the subscription associated with this consumer to a specific position
 func (ms *mqMsgStream) Seek(msgPositions []*internalpb.MsgPosition) error {
 	for _, mp := range msgPositions {
 		consumer, ok := ms.consumers[mp.ChannelName]
@@ -417,6 +539,9 @@ func (ms *mqMsgStream) Seek(msgPositions []*internalpb.MsgPosition) error {
 	return nil
 }
 
+var _ MsgStream = (*MqTtMsgStream)(nil)
+
+// MqTtMsgStream is a msgstream that contains timeticks
 type MqTtMsgStream struct {
 	mqMsgStream
 	chanMsgBuf         map[mqclient.Consumer][]TsMsg
@@ -430,6 +555,7 @@ type MqTtMsgStream struct {
 	syncConsumer       chan int
 }
 
+// NewMqTtMsgStream is used to generate a new MqTtMsgStream object
 func NewMqTtMsgStream(ctx context.Context,
 	receiveBufSize int64,
 	bufSize int64,
@@ -476,6 +602,10 @@ func (ms *MqTtMsgStream) addConsumer(consumer mqclient.Consumer, channel string)
 
 // AsConsumer subscribes channels as consumer for a MsgStream
 func (ms *MqTtMsgStream) AsConsumer(channels []string, subName string) {
+	ms.AsConsumerWithPosition(channels, subName, mqclient.SubscriptionPositionEarliest)
+}
+
+func (ms *MqTtMsgStream) AsConsumerWithPosition(channels []string, subName string, position mqclient.SubscriptionInitialPosition) {
 	for _, channel := range channels {
 		if _, ok := ms.consumers[channel]; ok {
 			continue
@@ -486,7 +616,7 @@ func (ms *MqTtMsgStream) AsConsumer(channels []string, subName string) {
 				Topic:                       channel,
 				SubscriptionName:            subName,
 				Type:                        mqclient.KeyShared,
-				SubscriptionInitialPosition: mqclient.SubscriptionPositionEarliest,
+				SubscriptionInitialPosition: position,
 				MessageChannel:              receiveChannel,
 			})
 			if err != nil {
@@ -509,6 +639,7 @@ func (ms *MqTtMsgStream) AsConsumer(channels []string, subName string) {
 	}
 }
 
+// Start will start a goroutine which keep carrying msg from pulsar/rocksmq to golang chan
 func (ms *MqTtMsgStream) Start() {
 	if ms.consumers != nil {
 		ms.wait.Add(1)
@@ -516,6 +647,7 @@ func (ms *MqTtMsgStream) Start() {
 	}
 }
 
+// Close will stop goroutine and free internal producers and consumers
 func (ms *MqTtMsgStream) Close() {
 	ms.streamCancel()
 	close(ms.syncConsumer)
@@ -742,11 +874,6 @@ func (ms *MqTtMsgStream) Seek(msgPositions []*internalpb.MsgPosition) error {
 		}
 		ms.addConsumer(consumer, mp.ChannelName)
 
-		//TODO: May cause problem
-		//if len(consumer.Chan()) == 0 {
-		//	return nil
-		//}
-
 		runLoop := true
 		for runLoop {
 			select {
@@ -782,42 +909,3 @@ func (ms *MqTtMsgStream) Seek(msgPositions []*internalpb.MsgPosition) error {
 	}
 	return nil
 }
-
-//TODO test InMemMsgStream
-/*
-type InMemMsgStream struct {
-	buffer chan *MsgPack
-}
-
-func (ms *InMemMsgStream) Start() {}
-func (ms *InMemMsgStream) Close() {}
-
-func (ms *InMemMsgStream) ProduceOne(msg TsMsg) error {
-	msgPack := MsgPack{}
-	msgPack.BeginTs = msg.BeginTs()
-	msgPack.EndTs = msg.EndTs()
-	msgPack.Msgs = append(msgPack.Msgs, msg)
-	buffer <- &msgPack
-	return nil
-}
-
-func (ms *InMemMsgStream) Produce(msgPack *MsgPack) error {
-	buffer <- msgPack
-	return nil
-}
-
-func (ms *InMemMsgStream) Broadcast(msgPack *MsgPack) error {
-	return ms.Produce(msgPack)
-}
-
-func (ms *InMemMsgStream) Consume() *MsgPack {
-	select {
-	case msgPack := <-ms.buffer:
-		return msgPack
-	}
-}
-
-func (ms *InMemMsgStream) Chan() <- chan *MsgPack {
-	return buffer
-}
-*/

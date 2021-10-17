@@ -24,16 +24,23 @@ import (
 	rocksdbkv "github.com/milvus-io/milvus/internal/kv/rocksdb"
 )
 
+// Rmq is global rocksmq instance that will be initialized only once
 var Rmq *rocksmq
+
+// once is used to init global rocksmq
 var once sync.Once
+
+// Params provide params that rocksmq needs
 var params paramtable.BaseTable
 
+// InitRmq is deprecate implementation of global rocksmq. will be removed later
 func InitRmq(rocksdbName string, idAllocator allocator.GIDAllocator) error {
 	var err error
 	Rmq, err = NewRocksMQ(rocksdbName, idAllocator)
 	return err
 }
 
+// InitRocksMQ init global rocksmq single instance
 func InitRocksMQ() error {
 	var err error
 	once.Do(func() {
@@ -68,32 +75,10 @@ func InitRocksMQ() error {
 	return err
 }
 
+// CloseRocksMQ is used to close global rocksmq
 func CloseRocksMQ() {
 	log.Debug("Close Rocksmq!")
-	if Rmq != nil {
-		Rmq.stopRetention()
-		if Rmq.store != nil {
-			Rmq.consumers.Range(func(k, v interface{}) bool {
-				var topic string
-				for _, consumer := range v.([]*Consumer) {
-					err := Rmq.DestroyConsumerGroup(consumer.Topic, consumer.GroupName)
-					if err != nil {
-						log.Warn("Rocksmq DestroyConsumerGroup failed!", zap.Any("topic", consumer.Topic), zap.Any("groupName", consumer.GroupName))
-					}
-					topic = consumer.Topic
-				}
-				if topic != "" {
-					err := Rmq.DestroyTopic(topic)
-					if err != nil {
-						log.Warn("Rocksmq DestroyTopic failed!", zap.Any("topic", topic))
-					}
-				}
-				return true
-			})
-			// FIXME(yukun): When close Rmq.store, there may be some goroutines in rocksmq.Consume() using the
-			// store instance, so this may cause crash. Needs to send a mutex to rocksmq to stop using store
-			// when Rmq needs to be closed.
-			// Rmq.store.Close()
-		}
+	if Rmq != nil && Rmq.store != nil {
+		Rmq.Close()
 	}
 }

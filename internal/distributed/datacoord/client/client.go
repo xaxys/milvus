@@ -35,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 )
 
+// Client is the datacoord grpc client
 type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -45,9 +46,15 @@ type Client struct {
 
 	sess *sessionutil.Session
 	addr string
+
+	getGrpcClient func() (datapb.DataCoordClient, error)
 }
 
-func (c *Client) getGrpcClient() (datapb.DataCoordClient, error) {
+func (c *Client) setGetGrpcClientFunc() {
+	c.getGrpcClient = c.getGrpcClientFunc
+}
+
+func (c *Client) getGrpcClientFunc() (datapb.DataCoordClient, error) {
 	c.grpcClientMtx.RLock()
 	if c.grpcClient != nil {
 		defer c.grpcClientMtx.RUnlock()
@@ -98,6 +105,7 @@ func getDataCoordAddress(sess *sessionutil.Session) (string, error) {
 	return ms.Address, nil
 }
 
+// NewClient creates a new client instance
 func NewClient(ctx context.Context, metaRoot string, etcdEndpoints []string) (*Client, error) {
 	sess := sessionutil.NewSession(ctx, metaRoot, etcdEndpoints)
 	if sess == nil {
@@ -106,11 +114,14 @@ func NewClient(ctx context.Context, metaRoot string, etcdEndpoints []string) (*C
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	return &Client{
+	client := &Client{
 		ctx:    ctx,
 		cancel: cancel,
 		sess:   sess,
-	}, nil
+	}
+
+	client.setGetGrpcClientFunc()
+	return client, nil
 }
 
 func (c *Client) Init() error {

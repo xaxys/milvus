@@ -42,7 +42,6 @@ type taskQueue interface {
 	AddActiveTask(t task)
 	PopActiveTask(tID UniqueID) task
 	getTaskByReqID(reqID UniqueID) task
-	TaskDoneTest(ts Timestamp) bool
 	Enqueue(t task) error
 	setMaxTaskNum(num int64)
 	getMaxTaskNum() int64
@@ -160,26 +159,6 @@ func (queue *baseTaskQueue) getTaskByReqID(reqID UniqueID) task {
 	}
 
 	return nil
-}
-
-func (queue *baseTaskQueue) TaskDoneTest(ts Timestamp) bool {
-	queue.utLock.RLock()
-	defer queue.utLock.RUnlock()
-	for e := queue.unissuedTasks.Front(); e != nil; e = e.Next() {
-		if e.Value.(task).EndTs() < ts {
-			return false
-		}
-	}
-
-	queue.atLock.RLock()
-	defer queue.atLock.RUnlock()
-	for _, task := range queue.activeTasks {
-		if task.BeginTs() < ts {
-			return false
-		}
-	}
-
-	return true
 }
 
 func (queue *baseTaskQueue) Enqueue(t task) error {
@@ -446,6 +425,7 @@ func (sched *taskScheduler) processTask(t task, q taskQueue) {
 			"ID":   t.ID(),
 		})
 	defer span.Finish()
+	traceID, _, _ := trace.InfoFromSpan(span)
 
 	span.LogFields(oplog.Int64("scheduler process AddActiveTask", t.ID()))
 	q.AddActiveTask(t)
@@ -463,6 +443,8 @@ func (sched *taskScheduler) processTask(t task, q taskQueue) {
 	}()
 	if err != nil {
 		trace.LogError(span, err)
+		log.Error("Failed to pre-execute task: "+err.Error(),
+			zap.String("traceID", traceID))
 		return
 	}
 
@@ -470,11 +452,20 @@ func (sched *taskScheduler) processTask(t task, q taskQueue) {
 	err = t.Execute(ctx)
 	if err != nil {
 		trace.LogError(span, err)
+		log.Error("Failed to execute task: "+err.Error(),
+			zap.String("traceID", traceID))
 		return
 	}
 
 	span.LogFields(oplog.Int64("scheduler process PostExecute", t.ID()))
 	err = t.PostExecute(ctx)
+
+	if err != nil {
+		trace.LogError(span, err)
+		log.Error("Failed to post-execute task: "+err.Error(),
+			zap.String("traceID", traceID))
+		return
+	}
 }
 
 func (sched *taskScheduler) definitionLoop() {
@@ -870,12 +861,6 @@ func (sched *taskScheduler) Start() error {
 func (sched *taskScheduler) Close() {
 	sched.cancel()
 	sched.wg.Wait()
-}
-
-func (sched *taskScheduler) TaskDoneTest(ts Timestamp) bool {
-	ddTaskDone := sched.ddQueue.TaskDoneTest(ts)
-	dmTaskDone := sched.dmQueue.TaskDoneTest(ts)
-	return ddTaskDone && dmTaskDone
 }
 
 func (sched *taskScheduler) getPChanStatistics() (map[pChan]*pChanStatistics, error) {

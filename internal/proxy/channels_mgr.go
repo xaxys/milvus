@@ -33,6 +33,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// channelsMgr manages the pchans, vchans and related message stream of collections.
 type channelsMgr interface {
 	getChannels(collectionID UniqueID) ([]pChan, error)
 	getVChannels(collectionID UniqueID) ([]vChan, error)
@@ -447,6 +448,9 @@ func newSingleTypeChannelsMgr(
 		msgStreamFactory:          msgStreamFactory,
 	}
 }
+
+// implementation assertion
+var _ channelsMgr = (*channelsMgrImpl)(nil)
 
 type channelsMgrImpl struct {
 	dmlChannelsMgr *singleTypeChannelsMgr

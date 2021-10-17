@@ -16,7 +16,7 @@
   "gnetId": null,
   "graphTooltip": 0,
   "id": 25,
-  "iteration": 1631947686128,
+  "iteration": 1634193433320,
   "links": [],
   "panels": [
     {
@@ -35,7 +35,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Counter of has collection",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -76,7 +76,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
-          "expr": "sum(milvus_rootcoord_has_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"}) by (pod)",
+          "expr": "sum(milvus_rootcoord_has_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"})",
           "instant": false,
           "interval": "",
           "intervalFactor": 2,
@@ -92,7 +92,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success Has collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -133,7 +133,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
-          "expr": "sum(milvus_rootcoord_has_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"success\"}) by (pod)",
+          "expr": "sum(milvus_rootcoord_has_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"success\"})",
           "instant": false,
           "interval": "",
           "intervalFactor": 2,
@@ -149,7 +149,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Counter of create collection",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -190,7 +190,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
-          "expr": "sum(milvus_rootcoord_create_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"}) by (pod)",
+          "expr": "sum(milvus_rootcoord_create_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"})",
           "instant": false,
           "interval": "",
           "intervalFactor": 2,
@@ -206,7 +206,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Counter of create collection",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -247,7 +247,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
-          "expr": "sum(milvus_rootcoord_create_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"success\"}) by (pod)",
+          "expr": "sum(milvus_rootcoord_create_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"success\"})",
           "instant": false,
           "interval": "",
           "intervalFactor": 2,
@@ -263,7 +263,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Show collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -304,7 +304,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
-          "expr": "sum(milvus_rootcoord_show_collections_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"}) by (pod)",
+          "expr": "sum(milvus_rootcoord_show_collections_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"})",
           "instant": false,
           "interval": "",
           "intervalFactor": 2,
@@ -320,7 +320,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Show collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -682,7 +682,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord describe collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -739,7 +739,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of RootCoord describe collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -780,6 +780,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
+          "exemplar": true,
           "expr": "sum(milvus_rootcoord_describe_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"success\"}) by (pod)",
           "instant": false,
           "interval": "",
@@ -796,7 +797,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord drop collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -853,7 +854,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of RootCoord drop collection operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -910,7 +911,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total  RootCoord drop partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -951,6 +952,7 @@
       "pluginVersion": "7.5.10",
       "targets": [
         {
+          "exemplar": true,
           "expr": "sum(milvus_rootcoord_drop_partition_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"}) by (pod)",
           "instant": false,
           "interval": "",
@@ -967,7 +969,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord drop partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1069,14 +1071,14 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(milvus_rootcoord_describe_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"}[5m])) by (pod)",
+          "expr": "sum(rate(milvus_rootcoord_describe_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"}[5m]))",
           "interval": "",
           "legendFormat": "total",
           "queryType": "randomWalk",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(milvus_rootcoord_describe_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"success\"}[5m])) by (pod)",
+          "expr": "sum(rate(milvus_rootcoord_describe_collection_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"success\"}[5m]))",
           "interval": "",
           "legendFormat": "success",
           "refId": "B"
@@ -1203,6 +1205,7 @@
       },
       "yaxes": [
         {
+          "$$hashKey": "object:109",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -1211,6 +1214,7 @@
           "show": true
         },
         {
+          "$$hashKey": "object:110",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -1230,7 +1234,7 @@
       "dashLength": 10,
       "dashes": false,
       "datasource": "$datasource",
-      "description": "per-second rate of has_partition as measured over the last 5 minutes",
+      "description": "per-second rate of drop_partition as measured over the last 5 minutes",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -1271,6 +1275,7 @@
       "steppedLine": false,
       "targets": [
         {
+          "exemplar": true,
           "expr": "sum(rate(milvus_rootcoord_drop_partition_total{app_kubernetes_io_instance=~\"$instance\", app_kubernetes_io_name=\"$app_name\", namespace=\"$namespace\", type=\"total\"}[5m])) by (pod)",
           "interval": "",
           "legendFormat": "total",
@@ -1304,6 +1309,7 @@
       },
       "yaxes": [
         {
+          "$$hashKey": "object:185",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -1312,6 +1318,7 @@
           "show": true
         },
         {
+          "$$hashKey": "object:186",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -1327,7 +1334,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Show partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1384,7 +1391,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Show partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1441,7 +1448,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Create partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1498,7 +1505,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Create partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1555,7 +1562,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Has partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1612,7 +1619,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of RootCoord Has partition operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -1972,7 +1979,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Create index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2029,7 +2036,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total  success of RootCoord Create index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2086,7 +2093,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Drop index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2143,7 +2150,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of RootCoord Drop index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2200,7 +2207,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Describe index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2257,7 +2264,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Describe index operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2617,7 +2624,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Show segments operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2674,7 +2681,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful RootCoord Show segments operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2731,7 +2738,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total RootCoord Describe segments operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2788,7 +2795,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success RootCoord Describe segments operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -2840,7 +2847,7 @@
       ],
       "timeFrom": null,
       "timeShift": null,
-      "title": "Descirbe Segments Success",
+      "title": "Describe Segments Success",
       "type": "stat"
     },
     {
@@ -3162,7 +3169,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total DataNode flush segments operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -3219,7 +3226,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Successful DataNode Flush segments operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -3276,7 +3283,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total DataNode Watch dm channel operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -3333,7 +3340,7 @@
     },
     {
       "datasource": "$datasource",
-      "description": "",
+      "description": "Total success of DataNode Watch dm channel operations",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -3693,7 +3700,7 @@
       "dashLength": 10,
       "dashes": false,
       "datasource": "$datasource",
-      "description": "",
+      "description": "0.95 quantile of Pulsar client producer rpc latency",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -3789,7 +3796,7 @@
       "dashLength": 10,
       "dashes": false,
       "datasource": "$datasource",
-      "description": "",
+      "description": "Pulsar Client Consumer Processing Time",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -3858,6 +3865,7 @@
       },
       "yaxes": [
         {
+          "$$hashKey": "object:200",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -3866,6 +3874,7 @@
           "show": true
         },
         {
+          "$$hashKey": "object:201",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -3885,7 +3894,7 @@
       "dashLength": 10,
       "dashes": false,
       "datasource": "$datasource",
-      "description": "",
+      "description": "0.95 quantile of Pulsar client producer latency",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -3981,7 +3990,7 @@
       "dashLength": 10,
       "dashes": false,
       "datasource": "$datasource",
-      "description": "",
+      "description": "Pulsar client received bytes by topic",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -4387,7 +4396,7 @@
       "dashLength": 10,
       "dashes": false,
       "datasource": "$datasource",
-      "description": "",
+      "description": "process cpu usage",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -4440,7 +4449,7 @@
       "timeFrom": null,
       "timeRegions": [],
       "timeShift": null,
-      "title": "CPU usage",
+      "title": "CPU Usage",
       "tooltip": {
         "shared": true,
         "sort": 0,
@@ -4456,6 +4465,7 @@
       },
       "yaxes": [
         {
+          "$$hashKey": "object:434",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -4464,6 +4474,7 @@
           "show": true
         },
         {
+          "$$hashKey": "object:435",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -4483,6 +4494,7 @@
       "dashLength": 10,
       "dashes": false,
       "datasource": "prometheus",
+      "description": "Process memory",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -5551,6 +5563,106 @@
         "align": false,
         "alignLevel": null
       }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "description": "Rate of bytes allocated, even if freed",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 106
+      },
+      "hiddenSeries": false,
+      "id": 123217,
+      "legend": {
+        "avg": false,
+        "current": false,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": false
+      },
+      "lines": true,
+      "linewidth": 1,
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "7.5.10",
+      "pointradius": 2,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "rate(go_memstats_alloc_bytes_total{app_kubernetes_io_name=\"$app_name\", app_kubernetes_io_instance=~\"$instance\", namespace=\"$namespace\"}[5m])",
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "{{component}}: {{pod}}",
+          "queryType": "randomWalk",
+          "refId": "A"
+        }
+      ],
+      "thresholds": [],
+      "timeFrom": null,
+      "timeRegions": [],
+      "timeShift": null,
+      "title": "Memory Allocated Rate",
+      "tooltip": {
+        "shared": true,
+        "sort": 0,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "buckets": null,
+        "mode": "time",
+        "name": null,
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "$$hashKey": "object:204",
+          "decimals": null,
+          "format": "short",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": "0",
+          "show": true
+        },
+        {
+          "$$hashKey": "object:205",
+          "format": "short",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false,
+        "alignLevel": null
+      }
     }
   ],
   "refresh": false,
@@ -5608,8 +5720,8 @@
         "allValue": null,
         "current": {
           "selected": true,
-          "text": "default",
-          "value": "default"
+          "text": "test",
+          "value": "test"
         },
         "datasource": "$datasource",
         "definition": "label_values(kube_pod_info, namespace)",
@@ -5734,5 +5846,5 @@
   "timezone": "browser",
   "title": "Milvus2.0",
   "uid": "uLf5cJ3Gz",
-  "version": 100
+  "version": 159
 }

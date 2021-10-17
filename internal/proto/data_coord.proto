@@ -158,7 +158,7 @@ message VchannelInfo {
   string channelName = 2;
   internal.MsgPosition seek_position = 3;
   repeated SegmentInfo unflushedSegments = 4;
-  repeated int64 flushedSegments = 5;
+  repeated SegmentInfo flushedSegments = 5;
 }
 
 message WatchDmChannelsRequest {
@@ -178,16 +178,13 @@ message SegmentMsg{
   SegmentInfo segment = 2;
 }
 
-message DDLFlushMeta {
-    int64 collectionID = 1;
-    repeated string binlog_paths = 2;
-}
-
 message CollectionInfo {
   int64 ID = 1;
   schema.CollectionSchema schema = 2;
   repeated int64 partitions = 3;
+  repeated common.KeyDataPair start_positions = 4;
 }
+
 message SegmentInfo {
   int64 ID = 1;
   int64 collectionID = 2;
@@ -199,9 +196,11 @@ message SegmentInfo {
   uint64 last_expire_time = 8;
   internal.MsgPosition start_position = 9;
   internal.MsgPosition dml_position = 10;
+  // binlogs consist of insert-binlogs and stats-binlogs
   repeated FieldBinlog binlogs = 11;
+  repeated FieldBinlog statslogs = 12;
+  repeated string deltalogs = 13;
 }
-
 
 message SegmentStartPosition {
   internal.MsgPosition start_position = 1;
@@ -214,7 +213,7 @@ message SaveBinlogPathsRequest {
   int64 collectionID = 3;
   repeated FieldBinlog field2BinlogPaths = 4;
   repeated CheckPoint checkPoints = 5;
-  repeated SegmentStartPosition start_positions = 6;                                                             
+  repeated SegmentStartPosition start_positions = 6;
   bool flushed = 7;
 }
 
@@ -222,7 +221,6 @@ message CheckPoint {
   int64 segmentID = 1;
   internal.MsgPosition position = 2;
   int64 num_of_rows = 3;
-  
 }
 
 message DataNodeTtMsg {

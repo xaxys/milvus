@@ -25,6 +25,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 )
 
+// GetComponentStates return information about whether the coord is healthy
 func (qc *QueryCoord) GetComponentStates(ctx context.Context) (*internalpb.ComponentStates, error) {
 	serviceComponentInfo := &internalpb.ComponentInfo{
 		NodeID:    Params.QueryCoordID,
@@ -49,6 +50,8 @@ func (qc *QueryCoord) GetComponentStates(ctx context.Context) (*internalpb.Compo
 	}, nil
 }
 
+// GetTimeTickChannel returns the time tick channel
+// TimeTickChannel contains many time tick messages, which has been sent by query nodes
 func (qc *QueryCoord) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
 	return &milvuspb.StringResponse{
 		Status: &commonpb.Status{
@@ -69,6 +72,7 @@ func (qc *QueryCoord) GetStatisticsChannel(ctx context.Context) (*milvuspb.Strin
 	}, nil
 }
 
+// ShowCollections return all the collections that have been loaded
 func (qc *QueryCoord) ShowCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
 	dbID := req.DbID
 	log.Debug("show collection start", zap.Int64("dbID", dbID))
@@ -122,6 +126,7 @@ func (qc *QueryCoord) ShowCollections(ctx context.Context, req *querypb.ShowColl
 	}, nil
 }
 
+// LoadCollection loads all the sealed segments of this collection to queryNodes, and assigns watchDmChannelRequest to queryNodes
 func (qc *QueryCoord) LoadCollection(ctx context.Context, req *querypb.LoadCollectionRequest) (*commonpb.Status, error) {
 	collectionID := req.CollectionID
 	//schema := req.Schema
@@ -138,21 +143,23 @@ func (qc *QueryCoord) LoadCollection(ctx context.Context, req *querypb.LoadColle
 		return status, err
 	}
 
+	baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_grpcRequest)
 	loadCollectionTask := &LoadCollectionTask{
-		BaseTask: BaseTask{
-			ctx:              qc.loopCtx,
-			Condition:        NewTaskCondition(qc.loopCtx),
-			triggerCondition: querypb.TriggerCondition_grpcRequest,
-		},
+		BaseTask:              baseTask,
 		LoadCollectionRequest: req,
 		rootCoord:             qc.rootCoordClient,
 		dataCoord:             qc.dataCoordClient,
 		cluster:               qc.cluster,
 		meta:                  qc.meta,
 	}
-	qc.scheduler.Enqueue([]task{loadCollectionTask})
+	err := qc.scheduler.Enqueue(loadCollectionTask)
+	if err != nil {
+		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+		status.Reason = err.Error()
+		return status, err
+	}
 
-	err := loadCollectionTask.WaitToFinish()
+	err = loadCollectionTask.waitToFinish()
 	if err != nil {
 		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 		status.Reason = err.Error()
@@ -163,6 +170,7 @@ func (qc *QueryCoord) LoadCollection(ctx context.Context, req *querypb.LoadColle
 	return status, nil
 }
 
+// ReleaseCollection clears all data related to this collecion on the querynode
 func (qc *QueryCoord) ReleaseCollection(ctx context.Context, req *querypb.ReleaseCollectionRequest) (*commonpb.Status, error) {
 	//dbID := req.DbID
 	collectionID := req.CollectionID
@@ -184,20 +192,22 @@ func (qc *QueryCoord) ReleaseCollection(ctx context.Context, req *querypb.Releas
 		return status, nil
 	}
 
+	baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_grpcRequest)
 	releaseCollectionTask := &ReleaseCollectionTask{
-		BaseTask: BaseTask{
-			ctx:              qc.loopCtx,
-			Condition:        NewTaskCondition(qc.loopCtx),
-			triggerCondition: querypb.TriggerCondition_grpcRequest,
-		},
+		BaseTask:                 baseTask,
 		ReleaseCollectionRequest: req,
 		cluster:                  qc.cluster,
 		meta:                     qc.meta,
 		rootCoord:                qc.rootCoordClient,
 	}
-	qc.scheduler.Enqueue([]task{releaseCollectionTask})
+	err := qc.scheduler.Enqueue(releaseCollectionTask)
+	if err != nil {
+		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+		status.Reason = err.Error()
+		return status, err
+	}
 
-	err := releaseCollectionTask.WaitToFinish()
+	err = releaseCollectionTask.waitToFinish()
 	if err != nil {
 		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 		status.Reason = err.Error()
@@ -210,6 +220,7 @@ func (qc *QueryCoord) ReleaseCollection(ctx context.Context, req *querypb.Releas
 	return status, nil
 }
 
+// ShowPartitions return all the partitions that have been loaded
 func (qc *QueryCoord) ShowPartitions(ctx context.Context, req *querypb.ShowPartitionsRequest) (*querypb.ShowPartitionsResponse, error) {
 	collectionID := req.CollectionID
 	log.Debug("show partitions start, ", zap.Int64("collectionID", collectionID), zap.Int64s("partitionIDs", req.PartitionIDs))
@@ -273,6 +284,7 @@ func (qc *QueryCoord) ShowPartitions(ctx context.Context, req *querypb.ShowParti
 	}, nil
 }
 
+// LoadPartitions loads all the sealed segments of this partition to queryNodes, and assigns watchDmChannelRequest to queryNodes
 func (qc *QueryCoord) LoadPartitions(ctx context.Context, req *querypb.LoadPartitionsRequest) (*commonpb.Status, error) {
 	collectionID := req.CollectionID
 	partitionIDs := req.PartitionIDs
@@ -323,20 +335,22 @@ func (qc *QueryCoord) LoadPartitions(ctx context.Context, req *querypb.LoadParti
 		req.PartitionIDs = partitionIDsToLoad
 	}
 
+	baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_grpcRequest)
 	loadPartitionTask := &LoadPartitionTask{
-		BaseTask: BaseTask{
-			ctx:              qc.loopCtx,
-			Condition:        NewTaskCondition(qc.loopCtx),
-			triggerCondition: querypb.TriggerCondition_grpcRequest,
-		},
+		BaseTask:              baseTask,
 		LoadPartitionsRequest: req,
 		dataCoord:             qc.dataCoordClient,
 		cluster:               qc.cluster,
 		meta:                  qc.meta,
 	}
-	qc.scheduler.Enqueue([]task{loadPartitionTask})
+	err := qc.scheduler.Enqueue(loadPartitionTask)
+	if err != nil {
+		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+		status.Reason = err.Error()
+		return status, err
+	}
 
-	err := loadPartitionTask.WaitToFinish()
+	err = loadPartitionTask.waitToFinish()
 	if err != nil {
 		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 		status.Reason = err.Error()
@@ -348,6 +362,7 @@ func (qc *QueryCoord) LoadPartitions(ctx context.Context, req *querypb.LoadParti
 	return status, nil
 }
 
+// ReleasePartitions clears all data related to this partition on the querynode
 func (qc *QueryCoord) ReleasePartitions(ctx context.Context, req *querypb.ReleasePartitionsRequest) (*commonpb.Status, error) {
 	//dbID := req.DbID
 	collectionID := req.CollectionID
@@ -391,18 +406,20 @@ func (qc *QueryCoord) ReleasePartitions(ctx context.Context, req *querypb.Releas
 	}
 
 	req.PartitionIDs = toReleasedPartitions
+	baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_grpcRequest)
 	releasePartitionTask := &ReleasePartitionTask{
-		BaseTask: BaseTask{
-			ctx:              qc.loopCtx,
-			Condition:        NewTaskCondition(qc.loopCtx),
-			triggerCondition: querypb.TriggerCondition_grpcRequest,
-		},
+		BaseTask:                 baseTask,
 		ReleasePartitionsRequest: req,
 		cluster:                  qc.cluster,
 	}
-	qc.scheduler.Enqueue([]task{releasePartitionTask})
+	err := qc.scheduler.Enqueue(releasePartitionTask)
+	if err != nil {
+		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+		status.Reason = err.Error()
+		return status, err
+	}
 
-	err := releasePartitionTask.WaitToFinish()
+	err = releasePartitionTask.waitToFinish()
 	if err != nil {
 		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 		status.Reason = err.Error()
@@ -414,6 +431,7 @@ func (qc *QueryCoord) ReleasePartitions(ctx context.Context, req *querypb.Releas
 	return status, nil
 }
 
+// CreateQueryChannel assigns unique querychannel and resultchannel to the specified collecion
 func (qc *QueryCoord) CreateQueryChannel(ctx context.Context, req *querypb.CreateQueryChannelRequest) (*querypb.CreateQueryChannelResponse, error) {
 	status := &commonpb.Status{
 		ErrorCode: commonpb.ErrorCode_Success,
@@ -429,7 +447,15 @@ func (qc *QueryCoord) CreateQueryChannel(ctx context.Context, req *querypb.Creat
 	}
 
 	collectionID := req.CollectionID
-	queryChannel, queryResultChannel := qc.meta.GetQueryChannel(collectionID)
+	queryChannel, queryResultChannel, err := qc.meta.getQueryChannel(collectionID)
+	if err != nil {
+		status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+		status.Reason = err.Error()
+		log.Debug("createQueryChannel end with error")
+		return &querypb.CreateQueryChannelResponse{
+			Status: status,
+		}, err
+	}
 
 	return &querypb.CreateQueryChannelResponse{
 		Status:         status,
@@ -438,6 +464,7 @@ func (qc *QueryCoord) CreateQueryChannel(ctx context.Context, req *querypb.Creat
 	}, nil
 }
 
+// GetPartitionStates returns state of the partition, including notExist, notPresent, onDisk, partitionInMemory, inMemory, partitionInGPU, InGPU
 func (qc *QueryCoord) GetPartitionStates(ctx context.Context, req *querypb.GetPartitionStatesRequest) (*querypb.GetPartitionStatesResponse, error) {
 	status := &commonpb.Status{
 		ErrorCode: commonpb.ErrorCode_Success,
@@ -476,6 +503,7 @@ func (qc *QueryCoord) GetPartitionStates(ctx context.Context, req *querypb.GetPa
 	}, nil
 }
 
+// GetSegmentInfo returns information of all the segments on queryNodes, and the information includes memSize, numRow, indexName, indexID ...
 func (qc *QueryCoord) GetSegmentInfo(ctx context.Context, req *querypb.GetSegmentInfoRequest) (*querypb.GetSegmentInfoResponse, error) {
 	status := &commonpb.Status{
 		ErrorCode: commonpb.ErrorCode_Success,
@@ -519,6 +547,7 @@ func (qc *QueryCoord) isHealthy() bool {
 	return code == internalpb.StateCode_Healthy
 }
 
+// GetMetrics returns all the queryCoord's metrics
 func (qc *QueryCoord) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	log.Debug("QueryCoord.GetMetrics",
 		zap.Int64("node_id", Params.QueryCoordID),

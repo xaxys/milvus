@@ -46,6 +46,7 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
+	"github.com/milvus-io/milvus/internal/util/trace"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
@@ -60,6 +61,7 @@ const (
 	TopKKey                         = "topk"
 	MetricTypeKey                   = "metric_type"
 	SearchParamsKey                 = "params"
+	RoundDecimalKey                 = "round_decimal"
 	HasCollectionTaskName           = "HasCollectionTask"
 	DescribeCollectionTaskName      = "DescribeCollectionTask"
 	GetCollectionStatisticsTaskName = "GetCollectionStatisticsTask"
@@ -83,6 +85,8 @@ const (
 	CreateAliasTaskName             = "CreateAliasTask"
 	DropAliasTaskName               = "DropAliasTask"
 	AlterAliasTaskName              = "AlterAliasTask"
+
+	minFloat32 = -1 * float32(math.MaxFloat32)
 )
 
 type task interface {
@@ -118,7 +122,7 @@ type insertTask struct {
 
 	result         *milvuspb.MutationResult
 	rowIDAllocator *allocator.IDAllocator
-	segIDAssigner  *SegIDAssigner
+	segIDAssigner  *segIDAssigner
 	chMgr          channelsMgr
 	chTicker       channelsTimeTicker
 	vChannels      []vChan
@@ -729,6 +733,8 @@ func (it *insertTask) checkFieldAutoID() error {
 }
 
 func (it *insertTask) PreExecute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(it.ctx, "Proxy-Insert-PreExecute")
+	defer sp.Finish()
 	it.Base.MsgType = commonpb.MsgType_Insert
 	it.Base.SourceID = Params.ProxyID
 
@@ -918,7 +924,7 @@ func (it *insertTask) _assignSegmentID(stream msgstream.MsgStream, pack *msgstre
 		size += int(unsafe.Sizeof(msg.CollectionID))
 		size += int(unsafe.Sizeof(msg.PartitionID))
 		size += int(unsafe.Sizeof(msg.SegmentID))
-		size += int(unsafe.Sizeof(msg.ChannelID))
+		size += int(unsafe.Sizeof(msg.ShardName))
 		size += int(unsafe.Sizeof(msg.Timestamps))
 		size += int(unsafe.Sizeof(msg.RowIDs))
 		return size
@@ -957,8 +963,7 @@ func (it *insertTask) _assignSegmentID(stream msgstream.MsgStream, pack *msgstre
 					CollectionName: collectionName,
 					PartitionName:  partitionName,
 					SegmentID:      segmentID,
-					// todo rename to ChannelName
-					ChannelID: channelNames[key],
+					ShardName:      channelNames[key],
 				}
 				insertMsg := &msgstream.InsertMsg{
 					BaseMsg: msgstream.BaseMsg{
@@ -998,6 +1003,8 @@ func (it *insertTask) _assignSegmentID(stream msgstream.MsgStream, pack *msgstre
 }
 
 func (it *insertTask) Execute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(it.ctx, "Proxy-Insert-Execute")
+	defer sp.Finish()
 	collectionName := it.BaseInsertTask.CollectionName
 	collID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
 	if err != nil {
@@ -1403,15 +1410,17 @@ func (st *searchTask) getChannels() ([]pChan, error) {
 		return nil, err
 	}
 
-	_, err = st.chMgr.getChannels(collID)
+	var channels []pChan
+	channels, err = st.chMgr.getChannels(collID)
 	if err != nil {
 		err := st.chMgr.createDMLMsgStream(collID)
 		if err != nil {
 			return nil, err
 		}
+		return st.chMgr.getChannels(collID)
 	}
 
-	return st.chMgr.getChannels(collID)
+	return channels, nil
 }
 
 func (st *searchTask) getVChannels() ([]vChan, error) {
@@ -1420,18 +1429,22 @@ func (st *searchTask) getVChannels() ([]vChan, error) {
 		return nil, err
 	}
 
-	_, err = st.chMgr.getChannels(collID)
+	var channels []vChan
+	channels, err = st.chMgr.getVChannels(collID)
 	if err != nil {
 		err := st.chMgr.createDMLMsgStream(collID)
 		if err != nil {
 			return nil, err
 		}
+		return st.chMgr.getVChannels(collID)
 	}
 
-	return st.chMgr.getVChannels(collID)
+	return channels, nil
 }
 
 func (st *searchTask) PreExecute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(st.TraceCtx(), "Proxy-Search-PreExecute")
+	defer sp.Finish()
 	st.Base.MsgType = commonpb.MsgType_Search
 	st.Base.SourceID = Params.ProxyID
 
@@ -1497,12 +1510,12 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 	st.query.OutputFields = outputFields
 
 	if st.query.GetDslType() == commonpb.DslType_BoolExprV1 {
-		annsField, err := GetAttrByKeyFromRepeatedKV(AnnsFieldKey, st.query.SearchParams)
+		annsField, err := funcutil.GetAttrByKeyFromRepeatedKV(AnnsFieldKey, st.query.SearchParams)
 		if err != nil {
 			return errors.New(AnnsFieldKey + " not found in search_params")
 		}
 
-		topKStr, err := GetAttrByKeyFromRepeatedKV(TopKKey, st.query.SearchParams)
+		topKStr, err := funcutil.GetAttrByKeyFromRepeatedKV(TopKKey, st.query.SearchParams)
 		if err != nil {
 			return errors.New(TopKKey + " not found in search_params")
 		}
@@ -1511,20 +1524,29 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 			return errors.New(TopKKey + " " + topKStr + " is not invalid")
 		}
 
-		metricType, err := GetAttrByKeyFromRepeatedKV(MetricTypeKey, st.query.SearchParams)
+		metricType, err := funcutil.GetAttrByKeyFromRepeatedKV(MetricTypeKey, st.query.SearchParams)
 		if err != nil {
 			return errors.New(MetricTypeKey + " not found in search_params")
 		}
 
-		searchParams, err := GetAttrByKeyFromRepeatedKV(SearchParamsKey, st.query.SearchParams)
+		searchParams, err := funcutil.GetAttrByKeyFromRepeatedKV(SearchParamsKey, st.query.SearchParams)
 		if err != nil {
 			return errors.New(SearchParamsKey + " not found in search_params")
+		}
+		roundDecimalStr, err := funcutil.GetAttrByKeyFromRepeatedKV(RoundDecimalKey, st.query.SearchParams)
+		if err != nil {
+			return errors.New(RoundDecimalKey + "not found in search_params")
+		}
+		roundDeciaml, err := strconv.Atoi(roundDecimalStr)
+		if err != nil {
+			return errors.New(RoundDecimalKey + " " + roundDecimalStr + " is not invalid")
 		}
 
 		queryInfo := &planpb.QueryInfo{
 			Topk:         int64(topK),
 			MetricType:   metricType,
 			SearchParams: searchParams,
+			RoundDecimal: int64(roundDeciaml),
 		}
 
 		log.Debug("create query plan",
@@ -1533,7 +1555,7 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 			zap.String("anns field", annsField),
 			zap.Any("query info", queryInfo))
 
-		plan, err := CreateQueryPlan(schema, st.query.Dsl, annsField, queryInfo)
+		plan, err := createQueryPlan(schema, st.query.Dsl, annsField, queryInfo)
 		if err != nil {
 			log.Debug("failed to create query plan",
 				zap.Error(err),
@@ -1623,6 +1645,8 @@ func (st *searchTask) PreExecute(ctx context.Context) error {
 }
 
 func (st *searchTask) Execute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(st.TraceCtx(), "Proxy-Search-Execute")
+	defer sp.Finish()
 	var tsMsg msgstream.TsMsg = &msgstream.SearchMsg{
 		SearchRequest: *st.SearchRequest,
 		BaseMsg: msgstream.BaseMsg{
@@ -1649,14 +1673,22 @@ func (st *searchTask) Execute(ctx context.Context) error {
 	if err != nil {
 		err = st.chMgr.createDQLStream(collID)
 		if err != nil {
-			st.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
-			st.result.Status.Reason = err.Error()
+			st.result = &milvuspb.SearchResults{
+				Status: &commonpb.Status{
+					ErrorCode: commonpb.ErrorCode_UnexpectedError,
+					Reason:    err.Error(),
+				},
+			}
 			return err
 		}
 		stream, err = st.chMgr.getDQLStream(collID)
 		if err != nil {
-			st.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
-			st.result.Status.Reason = err.Error()
+			st.result = &milvuspb.SearchResults{
+				Status: &commonpb.Status{
+					ErrorCode: commonpb.ErrorCode_UnexpectedError,
+					Reason:    err.Error(),
+				},
+			}
 			return err
 		}
 	}
@@ -1755,8 +1787,6 @@ func reduceSearchResultDataParallel(searchResultData []*schemapb.SearchResultDat
 		}
 	}
 
-	const minFloat32 = -1 * float32(math.MaxFloat32)
-
 	// TODO(yukun): Use parallel function
 	var realTopK int64 = -1
 	var idx int64
@@ -1766,17 +1796,14 @@ func reduceSearchResultDataParallel(searchResultData []*schemapb.SearchResultDat
 
 		j = 0
 		for ; j < topk; j++ {
-			valid := true
-			choice, maxDistance := 0, minFloat32
+			choice, maxDistance := -1, minFloat32
 			for q, loc := range locs { // query num, the number of ways to merge
 				if loc >= topk {
 					continue
 				}
 				curIdx := idx*topk + loc
 				id := searchResultData[q].Ids.GetIntId().Data[curIdx]
-				if id == -1 {
-					valid = false
-				} else {
+				if id != -1 {
 					distance := searchResultData[q].Scores[curIdx]
 					if distance > maxDistance {
 						choice = q
@@ -1784,7 +1811,7 @@ func reduceSearchResultDataParallel(searchResultData []*schemapb.SearchResultDat
 					}
 				}
 			}
-			if !valid {
+			if choice == -1 {
 				break
 			}
 			choiceOffset := locs[choice]
@@ -1955,6 +1982,8 @@ func reduceSearchResultData(searchResultData []*schemapb.SearchResultData, avail
 //}
 
 func (st *searchTask) PostExecute(ctx context.Context) error {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(st.TraceCtx(), "Proxy-Search-PostExecute")
+	defer sp.Finish()
 	t0 := time.Now()
 	defer func() {
 		log.Debug("WaitAndPostExecute", zap.Any("time cost", time.Since(t0)))
@@ -2104,15 +2133,17 @@ func (qt *queryTask) getChannels() ([]pChan, error) {
 		return nil, err
 	}
 
-	_, err = qt.chMgr.getChannels(collID)
+	var channels []pChan
+	channels, err = qt.chMgr.getChannels(collID)
 	if err != nil {
 		err := qt.chMgr.createDMLMsgStream(collID)
 		if err != nil {
 			return nil, err
 		}
+		return qt.chMgr.getChannels(collID)
 	}
 
-	return qt.chMgr.getChannels(collID)
+	return channels, nil
 }
 
 func (qt *queryTask) getVChannels() ([]vChan, error) {
@@ -2121,15 +2152,17 @@ func (qt *queryTask) getVChannels() ([]vChan, error) {
 		return nil, err
 	}
 
-	_, err = qt.chMgr.getChannels(collID)
+	var channels []vChan
+	channels, err = qt.chMgr.getVChannels(collID)
 	if err != nil {
 		err := qt.chMgr.createDMLMsgStream(collID)
 		if err != nil {
 			return nil, err
 		}
+		return qt.chMgr.getVChannels(collID)
 	}
 
-	return qt.chMgr.getVChannels(collID)
+	return channels, nil
 }
 
 func IDs2Expr(fieldName string, ids []int64) string {
@@ -2218,7 +2251,7 @@ func (qt *queryTask) PreExecute(ctx context.Context) error {
 		return fmt.Errorf(errMsg)
 	}
 
-	plan, err := CreateExprQueryPlan(schema, qt.query.Expr)
+	plan, err := createExprPlan(schema, qt.query.Expr)
 	if err != nil {
 		return err
 	}
@@ -2340,21 +2373,15 @@ func (qt *queryTask) Execute(ctx context.Context) error {
 	}
 	msgPack.Msgs[0] = tsMsg
 
-	collectionName := qt.query.CollectionName
-	collID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
+	stream, err := qt.chMgr.getDQLStream(qt.CollectionID)
 	if err != nil {
-		return err
-	}
-
-	stream, err := qt.chMgr.getDQLStream(collID)
-	if err != nil {
-		err = qt.chMgr.createDQLStream(collID)
+		err = qt.chMgr.createDQLStream(qt.CollectionID)
 		if err != nil {
 			qt.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 			qt.result.Status.Reason = err.Error()
 			return err
 		}
-		stream, err = qt.chMgr.getDQLStream(collID)
+		stream, err = qt.chMgr.getDQLStream(qt.CollectionID)
 		if err != nil {
 			qt.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 			qt.result.Status.Reason = err.Error()
@@ -2617,10 +2644,11 @@ func (dct *describeCollectionTask) PreExecute(ctx context.Context) error {
 	dct.Base.MsgType = commonpb.MsgType_DescribeCollection
 	dct.Base.SourceID = Params.ProxyID
 
-	if err := ValidateCollectionName(dct.CollectionName); err != nil {
-		return err
+	if dct.CollectionID != 0 && len(dct.CollectionName) == 0 {
+		return nil
 	}
-	return nil
+
+	return ValidateCollectionName(dct.CollectionName)
 }
 
 func (dct *describeCollectionTask) Execute(ctx context.Context) error {
@@ -4571,9 +4599,14 @@ func (rpt *releasePartitionsTask) PostExecute(ctx context.Context) error {
 
 type deleteTask struct {
 	Condition
-	*milvuspb.DeleteRequest
-	ctx    context.Context
-	result *milvuspb.MutationResult
+	*internalpb.DeleteRequest
+	ctx       context.Context
+	req       *milvuspb.DeleteRequest
+	result    *milvuspb.MutationResult
+	chMgr     channelsMgr
+	chTicker  channelsTimeTicker
+	vChannels []vChan
+	pChannels []pChan
 }
 
 func (dt *deleteTask) TraceCtx() context.Context {
@@ -4609,28 +4642,159 @@ func (dt *deleteTask) SetTs(ts Timestamp) {
 }
 
 func (dt *deleteTask) OnEnqueue() error {
-	dt.Base = &commonpb.MsgBase{}
+	dt.DeleteRequest.Base = &commonpb.MsgBase{}
 	return nil
+}
+
+func getPrimaryKeysFromExpr(schema *schemapb.CollectionSchema, expr string) (res []int64, err error) {
+	if len(expr) == 0 {
+		log.Warn("empty expr")
+		return
+	}
+
+	plan, err := createExprPlan(schema, expr)
+	if err != nil {
+		return res, fmt.Errorf("failed to create expr plan, expr = %s", expr)
+	}
+
+	// delete request only support expr "id in [a, b]"
+	termExpr, ok := plan.Node.(*planpb.PlanNode_Predicates).Predicates.Expr.(*planpb.Expr_TermExpr)
+	if !ok {
+		return res, fmt.Errorf("invalid plan node type")
+	}
+
+	for _, v := range termExpr.TermExpr.Values {
+		res = append(res, v.GetInt64Val())
+	}
+
+	return res, nil
 }
 
 func (dt *deleteTask) PreExecute(ctx context.Context) error {
 	dt.Base.MsgType = commonpb.MsgType_Delete
 	dt.Base.SourceID = Params.ProxyID
 
-	collName := dt.CollectionName
+	dt.result = &milvuspb.MutationResult{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		},
+		IDs: &schemapb.IDs{
+			IdField: nil,
+		},
+		Timestamp: dt.BeginTs(),
+	}
+
+	collName := dt.req.CollectionName
 	if err := ValidateCollectionName(collName); err != nil {
+		log.Error("Invalid collection name", zap.String("collectionName", collName))
+		return err
+	}
+	collID, err := globalMetaCache.GetCollectionID(ctx, collName)
+	if err != nil {
+		log.Debug("Failed to get collection id", zap.String("collectionName", collName))
+		return err
+	}
+	dt.DeleteRequest.CollectionID = collID
+
+	if len(dt.req.PartitionName) > 0 {
+		partName := dt.req.PartitionName
+		if err := ValidatePartitionTag(partName, true); err != nil {
+			log.Error("Invalid partition name", zap.String("partitionName", partName))
+			return err
+		}
+		partID, err := globalMetaCache.GetPartitionID(ctx, collName, partName)
+		if err != nil {
+			log.Debug("Failed to get partition id", zap.String("collectionName", collName), zap.String("partitionName", partName))
+			return err
+		}
+		dt.DeleteRequest.PartitionID = partID
+	}
+
+	schema, err := globalMetaCache.GetCollectionSchema(ctx, dt.req.CollectionName)
+	if err != nil {
+		log.Error("Failed to get collection schema", zap.String("collectionName", dt.req.CollectionName))
 		return err
 	}
 
-	partitionTag := dt.PartitionName
-	if err := ValidatePartitionTag(partitionTag, true); err != nil {
+	primaryKeys, err := getPrimaryKeysFromExpr(schema, dt.req.Expr)
+	if err != nil {
+		log.Error("Failed to get primary keys from expr", zap.Error(err))
 		return err
+	}
+	log.Debug("get primary keys from expr", zap.Any("primary keys", dt.DeleteRequest.PrimaryKeys))
+	dt.DeleteRequest.PrimaryKeys = primaryKeys
+
+	// set result
+	dt.result.IDs.IdField = &schemapb.IDs_IntId{
+		IntId: &schemapb.LongArray{
+			Data: primaryKeys,
+		},
+	}
+	dt.result.DeleteCnt = int64(len(primaryKeys))
+
+	rowNum := len(primaryKeys)
+	dt.Timestamps = make([]uint64, rowNum)
+	for index := range dt.Timestamps {
+		dt.Timestamps[index] = dt.BeginTs()
 	}
 
 	return nil
 }
 
 func (dt *deleteTask) Execute(ctx context.Context) (err error) {
+	sp, ctx := trace.StartSpanFromContextWithOperationName(dt.ctx, "Proxy-Delete-Execute")
+	defer sp.Finish()
+
+	var tsMsg msgstream.TsMsg = &msgstream.DeleteMsg{
+		DeleteRequest: *dt.DeleteRequest,
+		BaseMsg: msgstream.BaseMsg{
+			Ctx:            ctx,
+			HashValues:     []uint32{uint32(Params.ProxyID)},
+			BeginTimestamp: dt.BeginTs(),
+			EndTimestamp:   dt.EndTs(),
+		},
+	}
+	msgPack := msgstream.MsgPack{
+		BeginTs: dt.BeginTs(),
+		EndTs:   dt.EndTs(),
+		Msgs:    make([]msgstream.TsMsg, 1),
+	}
+	msgPack.Msgs[0] = tsMsg
+
+	collID := dt.DeleteRequest.CollectionID
+	stream, err := dt.chMgr.getDMLStream(collID)
+	if err != nil {
+		err = dt.chMgr.createDMLMsgStream(collID)
+		if err != nil {
+			dt.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+			dt.result.Status.Reason = err.Error()
+			return err
+		}
+		channels, err := dt.chMgr.getChannels(collID)
+		if err == nil {
+			for _, pchan := range channels {
+				err := dt.chTicker.addPChan(pchan)
+				if err != nil {
+					log.Warn("failed to add pchan to channels time ticker",
+						zap.Error(err),
+						zap.String("pchan", pchan))
+				}
+			}
+		}
+		stream, err = dt.chMgr.getDMLStream(collID)
+		if err != nil {
+			dt.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+			dt.result.Status.Reason = err.Error()
+			return err
+		}
+	}
+
+	err = stream.Produce(&msgPack)
+	if err != nil {
+		dt.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+		dt.result.Status.Reason = err.Error()
+		return err
+	}
 	return nil
 }
 

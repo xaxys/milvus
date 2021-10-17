@@ -8,6 +8,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
+
 package datacoord
 
 import (
@@ -53,6 +54,12 @@ func VerifyResponse(response interface{}, err error) error {
 		return errUnknownResponseType
 	}
 	return nil
+}
+
+// FailResponse sets status to failed with reason
+func FailResponse(status *commonpb.Status, reason string) {
+	status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+	status.Reason = reason
 }
 
 // LongTermChecker checks we receive at least one msg in d duration. If not, checker

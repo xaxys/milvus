@@ -43,6 +43,9 @@ type Timestamp = typeutil.Timestamp
 const sendTimeTickMsgInterval = 200 * time.Millisecond
 const channelMgrTickerInterval = 100 * time.Millisecond
 
+// make sure Proxy implements types.Proxy
+var _ types.Proxy = (*Proxy)(nil)
+
 type Proxy struct {
 	ctx    context.Context
 	cancel func()
@@ -62,13 +65,12 @@ type Proxy struct {
 	chMgr channelsMgr
 
 	sched *taskScheduler
-	tick  *timeTick
 
 	chTicker channelsTimeTicker
 
 	idAllocator  *allocator.IDAllocator
-	tsoAllocator *TimestampAllocator
-	segAssigner  *SegIDAssigner
+	tsoAllocator *timestampAllocator
+	segAssigner  *segIDAssigner
 
 	metricsCacheManager *metricsinfo.MetricsCacheManager
 
@@ -81,6 +83,7 @@ type Proxy struct {
 	closeCallbacks []func()
 }
 
+// NewProxy returns a Proxy struct.
 func NewProxy(ctx context.Context, factory msgstream.Factory) (*Proxy, error) {
 	rand.Seed(time.Now().UnixNano())
 	ctx1, cancel := context.WithCancel(ctx)
@@ -100,10 +103,14 @@ func (node *Proxy) Register() error {
 	node.session = sessionutil.NewSession(node.ctx, Params.MetaRootPath, Params.EtcdEndpoints)
 	node.session.Init(typeutil.ProxyRole, Params.NetworkAddress, false)
 	Params.ProxyID = node.session.ServerID
+	Params.SetLogger(Params.ProxyID)
 	Params.initProxySubName()
+	// TODO Reset the logger
+	//Params.initLogCfg()
 	return nil
 }
 
+// Init initialize proxy.
 func (node *Proxy) Init() error {
 	// wait for datacoord state changed to Healthy
 	if node.dataCoord != nil {
@@ -151,6 +158,8 @@ func (node *Proxy) Init() error {
 		}
 		log.Debug("Proxy CreateQueryChannel success")
 
+		// TODO SearchResultChannelNames and RetrieveResultChannelNames should not be part in the Param table
+		// we should maintain a separate map for search result
 		Params.SearchResultChannelNames = []string{resp.ResultChannel}
 		Params.RetrieveResultChannelNames = []string{resp.ResultChannel}
 		log.Debug("Proxy CreateQueryChannel success", zap.Any("SearchResultChannelNames", Params.SearchResultChannelNames))
@@ -172,13 +181,13 @@ func (node *Proxy) Init() error {
 
 	node.idAllocator = idAllocator
 
-	tsoAllocator, err := NewTimestampAllocator(node.ctx, node.rootCoord, Params.ProxyID)
+	tsoAllocator, err := newTimestampAllocator(node.ctx, node.rootCoord, Params.ProxyID)
 	if err != nil {
 		return err
 	}
 	node.tsoAllocator = tsoAllocator
 
-	segAssigner, err := NewSegIDAssigner(node.ctx, node.dataCoord, node.lastTick)
+	segAssigner, err := newSegIDAssigner(node.ctx, node.dataCoord, node.lastTick)
 	if err != nil {
 		panic(err)
 	}
@@ -194,8 +203,6 @@ func (node *Proxy) Init() error {
 	if err != nil {
 		return err
 	}
-
-	node.tick = newTimeTick(node.ctx, node.tsoAllocator, time.Millisecond*200, node.sched.TaskDoneTest, node.msFactory)
 
 	node.chTicker = newChannelsTimeTicker(node.ctx, channelMgrTickerInterval, []string{}, node.sched.getPChanStatistics, tsoAllocator)
 
@@ -275,6 +282,7 @@ func (node *Proxy) sendChannelsTimeTickLoop() {
 	}()
 }
 
+// Start starts a proxy node.
 func (node *Proxy) Start() error {
 	err := InitMetaCache(node.rootCoord)
 	if err != nil {
@@ -297,11 +305,6 @@ func (node *Proxy) Start() error {
 	}
 	log.Debug("start seg assigner ...")
 
-	if err := node.tick.Start(); err != nil {
-		return err
-	}
-	log.Debug("start time tick ...")
-
 	err = node.chTicker.start()
 	if err != nil {
 		return err
@@ -315,12 +318,16 @@ func (node *Proxy) Start() error {
 		cb()
 	}
 
+	Params.CreatedTime = time.Now()
+	Params.UpdatedTime = time.Now()
+
 	node.UpdateStateCode(internalpb.StateCode_Healthy)
 	log.Debug("Proxy", zap.Any("State", node.stateCode.Load()))
 
 	return nil
 }
 
+// Stop stops a proxy node.
 func (node *Proxy) Stop() error {
 	node.cancel()
 
@@ -332,9 +339,6 @@ func (node *Proxy) Stop() error {
 	}
 	if node.sched != nil {
 		node.sched.Close()
-	}
-	if node.tick != nil {
-		node.tick.Close()
 	}
 	if node.chTicker != nil {
 		err := node.chTicker.close()
@@ -358,7 +362,7 @@ func (node *Proxy) AddStartCallback(callbacks ...func()) {
 }
 
 func (node *Proxy) lastTick() Timestamp {
-	return node.tick.LastTick()
+	return node.chTicker.getMinTick()
 }
 
 // AddCloseCallback adds a callback in the Close phase.
@@ -366,6 +370,7 @@ func (node *Proxy) AddCloseCallback(callbacks ...func()) {
 	node.closeCallbacks = append(node.closeCallbacks, callbacks...)
 }
 
+// SetRootCoordClient set rootcoord client for proxy.
 func (node *Proxy) SetRootCoordClient(cli types.RootCoord) {
 	node.rootCoord = cli
 }

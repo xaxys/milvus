@@ -71,7 +71,7 @@ func TestDataSyncService_Start(t *testing.T) {
 				CollectionID: collectionID,
 				PartitionID:  defaultPartitionID,
 				SegmentID:    UniqueID(0),
-				ChannelID:    "0",
+				ShardName:    "0",
 				Timestamps:   []Timestamp{Timestamp(i + 1000), Timestamp(i + 1000)},
 				RowIDs:       []int64{int64(i), int64(i)},
 				RowData: []*commonpb.Blob{
@@ -212,4 +212,26 @@ func TestDataSyncService_partitionFlowGraphs(t *testing.T) {
 	fg, err = dataSyncService.getPartitionFlowGraphs(defaultPartitionID, []Channel{defaultVChannel})
 	assert.Nil(t, fg)
 	assert.Error(t, err)
+}
+
+func TestDataSyncService_removePartitionFlowGraphs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Run("test no tSafe", func(t *testing.T) {
+		streaming, err := genSimpleStreaming(ctx)
+		assert.NoError(t, err)
+
+		fac, err := genFactory()
+		assert.NoError(t, err)
+
+		dataSyncService := newDataSyncService(ctx, streaming.replica, streaming.tSafeReplica, fac)
+		assert.NotNil(t, dataSyncService)
+
+		dataSyncService.addPartitionFlowGraph(defaultPartitionID, defaultPartitionID, []Channel{defaultVChannel})
+
+		err = dataSyncService.tSafeReplica.removeTSafe(defaultVChannel)
+		assert.NoError(t, err)
+		dataSyncService.removePartitionFlowGraph(defaultPartitionID)
+	})
 }

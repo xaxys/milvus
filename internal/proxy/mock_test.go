@@ -17,17 +17,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/proto/schemapb"
-
 	"github.com/milvus-io/milvus/internal/msgstream"
-
-	"github.com/milvus-io/milvus/internal/util/funcutil"
-
-	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
-
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
-
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
+	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/internal/util/mqclient"
+	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
 )
 
 type mockTimestampAllocatorInterface struct {
@@ -276,6 +272,9 @@ func (ms *simpleMockMsgStream) AsProducer(channels []string) {
 func (ms *simpleMockMsgStream) AsConsumer(channels []string, subName string) {
 }
 
+func (ms *simpleMockMsgStream) AsConsumerWithPosition(channels []string, subName string, position mqclient.SubscriptionInitialPosition) {
+}
+
 func (ms *simpleMockMsgStream) ComputeProduceChannelIndexes(tsMsgs []msgstream.TsMsg) [][]int32 {
 	if len(tsMsgs) <= 0 {
 		return nil
@@ -325,8 +324,19 @@ func (ms *simpleMockMsgStream) Produce(pack *msgstream.MsgPack) error {
 	return nil
 }
 
+func (ms *simpleMockMsgStream) ProduceMark(pack *msgstream.MsgPack) (map[string][]msgstream.MessageID, error) {
+	defer ms.increaseMsgCount(1)
+	ms.msgChan <- pack
+
+	return map[string][]msgstream.MessageID{}, nil
+}
+
 func (ms *simpleMockMsgStream) Broadcast(pack *msgstream.MsgPack) error {
 	return nil
+}
+
+func (ms *simpleMockMsgStream) BroadcastMark(pack *msgstream.MsgPack) (map[string][]msgstream.MessageID, error) {
+	return map[string][]msgstream.MessageID{}, nil
 }
 
 func (ms *simpleMockMsgStream) GetProduceChannels() []string {

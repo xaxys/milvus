@@ -226,7 +226,8 @@ SegmentSealedImpl::vector_search(int64_t vec_count,
 
     AssertInfo(field_meta.is_vector(), "The meta type of vector field is not vector type");
     if (get_bit(vecindex_ready_bitset_, field_offset)) {
-        AssertInfo(vecindexs_.is_ready(field_offset), "");
+        AssertInfo(vecindexs_.is_ready(field_offset),
+                   "vector indexes isn't ready for field " + std::to_string(field_offset.get()));
         query::SearchOnSealed(*schema_, vecindexs_, search_info, query_data, query_count, bitset, output);
         return;
     } else if (!get_bit(field_data_ready_bitset_, field_offset)) {
@@ -240,6 +241,7 @@ SegmentSealedImpl::vector_search(int64_t vec_count,
     dataset.metric_type = search_info.metric_type_;
     dataset.topk = search_info.topk_;
     dataset.dim = field_meta.get_dim();
+    dataset.round_decimal = search_info.round_decimal_;
 
     AssertInfo(get_bit(field_data_ready_bitset_, field_offset),
                "Can't get bitset element at " + std::to_string(field_offset.get()));

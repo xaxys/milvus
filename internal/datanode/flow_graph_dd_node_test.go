@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
@@ -28,18 +33,19 @@ func TestFlowGraph_DDNode_newDDNode(te *testing.T) {
 		inCollID UniqueID
 
 		inFlushedSegs        []UniqueID
+		inFlushedChannelTs   Timestamp
 		inUnFlushedSegID     UniqueID
 		inUnFlushedChannelTs Timestamp
 
 		description string
 	}{
-		{UniqueID(1), []UniqueID{100, 101, 102}, 200, 666666,
+		{UniqueID(1), []UniqueID{100, 101, 102}, 666666, 200, 666666,
 			"Input VchannelInfo with 3 flushed segs and 1 unflushed seg"},
-		{UniqueID(2), []UniqueID{103}, 200, 666666,
+		{UniqueID(2), []UniqueID{103}, 666666, 200, 666666,
 			"Input VchannelInfo with 1 flushed seg and 1 unflushed seg"},
-		{UniqueID(3), []UniqueID{}, 200, 666666,
+		{UniqueID(3), []UniqueID{}, 666666, 200, 666666,
 			"Input VchannelInfo with 0 flushed segs and 1 unflushed seg"},
-		{UniqueID(3), []UniqueID{104}, 0, 0,
+		{UniqueID(3), []UniqueID{104}, 666666, 0, 0,
 			"Input VchannelInfo with 1 flushed seg and empty unflushed seg"},
 	}
 
@@ -52,19 +58,29 @@ func TestFlowGraph_DDNode_newDDNode(te *testing.T) {
 				di.DmlPosition = &internalpb.MsgPosition{Timestamp: test.inUnFlushedChannelTs}
 			}
 
+			fi := []*datapb.SegmentInfo{}
+			for _, id := range test.inFlushedSegs {
+				s := &datapb.SegmentInfo{ID: id}
+				fi = append(fi, s)
+			}
+
 			ddNode := newDDNode(
 				make(chan UniqueID),
 				test.inCollID,
 				&datapb.VchannelInfo{
-					FlushedSegments:   test.inFlushedSegs,
+					FlushedSegments:   fi,
 					UnflushedSegments: []*datapb.SegmentInfo{di},
 				},
 			)
 
+			flushedSegIDs := make([]int64, 0)
+			for _, seg := range ddNode.flushedSegments {
+				flushedSegIDs = append(flushedSegIDs, seg.ID)
+			}
 			assert.Equal(t, "ddNode", ddNode.Name())
 			assert.Equal(t, test.inCollID, ddNode.collectionID)
 			assert.Equal(t, len(test.inFlushedSegs), len(ddNode.flushedSegments))
-			assert.ElementsMatch(t, test.inFlushedSegs, ddNode.flushedSegments)
+			assert.ElementsMatch(t, test.inFlushedSegs, flushedSegIDs)
 
 			si, ok := ddNode.segID2SegInfo.Load(test.inUnFlushedSegID)
 			assert.True(t, ok)
@@ -83,9 +99,9 @@ func TestFlowGraph_DDNode_Operate(to *testing.T) {
 		}{
 			{[]Msg{},
 				"Invalid input length == 0"},
-			{[]Msg{&insertMsg{}, &insertMsg{}, &insertMsg{}},
+			{[]Msg{&flowGraphMsg{}, &flowGraphMsg{}, &flowGraphMsg{}},
 				"Invalid input length == 3"},
-			{[]Msg{&insertMsg{}},
+			{[]Msg{&flowGraphMsg{}},
 				"Invalid input length == 1 but input message is not msgStreamMsg"},
 		}
 
@@ -120,13 +136,13 @@ func TestFlowGraph_DDNode_Operate(to *testing.T) {
 					collectionID: test.ddnCollID,
 				}
 
-				var createCollMsg msgstream.TsMsg = &msgstream.DropCollectionMsg{
+				var dropCollMsg msgstream.TsMsg = &msgstream.DropCollectionMsg{
 					DropCollectionRequest: internalpb.DropCollectionRequest{
 						Base:         &commonpb.MsgBase{MsgType: commonpb.MsgType_DropCollection},
 						CollectionID: test.msgCollID,
 					},
 				}
-				tsMessages := []msgstream.TsMsg{createCollMsg}
+				tsMessages := []msgstream.TsMsg{dropCollMsg}
 				var msgStreamMsg Msg = flowgraph.GenerateMsgStreamMsg(tsMessages, 0, 0, nil, nil)
 
 				rt := ddn.Operate([]Msg{msgStreamMsg})
@@ -169,9 +185,10 @@ func TestFlowGraph_DDNode_Operate(to *testing.T) {
 
 		for _, test := range tests {
 			te.Run(test.description, func(t *testing.T) {
+				fs := &datapb.SegmentInfo{ID: test.ddnFlushedSegment}
 				// Prepare ddNode states
 				ddn := ddNode{
-					flushedSegments: []UniqueID{test.ddnFlushedSegment},
+					flushedSegments: []*datapb.SegmentInfo{fs},
 					collectionID:    test.ddnCollID,
 				}
 				FilterThreshold = test.threshold
@@ -190,11 +207,49 @@ func TestFlowGraph_DDNode_Operate(to *testing.T) {
 
 				// Test
 				rt := ddn.Operate([]Msg{msgStreamMsg})
-				assert.Equal(t, test.expectedRtLen, len(rt[0].(*insertMsg).insertMessages))
+				assert.Equal(t, test.expectedRtLen, len(rt[0].(*flowGraphMsg).insertMessages))
 			})
 		}
 	})
 
+	to.Run("Test DDNode Operate Delete Msg", func(te *testing.T) {
+		tests := []struct {
+			ddnCollID   UniqueID
+			inMsgCollID UniqueID
+
+			MsgEndTs Timestamp
+
+			expectedRtLen int
+			description   string
+		}{
+			{1, 1, 2000, 1, "normal"},
+			{1, 2, 4000, 0, "inMsgCollID(2) != ddnCollID"},
+		}
+
+		for _, test := range tests {
+			te.Run(test.description, func(t *testing.T) {
+				// Prepare ddNode states
+				ddn := ddNode{
+					collectionID: test.ddnCollID,
+				}
+
+				// Prepare delete messages
+				var dMsg msgstream.TsMsg = &msgstream.DeleteMsg{
+					BaseMsg: msgstream.BaseMsg{EndTimestamp: test.MsgEndTs},
+					DeleteRequest: internalpb.DeleteRequest{
+						Base:         &commonpb.MsgBase{MsgType: commonpb.MsgType_Delete},
+						CollectionID: test.inMsgCollID,
+					},
+				}
+				tsMessages := []msgstream.TsMsg{dMsg}
+				var msgStreamMsg Msg = flowgraph.GenerateMsgStreamMsg(tsMessages, 0, 0, nil, nil)
+
+				// Test
+				rt := ddn.Operate([]Msg{msgStreamMsg})
+				assert.Equal(t, test.expectedRtLen, len(rt[0].(*flowGraphMsg).deleteMessages))
+			})
+		}
+	})
 }
 
 func TestFlowGraph_DDNode_filterMessages(te *testing.T) {
@@ -226,9 +281,14 @@ func TestFlowGraph_DDNode_filterMessages(te *testing.T) {
 
 	for _, test := range tests {
 		te.Run(test.description, func(t *testing.T) {
+			fs := []*datapb.SegmentInfo{}
+			for _, id := range test.ddnFlushedSegments {
+				s := &datapb.SegmentInfo{ID: id}
+				fs = append(fs, s)
+			}
 			// Prepare ddNode states
 			ddn := ddNode{
-				flushedSegments: test.ddnFlushedSegments,
+				flushedSegments: fs,
 			}
 
 			for k, v := range test.ddnSegID2Ts {
@@ -281,7 +341,12 @@ func TestFlowGraph_DDNode_isFlushed(te *testing.T) {
 
 	for _, test := range tests {
 		te.Run(test.description, func(t *testing.T) {
-			ddn := &ddNode{flushedSegments: test.influshedSegment}
+			fs := []*datapb.SegmentInfo{}
+			for _, id := range test.influshedSegment {
+				s := &datapb.SegmentInfo{ID: id}
+				fs = append(fs, s)
+			}
+			ddn := &ddNode{flushedSegments: fs}
 			assert.Equal(t, test.expectedOut, ddn.isFlushed(test.inSeg))
 		})
 	}

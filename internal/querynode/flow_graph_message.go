@@ -16,11 +16,15 @@ import (
 	"github.com/milvus-io/milvus/internal/util/flowgraph"
 )
 
+// Msg is an interface which has a function named TimeTick
 type Msg = flowgraph.Msg
+
+// MsgStreamMsg is an implementation of interface Msg
 type MsgStreamMsg = flowgraph.MsgStreamMsg
 
 type insertMsg struct {
 	insertMessages []*msgstream.InsertMsg
+	deleteMessages []*msgstream.DeleteMsg
 	timeRange      TimeRange
 }
 

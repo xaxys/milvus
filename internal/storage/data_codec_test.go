@@ -15,6 +15,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
+
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
@@ -248,21 +251,22 @@ func TestInsertCodec(t *testing.T) {
 			},
 		},
 	}
-	Blobs1, _, err := insertCodec.Serialize(PartitionID, SegmentID, insertData1)
+	Blobs1, statsBlob1, err := insertCodec.Serialize(PartitionID, SegmentID, insertData1)
 	assert.Nil(t, err)
 	for _, blob := range Blobs1 {
 		blob.Key = fmt.Sprintf("1/insert_log/2/3/4/5/%d", 100)
 		assert.Equal(t, blob.GetKey(), blob.Key)
 	}
-	Blobs2, _, err := insertCodec.Serialize(PartitionID, SegmentID, insertData2)
+	Blobs2, statsBlob2, err := insertCodec.Serialize(PartitionID, SegmentID, insertData2)
 	assert.Nil(t, err)
 	for _, blob := range Blobs2 {
 		blob.Key = fmt.Sprintf("1/insert_log/2/3/4/5/%d", 99)
 		assert.Equal(t, blob.GetKey(), blob.Key)
 	}
 	resultBlobs := append(Blobs1, Blobs2...)
-	partID, segID, resultData, err := insertCodec.Deserialize(resultBlobs)
+	collID, partID, segID, resultData, err := insertCodec.DeserializeAll(resultBlobs)
 	assert.Nil(t, err)
+	assert.Equal(t, UniqueID(CollectionID), collID)
 	assert.Equal(t, UniqueID(PartitionID), partID)
 	assert.Equal(t, UniqueID(SegmentID), segID)
 	assert.Equal(t, []int64{2, 2}, resultData.Data[RowIDField].(*Int64FieldData).NumRows)
@@ -296,7 +300,34 @@ func TestInsertCodec(t *testing.T) {
 	blobs := []*Blob{}
 	_, _, _, err = insertCodec.Deserialize(blobs)
 	assert.NotNil(t, err)
+	_, _, _, _, err = insertCodec.DeserializeAll(blobs)
+	assert.NotNil(t, err)
+
+	_, err = DeserializeStats(statsBlob1)
+	assert.Nil(t, err)
+
+	_, err = DeserializeStats(statsBlob2)
+	assert.Nil(t, err)
 }
+
+func TestDeleteCodec(t *testing.T) {
+	schema := &etcdpb.CollectionMeta{
+		ID: CollectionID,
+	}
+	deleteCodec := NewDeleteCodec(schema)
+	deleteData := &DeleteData{
+		Data: map[string]int64{"1": 43757345, "2": 23578294723},
+	}
+	blob, err := deleteCodec.Serialize(1, 1, deleteData)
+	assert.Nil(t, err)
+
+	pid, sid, data, err := deleteCodec.Deserialize(blob)
+	assert.Nil(t, err)
+	assert.Equal(t, pid, int64(1))
+	assert.Equal(t, sid, int64(1))
+	assert.Equal(t, data, deleteData)
+}
+
 func TestDDCodec(t *testing.T) {
 	dataDefinitionCodec := NewDataDefinitionCodec(int64(1))
 	ts := []Timestamp{1, 2, 3, 4}
@@ -328,6 +359,99 @@ func TestDDCodec(t *testing.T) {
 	assert.NotNil(t, err)
 }
 
+func TestIndexFileBinlogCodec(t *testing.T) {
+	indexBuildID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	version := int64(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	collectionID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	partitionID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	segmentID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	fieldID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	indexName := funcutil.GenRandomStr()
+	indexID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	indexParams := make(map[string]string)
+	indexParams["index_type"] = "IVF_FLAT"
+	datas := []*Blob{
+		{
+			Key:   "ivf1",
+			Value: []byte{1, 2, 3},
+		},
+		{
+			Key:   "ivf2",
+			Value: []byte{4, 5, 6},
+		},
+		{
+			Key:   "large",
+			Value: []byte(funcutil.RandomString(maxLengthPerRowOfIndexFile + 1)),
+		},
+	}
+
+	codec := NewIndexFileBinlogCodec()
+
+	serializedBlobs, err := codec.Serialize(indexBuildID, version, collectionID, partitionID, segmentID, fieldID, indexParams, indexName, indexID, datas)
+	assert.Nil(t, err)
+
+	idxBuildID, v, collID, parID, segID, fID, params, idxName, idxID, blobs, err := codec.DeserializeImpl(serializedBlobs)
+	assert.Nil(t, err)
+	assert.Equal(t, indexBuildID, idxBuildID)
+	assert.Equal(t, version, v)
+	assert.Equal(t, collectionID, collID)
+	assert.Equal(t, partitionID, parID)
+	assert.Equal(t, segmentID, segID)
+	assert.Equal(t, fieldID, fID)
+	assert.Equal(t, len(indexParams), len(params))
+	for key, value := range indexParams {
+		assert.Equal(t, value, params[key])
+	}
+	assert.Equal(t, indexName, idxName)
+	assert.Equal(t, indexID, idxID)
+	assert.ElementsMatch(t, datas, blobs)
+
+	blobs, indexParams, indexName, indexID, err = codec.Deserialize(serializedBlobs)
+	assert.Nil(t, err)
+	assert.ElementsMatch(t, datas, blobs)
+	for key, value := range indexParams {
+		assert.Equal(t, value, params[key])
+	}
+	assert.Equal(t, indexName, idxName)
+	assert.Equal(t, indexID, idxID)
+
+	err = codec.Close()
+	assert.Nil(t, err)
+
+	// empty
+	_, _, _, _, _, _, _, _, _, _, err = codec.DeserializeImpl(nil)
+	assert.NotNil(t, err)
+}
+
+func TestIndexFileBinlogCodecError(t *testing.T) {
+	var err error
+
+	// failed to read binlog
+	codec := NewIndexFileBinlogCodec()
+	_, _, _, _, err = codec.Deserialize([]*Blob{{Key: "key", Value: []byte("not in binlog format")}})
+	assert.NotNil(t, err)
+
+	indexBuildID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	version := int64(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	collectionID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	partitionID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	segmentID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	fieldID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	indexName := funcutil.GenRandomStr()
+	indexID := UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt())
+	indexParams := make(map[string]string)
+	indexParams["index_type"] = "IVF_FLAT"
+	datas := []*Blob{
+		{
+			Key:   "ivf1",
+			Value: []byte{1, 2, 3},
+		},
+	}
+
+	_, err = codec.Serialize(indexBuildID, version, collectionID, partitionID, segmentID, fieldID, indexParams, indexName, indexID, datas)
+	assert.Nil(t, err)
+}
+
 func TestIndexCodec(t *testing.T) {
 	indexCodec := NewIndexCodec()
 	blobs := []*Blob{
@@ -350,7 +474,7 @@ func TestIndexCodec(t *testing.T) {
 	blobsInput, err := indexCodec.Serialize(blobs, indexParams, "index_test_name", 1234)
 	assert.Nil(t, err)
 	assert.EqualValues(t, 4, len(blobsInput))
-	assert.EqualValues(t, IndexParamsFile, blobsInput[3].Key)
+	assert.EqualValues(t, IndexParamsKey, blobsInput[3].Key)
 	blobsOutput, indexParamsOutput, indexName, indexID, err := indexCodec.Deserialize(blobsInput)
 	assert.Nil(t, err)
 	assert.EqualValues(t, 3, len(blobsOutput))

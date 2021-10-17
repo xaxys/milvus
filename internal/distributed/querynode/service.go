@@ -28,7 +28,6 @@ import (
 	"google.golang.org/grpc"
 
 	grpc_opentracing "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
-	dsc "github.com/milvus-io/milvus/internal/distributed/datacoord/client"
 	isc "github.com/milvus-io/milvus/internal/distributed/indexcoord/client"
 	rcc "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
 	"github.com/milvus-io/milvus/internal/log"
@@ -43,10 +42,12 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+// UniqueID is an alias for type typeutil.UniqueID, used as a unique identifier for the request.
 type UniqueID = typeutil.UniqueID
 
+// Server is the grpc server of QueryNode.
 type Server struct {
-	querynode   *qn.QueryNode
+	querynode   types.QueryNodeComponent
 	wg          sync.WaitGroup
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -54,13 +55,13 @@ type Server struct {
 
 	grpcServer *grpc.Server
 
-	dataCoord  *dsc.Client
-	rootCoord  *rcc.GrpcClient
-	indexCoord *isc.Client
+	rootCoord  types.RootCoord
+	indexCoord types.IndexCoord
 
 	closer io.Closer
 }
 
+// NewServer create a new QueryNode grpc server.
 func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 
@@ -73,12 +74,11 @@ func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) 
 	return s, nil
 }
 
+// init initializes QueryNode's grpc service.
 func (s *Server) init() error {
 	Params.Init()
-	Params.LoadFromEnv()
-	Params.LoadFromArgs()
 
-	qn.Params.Init()
+	qn.Params.InitOnce()
 	qn.Params.QueryNodeIP = Params.QueryNodeIP
 	qn.Params.QueryNodePort = int64(Params.QueryNodePort)
 	qn.Params.QueryNodeID = Params.QueryNodeID
@@ -100,61 +100,64 @@ func (s *Server) init() error {
 	addr := Params.RootCoordAddress
 
 	log.Debug("QueryNode start to new RootCoordClient", zap.Any("QueryCoordAddress", addr))
-	rootCoord, err := rcc.NewClient(s.ctx, qn.Params.MetaRootPath, qn.Params.EtcdEndpoints)
-	if err != nil {
-		log.Debug("QueryNode new RootCoordClient failed", zap.Error(err))
-		panic(err)
+	if s.rootCoord == nil {
+		s.rootCoord, err = rcc.NewClient(s.ctx, qn.Params.MetaRootPath, qn.Params.EtcdEndpoints)
+		if err != nil {
+			log.Debug("QueryNode new RootCoordClient failed", zap.Error(err))
+			panic(err)
+		}
 	}
 
-	if err = rootCoord.Init(); err != nil {
+	if err = s.rootCoord.Init(); err != nil {
 		log.Debug("QueryNode RootCoordClient Init failed", zap.Error(err))
 		panic(err)
 	}
 
-	if err = rootCoord.Start(); err != nil {
+	if err = s.rootCoord.Start(); err != nil {
 		log.Debug("QueryNode RootCoordClient Start failed", zap.Error(err))
 		panic(err)
 	}
 	log.Debug("QueryNode start to wait for RootCoord ready")
-	err = funcutil.WaitForComponentHealthy(s.ctx, rootCoord, "RootCoord", 1000000, time.Millisecond*200)
+	err = funcutil.WaitForComponentHealthy(s.ctx, s.rootCoord, "RootCoord", 1000000, time.Millisecond*200)
 	if err != nil {
 		log.Debug("QueryNode wait for RootCoord ready failed", zap.Error(err))
 		panic(err)
 	}
 	log.Debug("QueryNode report RootCoord is ready")
 
-	if err := s.SetRootCoord(rootCoord); err != nil {
+	if err := s.SetRootCoord(s.rootCoord); err != nil {
 		panic(err)
 	}
 
 	// --- IndexCoord ---
 	log.Debug("Index coord", zap.String("address", Params.IndexCoordAddress))
-	indexCoord, err := isc.NewClient(s.ctx, qn.Params.MetaRootPath, qn.Params.EtcdEndpoints)
-
-	if err != nil {
-		log.Debug("QueryNode new IndexCoordClient failed", zap.Error(err))
-		panic(err)
+	if s.indexCoord == nil {
+		s.indexCoord, err = isc.NewClient(s.ctx, qn.Params.MetaRootPath, qn.Params.EtcdEndpoints)
+		if err != nil {
+			log.Debug("QueryNode new IndexCoordClient failed", zap.Error(err))
+			panic(err)
+		}
 	}
 
-	if err := indexCoord.Init(); err != nil {
+	if err := s.indexCoord.Init(); err != nil {
 		log.Debug("QueryNode IndexCoordClient Init failed", zap.Error(err))
 		panic(err)
 	}
 
-	if err := indexCoord.Start(); err != nil {
+	if err := s.indexCoord.Start(); err != nil {
 		log.Debug("QueryNode IndexCoordClient Start failed", zap.Error(err))
 		panic(err)
 	}
 	// wait IndexCoord healthy
 	log.Debug("QueryNode start to wait for IndexCoord ready")
-	err = funcutil.WaitForComponentHealthy(s.ctx, indexCoord, "IndexCoord", 1000000, time.Millisecond*200)
+	err = funcutil.WaitForComponentHealthy(s.ctx, s.indexCoord, "IndexCoord", 1000000, time.Millisecond*200)
 	if err != nil {
 		log.Debug("QueryNode wait for IndexCoord ready failed", zap.Error(err))
 		panic(err)
 	}
 	log.Debug("QueryNode report IndexCoord is ready")
 
-	if err := s.SetIndexCoord(indexCoord); err != nil {
+	if err := s.SetIndexCoord(s.indexCoord); err != nil {
 		panic(err)
 	}
 
@@ -171,10 +174,12 @@ func (s *Server) init() error {
 	return nil
 }
 
+// start starts QueryNode's grpc service.
 func (s *Server) start() error {
 	return s.querynode.Start()
 }
 
+// startGrpcLoop starts the grpc loop of QueryNode component.
 func (s *Server) startGrpcLoop(grpcPort int) {
 	defer s.wg.Done()
 
@@ -218,6 +223,7 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 
 }
 
+// Run initializes and starts QueryNode's grpc service.
 func (s *Server) Run() error {
 
 	if err := s.init(); err != nil {
@@ -232,6 +238,7 @@ func (s *Server) Run() error {
 	return nil
 }
 
+// Stop stops QueryNode's grpc service.
 func (s *Server) Stop() error {
 	if s.closer != nil {
 		if err := s.closer.Close(); err != nil {
@@ -252,47 +259,57 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+// SetRootCoord sets the RootCoord's client for QueryNode component.
 func (s *Server) SetRootCoord(rootCoord types.RootCoord) error {
 	return s.querynode.SetRootCoord(rootCoord)
 }
 
+// SetIndexCoord sets the IndexCoord's client for QueryNode component.
 func (s *Server) SetIndexCoord(indexCoord types.IndexCoord) error {
 	return s.querynode.SetIndexCoord(indexCoord)
 }
 
+// GetTimeTickChannel gets the time tick channel of QueryNode.
 func (s *Server) GetTimeTickChannel(ctx context.Context, req *internalpb.GetTimeTickChannelRequest) (*milvuspb.StringResponse, error) {
 	return s.querynode.GetTimeTickChannel(ctx)
 }
 
+// GetStatisticsChannel gets the statistics channel of QueryNode.
 func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
 	return s.querynode.GetStatisticsChannel(ctx)
 }
 
+// GetComponentStates gets the component states of QueryNode.
 func (s *Server) GetComponentStates(ctx context.Context, req *internalpb.GetComponentStatesRequest) (*internalpb.ComponentStates, error) {
 	// ignore ctx and in
 	return s.querynode.GetComponentStates(ctx)
 }
 
+// AddQueryChannel adds query channel for QueryNode component.
 func (s *Server) AddQueryChannel(ctx context.Context, req *querypb.AddQueryChannelRequest) (*commonpb.Status, error) {
 	// ignore ctx
 	return s.querynode.AddQueryChannel(ctx, req)
 }
 
+// RemoveQueryChannel removes the query channel for QueryNode component.
 func (s *Server) RemoveQueryChannel(ctx context.Context, req *querypb.RemoveQueryChannelRequest) (*commonpb.Status, error) {
 	// ignore ctx
 	return s.querynode.RemoveQueryChannel(ctx, req)
 }
 
+// WatchDmChannels watches the channels about data manipulation.
 func (s *Server) WatchDmChannels(ctx context.Context, req *querypb.WatchDmChannelsRequest) (*commonpb.Status, error) {
 	// ignore ctx
 	return s.querynode.WatchDmChannels(ctx, req)
 }
 
+// LoadSegments loads the segments to search.
 func (s *Server) LoadSegments(ctx context.Context, req *querypb.LoadSegmentsRequest) (*commonpb.Status, error) {
 	// ignore ctx
 	return s.querynode.LoadSegments(ctx, req)
 }
 
+// ReleaseCollection releases the data of the specified collection in QueryNode.
 func (s *Server) ReleaseCollection(ctx context.Context, req *querypb.ReleaseCollectionRequest) (*commonpb.Status, error) {
 	// ignore ctx
 	return s.querynode.ReleaseCollection(ctx, req)

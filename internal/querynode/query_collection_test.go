@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"math"
 	"math/rand"
-	"reflect"
 	"testing"
 	"time"
 
@@ -20,6 +18,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
@@ -52,7 +51,7 @@ func genSimpleQueryCollection(ctx context.Context, cancel context.CancelFunc) (*
 		return nil, err
 	}
 
-	queryCollection := newQueryCollection(ctx, cancel,
+	queryCollection, err := newQueryCollection(ctx, cancel,
 		defaultCollectionID,
 		historical,
 		streaming,
@@ -60,22 +59,40 @@ func genSimpleQueryCollection(ctx context.Context, cancel context.CancelFunc) (*
 		localCM,
 		remoteCM,
 		false)
-	if queryCollection == nil {
-		return nil, errors.New("nil simple query collection")
+	return queryCollection, err
+}
+
+func genSimpleSegmentInfo() *querypb.SegmentInfo {
+	return &querypb.SegmentInfo{
+		SegmentID:    defaultSegmentID,
+		CollectionID: defaultCollectionID,
+		PartitionID:  defaultPartitionID,
 	}
-	return queryCollection, nil
+}
+
+func genSimpleSealedSegmentsChangeInfo() *querypb.SealedSegmentsChangeInfo {
+	return &querypb.SealedSegmentsChangeInfo{
+		Base:            genCommonMsgBase(commonpb.MsgType_SealedSegmentsChangeInfo),
+		OnlineNodeID:    Params.QueryNodeID,
+		OnlineSegments:  []*querypb.SegmentInfo{},
+		OfflineNodeID:   Params.QueryNodeID,
+		OfflineSegments: []*querypb.SegmentInfo{},
+	}
+}
+
+func genSimpleSealedSegmentsChangeInfoMsg() *msgstream.SealedSegmentsChangeInfoMsg {
+	return &msgstream.SealedSegmentsChangeInfoMsg{
+		BaseMsg:                  genMsgStreamBaseMsg(),
+		SealedSegmentsChangeInfo: *genSimpleSealedSegmentsChangeInfo(),
+	}
 }
 
 func updateTSafe(queryCollection *queryCollection, timestamp Timestamp) {
 	// register
-	queryCollection.watcherSelectCase = make([]reflect.SelectCase, 0)
 	queryCollection.tSafeWatchers[defaultVChannel] = newTSafeWatcher()
 	queryCollection.streaming.tSafeReplica.addTSafe(defaultVChannel)
 	queryCollection.streaming.tSafeReplica.registerTSafeWatcher(defaultVChannel, queryCollection.tSafeWatchers[defaultVChannel])
-	queryCollection.watcherSelectCase = append(queryCollection.watcherSelectCase, reflect.SelectCase{
-		Dir:  reflect.SelectRecv,
-		Chan: reflect.ValueOf(queryCollection.tSafeWatchers[defaultVChannel].watcherChan()),
-	})
+	queryCollection.addTSafeWatcher(defaultVChannel)
 
 	queryCollection.streaming.tSafeReplica.setTSafe(defaultVChannel, defaultCollectionID, timestamp)
 }
@@ -125,7 +142,8 @@ func TestQueryCollection_withoutVChannel(t *testing.T) {
 	assert.Nil(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	queryCollection := newQueryCollection(ctx, cancel, 0, historical, streaming, factory, nil, nil, false)
+	queryCollection, err := newQueryCollection(ctx, cancel, 0, historical, streaming, factory, nil, nil, false)
+	assert.NoError(t, err)
 
 	producerChannels := []string{"testResultChannel"}
 	queryCollection.queryResultMsgStream.AsProducer(producerChannels)
@@ -136,7 +154,7 @@ func TestQueryCollection_withoutVChannel(t *testing.T) {
 	for i := 0; i < dim; i++ {
 		vec[i] = rand.Float32()
 	}
-	dslString := "{\"bool\": { \n\"vector\": {\n \"vec\": {\n \"metric_type\": \"L2\", \n \"params\": {\n \"nprobe\": 10 \n},\n \"query\": \"$0\",\"topk\": 10 \n } \n } \n } \n }"
+	dslString := "{\"bool\": { \n\"vector\": {\n \"vec\": {\n \"metric_type\": \"L2\", \n \"params\": {\n \"nprobe\": 10 \n},\n \"query\": \"$0\",\n \"topk\": 10 \n,\"round_decimal\": 6\n } \n } \n } \n }"
 	var searchRawData1 []byte
 	var searchRawData2 []byte
 	for i, ele := range vec {
@@ -314,6 +332,15 @@ func TestQueryCollection_consumeQuery(t *testing.T) {
 		runConsumeQuery(msg)
 	})
 
+	t.Run("consume SimpleSealedSegmentsChangeInfoMsg", func(t *testing.T) {
+		// test is success if it doesn't block
+		msg := genSimpleSealedSegmentsChangeInfoMsg()
+		simpleInfo := genSimpleSegmentInfo()
+		simpleInfo.CollectionID = 1000
+		msg.OnlineSegments = append(msg.OnlineSegments, simpleInfo)
+		runConsumeQuery(msg)
+	})
+
 	t.Run("consume invalid msg", func(t *testing.T) {
 		msg, err := genSimpleRetrieveMsg()
 		assert.NoError(t, err)
@@ -484,6 +511,15 @@ func TestQueryCollection_serviceableTime(t *testing.T) {
 	assert.Equal(t, st+gracefulTime, resST)
 }
 
+func TestQueryCollection_addTSafeWatcher(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	queryCollection, err := genSimpleQueryCollection(ctx, cancel)
+	assert.NoError(t, err)
+
+	queryCollection.addTSafeWatcher(defaultVChannel)
+}
+
 func TestQueryCollection_waitNewTSafe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -493,7 +529,8 @@ func TestQueryCollection_waitNewTSafe(t *testing.T) {
 	timestamp := Timestamp(1000)
 	updateTSafe(queryCollection, timestamp)
 
-	resTimestamp := queryCollection.waitNewTSafe()
+	resTimestamp, err := queryCollection.waitNewTSafe()
+	assert.NoError(t, err)
 	assert.Equal(t, timestamp, resTimestamp)
 }
 
@@ -628,4 +665,58 @@ func TestQueryCollection_AddPopUnsolvedMsg(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		assert.EqualValues(t, i, unsolved[i].ID())
 	}
+}
+
+func TestQueryCollection_adjustByChangeInfo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.TODO())
+
+	t.Run("test adjustByChangeInfo", func(t *testing.T) {
+		qc, err := genSimpleQueryCollection(ctx, cancel)
+		assert.Nil(t, err)
+
+		info := genSimpleSealedSegmentsChangeInfoMsg()
+
+		// test online
+		info.OnlineSegments = append(info.OnlineSegments, genSimpleSegmentInfo())
+		err = qc.adjustByChangeInfo(info)
+		assert.NoError(t, err)
+		ids := qc.globalSegmentManager.getGlobalSegmentIDs()
+		assert.Len(t, ids, 1)
+
+		// test offline
+		info.OnlineSegments = make([]*querypb.SegmentInfo, 0)
+		info.OfflineSegments = append(info.OfflineSegments, genSimpleSegmentInfo())
+		err = qc.adjustByChangeInfo(info)
+		assert.NoError(t, err)
+		ids = qc.globalSegmentManager.getGlobalSegmentIDs()
+		assert.Len(t, ids, 0)
+	})
+
+	t.Run("test mismatch collectionID when adjustByChangeInfo", func(t *testing.T) {
+		qc, err := genSimpleQueryCollection(ctx, cancel)
+		assert.Nil(t, err)
+
+		info := genSimpleSealedSegmentsChangeInfoMsg()
+
+		// test online
+		simpleInfo := genSimpleSegmentInfo()
+		simpleInfo.CollectionID = 1000
+		info.OnlineSegments = append(info.OnlineSegments, simpleInfo)
+		err = qc.adjustByChangeInfo(info)
+		assert.Error(t, err)
+	})
+
+	t.Run("test no segment when adjustByChangeInfo", func(t *testing.T) {
+		qc, err := genSimpleQueryCollection(ctx, cancel)
+		assert.Nil(t, err)
+
+		err = qc.historical.replica.removeSegment(defaultSegmentID)
+		assert.NoError(t, err)
+
+		info := genSimpleSealedSegmentsChangeInfoMsg()
+		info.OfflineSegments = append(info.OfflineSegments, genSimpleSegmentInfo())
+
+		err = qc.adjustByChangeInfo(info)
+		assert.Error(t, err)
+	})
 }

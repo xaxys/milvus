@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
@@ -25,6 +30,7 @@ import (
 
 type allocatorInterface interface {
 	allocID() (UniqueID, error)
+	allocIDBatch(count uint32) (UniqueID, uint32, error)
 	genKey(alloc bool, ids ...UniqueID) (key string, err error)
 }
 
@@ -32,6 +38,7 @@ type allocator struct {
 	rootCoord types.RootCoord
 }
 
+// check if allocator implements allocatorInterface
 var _ allocatorInterface = &allocator{}
 
 func newAllocator(s types.RootCoord) *allocator {
@@ -40,7 +47,7 @@ func newAllocator(s types.RootCoord) *allocator {
 	}
 }
 
-// allocID allocat one ID from rootCoord
+// allocID allocates one ID from rootCoord
 func (alloc *allocator) allocID() (UniqueID, error) {
 	ctx := context.TODO()
 	resp, err := alloc.rootCoord.AllocID(ctx, &rootcoordpb.AllocIDRequest{
@@ -64,10 +71,31 @@ func (alloc *allocator) allocID() (UniqueID, error) {
 	return resp.ID, nil
 }
 
+// allocIDBatch allocates IDs in batch from rootCoord
+func (alloc *allocator) allocIDBatch(count uint32) (UniqueID, uint32, error) {
+	ctx := context.Background()
+	resp, err := alloc.rootCoord.AllocID(ctx, &rootcoordpb.AllocIDRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:  commonpb.MsgType_RequestID,
+			SourceID: Params.NodeID,
+		},
+		Count: count,
+	})
+
+	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
+		return 0, 0, errors.New(resp.Status.GetReason())
+	}
+
+	if err != nil {
+		return 0, 0, err
+	}
+	return resp.GetID(), resp.GetCount(), nil
+}
+
 // genKey gives a valid key string for lists of UniqueIDs:
 //  if alloc is true, the returned keys will have a generated-unique ID at the end.
 //  if alloc is false, the returned keys will only consist of provided ids.
-func (alloc *allocator) genKey(isalloc bool, ids ...UniqueID) (key string, err error) {
+func (alloc *allocator) genKey(isalloc bool, ids ...UniqueID) (string, error) {
 	if isalloc {
 		idx, err := alloc.allocID()
 		if err != nil {
@@ -75,12 +103,14 @@ func (alloc *allocator) genKey(isalloc bool, ids ...UniqueID) (key string, err e
 		}
 		ids = append(ids, idx)
 	}
+	return JoinIDPath(ids...), nil
+}
 
+// JoinIDPath joins ids to path format.
+func JoinIDPath(ids ...UniqueID) string {
 	idStr := make([]string, len(ids))
 	for _, id := range ids {
 		idStr = append(idStr, strconv.FormatInt(id, 10))
 	}
-
-	key = path.Join(idStr...)
-	return
+	return path.Join(idStr...)
 }

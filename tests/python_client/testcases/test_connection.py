@@ -1,9 +1,9 @@
 import pytest
 import concurrent.futures
-from pymilvus import DefaultConfig
+from pymilvus import DefaultConfig, Milvus
 
 from base.client_base import TestcaseBase
-from utils.utils import *
+from utils.utils import get_milvus, gen_invalid_ips, gen_invalid_ints, gen_invalid_uris
 import common.common_type as ct
 import common.common_func as cf
 from common.code_mapping import ConnectionErrorMessage as cem
@@ -281,9 +281,9 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.tags(ct.CaseLabel.L1)
     def test_connection_add_after_connect(self, host, port):
         """
-        target: add_connect passes different params after normal connect
-        method: normal connection then add_connect passes different params
-        expected: add_connect failed
+        target: add_connection with different params after normal connect
+        method: then add_connection with different params
+        expected: add_connection failed
         """
 
         # create connection that param of alias is not exist
@@ -301,9 +301,10 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.tags(ct.CaseLabel.L1)
     def test_connection_add_after_default_connect(self, host, port):
         """
-        target: add_connect passes different params after normal connect passes default alias
-        method: normal connection then add_connect passes different params
-        expected: add_connect failed
+        target: add_connection with different params after default alias connected
+        method: 1. connect with default alias
+                2. add_connection with the same alias but different params
+        expected: add_connection failed
         """
         # create connection that param of alias is default
         self.connection_wrap.connect(alias=DefaultConfig.DEFAULT_USING, host=host, port=port,
@@ -321,34 +322,36 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.tags(ct.CaseLabel.L1)
     def test_connection_add_after_disconnect(self, host, port):
         """
-        target: add_connect after normal connect、disconnect
-        method: normal connect, disconnect then add connect passes the same alias
-        expected: add_connect successfully
+        target: update connection params after connection disconnected
+        method: 1. connect and disconnect a connection
+                2. re-add connection by the same alias with different connection params
+        expected: re-add_connection successfully with new params
         """
 
-        # create connection that param of alias is not exist
+        # add a new connection and connect
         self.connection_wrap.connect(alias="test_alias_name", host=host, port=port, check_task=ct.CheckTasks.ccr)
 
-        # disconnect alias is exist
+        # disconnect the connection
         self.connection_wrap.disconnect(alias="test_alias_name")
 
-        # get an addr that is exist
+        # get the connection address after it disconnected
         self.connection_wrap.get_connection_addr(alias="test_alias_name", check_task=ct.CheckTasks.ccr,
                                                  check_items={ct.dict_content: {"host": host, "port": port}})
 
-        # add connection after that alias has been disconnected
+        # re-add connection by the same alias with different connection params
         self.connection_wrap.add_connection(test_alias_name={"host": "localhost", "port": "1"})
 
-        # get an addr that is exist
+        # re-get the connection address
         self.connection_wrap.get_connection_addr(alias="test_alias_name", check_task=ct.CheckTasks.ccr,
                                                  check_items={ct.dict_content: {"host": "localhost", "port": "1"}})
 
     @pytest.mark.tags(ct.CaseLabel.L1)
     def test_connection_add_after_remove(self, host, port):
         """
-        target: add_connect after normal connect、remove_connection
-        method: normal connect, remove_connection then add connect passes the same alias
-        expected: add_connect successfully
+        target: add_connection after normal connect、remove_connection
+        method: 1. connect and remove_connection
+                2. add connection by the same alias with different params
+        expected: add_connection by the same alias with different params successfully
         """
 
         # create connection that param of alias is not exist
@@ -371,8 +374,8 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.tags(ct.CaseLabel.L1)
     def test_connection_connect_alias_not_exist(self):
         """
-        target: connect passes alias that is not exist and raise error
-        method: connect passes alias that is not exist
+        target: connect with a non existing alias and raise error
+        method: connect with a non existing alias
         expected: response of connect is error
         """
 
@@ -392,9 +395,10 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.tags(ct.CaseLabel.L1)
     def test_connection_connect_default_alias_invalid(self, port):
         """
-        target: connect passes configure is not exist and raise error
-        method: connect passes configure is not exist
-        expected: response of connect is error
+        target: connect with non existing params
+        method: 1. add connection with non existing params
+                2. try to connect
+        expected: raise an exception
         """
 
         # add invalid default connection
@@ -416,9 +420,11 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.tags(ct.CaseLabel.L0)
     def test_connection_connect_default_alias_effective(self, host, port):
         """
-        target: connect passes useful configure that adds by add_connect
-        method: connect passes configure that add by add_connect
-        expected: connect successfully
+        target: verify connections by default alias
+        method: 1. add connection with default alias
+                2. connect with default alias
+                3. list connections and get connection address
+        expected: 1. add connection, connect, list and get connection address successfully
         """
 
         # add a valid default connection
@@ -501,9 +507,9 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.parametrize("connect_name", [DefaultConfig.DEFAULT_USING, "test_alias_nme"])
     def test_connection_connect_wrong_params(self, host, port, connect_name):
         """
-        target: connect directly via wrong parameters and raise error
-        method: connect directly via wrong parameters
-        expected: response of connect is error
+        target: connect directly via invalid parameters and raise error
+        method: connect directly via invalid parameters
+        expected: raise exception with error msg
         """
 
         # created connection with wrong connect name
@@ -525,8 +531,8 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.parametrize("connect_name", [DefaultConfig.DEFAULT_USING, ct.Not_Exist])
     def test_connection_disconnect_not_exist(self, connect_name):
         """
-        target: disconnect passes alias that is not exist
-        method: disconnect passes alias that is not exist
+        target: disconnect with non existing alias
+        method: disconnect with non existing alias
         expected: check connection list is normal
         """
 
@@ -548,8 +554,13 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.tags(ct.CaseLabel.L1)
     def test_connection_disconnect_after_default_connect(self, host, port):
         """
-        target: disconnect default connect and check result
-        method: disconnect default connect
+        target: check results after disconnect with default alias
+        method: 1. connect with default alias
+                2. get connection
+                3. disconnect with default alias
+                4. get connection
+                5. disconnect again
+                6. list connections and get connection address
         expected: the connection was successfully terminated
         """
 
@@ -584,8 +595,10 @@ class TestConnectionOperation(TestcaseBase):
     @pytest.mark.tags(ct.CaseLabel.L1)
     def test_connection_disconnect_after_connect(self, host, port):
         """
-        target: disconnect test connect and check result
-        method: disconnect test connect
+        target: disconnect with customized alias and check results
+        method: 1. connect with customized alias
+                2. disconnect with the alias
+                3. list connections and get connection address
         expected: the connection was successfully terminated
         """
         test_alias_name = "test_alias_name"

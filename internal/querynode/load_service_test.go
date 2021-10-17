@@ -824,7 +824,7 @@ func generateInsertBinLog(collectionID UniqueID, partitionID UniqueID, segmentID
 		return nil, nil, err
 	}
 
-	// binLogs -> minIO/S3
+	// binLogs -> MinIO/S3
 	segIDStr := strconv.FormatInt(segmentID, 10)
 	keyPrefix = path.Join(keyPrefix, segIDStr)
 
@@ -885,7 +885,7 @@ func doInsert(ctx context.Context, collectionID UniqueID, partitionID UniqueID, 
 				CollectionID: collectionID,
 				PartitionID:  partitionID,
 				SegmentID:    segmentID,
-				ChannelID:    "0",
+				ShardName:    "0",
 				Timestamps:   []uint64{uint64(i + 1000)},
 				RowIDs:       []int64{int64(i)},
 				RowData: []*commonpb.Blob{

@@ -1,18 +1,26 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
 import (
+	"context"
 	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -21,29 +29,63 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/milvus-io/milvus/internal/common"
+	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
-	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/storage"
 )
-
-func newSegmentReplica(rc types.RootCoord, collID UniqueID) *SegmentReplica {
-	metaService := newMetaService(rc, collID)
-
-	var replica = &SegmentReplica{
-		collectionID: collID,
-
-		newSegments:     make(map[UniqueID]*Segment),
-		normalSegments:  make(map[UniqueID]*Segment),
-		flushedSegments: make(map[UniqueID]*Segment),
-
-		metaService: metaService,
-	}
-	return replica
-}
 
 func TestNewReplica(t *testing.T) {
 	rc := &RootCoordFactory{}
-	replica := newReplica(rc, 0)
+	replica, err := newReplica(context.Background(), rc, 0)
+	assert.Nil(t, err)
 	assert.NotNil(t, replica)
+}
+
+type mockMinioKV struct {
+	kv.BaseKV
+}
+
+func (kv *mockMinioKV) LoadWithPrefix(prefix string) ([]string, []string, error) {
+	stats := &storage.Int64Stats{
+		FieldID: common.RowIDField,
+		Min:     0,
+		Max:     10,
+		BF:      bloom.NewWithEstimates(bloomFilterSize, maxBloomFalsePositive),
+	}
+	buffer, _ := json.Marshal(stats)
+	return []string{"0"}, []string{string(buffer)}, nil
+}
+
+type mockPkfilterMergeError struct {
+	kv.BaseKV
+}
+
+func (kv *mockPkfilterMergeError) LoadWithPrefix(prefix string) ([]string, []string, error) {
+	stats := &storage.Int64Stats{
+		FieldID: common.RowIDField,
+		Min:     0,
+		Max:     10,
+		BF:      bloom.NewWithEstimates(1, 0.0001),
+	}
+	buffer, _ := json.Marshal(stats)
+	return []string{"0"}, []string{string(buffer)}, nil
+}
+
+type mockMinioKVError struct {
+	kv.BaseKV
+}
+
+func (kv *mockMinioKVError) LoadWithPrefix(prefix string) ([]string, []string, error) {
+	return nil, nil, fmt.Errorf("mock error")
+}
+
+type mockMinioKVStatsError struct {
+	kv.BaseKV
+}
+
+func (kv *mockMinioKVStatsError) LoadWithPrefix(prefix string) ([]string, []string, error) {
+	return []string{"0"}, []string{"3123123,error,test"}, nil
 }
 
 func TestSegmentReplica_getCollectionAndPartitionID(te *testing.T) {
@@ -103,9 +145,9 @@ func TestSegmentReplica_getCollectionAndPartitionID(te *testing.T) {
 				}
 
 				collID, parID, err := sr.getCollectionAndPartitionID(test.segInFlushed)
-				assert.Error(t, err)
-				assert.Zero(t, collID)
-				assert.Zero(t, parID)
+				assert.NoError(t, err)
+				assert.Equal(t, test.inCollID, collID)
+				assert.Equal(t, test.inParID, parID)
 			} else {
 				sr := &SegmentReplica{}
 				collID, parID, err := sr.getCollectionAndPartitionID(1000)
@@ -122,9 +164,10 @@ func TestSegmentReplica(t *testing.T) {
 	collID := UniqueID(1)
 
 	t.Run("Test coll mot match", func(t *testing.T) {
-		replica := newSegmentReplica(rc, collID)
+		replica, err := newReplica(context.Background(), rc, collID)
+		assert.Nil(t, err)
 
-		err := replica.addNewSegment(1, collID+1, 0, "", nil, nil)
+		err = replica.addNewSegment(1, collID+1, 0, "", nil, nil)
 		assert.NotNil(t, err)
 	})
 
@@ -220,9 +263,10 @@ func TestSegmentReplica_InterfaceMethod(te *testing.T) {
 
 		for _, test := range tests {
 			to.Run(test.description, func(t *testing.T) {
-				sr := newSegmentReplica(rc, test.replicaCollID)
+				sr, err := newReplica(context.Background(), rc, test.replicaCollID)
+				assert.Nil(t, err)
 				require.False(t, sr.hasSegment(test.inSegID, true))
-				err := sr.addNewSegment(test.inSegID,
+				err = sr.addNewSegment(test.inSegID,
 					test.inCollID, 1, "", test.instartPos, &internalpb.MsgPosition{})
 				if test.isValidCase {
 					assert.NoError(t, err)
@@ -255,9 +299,11 @@ func TestSegmentReplica_InterfaceMethod(te *testing.T) {
 
 		for _, test := range tests {
 			to.Run(test.description, func(t *testing.T) {
-				sr := newSegmentReplica(rc, test.replicaCollID)
+				sr, err := newReplica(context.Background(), rc, test.replicaCollID)
+				sr.minIOKV = &mockMinioKV{}
+				assert.Nil(t, err)
 				require.False(t, sr.hasSegment(test.inSegID, true))
-				err := sr.addNormalSegment(test.inSegID, test.inCollID, 1, "", 0, &segmentCheckPoint{})
+				err = sr.addNormalSegment(test.inSegID, test.inCollID, 1, "", 0, &segmentCheckPoint{})
 				if test.isValidCase {
 					assert.NoError(t, err)
 					assert.True(t, sr.hasSegment(test.inSegID, true))
@@ -368,7 +414,9 @@ func TestSegmentReplica_InterfaceMethod(te *testing.T) {
 					sr.flushedSegments[test.flushedSegID] = &Segment{}
 				}
 				sr.updateSegmentEndPosition(test.inSegID, new(internalpb.MsgPosition))
-				sr.removeSegment(0)
+				err := sr.removeSegment(0)
+				assert.Nil(t, err)
+
 			})
 		}
 	})
@@ -450,7 +498,8 @@ func TestSegmentReplica_InterfaceMethod(te *testing.T) {
 
 		for _, test := range tests {
 			to.Run(test.description, func(t *testing.T) {
-				sr := newSegmentReplica(rc, test.replicaCollID)
+				sr, err := newReplica(context.Background(), rc, test.replicaCollID)
+				assert.Nil(t, err)
 
 				if test.metaServiceErr {
 					rc.setCollectionID(-1)
@@ -471,15 +520,56 @@ func TestSegmentReplica_InterfaceMethod(te *testing.T) {
 
 	})
 
+	te.Run("Test_addSegmentMinIOLoadError", func(to *testing.T) {
+		sr, err := newReplica(context.Background(), rc, 1)
+		assert.Nil(to, err)
+		sr.minIOKV = &mockMinioKVError{}
+
+		cpPos := &internalpb.MsgPosition{ChannelName: "insert-01", Timestamp: Timestamp(10)}
+		cp := &segmentCheckPoint{int64(10), *cpPos}
+		err = sr.addNormalSegment(1, 1, 2, "insert-01", int64(10), cp)
+		assert.NotNil(to, err)
+		err = sr.addFlushedSegment(1, 1, 2, "insert-01", int64(0))
+		assert.NotNil(to, err)
+	})
+
+	te.Run("Test_addSegmentStatsError", func(to *testing.T) {
+		sr, err := newReplica(context.Background(), rc, 1)
+		assert.Nil(to, err)
+		sr.minIOKV = &mockMinioKVStatsError{}
+
+		cpPos := &internalpb.MsgPosition{ChannelName: "insert-01", Timestamp: Timestamp(10)}
+		cp := &segmentCheckPoint{int64(10), *cpPos}
+		err = sr.addNormalSegment(1, 1, 2, "insert-01", int64(10), cp)
+		assert.NotNil(to, err)
+		err = sr.addFlushedSegment(1, 1, 2, "insert-01", int64(0))
+		assert.NotNil(to, err)
+	})
+
+	te.Run("Test_addSegmentPkfilterError", func(to *testing.T) {
+		sr, err := newReplica(context.Background(), rc, 1)
+		assert.Nil(to, err)
+		sr.minIOKV = &mockPkfilterMergeError{}
+
+		cpPos := &internalpb.MsgPosition{ChannelName: "insert-01", Timestamp: Timestamp(10)}
+		cp := &segmentCheckPoint{int64(10), *cpPos}
+		err = sr.addNormalSegment(1, 1, 2, "insert-01", int64(10), cp)
+		assert.NotNil(to, err)
+		err = sr.addFlushedSegment(1, 1, 2, "insert-01", int64(0))
+		assert.NotNil(to, err)
+	})
+
 	te.Run("Test inner function segment", func(t *testing.T) {
 		collID := UniqueID(1)
-		replica := newSegmentReplica(rc, collID)
+		replica, err := newReplica(context.Background(), rc, collID)
+		assert.Nil(t, err)
+		replica.minIOKV = &mockMinioKV{}
 		assert.False(t, replica.hasSegment(0, true))
 		assert.False(t, replica.hasSegment(0, false))
 
 		startPos := &internalpb.MsgPosition{ChannelName: "insert-01", Timestamp: Timestamp(100)}
 		endPos := &internalpb.MsgPosition{ChannelName: "insert-01", Timestamp: Timestamp(200)}
-		err := replica.addNewSegment(0, 1, 2, "insert-01", startPos, endPos)
+		err = replica.addNewSegment(0, 1, 2, "insert-01", startPos, endPos)
 		assert.NoError(t, err)
 		assert.True(t, replica.hasSegment(0, true))
 		assert.Equal(t, 1, len(replica.newSegments))
@@ -555,6 +645,12 @@ func TestSegmentReplica_InterfaceMethod(te *testing.T) {
 		assert.Equal(t, int64(10), replica.normalSegments[UniqueID(0)].checkPoint.numRows)
 		replica.updateSegmentCheckPoint(1)
 		assert.Equal(t, int64(20), replica.normalSegments[UniqueID(1)].checkPoint.numRows)
+
+		err = replica.addFlushedSegment(1, 1, 2, "insert-01", int64(0))
+		assert.Nil(t, err)
+
+		totalSegments := replica.filterSegments("insert-01", 0)
+		assert.Equal(t, len(totalSegments), 3)
 	})
 }
 
@@ -591,9 +687,11 @@ func TestReplica_UpdatePKRange(t *testing.T) {
 	cpPos := &internalpb.MsgPosition{ChannelName: chanName, Timestamp: Timestamp(10)}
 	cp := &segmentCheckPoint{int64(10), *cpPos}
 
-	replica := newSegmentReplica(rc, collID)
+	replica, err := newReplica(context.Background(), rc, collID)
+	assert.Nil(t, err)
+	replica.minIOKV = &mockMinioKV{}
 
-	err := replica.addNewSegment(1, collID, partID, chanName, startPos, endPos)
+	err = replica.addNewSegment(1, collID, partID, chanName, startPos, endPos)
 	assert.Nil(t, err)
 	err = replica.addNormalSegment(2, collID, partID, chanName, 100, cp)
 	assert.Nil(t, err)

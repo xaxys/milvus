@@ -19,23 +19,21 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 )
 
-const (
-	// todo : put to param table
-	ServerID      = 1
-	BinlogVersion = 1
-	CommitID      = 1
-	ServerVersion = 1
-)
-
 // BinlogType is to distinguish different files saving different data.
 type BinlogType int32
 
 const (
+	// InsertBinlog BinlogType for insert data
 	InsertBinlog BinlogType = iota
+	// DeleteBinlog BinlogType for delete data
 	DeleteBinlog
+	// DDLBinlog BinlogType for DDL
 	DDLBinlog
+	// IndexFileBinlog BinlogType for index
+	IndexFileBinlog
 )
 const (
+	// MagicNumber used in binlog
 	MagicNumber int32 = 0xfffabc
 )
 
@@ -72,6 +70,7 @@ func (writer *baseBinlogWriter) GetRowNums() (int32, error) {
 	return int32(length), nil
 }
 
+// GetBinlogType returns writer's binlogType
 func (writer *baseBinlogWriter) GetBinlogType() BinlogType {
 	return writer.binlogType
 }
@@ -227,6 +226,24 @@ func (writer *DDLBinlogWriter) NextDropPartitionEventWriter() (*dropPartitionEve
 	return event, nil
 }
 
+// IndexFileBinlogWriter is an object to write binlog file which saves index files
+type IndexFileBinlogWriter struct {
+	baseBinlogWriter
+}
+
+// NextIndexFileEventWriter return next available EventWriter
+func (writer *IndexFileBinlogWriter) NextIndexFileEventWriter() (*indexFileEventWriter, error) {
+	if writer.isClosed() {
+		return nil, fmt.Errorf("binlog has closed")
+	}
+	event, err := newIndexFileEventWriter()
+	if err != nil {
+		return nil, err
+	}
+	writer.eventWriters = append(writer.eventWriters, event)
+	return event, nil
+}
+
 // NewInsertBinlogWriter creates InsertBinlogWriter to write binlog file.
 func NewInsertBinlogWriter(dataType schemapb.DataType, collectionID, partitionID, segmentID, FieldID int64) *InsertBinlogWriter {
 	descriptorEvent := newDescriptorEvent()
@@ -247,10 +264,12 @@ func NewInsertBinlogWriter(dataType schemapb.DataType, collectionID, partitionID
 }
 
 // NewDeleteBinlogWriter creates DeleteBinlogWriter to write binlog file.
-func NewDeleteBinlogWriter(dataType schemapb.DataType, collectionID int64) *DeleteBinlogWriter {
+func NewDeleteBinlogWriter(dataType schemapb.DataType, collectionID, partitionID, segmentID int64) *DeleteBinlogWriter {
 	descriptorEvent := newDescriptorEvent()
 	descriptorEvent.PayloadDataType = dataType
 	descriptorEvent.CollectionID = collectionID
+	descriptorEvent.PartitionID = partitionID
+	descriptorEvent.SegmentID = segmentID
 	return &DeleteBinlogWriter{
 		baseBinlogWriter: baseBinlogWriter{
 			descriptorEvent: *descriptorEvent,
@@ -272,6 +291,40 @@ func NewDDLBinlogWriter(dataType schemapb.DataType, collectionID int64) *DDLBinl
 			descriptorEvent: *descriptorEvent,
 			magicNumber:     MagicNumber,
 			binlogType:      DDLBinlog,
+			eventWriters:    make([]EventWriter, 0),
+			buffer:          nil,
+		},
+	}
+}
+
+// NewIndexFileBinlogWriter returns a new IndexFileBinlogWriter with provided parameters
+func NewIndexFileBinlogWriter(
+	indexBuildID UniqueID,
+	version int64,
+	collectionID UniqueID,
+	partitionID UniqueID,
+	segmentID UniqueID,
+	fieldID UniqueID,
+	indexName string,
+	indexID UniqueID,
+	key string,
+) *IndexFileBinlogWriter {
+	descriptorEvent := newDescriptorEvent()
+	descriptorEvent.CollectionID = collectionID
+	descriptorEvent.PartitionID = partitionID
+	descriptorEvent.SegmentID = segmentID
+	descriptorEvent.FieldID = fieldID
+	descriptorEvent.PayloadDataType = schemapb.DataType_String
+	descriptorEvent.AddExtra("indexBuildID", fmt.Sprintf("%d", indexBuildID))
+	descriptorEvent.AddExtra("version", fmt.Sprintf("%d", version))
+	descriptorEvent.AddExtra("indexName", indexName)
+	descriptorEvent.AddExtra("indexID", fmt.Sprintf("%d", indexID))
+	descriptorEvent.AddExtra("key", key)
+	return &IndexFileBinlogWriter{
+		baseBinlogWriter: baseBinlogWriter{
+			descriptorEvent: *descriptorEvent,
+			magicNumber:     MagicNumber,
+			binlogType:      IndexFileBinlog,
 			eventWriters:    make([]EventWriter, 0),
 			buffer:          nil,
 		},

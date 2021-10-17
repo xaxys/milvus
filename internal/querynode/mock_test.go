@@ -50,6 +50,7 @@ const (
 	defaultVecFieldName   = "vec"
 	defaultConstFieldName = "const"
 	defaultTopK           = int64(10)
+	defaultRoundDecimal   = int64(6)
 	defaultDim            = 128
 	defaultNProb          = 10
 	defaultMetricType     = "JACCARD"
@@ -70,7 +71,10 @@ const (
 	defaultPartitionName  = "query-node-unittest-default-partition"
 )
 
-const defaultMsgLength = 100
+const (
+	defaultMsgLength = 100
+	defaultDelLength = 10
+)
 
 const (
 	buildID   = UniqueID(0)
@@ -247,8 +251,19 @@ func generateIndex(segmentID UniqueID) ([]string, error) {
 	}
 
 	// serialize index params
-	var indexCodec storage.IndexCodec
-	serializedIndexBlobs, err := indexCodec.Serialize(binarySet, indexParams, indexName, indexID)
+	indexCodec := storage.NewIndexFileBinlogCodec()
+	serializedIndexBlobs, err := indexCodec.Serialize(
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		indexParams,
+		indexName,
+		indexID,
+		binarySet,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -669,10 +684,27 @@ func genSimpleTimestampFieldData() []Timestamp {
 	return times
 }
 
+func genSimpleTimestampDeletedPK() []Timestamp {
+	times := make([]Timestamp, defaultDelLength)
+	for i := 0; i < defaultDelLength; i++ {
+		times[i] = Timestamp(i)
+	}
+	times[0] = 1
+	return times
+}
+
 func genSimpleRowIDField() []IntPrimaryKey {
 	ids := make([]IntPrimaryKey, defaultMsgLength)
 	for i := 0; i < defaultMsgLength; i++ {
 		ids[i] = IntPrimaryKey(i)
+	}
+	return ids
+}
+
+func genSimpleDeleteID() []IntPrimaryKey {
+	ids := make([]IntPrimaryKey, defaultDelLength)
+	for i := 0; i < defaultDelLength; i++ {
+		ids[0] = IntPrimaryKey(i)
 	}
 	return ids
 }
@@ -705,10 +737,25 @@ func genSimpleInsertMsg() (*msgstream.InsertMsg, error) {
 			CollectionID:   defaultCollectionID,
 			PartitionID:    defaultPartitionID,
 			SegmentID:      defaultSegmentID,
-			ChannelID:      defaultVChannel,
+			ShardName:      defaultVChannel,
 			Timestamps:     genSimpleTimestampFieldData(),
 			RowIDs:         genSimpleRowIDField(),
 			RowData:        rowData,
+		},
+	}, nil
+}
+
+func genSimpleDeleteMsg() (*msgstream.DeleteMsg, error) {
+	return &msgstream.DeleteMsg{
+		BaseMsg: genMsgStreamBaseMsg(),
+		DeleteRequest: internalpb.DeleteRequest{
+			Base:           genCommonMsgBase(commonpb.MsgType_Delete),
+			CollectionName: defaultCollectionName,
+			PartitionName:  defaultPartitionName,
+			CollectionID:   defaultCollectionID,
+			PartitionID:    defaultPartitionID,
+			PrimaryKeys:    genSimpleDeleteID(),
+			Timestamps:     genSimpleTimestampDeletedPK(),
 		},
 	}, nil
 }
@@ -881,11 +928,12 @@ func genSimpleStreaming(ctx context.Context) (*streaming, error) {
 
 // ---------- unittest util functions ----------
 // functions of messages and requests
-func genDSL(schema *schemapb.CollectionSchema, nProb int, topK int64) (string, error) {
+func genDSL(schema *schemapb.CollectionSchema, nProb int, topK int64, roundDecimal int64) (string, error) {
 	var vecFieldName string
 	var metricType string
 	nProbStr := strconv.Itoa(nProb)
 	topKStr := strconv.FormatInt(topK, 10)
+	roundDecimalStr := strconv.FormatInt(roundDecimal, 10)
 	for _, f := range schema.Fields {
 		if f.DataType == schemapb.DataType_FloatVector {
 			vecFieldName = f.Name
@@ -901,18 +949,16 @@ func genDSL(schema *schemapb.CollectionSchema, nProb int, topK int64) (string, e
 		return "", err
 	}
 
-	return "{\"bool\": { " +
-		"\"vector\": {" +
-		"\"" + vecFieldName + "\": {" +
-		" \"metric_type\": \"" + metricType + "\", " +
-		" \"params\": {" +
-		" \"nprobe\": " + nProbStr + " " +
-		"}, \"query\": \"$0\",\"topk\": " + topKStr + " \n } \n } \n } \n }", nil
+	return "{\"bool\": { \n\"vector\": {\n \"" + vecFieldName +
+		"\": {\n \"metric_type\": \"" + metricType +
+		"\", \n \"params\": {\n \"nprobe\": " + nProbStr + " \n},\n \"query\": \"$0\",\n \"topk\": " + topKStr +
+		" \n,\"round_decimal\": " + roundDecimalStr +
+		"\n } \n } \n } \n }", nil
 }
 
 func genSimpleDSL() (string, error) {
 	schema := genSimpleSegCoreSchema()
-	return genDSL(schema, defaultNProb, defaultTopK)
+	return genDSL(schema, defaultNProb, defaultTopK, defaultRoundDecimal)
 }
 
 func genSimplePlaceHolderGroup() ([]byte, error) {

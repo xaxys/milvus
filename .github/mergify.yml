@@ -33,16 +33,6 @@ pull_request_rules:
         add:
           - ci-passed
 
-  - name: Test passed for document changed
-    conditions:
-      - base=master
-      - -files~=^[^\.]+$
-      - -files~=\S+\.(?!md$|png$)
-    actions:
-      label:
-        add:
-          - ci-passed
-
   - name: Test passed for mergify changed
     conditions:
       - base=master
@@ -56,7 +46,7 @@ pull_request_rules:
     conditions:
       - base=master
       - title~=\[skip ci\]
-      - -files~=^internal\/
+      - label=kind/improvement
     actions:
       label:
         add:
@@ -76,26 +66,6 @@ pull_request_rules:
       - base=master
       - -title~=\[skip ci\]
       - "check-failure=Build and test AMD64 Ubuntu 18.04"
-    actions:
-      label:
-        remove:
-          - ci-passed
-
-  - name: Remove ci-passed when ci failed
-    conditions:
-      - base=master
-      - -title~=\[skip ci\]
-      - "check-failure=continuous-integration/jenkins/pr-merge"
-    actions:
-      label:
-        remove:
-          - ci-passed
-
-  - name: Remove ci-passed when ci pending
-    conditions:
-      - base=master
-      - -title~=\[skip ci\]
-      - "check-pending=continuous-integration/jenkins/pr-merge"
     actions:
       label:
         remove:

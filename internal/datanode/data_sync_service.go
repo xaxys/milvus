@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
@@ -31,7 +36,7 @@ type dataSyncService struct {
 	ctx          context.Context
 	cancelFn     context.CancelFunc
 	fg           *flowgraph.TimeTickedFlowGraph
-	flushChan    <-chan *flushMsg
+	flushChs     *flushChans
 	replica      Replica
 	idAllocator  allocatorInterface
 	msFactory    msgstream.Factory
@@ -39,17 +44,20 @@ type dataSyncService struct {
 	dataCoord    types.DataCoord
 	clearSignal  chan<- UniqueID
 
+	flushingSegCache *Cache
+
 	saveBinlog func(fu *segmentFlushUnit) error
 }
 
 func newDataSyncService(ctx context.Context,
-	flushChan <-chan *flushMsg,
+	flushChs *flushChans,
 	replica Replica,
 	alloc allocatorInterface,
 	factory msgstream.Factory,
 	vchan *datapb.VchannelInfo,
 	clearSignal chan<- UniqueID,
 	dataCoord types.DataCoord,
+	flushingSegCache *Cache,
 
 ) (*dataSyncService, error) {
 
@@ -60,22 +68,43 @@ func newDataSyncService(ctx context.Context,
 	ctx1, cancel := context.WithCancel(ctx)
 
 	service := &dataSyncService{
-		ctx:          ctx1,
-		cancelFn:     cancel,
-		fg:           nil,
-		flushChan:    flushChan,
-		replica:      replica,
-		idAllocator:  alloc,
-		msFactory:    factory,
-		collectionID: vchan.GetCollectionID(),
-		dataCoord:    dataCoord,
-		clearSignal:  clearSignal,
+		ctx:              ctx1,
+		cancelFn:         cancel,
+		fg:               nil,
+		flushChs:         flushChs,
+		replica:          replica,
+		idAllocator:      alloc,
+		msFactory:        factory,
+		collectionID:     vchan.GetCollectionID(),
+		dataCoord:        dataCoord,
+		clearSignal:      clearSignal,
+		flushingSegCache: flushingSegCache,
 	}
 
 	if err := service.initNodes(vchan); err != nil {
 		return nil, err
 	}
 	return service, nil
+}
+
+type parallelConfig struct {
+	maxQueueLength int32
+	maxParallelism int32
+}
+
+type nodeConfig struct {
+	msFactory    msgstream.Factory // msgStream factory
+	collectionID UniqueID
+	vChannelName string
+	replica      Replica // Segment replica
+	allocator    allocatorInterface
+
+	// defaults
+	parallelConfig
+}
+
+func newParallelConfig() parallelConfig {
+	return parallelConfig{Params.FlowGraphMaxQueueLength, Params.FlowGraphMaxParallelism}
 }
 
 // start starts the flowgraph in datasyncservice
@@ -159,31 +188,40 @@ func (dsService *dataSyncService) initNodes(vchanInfo *datapb.VchannelInfo) erro
 
 	dsService.saveBinlog = saveBinlog
 
-	var dmStreamNode Node = newDmInputNode(
-		dsService.ctx,
-		dsService.msFactory,
-		vchanInfo.CollectionID,
-		vchanInfo.GetChannelName(),
-		vchanInfo.GetSeekPosition(),
-	)
+	c := &nodeConfig{
+		msFactory:    dsService.msFactory,
+		collectionID: vchanInfo.GetCollectionID(),
+		vChannelName: vchanInfo.GetChannelName(),
+		replica:      dsService.replica,
+		allocator:    dsService.idAllocator,
+
+		parallelConfig: newParallelConfig(),
+	}
+
+	var dmStreamNode Node
+	dmStreamNode, err = newDmInputNode(dsService.ctx, vchanInfo.GetSeekPosition(), c)
+	if err != nil {
+		return err
+	}
+
 	var ddNode Node = newDDNode(dsService.clearSignal, dsService.collectionID, vchanInfo)
 	var insertBufferNode Node
 	insertBufferNode, err = newInsertBufferNode(
 		dsService.ctx,
-		dsService.replica,
-		dsService.msFactory,
-		dsService.idAllocator,
-		dsService.flushChan,
+		dsService.flushChs.insertBufferCh,
 		saveBinlog,
-		vchanInfo.GetChannelName(),
+		dsService.flushingSegCache,
+		c,
 	)
 	if err != nil {
 		return err
 	}
 
-	dn := newDeleteDNode(dsService.replica)
-
-	var deleteNode Node = dn
+	var deleteNode Node
+	deleteNode, err = newDeleteNode(dsService.ctx, dsService.flushChs.deleteBufferCh, c)
+	if err != nil {
+		return err
+	}
 
 	// recover segment checkpoints
 	for _, us := range vchanInfo.GetUnflushedSegments() {
@@ -204,8 +242,33 @@ func (dsService *dataSyncService) initNodes(vchanInfo *datapb.VchannelInfo) erro
 			zap.Int64("NumOfRows", us.GetNumOfRows()),
 		)
 
-		dsService.replica.addNormalSegment(us.GetID(), us.CollectionID, us.PartitionID, us.GetInsertChannel(),
-			us.GetNumOfRows(), &segmentCheckPoint{us.GetNumOfRows(), *us.GetDmlPosition()})
+		if err := dsService.replica.addNormalSegment(us.GetID(), us.CollectionID, us.PartitionID, us.GetInsertChannel(),
+			us.GetNumOfRows(), &segmentCheckPoint{us.GetNumOfRows(), *us.GetDmlPosition()}); err != nil {
+			return err
+		}
+	}
+
+	for _, fs := range vchanInfo.GetFlushedSegments() {
+		if fs.CollectionID != dsService.collectionID ||
+			fs.GetInsertChannel() != vchanInfo.ChannelName {
+			log.Warn("Collection ID or ChannelName not compact",
+				zap.Int64("Wanted ID", dsService.collectionID),
+				zap.Int64("Actual ID", fs.CollectionID),
+				zap.String("Wanted Channel Name", vchanInfo.ChannelName),
+				zap.String("Actual Channel Name", fs.GetInsertChannel()),
+			)
+			continue
+		}
+
+		log.Info("Recover Segment NumOfRows form checkpoints",
+			zap.String("InsertChannel", fs.GetInsertChannel()),
+			zap.Int64("SegmentID", fs.GetID()),
+			zap.Int64("NumOfRows", fs.GetNumOfRows()),
+		)
+		if err := dsService.replica.addFlushedSegment(fs.GetID(), fs.CollectionID,
+			fs.PartitionID, fs.GetInsertChannel(), fs.GetNumOfRows()); err != nil {
+			return err
+		}
 	}
 
 	dsService.fg.AddNode(dmStreamNode)

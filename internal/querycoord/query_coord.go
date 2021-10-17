@@ -13,6 +13,7 @@ package querycoord
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"path/filepath"
 	"strconv"
@@ -37,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+// Timestamp is an alias for the Int64 type
 type Timestamp = typeutil.Timestamp
 
 type queryChannelInfo struct {
@@ -44,11 +46,14 @@ type queryChannelInfo struct {
 	responseChannel string
 }
 
+// QueryCoord is the coordinator of queryNodes
 type QueryCoord struct {
 	loopCtx    context.Context
 	loopCancel context.CancelFunc
 	loopWg     sync.WaitGroup
 	kvClient   *etcdkv.EtcdKV
+
+	initOnce sync.Once
 
 	queryCoordID uint64
 	meta         Meta
@@ -65,7 +70,6 @@ type QueryCoord struct {
 	eventChan <-chan *sessionutil.SessionEvent
 
 	stateCode  atomic.Value
-	isInit     atomic.Value
 	enableGrpc bool
 
 	msFactory msgstream.Factory
@@ -77,10 +81,14 @@ func (qc *QueryCoord) Register() error {
 	qc.session = sessionutil.NewSession(qc.loopCtx, Params.MetaRootPath, Params.EtcdEndpoints)
 	qc.session.Init(typeutil.QueryCoordRole, Params.Address, true)
 	Params.NodeID = uint64(qc.session.ServerID)
+	Params.SetLogger(typeutil.UniqueID(-1))
 	return nil
 }
 
+// Init function initializes the queryCoord's meta, cluster, etcdKV and task scheduler
 func (qc *QueryCoord) Init() error {
+	log.Debug("query coordinator start init")
+	//connect etcd
 	connectEtcdFn := func() error {
 		etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
 		if err != nil {
@@ -89,39 +97,47 @@ func (qc *QueryCoord) Init() error {
 		qc.kvClient = etcdKV
 		return nil
 	}
-	log.Debug("query coordinator try to connect etcd")
-	err := retry.Do(qc.loopCtx, connectEtcdFn, retry.Attempts(300))
-	if err != nil {
-		log.Debug("query coordinator try to connect etcd failed", zap.Error(err))
-		return err
-	}
-	log.Debug("query coordinator try to connect etcd success")
-	qc.meta, err = newMeta(qc.kvClient)
-	if err != nil {
-		log.Error("query coordinator init meta failed", zap.Error(err))
-		return err
-	}
+	var initError error = nil
+	qc.initOnce.Do(func() {
+		log.Debug("query coordinator try to connect etcd")
+		initError = retry.Do(qc.loopCtx, connectEtcdFn, retry.Attempts(300))
+		if initError != nil {
+			log.Debug("query coordinator try to connect etcd failed", zap.Error(initError))
+			return
+		}
+		log.Debug("query coordinator try to connect etcd success")
+		qc.meta, initError = newMeta(qc.kvClient)
+		if initError != nil {
+			log.Error("query coordinator init meta failed", zap.Error(initError))
+			return
+		}
 
-	qc.cluster, err = newQueryNodeCluster(qc.loopCtx, qc.meta, qc.kvClient, qc.newNodeFn, qc.session)
-	if err != nil {
-		log.Error("query coordinator init cluster failed", zap.Error(err))
-		return err
-	}
+		qc.cluster, initError = newQueryNodeCluster(qc.loopCtx, qc.meta, qc.kvClient, qc.newNodeFn, qc.session)
+		if initError != nil {
+			log.Error("query coordinator init cluster failed", zap.Error(initError))
+			return
+		}
 
-	qc.scheduler, err = NewTaskScheduler(qc.loopCtx, qc.meta, qc.cluster, qc.kvClient, qc.rootCoordClient, qc.dataCoordClient)
-	if err != nil {
-		log.Error("query coordinator init task scheduler failed", zap.Error(err))
-		return err
-	}
+		qc.scheduler, initError = NewTaskScheduler(qc.loopCtx, qc.meta, qc.cluster, qc.kvClient, qc.rootCoordClient, qc.dataCoordClient)
+		if initError != nil {
+			log.Error("query coordinator init task scheduler failed", zap.Error(initError))
+			return
+		}
 
-	qc.metricsCacheManager = metricsinfo.NewMetricsCacheManager()
+		qc.metricsCacheManager = metricsinfo.NewMetricsCacheManager()
+	})
 
-	return nil
+	return initError
 }
 
+// Start function starts the goroutines to watch the meta and node updates
 func (qc *QueryCoord) Start() error {
 	qc.scheduler.Start()
 	log.Debug("start scheduler ...")
+
+	Params.CreatedTime = time.Now()
+	Params.UpdatedTime = time.Now()
+
 	qc.UpdateStateCode(internalpb.StateCode_Healthy)
 
 	qc.loopWg.Add(1)
@@ -130,9 +146,14 @@ func (qc *QueryCoord) Start() error {
 	qc.loopWg.Add(1)
 	go qc.watchMetaLoop()
 
+	go qc.session.LivenessCheck(qc.loopCtx, func() {
+		qc.Stop()
+	})
+
 	return nil
 }
 
+// Stop function stops watching the meta and node updates
 func (qc *QueryCoord) Stop() error {
 	qc.scheduler.Close()
 	log.Debug("close scheduler ...")
@@ -143,10 +164,12 @@ func (qc *QueryCoord) Stop() error {
 	return nil
 }
 
+// UpdateStateCode updates the status of the coord, including healthy, unhealthy
 func (qc *QueryCoord) UpdateStateCode(code internalpb.StateCode) {
 	qc.stateCode.Store(code)
 }
 
+// NewQueryCoord creates a QueryCoord object.
 func NewQueryCoord(ctx context.Context, factory msgstream.Factory) (*QueryCoord, error) {
 	rand.Seed(time.Now().UnixNano())
 	queryChannels := make([]*queryChannelInfo, 0)
@@ -174,12 +197,24 @@ func NewQueryCoord(ctx context.Context, factory msgstream.Factory) (*QueryCoord,
 	return service, nil
 }
 
-func (qc *QueryCoord) SetRootCoord(rootCoord types.RootCoord) {
+// SetRootCoord sets root coordinator's client
+func (qc *QueryCoord) SetRootCoord(rootCoord types.RootCoord) error {
+	if rootCoord == nil {
+		return errors.New("null root coordinator interface")
+	}
+
 	qc.rootCoordClient = rootCoord
+	return nil
 }
 
-func (qc *QueryCoord) SetDataCoord(dataCoord types.DataCoord) {
+// SetDataCoord sets data coordinator's client
+func (qc *QueryCoord) SetDataCoord(dataCoord types.DataCoord) error {
+	if dataCoord == nil {
+		return errors.New("null data coordinator interface")
+	}
+
 	qc.dataCoordClient = dataCoord
+	return nil
 }
 
 func (qc *QueryCoord) watchNodeLoop() {
@@ -202,19 +237,17 @@ func (qc *QueryCoord) watchNodeLoop() {
 			SourceNodeIDs: offlineNodeIDs,
 		}
 
+		baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_nodeDown)
 		loadBalanceTask := &LoadBalanceTask{
-			BaseTask: BaseTask{
-				ctx:              qc.loopCtx,
-				Condition:        NewTaskCondition(qc.loopCtx),
-				triggerCondition: querypb.TriggerCondition_nodeDown,
-			},
+			BaseTask:           baseTask,
 			LoadBalanceRequest: loadBalanceSegment,
 			rootCoord:          qc.rootCoordClient,
 			dataCoord:          qc.dataCoordClient,
 			cluster:            qc.cluster,
 			meta:               qc.meta,
 		}
-		qc.scheduler.Enqueue([]task{loadBalanceTask})
+		//TODO::deal enqueue error
+		qc.scheduler.Enqueue(loadBalanceTask)
 		log.Debug("start a loadBalance task", zap.Any("task", loadBalanceTask))
 	}
 
@@ -223,7 +256,10 @@ func (qc *QueryCoord) watchNodeLoop() {
 		select {
 		case <-ctx.Done():
 			return
-		case event := <-qc.eventChan:
+		case event, ok := <-qc.eventChan:
+			if !ok {
+				return
+			}
 			switch event.EventType {
 			case sessionutil.SessionAddEvent:
 				serverID := event.Session.ServerID
@@ -252,21 +288,19 @@ func (qc *QueryCoord) watchNodeLoop() {
 					BalanceReason: querypb.TriggerCondition_nodeDown,
 				}
 
+				baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_nodeDown)
 				loadBalanceTask := &LoadBalanceTask{
-					BaseTask: BaseTask{
-						ctx:              qc.loopCtx,
-						Condition:        NewTaskCondition(qc.loopCtx),
-						triggerCondition: querypb.TriggerCondition_nodeDown,
-					},
+					BaseTask:           baseTask,
 					LoadBalanceRequest: loadBalanceSegment,
 					rootCoord:          qc.rootCoordClient,
 					dataCoord:          qc.dataCoordClient,
 					cluster:            qc.cluster,
 					meta:               qc.meta,
 				}
-				qc.scheduler.Enqueue([]task{loadBalanceTask})
-				log.Debug("start a loadBalance task", zap.Any("task", loadBalanceTask))
 				qc.metricsCacheManager.InvalidateSystemInfoMetrics()
+				//TODO:: deal enqueue error
+				qc.scheduler.Enqueue(loadBalanceTask)
+				log.Debug("start a loadBalance task", zap.Any("task", loadBalanceTask))
 			}
 		}
 	}
@@ -293,7 +327,7 @@ func (qc *QueryCoord) watchMetaLoop() {
 					log.Error("watch MetaReplica loop error when get segmentID", zap.Any("error", err.Error()))
 				}
 				segmentInfo := &querypb.SegmentInfo{}
-				err = proto.UnmarshalText(string(event.Kv.Value), segmentInfo)
+				err = proto.Unmarshal(event.Kv.Value, segmentInfo)
 				if err != nil {
 					log.Error("watch MetaReplica loop error when unmarshal", zap.Any("error", err.Error()))
 				}

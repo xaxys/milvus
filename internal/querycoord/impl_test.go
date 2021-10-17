@@ -13,6 +13,7 @@ package querycoord
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -320,15 +321,93 @@ func TestGrpcTask(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, res.Status.ErrorCode)
 	})
 
-	//nodes, err := queryCoord.cluster.getOnServiceNodes()
-	//assert.Nil(t, err)
-
 	err = node.stop()
-	//assert.Nil(t, err)
-
-	//allNodeOffline := waitAllQueryNodeOffline(queryCoord.cluster, nodes)
-	//assert.Equal(t, allNodeOffline, true)
+	err = removeNodeSession(node.queryNodeID)
+	assert.Nil(t, err)
 	queryCoord.Stop()
+	err = removeAllSession()
+	assert.Nil(t, err)
+}
+
+func TestGrpcTaskEnqueueFail(t *testing.T) {
+	refreshParams()
+	ctx := context.Background()
+	queryCoord, err := startQueryCoord(ctx)
+	assert.Nil(t, err)
+
+	_, err = startQueryNodeServer(ctx)
+	assert.Nil(t, err)
+
+	taskIDAllocator := queryCoord.scheduler.taskIDAllocator
+	failedAllocator := func() (UniqueID, error) {
+		return 0, errors.New("scheduler failed to allocate ID")
+	}
+
+	queryCoord.scheduler.taskIDAllocator = failedAllocator
+
+	t.Run("Test LoadPartition", func(t *testing.T) {
+		status, err := queryCoord.LoadPartitions(ctx, &querypb.LoadPartitionsRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_LoadPartitions,
+			},
+			CollectionID: defaultCollectionID,
+			PartitionIDs: []UniqueID{defaultPartitionID},
+			Schema:       genCollectionSchema(defaultCollectionID, false),
+		})
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+		assert.NotNil(t, err)
+	})
+
+	t.Run("Test LoadCollection", func(t *testing.T) {
+		status, err := queryCoord.LoadCollection(ctx, &querypb.LoadCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_LoadCollection,
+			},
+			CollectionID: defaultCollectionID,
+			Schema:       genCollectionSchema(defaultCollectionID, false),
+		})
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+		assert.NotNil(t, err)
+	})
+
+	queryCoord.scheduler.taskIDAllocator = taskIDAllocator
+	status, err := queryCoord.LoadCollection(ctx, &querypb.LoadCollectionRequest{
+		Base: &commonpb.MsgBase{
+			MsgType: commonpb.MsgType_LoadCollection,
+		},
+		CollectionID: defaultCollectionID,
+		Schema:       genCollectionSchema(defaultCollectionID, false),
+	})
+	assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
+	assert.Nil(t, err)
+	queryCoord.scheduler.taskIDAllocator = failedAllocator
+
+	t.Run("Test ReleasePartition", func(t *testing.T) {
+		status, err := queryCoord.ReleasePartitions(ctx, &querypb.ReleasePartitionsRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_ReleasePartitions,
+			},
+			CollectionID: defaultCollectionID,
+			PartitionIDs: []UniqueID{defaultPartitionID},
+		})
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+		assert.NotNil(t, err)
+	})
+
+	t.Run("Test ReleaseCollection", func(t *testing.T) {
+		status, err := queryCoord.ReleaseCollection(ctx, &querypb.ReleaseCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_ReleaseCollection,
+			},
+			CollectionID: defaultCollectionID,
+		})
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+		assert.NotNil(t, err)
+	})
+
+	queryCoord.Stop()
+	err = removeAllSession()
+	assert.Nil(t, err)
 }
 
 func TestLoadBalanceTask(t *testing.T) {
@@ -344,7 +423,7 @@ func TestLoadBalanceTask(t *testing.T) {
 	queryNode2, err := startQueryNodeServer(baseCtx)
 	assert.Nil(t, err)
 
-	time.Sleep(time.Second)
+	time.Sleep(100 * time.Millisecond)
 	res, err := queryCoord.LoadCollection(baseCtx, &querypb.LoadCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType: commonpb.MsgType_LoadCollection,
@@ -355,7 +434,7 @@ func TestLoadBalanceTask(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, commonpb.ErrorCode_Success, res.ErrorCode)
 
-	time.Sleep(time.Second)
+	time.Sleep(100 * time.Millisecond)
 	for {
 		collectionInfo := queryCoord.meta.showCollections()
 		if collectionInfo[0].InMemoryPercentage == 100 {
@@ -374,7 +453,7 @@ func TestLoadBalanceTask(t *testing.T) {
 	}
 
 	loadBalanceTask := &LoadBalanceTask{
-		BaseTask: BaseTask{
+		BaseTask: &BaseTask{
 			ctx:              baseCtx,
 			Condition:        NewTaskCondition(baseCtx),
 			triggerCondition: querypb.TriggerCondition_nodeDown,
@@ -385,7 +464,7 @@ func TestLoadBalanceTask(t *testing.T) {
 		cluster:            queryCoord.cluster,
 		meta:               queryCoord.meta,
 	}
-	queryCoord.scheduler.Enqueue([]task{loadBalanceTask})
+	queryCoord.scheduler.Enqueue(loadBalanceTask)
 
 	res, err = queryCoord.ReleaseCollection(baseCtx, &querypb.ReleaseCollectionRequest{
 		Base: &commonpb.MsgBase{
@@ -398,9 +477,12 @@ func TestLoadBalanceTask(t *testing.T) {
 	queryNode1.stop()
 	queryNode2.stop()
 	queryCoord.Stop()
+	err = removeAllSession()
+	assert.Nil(t, err)
 }
 
 func TestGrpcTaskBeforeHealthy(t *testing.T) {
+	refreshParams()
 	ctx := context.Background()
 	unHealthyCoord, err := startUnHealthyQueryCoord(ctx)
 	assert.Nil(t, err)
@@ -550,4 +632,26 @@ func TestGrpcTaskBeforeHealthy(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, res.Status.ErrorCode)
 	})
 
+	unHealthyCoord.Stop()
+	err = removeAllSession()
+	assert.Nil(t, err)
+}
+
+func Test_GrpcGetQueryChannelFail(t *testing.T) {
+	kv := &testKv{
+		returnFn: failedResult,
+	}
+	meta, err := newMeta(kv)
+	assert.Nil(t, err)
+
+	queryCoord := &QueryCoord{
+		meta: meta,
+	}
+	queryCoord.stateCode.Store(internalpb.StateCode_Healthy)
+
+	res, err := queryCoord.CreateQueryChannel(context.Background(), &querypb.CreateQueryChannelRequest{
+		CollectionID: defaultCollectionID,
+	})
+	assert.NotNil(t, err)
+	assert.Equal(t, commonpb.ErrorCode_UnexpectedError, res.Status.ErrorCode)
 }

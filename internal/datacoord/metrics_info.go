@@ -16,6 +16,8 @@ import (
 	"errors"
 	"os"
 
+	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
+
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 
 	"go.uber.org/zap"
@@ -35,7 +37,7 @@ func (s *Server) getSystemInfoMetrics(
 	// TODO(dragondriver): add more detail metrics
 
 	// get datacoord info
-	nodes := s.cluster.GetNodes()
+	nodes := s.cluster.GetSessions()
 	clusterTopology := metricsinfo.DataClusterTopology{
 		Self:           s.getDataCoordMetrics(),
 		ConnectedNodes: make([]metricsinfo.DataNodeInfos, 0, len(nodes)),
@@ -99,8 +101,10 @@ func (s *Server) getDataCoordMetrics() metricsinfo.DataCoordInfos {
 				SystemVersion: os.Getenv(metricsinfo.GitCommitEnvKey),
 				DeployMode:    os.Getenv(metricsinfo.DeployModeEnvKey),
 			},
-			// TODO(dragondriver): CreatedTime & UpdatedTime, easy but time-costing
-			Type: typeutil.DataCoordRole,
+			CreatedTime: Params.CreatedTime.String(),
+			UpdatedTime: Params.UpdatedTime.String(),
+			Type:        typeutil.DataCoordRole,
+			ID:          s.session.ServerID,
 		},
 		SystemConfigurations: metricsinfo.DataCoordConfiguration{
 			SegmentMaxSize: Params.SegmentMaxSize,
@@ -110,21 +114,23 @@ func (s *Server) getDataCoordMetrics() metricsinfo.DataCoordInfos {
 
 // getDataNodeMetrics composes data node infos
 // this function will invoke GetMetrics with data node specified in NodeInfo
-func (s *Server) getDataNodeMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, node *NodeInfo) (metricsinfo.DataNodeInfos, error) {
+func (s *Server) getDataNodeMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, node *Session) (metricsinfo.DataNodeInfos, error) {
 	infos := metricsinfo.DataNodeInfos{
 		BaseComponentInfos: metricsinfo.BaseComponentInfos{
 			HasError: true,
+			ID:       int64(uniquegenerator.GetUniqueIntGeneratorIns().GetInt()),
 		},
 	}
 	if node == nil {
 		return infos, errors.New("datanode is nil")
 	}
 
-	if node.GetClient() == nil {
-		return infos, errors.New("datanode client is nil")
+	cli, err := node.GetOrCreateClient(ctx)
+	if err != nil {
+		return infos, err
 	}
 
-	metrics, err := node.GetClient().GetMetrics(ctx, req)
+	metrics, err := cli.GetMetrics(ctx, req)
 	if err != nil {
 		log.Warn("invalid metrics of data node was found",
 			zap.Error(err))

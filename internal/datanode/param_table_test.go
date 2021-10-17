@@ -1,24 +1,34 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
 import (
 	"log"
+	"path"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func TestParamTable_DataNode(t *testing.T) {
-
+func TestParamTable(t *testing.T) {
+	Params.Init()
+	Params.NodeID = 2
+	Params.initMsgChannelSubName()
 	t.Run("Test NodeID", func(t *testing.T) {
 		id := Params.NodeID
 		log.Println("NodeID:", id)
@@ -55,18 +65,27 @@ func TestParamTable_DataNode(t *testing.T) {
 		log.Println("PulsarAddress:", address)
 	})
 
+	t.Run("Test ClusterChannelPrefix", func(t *testing.T) {
+		path := Params.ClusterChannelPrefix
+		assert.Equal(t, path, "by-dev")
+		log.Println("ClusterChannelPrefix:", Params.ClusterChannelPrefix)
+	})
+
 	t.Run("Test SegmentStatisticsChannelName", func(t *testing.T) {
 		path := Params.SegmentStatisticsChannelName
+		assert.Equal(t, path, "by-dev-datacoord-statistics-channel")
 		log.Println("SegmentStatisticsChannelName:", path)
 	})
 
 	t.Run("Test TimeTickChannelName", func(t *testing.T) {
 		name := Params.TimeTickChannelName
+		assert.Equal(t, name, "by-dev-datacoord-timetick-channel")
 		log.Println("TimeTickChannelName:", name)
 	})
 
 	t.Run("Test msgChannelSubName", func(t *testing.T) {
 		name := Params.MsgChannelSubName
+		assert.Equal(t, name, "by-dev-dataNode-2")
 		log.Println("MsgChannelSubName:", name)
 	})
 
@@ -108,5 +127,16 @@ func TestParamTable_DataNode(t *testing.T) {
 	t.Run("Test UpdatedTime", func(t *testing.T) {
 		Params.UpdatedTime = time.Now()
 		log.Println("UpdatedTime: ", Params.UpdatedTime)
+	})
+
+	t.Run("Test InsertBinlogRootPath", func(t *testing.T) {
+		Params.Init()
+		assert.Equal(t, path.Join("files", "insert_log"), Params.InsertBinlogRootPath)
+	})
+
+	t.Run("Test StatsBinlogRootPath", func(t *testing.T) {
+		p := new(ParamTable)
+		p.Init()
+		assert.Equal(t, path.Join("files", "stats_log"), Params.StatsBinlogRootPath)
 	})
 }

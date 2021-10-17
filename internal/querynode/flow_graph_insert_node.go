@@ -28,11 +28,17 @@ type insertNode struct {
 	replica ReplicaInterface
 }
 
-type InsertData struct {
+type insertData struct {
 	insertIDs        map[UniqueID][]int64
 	insertTimestamps map[UniqueID][]Timestamp
 	insertRecords    map[UniqueID][]*commonpb.Blob
 	insertOffset     map[UniqueID]int64
+}
+
+type deleteData struct {
+	deleteIDs        map[UniqueID][]int64
+	deleteTimestamps map[UniqueID][]Timestamp
+	deleteOffset     map[UniqueID]int64
 }
 
 func (iNode *insertNode) Name() string {
@@ -53,7 +59,7 @@ func (iNode *insertNode) Operate(in []flowgraph.Msg) []flowgraph.Msg {
 		// TODO: add error handling
 	}
 
-	insertData := InsertData{
+	iData := insertData{
 		insertIDs:        make(map[UniqueID][]int64),
 		insertTimestamps: make(map[UniqueID][]Timestamp),
 		insertRecords:    make(map[UniqueID][]*commonpb.Blob),
@@ -84,41 +90,41 @@ func (iNode *insertNode) Operate(in []flowgraph.Msg) []flowgraph.Msg {
 
 		// check if segment exists, if not, create this segment
 		if !iNode.replica.hasSegment(task.SegmentID) {
-			err := iNode.replica.addSegment(task.SegmentID, task.PartitionID, task.CollectionID, task.ChannelID, segmentTypeGrowing, true)
+			err := iNode.replica.addSegment(task.SegmentID, task.PartitionID, task.CollectionID, task.ShardName, segmentTypeGrowing, true)
 			if err != nil {
 				log.Warn(err.Error())
 				continue
 			}
 		}
 
-		insertData.insertIDs[task.SegmentID] = append(insertData.insertIDs[task.SegmentID], task.RowIDs...)
-		insertData.insertTimestamps[task.SegmentID] = append(insertData.insertTimestamps[task.SegmentID], task.Timestamps...)
-		insertData.insertRecords[task.SegmentID] = append(insertData.insertRecords[task.SegmentID], task.RowData...)
+		iData.insertIDs[task.SegmentID] = append(iData.insertIDs[task.SegmentID], task.RowIDs...)
+		iData.insertTimestamps[task.SegmentID] = append(iData.insertTimestamps[task.SegmentID], task.Timestamps...)
+		iData.insertRecords[task.SegmentID] = append(iData.insertRecords[task.SegmentID], task.RowData...)
 	}
 
 	// 2. do preInsert
-	for segmentID := range insertData.insertRecords {
+	for segmentID := range iData.insertRecords {
 		var targetSegment, err = iNode.replica.getSegmentByID(segmentID)
 		if err != nil {
 			log.Warn(err.Error())
 		}
 
-		var numOfRecords = len(insertData.insertRecords[segmentID])
+		var numOfRecords = len(iData.insertRecords[segmentID])
 		if targetSegment != nil {
 			offset, err := targetSegment.segmentPreInsert(numOfRecords)
 			if err != nil {
 				log.Warn(err.Error())
 			}
-			insertData.insertOffset[segmentID] = offset
+			iData.insertOffset[segmentID] = offset
 			log.Debug("insertNode operator", zap.Int("insert size", numOfRecords), zap.Int64("insert offset", offset), zap.Int64("segment id", segmentID))
 		}
 	}
 
 	// 3. do insert
 	wg := sync.WaitGroup{}
-	for segmentID := range insertData.insertRecords {
+	for segmentID := range iData.insertRecords {
 		wg.Add(1)
-		go iNode.insert(&insertData, segmentID, &wg)
+		go iNode.insert(&iData, segmentID, &wg)
 	}
 	wg.Wait()
 
@@ -132,7 +138,7 @@ func (iNode *insertNode) Operate(in []flowgraph.Msg) []flowgraph.Msg {
 	return []Msg{res}
 }
 
-func (iNode *insertNode) insert(insertData *InsertData, segmentID UniqueID, wg *sync.WaitGroup) {
+func (iNode *insertNode) insert(iData *insertData, segmentID UniqueID, wg *sync.WaitGroup) {
 	log.Debug("QueryNode::iNode::insert", zap.Any("SegmentID", segmentID))
 	var targetSegment, err = iNode.replica.getSegmentByID(segmentID)
 	if err != nil {
@@ -147,10 +153,10 @@ func (iNode *insertNode) insert(insertData *InsertData, segmentID UniqueID, wg *
 		return
 	}
 
-	ids := insertData.insertIDs[segmentID]
-	timestamps := insertData.insertTimestamps[segmentID]
-	records := insertData.insertRecords[segmentID]
-	offsets := insertData.insertOffset[segmentID]
+	ids := iData.insertIDs[segmentID]
+	timestamps := iData.insertTimestamps[segmentID]
+	records := iData.insertRecords[segmentID]
+	offsets := iData.insertOffset[segmentID]
 
 	err = targetSegment.segmentInsert(offsets, &ids, &timestamps, &records)
 	if err != nil {
@@ -160,9 +166,35 @@ func (iNode *insertNode) insert(insertData *InsertData, segmentID UniqueID, wg *
 		return
 	}
 
-	log.Debug("Do insert done", zap.Int("len", len(insertData.insertIDs[segmentID])),
+	log.Debug("Do insert done", zap.Int("len", len(iData.insertIDs[segmentID])),
 		zap.Int64("segmentID", segmentID))
 	wg.Done()
+}
+
+func (iNode *insertNode) delete(deleteData *deleteData, segmentID UniqueID, wg *sync.WaitGroup) {
+	defer wg.Done()
+	log.Debug("QueryNode::iNode::delete", zap.Any("SegmentID", segmentID))
+	var targetSegment, err = iNode.replica.getSegmentByID(segmentID)
+	if err != nil {
+		log.Warn("Cannot find segment:", zap.Int64("segmentID", segmentID))
+		return
+	}
+
+	if targetSegment.segmentType != segmentTypeGrowing {
+		return
+	}
+
+	ids := deleteData.deleteIDs[segmentID]
+	timestamps := deleteData.deleteTimestamps[segmentID]
+	offset := deleteData.deleteOffset[segmentID]
+
+	err = targetSegment.segmentDelete(offset, &ids, &timestamps)
+	if err != nil {
+		log.Warn("QueryNode: targetSegmentDelete failed", zap.Error(err))
+		return
+	}
+
+	log.Debug("Do delete done", zap.Int("len", len(deleteData.deleteIDs[segmentID])), zap.Int64("segmentID", segmentID))
 }
 
 func newInsertNode(replica ReplicaInterface) *insertNode {

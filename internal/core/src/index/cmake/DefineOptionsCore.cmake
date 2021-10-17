@@ -55,14 +55,14 @@ endmacro()
 #----------------------------------------------------------------------
 set_option_category("Thirdparty")
 
-set(KNOWHERE_DEPENDENCY_SOURCE_DEFAULT "BUNDLED")
+set(KNOWHERE_DEPENDENCY_SOURCE "AUTO")
 
 define_option_string(KNOWHERE_DEPENDENCY_SOURCE
         "Method to use for acquiring KNOWHERE's build dependencies"
-        "${KNOWHERE_DEPENDENCY_SOURCE_DEFAULT}"
         "AUTO"
         "BUNDLED"
         "SYSTEM")
+
 
 define_option(KNOWHERE_USE_CCACHE "Use ccache when compiling (if available)" ON)
 
@@ -90,12 +90,6 @@ define_option(MILVUS_CUDA_ARCH "Build with CUDA arch" "DEFAULT")
 
 #----------------------------------------------------------------------
 set_option_category("Test and benchmark")
-
-if (BUILD_UNIT_TEST)
-    define_option(KNOWHERE_BUILD_TESTS "Build the KNOWHERE googletest unit tests" ON)
-else ()
-    define_option(KNOWHERE_BUILD_TESTS "Build the KNOWHERE googletest unit tests" OFF)
-endif (BUILD_UNIT_TEST)
 
 #----------------------------------------------------------------------
 macro(config_summary)

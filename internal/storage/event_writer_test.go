@@ -47,7 +47,7 @@ func TestSizeofStruct(t *testing.T) {
 	}
 	err = de.Write(&buf)
 	assert.Nil(t, err)
-	s3 := binary.Size(de.DescriptorEventDataFixPart) + binary.Size(de.PostHeaderLengths)
+	s3 := binary.Size(de.DescriptorEventDataFixPart) + binary.Size(de.PostHeaderLengths) + binary.Size(de.ExtraLength) + int(de.ExtraLength)
 	assert.Equal(t, s3, buf.Len())
 }
 
@@ -84,4 +84,24 @@ func TestEventWriter(t *testing.T) {
 	assert.EqualValues(t, length, buffer.Len())
 	err = insertEvent.Close()
 	assert.Nil(t, err)
+}
+
+func TestReadMagicNumber(t *testing.T) {
+	var err error
+	buf := bytes.Buffer{}
+
+	// eof
+	_, err = readMagicNumber(&buf)
+	assert.Error(t, err)
+
+	// not a magic number
+	_ = binary.Write(&buf, binary.LittleEndian, MagicNumber+1)
+	_, err = readMagicNumber(&buf)
+	assert.Error(t, err)
+
+	// normal case
+	_ = binary.Write(&buf, binary.LittleEndian, MagicNumber)
+	num, err := readMagicNumber(&buf)
+	assert.NoError(t, err)
+	assert.Equal(t, MagicNumber, num)
 }

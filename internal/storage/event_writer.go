@@ -15,7 +15,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 )
@@ -30,6 +32,7 @@ const (
 	DropCollectionEventType
 	CreatePartitionEventType
 	DropPartitionEventType
+	IndexFileEventType
 	EventTypeEnd
 )
 
@@ -42,6 +45,7 @@ func (code EventTypeCode) String() string {
 		DropCollectionEventType:   "DropCollectionEventType",
 		CreatePartitionEventType:  "CreatePartitionEventType",
 		DropPartitionEventType:    "DropPartitionEventType",
+		IndexFileEventType:        "IndexFileEventType",
 	}
 	if eventTypeStr, ok := codes[code]; ok {
 		return eventTypeStr
@@ -59,6 +63,13 @@ func (event *descriptorEvent) GetMemoryUsageInBytes() int32 {
 }
 
 func (event *descriptorEvent) Write(buffer io.Writer) error {
+	err := event.descriptorEventData.FinishExtra()
+	if err != nil {
+		return err
+	}
+	event.descriptorEventHeader.EventLength = event.descriptorEventHeader.GetMemoryUsageInBytes() + event.descriptorEventData.GetMemoryUsageInBytes()
+	event.descriptorEventHeader.NextPosition = int32(binary.Size(MagicNumber)) + event.descriptorEventHeader.EventLength
+
 	if err := event.descriptorEventHeader.Write(buffer); err != nil {
 		return err
 	}
@@ -66,6 +77,18 @@ func (event *descriptorEvent) Write(buffer io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+func readMagicNumber(buffer io.Reader) (int32, error) {
+	var magicNumber int32
+	if err := binary.Read(buffer, binary.LittleEndian, &magicNumber); err != nil {
+		return -1, err
+	}
+	if magicNumber != MagicNumber {
+		return -1, fmt.Errorf("parse magic number failed, expected: %s, actual: %s", strconv.Itoa(int(MagicNumber)), strconv.Itoa(int(magicNumber)))
+	}
+
+	return magicNumber, nil
 }
 
 func ReadDescriptorEvent(buffer io.Reader) (*descriptorEvent, error) {
@@ -192,12 +215,14 @@ type dropPartitionEventWriter struct {
 	dropPartitionEventData
 }
 
+type indexFileEventWriter struct {
+	baseEventWriter
+	indexFileEventData
+}
+
 func newDescriptorEvent() *descriptorEvent {
 	header := newDescriptorEventHeader()
 	data := newDescriptorEventData()
-	header.EventLength = header.GetMemoryUsageInBytes() + data.GetMemoryUsageInBytes()
-	header.NextPosition = int32(binary.Size(MagicNumber)) + header.EventLength
-	data.HeaderLength = int8(binary.Size(eventHeader{}))
 	return &descriptorEvent{
 		descriptorEventHeader: *header,
 		descriptorEventData:   *data,
@@ -349,5 +374,28 @@ func newDropPartitionEventWriter(dataType schemapb.DataType) (*dropPartitionEven
 	}
 	writer.baseEventWriter.getEventDataSize = writer.dropPartitionEventData.GetEventDataFixPartSize
 	writer.baseEventWriter.writeEventData = writer.dropPartitionEventData.WriteEventData
+	return writer, nil
+}
+
+func newIndexFileEventWriter() (*indexFileEventWriter, error) {
+	payloadWriter, err := NewPayloadWriter(schemapb.DataType_String)
+	if err != nil {
+		return nil, err
+	}
+	header := newEventHeader(IndexFileEventType)
+	data := newIndexFileEventData()
+
+	writer := &indexFileEventWriter{
+		baseEventWriter: baseEventWriter{
+			eventHeader:            *header,
+			PayloadWriterInterface: payloadWriter,
+			isClosed:               false,
+			isFinish:               false,
+		},
+		indexFileEventData: *data,
+	}
+	writer.baseEventWriter.getEventDataSize = writer.indexFileEventData.GetEventDataFixPartSize
+	writer.baseEventWriter.writeEventData = writer.indexFileEventData.WriteEventData
+
 	return writer, nil
 }

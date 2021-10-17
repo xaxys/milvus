@@ -18,22 +18,39 @@ import (
 )
 
 const (
-	L2             = "L2"
-	IP             = "IP"
-	HAMMING        = "HAMMING"
-	JACCARD        = "JACCARD"
-	TANIMOTO       = "TANIMOTO"
-	SUBSTRUCTURE   = "SUBSTRUCTURE"
+	// L2 represents Euclidean distance
+	L2 = "L2"
+
+	// IP represents inner product distance
+	IP = "IP"
+
+	// HAMMING represents hamming distance
+	HAMMING = "HAMMING"
+
+	// JACCARD represents jaccard distance
+	JACCARD = "JACCARD"
+
+	// TANIMOTO represents tanimoto distance
+	TANIMOTO = "TANIMOTO"
+
+	// SUBSTRUCTURE represents substructure distance
+	SUBSTRUCTURE = "SUBSTRUCTURE"
+
+	// SUPERSTRUCTURE represents superstructure distance
 	SUPERSTRUCTURE = "SUPERSTRUCTURE"
 
 	MinNBits     = 1
 	MaxNBits     = 16
 	DefaultNBits = 8
 
+	// MinNList is the lower limit of nlist that used in Index IVFxxx
 	MinNList = 1
+	// MaxNList is the upper limit of nlist that used in Index IVFxxx
 	MaxNList = 65536
 
+	// DefaultMinDim is the smallest dimension supported in Milvus
 	DefaultMinDim = 1
+	// DefaultMaxDim is the largest dimension supported in Milvus
 	DefaultMaxDim = 32768
 
 	NgtMinEdgeSize = 1
@@ -57,11 +74,14 @@ const (
 	// too large of n_trees takes much time, if there is real requirement, change this threshold.
 	MaxNTrees = 1024
 
-	DIM    = "dim"
+	// DIM is a constant used to represent dimension
+	DIM = "dim"
+	// Metric is a constant used to metric type
 	Metric = "metric_type"
-	NLIST  = "nlist"
-	NBITS  = "nbits"
-	IVFM   = "m"
+	// NLIST is a constant used to nlist in Index IVFxxx
+	NLIST = "nlist"
+	NBITS = "nbits"
+	IVFM  = "m"
 
 	KNNG         = "knng"
 	SearchLength = "search_length"
@@ -86,16 +106,21 @@ const (
 	GPUMode   = "GPU"
 )
 
-var METRICS = []string{L2, IP}                                                             // const
+// METRICS is a set of all metrics types supported for float vector.
+var METRICS = []string{L2, IP} // const
+
+// BinIDMapMetrics is a set of all metric types supported for binary vector.
 var BinIDMapMetrics = []string{HAMMING, JACCARD, TANIMOTO, SUBSTRUCTURE, SUPERSTRUCTURE}   // const
 var BinIvfMetrics = []string{HAMMING, JACCARD, TANIMOTO}                                   // const
 var supportDimPerSubQuantizer = []int{32, 28, 24, 20, 16, 12, 10, 8, 6, 4, 3, 2, 1}        // const
 var supportSubQuantizer = []int{96, 64, 56, 48, 40, 32, 28, 24, 20, 16, 12, 8, 4, 3, 2, 1} // const
 
 type ConfAdapter interface {
+	// CheckTrain returns true if the index can be built with the specific index parameters.
 	CheckTrain(map[string]string) bool
 }
 
+// BaseConfAdapter checks if a `FLAT` index can be built.
 type BaseConfAdapter struct {
 }
 

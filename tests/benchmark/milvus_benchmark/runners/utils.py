@@ -143,6 +143,7 @@ def get_dataset(hdf5_file_path):
 
 
 def get_default_field_name(data_type=DataType.FLOAT_VECTOR):
+    """ Return fild name according to data type """
     if data_type == DataType.FLOAT_VECTOR:
         field_name = DEFAULT_F_FIELD_NAME
     elif data_type == DataType.BINARY_VECTOR:
@@ -158,6 +159,7 @@ def get_default_field_name(data_type=DataType.FLOAT_VECTOR):
 
 
 def get_vector_type(data_type):
+    """ Return vector type according to data type """
     vector_type = ''
     if data_type in ["random", "sift", "deep", "glove", "local"]:
         vector_type = DataType.FLOAT_VECTOR

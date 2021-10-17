@@ -44,11 +44,18 @@ type HardwareMetrics struct {
 }
 
 const (
+	// GitCommitEnvKey defines the key to retrieve the commit corresponding to the current milvus version
+	// from the metrics information
 	GitCommitEnvKey = "MILVUS_GIT_COMMIT"
 
-	// maybe MILVUS_DEPLOY_MODE is more reasonable? not easy to change this due to compatible issue
-	DeployModeEnvKey     = "DEPLOY_MODE"
-	ClusterDeployMode    = "DISTRIBUTED"
+	// DeployModeEnvKey defines the key to retrieve the current milvus deployment mode
+	// from the metrics information
+	DeployModeEnvKey = "DEPLOY_MODE"
+
+	// ClusterDeployMode represents distributed deployment mode
+	ClusterDeployMode = "DISTRIBUTED"
+
+	// StandaloneDeployMode represents the stand-alone deployment mode
 	StandaloneDeployMode = "STANDALONE"
 )
 
@@ -68,6 +75,7 @@ type BaseComponentInfos struct {
 	CreatedTime   string          `json:"created_time"`
 	UpdatedTime   string          `json:"updated_time"`
 	Type          string          `json:"type"`
+	ID            int64           `json:"id"`
 }
 
 // QueryNodeConfiguration records the configuration of query node.
@@ -79,6 +87,8 @@ type QueryNodeConfiguration struct {
 	RetrieveReceiveBufSize       int64 `json:"retrieve_receive_buf_size"`
 	RetrievePulsarBufSize        int64 `json:"retrieve_pulsar_buf_size"`
 	RetrieveResultReceiveBufSize int64 `json:"retrieve_result_receive_buf_size"`
+
+	SimdType string `json:"simd_type"`
 }
 
 // QueryNodeInfos implements ComponentInfos
@@ -114,6 +124,8 @@ type ProxyInfos struct {
 // IndexNodeConfiguration records the configuration of index node.
 type IndexNodeConfiguration struct {
 	MinioBucketName string `json:"minio_bucket_name"`
+
+	SimdType string `json:"simd_type"`
 }
 
 // IndexNodeInfos implements ComponentInfos

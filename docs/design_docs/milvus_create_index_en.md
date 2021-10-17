@@ -1,5 +1,5 @@
 # Create Index
-`Index system` is the core part of `Milvus`, used to speed up the searches, this documents indroduces which components are involved in `Create Index`,and what does these components do?
+`Index system` is the core part of `Milvus`, which is used to speed up the searches, this document indroduces which components are involved in `Create Index`,and what do these components do?
 
 The execution flow of `Create Index` is shown in the following figure:
 
@@ -24,7 +24,7 @@ message CreateIndexRequest {
 }
 ```
 
-2. When received the `CreateIndex` request, the `Proxy` would wraps this request into `CreateIndexTask`, and pushs this task into `DdTaskQueue` queue. After that, `Proxy` would call method of `WatiToFinish` to wait until the task finished.
+2. When received the `CreateIndex` request, the `Proxy` would wrap this request into `CreateIndexTask`, and pushs this task into `DdTaskQueue` queue. After that, `Proxy` would call method of `WatiToFinish` to wait until the task finished.
  
 ```go
 type task interface {
@@ -53,7 +53,7 @@ type createIndexTask struct {
 }
 ```
 
-3. There is a backgroud service in `Proxy`, this service would get the `CreateIndexTask` from `DdTaskQueue`, and executes it in three phases.
+3. There is a background service in `Proxy`, this service would get the `CreateIndexTask` from `DdTaskQueue`, and executes it in three phases.
     - `PreExecute`, do some static checking at this phase, such as check if the index param is legal, etc. 
     - `Execute`, at this phase, `Proxy` would send `CreateIndex` request to `RootCoord` via `Grpc`,and wait the reponse, the `proto` is defined as follow:
     ```proto
@@ -143,7 +143,7 @@ message BuildIndexResponse {
 
 11.  There is a backgroud service, `assignTaskLoop`, in `IndexCoord`. `assignTaskLoop` would call `GetUnassignedTask` periodically, the default interval is 3s. `GetUnassignedTask` would list these segments whos `index meta` has been updated, but index has not been created yet. 
 
-12.  The previous step has listed the segments whos index has not been created, for each those segments, `IndexCoord` would call `PeekClient` to get an available `IndexNode`,   and send `CreateIndex` request to this `IndexNode`. The `proto` is defined as follow. 
+12.  The previous step has listed the segments whose index has not been created, for each those segments, `IndexCoord` would call `PeekClient` to get an available `IndexNode`,   and send `CreateIndex` request to this `IndexNode`. The `proto` is defined as follow. 
 ```proto
 service IndexNode {
   ...

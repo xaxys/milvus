@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/kv"
-	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 
@@ -35,7 +34,7 @@ import (
 
 func newMemoryMeta(allocator allocator) (*meta, error) {
 	memoryKV := memkv.NewMemoryKV()
-	return NewMeta(memoryKV)
+	return newMeta(memoryKV)
 }
 
 var _ allocator = (*MockAllocator)(nil)
@@ -77,6 +76,10 @@ func (kv *saveFailKV) Save(key, value string) error {
 	return errors.New("mocked fail")
 }
 
+func (kv *saveFailKV) MultiSave(kvs map[string]string) error {
+	return errors.New("mocked fail")
+}
+
 // a mock kv that always fail when do `Remove`
 type removeFailKV struct{ kv.TxnKV }
 
@@ -113,10 +116,6 @@ func newMockDataNodeClient(id int64, ch chan interface{}) (*mockDataNodeClient, 
 		state: internalpb.StateCode_Initializing,
 		ch:    ch,
 	}, nil
-}
-
-var mockDataNodeCreator DataNodeCreatorFunc = func(_ context.Context, addr string) (types.DataNode, error) {
-	return newMockDataNodeClient(0, nil)
 }
 
 func (c *mockDataNodeClient) Init() error {
@@ -163,6 +162,7 @@ func (c *mockDataNodeClient) GetMetrics(ctx context.Context, req *milvuspb.GetMe
 	nodeInfos := metricsinfo.DataNodeInfos{
 		BaseComponentInfos: metricsinfo.BaseComponentInfos{
 			Name: metricsinfo.ConstructComponentName(typeutil.DataNodeRole, nodeID),
+			ID:   nodeID,
 		},
 	}
 	resp, err := metricsinfo.MarshalComponentInfos(nodeInfos)
@@ -402,6 +402,7 @@ func (m *mockRootCoordService) GetMetrics(ctx context.Context, req *milvuspb.Get
 		Self: metricsinfo.RootCoordInfos{
 			BaseComponentInfos: metricsinfo.BaseComponentInfos{
 				Name: metricsinfo.ConstructComponentName(typeutil.RootCoordRole, nodeID),
+				ID:   nodeID,
 			},
 		},
 		Connections: metricsinfo.ConnTopology{
