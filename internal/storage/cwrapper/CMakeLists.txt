@@ -46,7 +46,7 @@ macro( build_arrow )
 
     ExternalProject_Add(
             arrow_ep
-            PREFIX              ${ARROW_BUILD}
+            PREFIX              ${CMAKE_BINARY_DIR}/3rdparty_download/arrow-subbuild
             DOWNLOAD_DIR        ${THIRDPARTY_DOWNLOAD_PATH}
             INSTALL_DIR         ${ARROW_OUTPUT}
             URL                 ${ARROW_SOURCE_URL}
