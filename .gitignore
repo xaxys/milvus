@@ -54,6 +54,7 @@ lib/
 
 .DS_Store
 *.sw[po]
+arrow_build
 cwrapper_build
 cwrapper_dablooms_build
 **/cwrapper_rocksdb_build/

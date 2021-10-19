@@ -25,10 +25,10 @@ done
 DIR=$( cd -P $( dirname $SOURCE ) && pwd )
 # DIR=${DIR}/../internal/storage/cwrapper
 
-CMAKE_BUILD=${DIR}/../cwrapper_build
-OUTPUT_LIB=${DIR}/../internal/storage/cwrapper/output
-SRC_DIR=${DIR}/../internal/storage/cwrapper
-CORE_OUTPUT_LIB=${DIR}/../internal/core/output
+CMAKE_BUILD="${DIR}/../cwrapper_build"
+OUTPUT_LIB="${DIR}/../internal/storage/cwrapper/output"
+SRC_DIR="${DIR}/../internal/storage/cwrapper"
+ARROW_BUILD="${DIR}/../arrow_build"
 
 if [ ! -d ${CMAKE_BUILD} ];then
     mkdir ${CMAKE_BUILD}
@@ -78,7 +78,7 @@ pushd ${CMAKE_BUILD}
 CMAKE_CMD="cmake \
 -DCMAKE_INSTALL_PREFIX=${OUTPUT_LIB} \
 -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
--DCORE_OUTPUT_LIB=${CORE_OUTPUT_LIB} \
+-DARROW_BUILD=${ARROW_BUILD} \
 -DCUSTOM_THIRDPARTY_DOWNLOAD_PATH=${CUSTOM_THIRDPARTY_PATH} ${SRC_DIR}"
 
 ${CMAKE_CMD}
