@@ -46,7 +46,7 @@ macro( build_arrow )
 
     ExternalProject_Add(
             arrow_ep
-            PREFIX              ${CMAKE_BINARY_DIR}/3rdparty_download/arrow-subbuild
+            PREFIX              ${ARROW_BUILD}
             DOWNLOAD_DIR        ${THIRDPARTY_DOWNLOAD_PATH}
             INSTALL_DIR         ${ARROW_OUTPUT}
             URL                 ${ARROW_SOURCE_URL}
@@ -102,13 +102,13 @@ endmacro()
 find_package( Arrow PATHS ${ARROW_OUTPUT} )
 find_package( Parquet PATHS ${ARROW_OUTPUT}/lib/cmake/arrow )
 
-if ( NOT DEFINED ${Arrow_FOUND} )
+if ( NOT DEFINED ARROW_FOUND )
     build_arrow()
 else ()
-    set( ARROW_DEPENDENCIES_LIB arrow_dependencies ${ARROW_OUTPUT}/lib/libarrow_bundled_dependencies.a )
-    if ( NOT DEFINED ${PARQUET_STATIC_LIB} )
-        set( PARQUET_STATIC_LIB ${ARROW_OUTPUT}/lib/parquet.a )
-    endif ()
+    set( ARROW_INCLUDE_DIR ${ARROW_OUTPUT}/include )
+    set( ARROW_STATIC_LIB ${ARROW_OUTPUT}/lib/libarrow.a )
+    set( ARROW_DEPENDENCIES_LIB ${ARROW_OUTPUT}/lib/libarrow_bundled_dependencies.a )
+    set( PARQUET_STATIC_LIB ${ARROW_OUTPUT}/lib/libparquet.a )
 endif ()
 
 add_library( wrapper STATIC )
