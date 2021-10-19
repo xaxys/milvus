@@ -57,13 +57,22 @@ macro( build_arrow )
         file( MAKE_DIRECTORY "${INSTALL_DIR}/include" )
     endif()
 
+    add_library( arrow_dependencies STATIC IMPORTED )
+    set_target_properties( arrow_dependencies
+            PROPERTIES
+                IMPORTED_GLOBAL                 TRUE
+                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
+                INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
+    add_dependencies( arrow_dependencies arrow_ep )
+
     add_library( arrow STATIC IMPORTED )
     set_target_properties( arrow
             PROPERTIES
                 IMPORTED_GLOBAL                 TRUE
                 IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
-    add_dependencies( arrow arrow_ep )
+    add_dependencies( arrow arrow_ep arrow_dependencies )
+    target_link_libraries( arrow INTERFACE arrow_dependencies )
 
     get_target_property( ARROW_STATIC_LIB arrow IMPORTED_LOCATION )
     get_target_property( ARROW_INCLUDE_DIR arrow INTERFACE_INCLUDE_DIRECTORIES )
@@ -79,6 +88,3 @@ if ( NOT DEFINED ${Arrow_FOUND} )
 else ()
     add_library( arrow ALIAS arrow_static )
 endif ()
-
-# install( FILES ${ARROW_SHARED_LIB}
-#         DESTINATION lib )

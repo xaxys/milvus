@@ -78,6 +78,7 @@ macro( build_arrow )
                 IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies( arrow arrow_ep arrow_dependencies )
+    target_link_libraries( arrow INTERFACE arrow_dependencies )
 
     add_library( parquet STATIC IMPORTED )
     set_target_properties( parquet
