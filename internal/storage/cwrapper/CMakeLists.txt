@@ -11,6 +11,7 @@
 
 cmake_minimum_required( VERSION 3.18 )
 project(wrapper)
+include(ExternalProject)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -19,11 +20,11 @@ set( ARROW_OUTPUT "${ARROW_BUILD}/output" )
 set( ARROW_TERGET_VERSION "5.0.0" )
 
 macro( build_arrow )
-    message( STATUS "Building ARROW-${ARROW_VERSION} from source" )
-
     if( NOT DEFINED ARROW_VERSION )
         set( ARROW_VERSION ${ARROW_TERGET_VERSION} )
     endif()
+
+    message( STATUS "Building ARROW-${ARROW_VERSION} from source" )
 
     if ( DEFINED ENV{MILVUS_ARROW_URL} )
         set( ARROW_SOURCE_URL "$ENV{MILVUS_ARROW_URL}" )
@@ -34,8 +35,8 @@ macro( build_arrow )
     set( ARROW_CMAKE_ARGS
         "-DARROW_PARQUET=ON"
         "-DARROW_COMPUTE=ON"
-        "-DARROW_BUILD_STATIC=OFF"
-        "-DARROW_BUILD_SHARED=ON"
+        "-DARROW_BUILD_STATIC=ON"
+        "-DARROW_BUILD_SHARED=OFF"
         "-DARROW_BUILD_TESTS=OFF"
         "-DARROW_TEST_MEMCHECK=OFF"
         "-DARROW_BUILD_BENCHMARKS=OFF"
@@ -62,15 +63,13 @@ macro( build_arrow )
         file( MAKE_DIRECTORY "${INSTALL_DIR}/include" )
     endif ()
 
-    set ( ARROW_INCLUDE_DIR ${INSTALL_DIR}/include )
-
-    add_library( arrow_bundled_dependencies STATIC IMPORTED )
-    set_target_properties( arrow_bundled_dependencies 
+    add_library( arrow_dependencies STATIC IMPORTED )
+    set_target_properties( arrow_dependencies
             PROPERTIES
                 IMPORTED_GLOBAL                 TRUE
                 IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
-    add_dependencies( arrow_bundled_dependencies arrow_ep )
+    add_dependencies( arrow_dependencies arrow_ep )
 
     add_library( arrow STATIC IMPORTED )
     set_target_properties( arrow
@@ -78,7 +77,7 @@ macro( build_arrow )
                 IMPORTED_GLOBAL                 TRUE
                 IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
-    add_dependencies( arrow arrow_ep )
+    add_dependencies( arrow arrow_ep arrow_dependencies )
 
     add_library( parquet STATIC IMPORTED )
     set_target_properties( parquet
@@ -89,24 +88,33 @@ macro( build_arrow )
     add_dependencies( parquet arrow-ep )
     target_link_libraries( parquet INTERFACE arrow )
 
+    get_target_property( ARROW_DEPENDENCIES_LIB arrow_dependencies IMPORTED_LOCATION )
+    get_target_property( ARROW_STATIC_LIB arrow IMPORTED_LOCATION )
+    get_target_property( ARROW_INCLUDE_DIR arrow INTERFACE_INCLUDE_DIRECTORIES )
+    message( STATUS ${ARROW_INCLUDE_DIR} )
+    set_directory_properties( PROPERTY INCLUDE_DIRECTORIES ${ARROW_INCLUDE_DIR} )
+
+    get_target_property( PARQUET_STATIC_LIB parquet IMPORTED_LOCATION )
+
 endmacro()
 
-set( Parquet_DIR ${ARROW_OUTPUT}/lib/cmake/arrow )
-find_package( Arrow PATHS ${ARROW_OUTPUT})
-find_package( Parquet )
+find_package( Arrow PATHS ${ARROW_OUTPUT} )
+find_package( Parquet PATHS ${ARROW_OUTPUT}/lib/cmake/arrow )
 
-if ( ${Arrow_FOUND} )
-    message( STATUS "Found ARROW-${ARROW_VERSION}" )
-    set ( ARROW_INCLUDE_DIR ${ARROW_OUTPUT}/include )
-else ()
+if ( NOT DEFINED ${Arrow_FOUND} )
     build_arrow()
+else ()
+    set( ARROW_DEPENDENCIES_LIB arrow_dependencies ${ARROW_OUTPUT}/lib/libarrow_bundled_dependencies.a )
+    if ( NOT DEFINED ${PARQUET_STATIC_LIB} )
+        set( PARQUET_STATIC_LIB ${ARROW_OUTPUT}/lib/parquet.a )
+    endif ()
 endif ()
 
 add_library( wrapper STATIC )
 target_sources( wrapper PUBLIC ParquetWrapper.cpp PayloadStream.cpp )
 set_target_properties( wrapper
             PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR})
+            INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR} )
 target_include_directories( wrapper PRIVATE ${ARROW_INCLUDE_DIR} )
 target_link_libraries( wrapper PUBLIC parquet pthread )
 
@@ -114,12 +122,12 @@ if(NOT CMAKE_INSTALL_PREFIX)
     set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_BINARY_DIR})
 endif()
 
-install( FILES ${ARROW_OUTPUT}/lib/libarrow.a
-               ${ARROW_OUTPUT}/lib/libarrow_bundled_dependencies.a
-               ${ARROW_OUTPUT}/lib/libparquet.a
+install( FILES ${ARROW_STATIC_LIB}
+               ${ARROW_DEPENDENCIES_LIB}
+               ${PARQUET_STATIC_LIB}
         DESTINATION lib )
 
-install(TARGETS wrapper DESTINATION ${CMAKE_INSTALL_PREFIX})
+install( TARGETS wrapper DESTINATION ${CMAKE_INSTALL_PREFIX} )
 
 if (BUILD_TESTING)
     add_subdirectory(test)

@@ -39,7 +39,7 @@ set(MILVUS_TEST_FILES
 
 add_executable(all_tests
         ${MILVUS_TEST_FILES}
-        test_arrow.cpp)
+        )
 
 # check if memory leak exists in index builder
 set(INDEX_BUILDER_TEST_FILES

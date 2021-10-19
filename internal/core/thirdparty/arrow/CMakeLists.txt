@@ -14,11 +14,11 @@ set( ARROW_OUTPUT "${ARROW_BUILD}/output" )
 set( ARROW_TERGET_VERSION "5.0.0" )
 
 macro( build_arrow )
-    message( STATUS "Building ARROW-${ARROW_VERSION} from source" )
-
     if( NOT DEFINED ARROW_VERSION )
         set( ARROW_VERSION ${ARROW_TERGET_VERSION} )
     endif()
+
+    message( STATUS "Building ARROW-${ARROW_VERSION} from source" )
 
     if ( DEFINED ENV{MILVUS_ARROW_URL} )
         set( ARROW_SOURCE_URL "$ENV{MILVUS_ARROW_URL}" )
@@ -57,14 +57,6 @@ macro( build_arrow )
         file( MAKE_DIRECTORY "${INSTALL_DIR}/include" )
     endif()
 
-    add_library( arrow_bundled_dependencies STATIC IMPORTED )
-    set_target_properties( arrow_bundled_dependencies 
-            PROPERTIES
-                IMPORTED_GLOBAL                 TRUE
-                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
-                INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
-    add_dependencies( arrow_bundled_dependencies arrow_ep )
-
     add_library( arrow STATIC IMPORTED )
     set_target_properties( arrow
             PROPERTIES
@@ -72,20 +64,21 @@ macro( build_arrow )
                 IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies( arrow arrow_ep )
-    target_link_libraries( arrow INTERFACE arrow_bundled_dependencies )
+
+    get_target_property( ARROW_STATIC_LIB arrow IMPORTED_LOCATION )
+    get_target_property( ARROW_INCLUDE_DIR arrow INTERFACE_INCLUDE_DIRECTORIES )
+    message( STATUS ${ARROW_INCLUDE_DIR} )
+    set_directory_properties( PROPERTY INCLUDE_DIRECTORIES ${ARROW_INCLUDE_DIR} )
 
 endmacro()
 
-set( Arrow_DIR ${ARROW_OUTPUT}/lib/cmake/arrow )
-find_package( Arrow )
+find_package( Arrow PATHS ${ARROW_OUTPUT} )
 
-if ( ${Arrow_FOUND} )
-    message( STATUS "Found ARROW-${ARROW_VERSION}" )
-    add_library( arrow ALIAS arrow_static )
-else ()
+if ( NOT DEFINED ${Arrow_FOUND} )
     build_arrow()
+else ()
+    add_library( arrow ALIAS arrow_static )
 endif ()
 
-get_target_property( var arrow INTERFACE_INCLUDE_DIRECTORIES )
-message( STATUS ${var} )
-set_directory_properties( PROPERTY INCLUDE_DIRECTORIES ${var} )
+# install( FILES ${ARROW_SHARED_LIB}
+#         DESTINATION lib )
