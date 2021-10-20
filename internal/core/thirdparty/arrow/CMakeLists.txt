@@ -40,9 +40,9 @@ macro( build_arrow )
 
     ExternalProject_Add(
             arrow_ep
-            PREFIX              ${ARROW_BUILD}
+            PREFIX              ${CMAKE_BINARY_DIR}/3rdparty_download/arrow-subbuild
             DOWNLOAD_DIR        ${THIRDPARTY_DOWNLOAD_PATH}
-            INSTALL_DIR         ${ARROW_OUTPUT}
+            INSTALL_DIR         ${CMAKE_CURRENT_BINARY_DIR}
             URL                 ${ARROW_SOURCE_URL}
             URL_MD5             "9caf5dbd36ef4972c3a591bcfeaf59c8"
             CMAKE_ARGS          ${ARROW_CMAKE_ARGS}
@@ -74,17 +74,10 @@ macro( build_arrow )
     add_dependencies( arrow arrow_ep arrow_dependencies )
     target_link_libraries( arrow INTERFACE arrow_dependencies )
 
-    get_target_property( ARROW_STATIC_LIB arrow IMPORTED_LOCATION )
     get_target_property( ARROW_INCLUDE_DIR arrow INTERFACE_INCLUDE_DIRECTORIES )
     message( STATUS ${ARROW_INCLUDE_DIR} )
     set_directory_properties( PROPERTY INCLUDE_DIRECTORIES ${ARROW_INCLUDE_DIR} )
 
 endmacro()
 
-find_package( Arrow PATHS ${ARROW_OUTPUT} )
-
-if ( NOT DEFINED ARROW_FOUND )
-    build_arrow()
-else ()
-    add_library( arrow ALIAS arrow_static )
-endif ()
+build_arrow()

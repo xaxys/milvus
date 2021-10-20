@@ -46,9 +46,9 @@ macro( build_arrow )
 
     ExternalProject_Add(
             arrow_ep
-            PREFIX              ${ARROW_BUILD}
+            PREFIX              ${CMAKE_BINARY_DIR}/3rdparty_download/arrow-subbuild
             DOWNLOAD_DIR        ${THIRDPARTY_DOWNLOAD_PATH}
-            INSTALL_DIR         ${ARROW_OUTPUT}
+            INSTALL_DIR         ${CMAKE_CURRENT_BINARY_DIR}/output
             URL                 ${ARROW_SOURCE_URL}
             URL_MD5             "9caf5dbd36ef4972c3a591bcfeaf59c8"
             CMAKE_ARGS          ${ARROW_CMAKE_ARGS}
@@ -70,6 +70,7 @@ macro( build_arrow )
                 IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies( arrow_dependencies arrow_ep )
+    get_target_property( ARROW_DEPENDENCIES_LIB arrow_dependencies IMPORTED_LOCATION )
 
     add_library( arrow STATIC IMPORTED )
     set_target_properties( arrow
@@ -79,6 +80,7 @@ macro( build_arrow )
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies( arrow arrow_ep arrow_dependencies )
     target_link_libraries( arrow INTERFACE arrow_dependencies )
+    get_target_property( ARROW_STATIC_LIB arrow IMPORTED_LOCATION )
 
     add_library( parquet STATIC IMPORTED )
     set_target_properties( parquet
@@ -88,28 +90,15 @@ macro( build_arrow )
             INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies( parquet arrow-ep )
     target_link_libraries( parquet INTERFACE arrow )
+    get_target_property( PARQUET_STATIC_LIB parquet IMPORTED_LOCATION )
 
-    get_target_property( ARROW_DEPENDENCIES_LIB arrow_dependencies IMPORTED_LOCATION )
-    get_target_property( ARROW_STATIC_LIB arrow IMPORTED_LOCATION )
     get_target_property( ARROW_INCLUDE_DIR arrow INTERFACE_INCLUDE_DIRECTORIES )
     message( STATUS ${ARROW_INCLUDE_DIR} )
     set_directory_properties( PROPERTY INCLUDE_DIRECTORIES ${ARROW_INCLUDE_DIR} )
 
-    get_target_property( PARQUET_STATIC_LIB parquet IMPORTED_LOCATION )
-
 endmacro()
 
-find_package( Arrow PATHS ${ARROW_OUTPUT} )
-find_package( Parquet PATHS ${ARROW_OUTPUT}/lib/cmake/arrow )
-
-if ( NOT DEFINED ARROW_FOUND )
-    build_arrow()
-else ()
-    set( ARROW_INCLUDE_DIR ${ARROW_OUTPUT}/include )
-    set( ARROW_STATIC_LIB ${ARROW_OUTPUT}/lib/libarrow.a )
-    set( ARROW_DEPENDENCIES_LIB ${ARROW_OUTPUT}/lib/libarrow_bundled_dependencies.a )
-    set( PARQUET_STATIC_LIB ${ARROW_OUTPUT}/lib/libparquet.a )
-endif ()
+build_arrow()
 
 add_library( wrapper STATIC )
 target_sources( wrapper PUBLIC ParquetWrapper.cpp PayloadStream.cpp )
