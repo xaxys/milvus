@@ -47,7 +47,6 @@ macro( build_arrow )
             URL_MD5             "9caf5dbd36ef4972c3a591bcfeaf59c8"
             CMAKE_ARGS          ${ARROW_CMAKE_ARGS}
             SOURCE_SUBDIR       "cpp"
-            BUILD_IN_SOURCE     1
             BUILD_COMMAND       ${MAKE}
             INSTALL_COMMAND     ${MAKE} install
     )

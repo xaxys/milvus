@@ -48,12 +48,12 @@ macro( build_arrow )
             arrow_ep
             PREFIX              ${CMAKE_BINARY_DIR}/3rdparty_download/arrow-subbuild
             DOWNLOAD_DIR        ${THIRDPARTY_DOWNLOAD_PATH}
-            INSTALL_DIR         ${CMAKE_CURRENT_BINARY_DIR}/output
+            INSTALL_DIR         ${CMAKE_CURRENT_BINARY_DIR}
+            BINARY_DIR          arrow-bin
             URL                 ${ARROW_SOURCE_URL}
             URL_MD5             "9caf5dbd36ef4972c3a591bcfeaf59c8"
             CMAKE_ARGS          ${ARROW_CMAKE_ARGS}
             SOURCE_SUBDIR       "cpp"
-            BUILD_IN_SOURCE     1
             BUILD_COMMAND       ${MAKE}
             INSTALL_COMMAND     ${MAKE} install
     )
