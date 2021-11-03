@@ -1,4 +1,4 @@
-// Code generated from Plan.g4 by ANTLR 4.9. DO NOT EDIT.
+// Code generated from ../../internal/proxy/plan_parser/Plan.g4 by ANTLR 4.9. DO NOT EDIT.
 
 package parser
 
