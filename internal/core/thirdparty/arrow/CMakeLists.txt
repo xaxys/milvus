@@ -48,7 +48,6 @@ macro( build_arrow )
             CMAKE_ARGS          ${ARROW_CMAKE_ARGS}
             SOURCE_SUBDIR       "cpp"
             BUILD_COMMAND       ${MAKE}
-            INSTALL_COMMAND     ${MAKE} install
     )
 
     ExternalProject_Get_Property( arrow_ep INSTALL_DIR )
