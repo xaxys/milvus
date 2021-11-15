@@ -61,14 +61,7 @@ func TestBaseTable_SaveAndLoad(t *testing.T) {
 
 func TestBaseTable_LoadFromKVPair(t *testing.T) {
 	var kvPairs []*commonpb.KeyValuePair
-	kvPairs = append(kvPairs, &commonpb.KeyValuePair{
-		Key:   "k1",
-		Value: "v1",
-	})
-	kvPairs = append(kvPairs, &commonpb.KeyValuePair{
-		Key:   "k2",
-		Value: "v2",
-	})
+	kvPairs = append(kvPairs, &commonpb.KeyValuePair{Key: "k1", Value: "v1"}, &commonpb.KeyValuePair{Key: "k2", Value: "v2"})
 
 	err := baseParams.LoadFromKVPair(kvPairs)
 	assert.Nil(t, err)
@@ -141,10 +134,9 @@ func TestBaseTable_ConfDir(t *testing.T) {
 	baseParams.configDir = "./"
 
 	assert.Panics(t, func() { baseParams.loadFromMilvusYaml() })
-	assert.False(t, baseParams.loadFromCommonYaml())
 
 	baseParams.configDir = rightConfig
-	assert.True(t, baseParams.loadFromCommonYaml())
+	baseParams.loadFromMilvusYaml()
 }
 
 func TestBateTable_ConfPath(t *testing.T) {
@@ -186,6 +178,15 @@ func TestBaseTable_Parse(t *testing.T) {
 		assert.Panics(t, func() { baseParams.ParseFloat("key") })
 	})
 
+	t.Run("ParseFloatWithDefault", func(t *testing.T) {
+		baseParams.Remove("key")
+		assert.Equal(t, float64(0.0), baseParams.ParseFloatWithDefault("key", 0.0))
+		assert.Equal(t, float64(3.14), baseParams.ParseFloatWithDefault("key", 3.14))
+
+		assert.Nil(t, baseParams.Save("key", "2"))
+		assert.Equal(t, float64(2.0), baseParams.ParseFloatWithDefault("key", 3.14))
+	})
+
 	t.Run("ParseInt32", func(t *testing.T) {
 		assert.Nil(t, baseParams.Save("key", "0"))
 		assert.Equal(t, int32(0), baseParams.ParseInt32("key"))
@@ -198,6 +199,13 @@ func TestBaseTable_Parse(t *testing.T) {
 		assert.Panics(t, func() { baseParams.ParseInt32("key") })
 	})
 
+	t.Run("ParseInt32WithDefault", func(t *testing.T) {
+		baseParams.Remove("key")
+		assert.Equal(t, int32(1), baseParams.ParseInt32WithDefault("key", 1))
+		assert.Nil(t, baseParams.Save("key", "2"))
+		assert.Equal(t, int32(2), baseParams.ParseInt32WithDefault("key", 1))
+	})
+
 	t.Run("ParseInt64", func(t *testing.T) {
 		assert.Nil(t, baseParams.Save("key", "0"))
 		assert.Equal(t, int64(0), baseParams.ParseInt64("key"))
@@ -208,6 +216,20 @@ func TestBaseTable_Parse(t *testing.T) {
 		assert.Panics(t, func() { baseParams.ParseInt64("not_exist_key") })
 		assert.Nil(t, baseParams.Save("key", "abc"))
 		assert.Panics(t, func() { baseParams.ParseInt64("key") })
+	})
+
+	t.Run("ParseInt64WithDefault", func(t *testing.T) {
+		baseParams.Remove("key")
+		assert.Equal(t, int64(1), baseParams.ParseInt64WithDefault("key", 1))
+		assert.Nil(t, baseParams.Save("key", "2"))
+		assert.Equal(t, int64(2), baseParams.ParseInt64WithDefault("key", 1))
+	})
+
+	t.Run("ParseIntWithDefault", func(t *testing.T) {
+		baseParams.Remove("key")
+		assert.Equal(t, int(1), baseParams.ParseIntWithDefault("key", 1))
+		assert.Nil(t, baseParams.Save("key", "2"))
+		assert.Equal(t, int(2), baseParams.ParseIntWithDefault("key", 1))
 	})
 }
 

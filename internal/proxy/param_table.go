@@ -22,9 +22,12 @@ import (
 )
 
 const (
-	SuggestPulsarMaxMessageSizeKey = 5 * 1024 * 1024
+	// SuggestPulsarMaxMessageSize defines the maximum size of Pulsar message.
+	SuggestPulsarMaxMessageSize = 5 * 1024 * 1024
 )
 
+// ParamTable is a derived struct of paramtable.BaseTable. It achieves Composition by
+// embedding paramtable.BaseTable. It is used to quickly and easily access the system configuration.
 type ParamTable struct {
 	paramtable.BaseTable
 
@@ -65,17 +68,24 @@ type ParamTable struct {
 	MaxTaskNum int64
 
 	PulsarMaxMessageSize int
+
+	CreatedTime time.Time
+	UpdatedTime time.Time
 }
 
+// Params is a package scoped variable of type ParamTable.
 var Params ParamTable
 var once sync.Once
 
+// InitOnce ensures that Init is only called once.
 func (pt *ParamTable) InitOnce() {
 	once.Do(func() {
 		pt.Init()
 	})
 }
 
+// Init is an override method of BaseTable's Init. It mainly calls the
+// Init of BaseTable and do some other initialization.
 func (pt *ParamTable) Init() {
 	pt.BaseTable.Init()
 	err := pt.LoadYaml("advanced/proxy.yaml")
@@ -101,13 +111,13 @@ func (pt *ParamTable) Init() {
 	pt.initDefaultIndexName()
 
 	pt.initPulsarMaxMessageSize()
-	pt.initRoleName()
 
 	pt.initMaxTaskNum()
 
 	pt.initRoleName()
 }
 
+// InitAlias initialize Alias member.
 func (pt *ParamTable) InitAlias(alias string) {
 	pt.Alias = alias
 }
@@ -260,11 +270,11 @@ func (pt *ParamTable) initPulsarMaxMessageSize() {
 
 	maxMessageSizeStr, err := pt.Load("pulsar.maxMessageSize")
 	if err != nil {
-		pt.PulsarMaxMessageSize = SuggestPulsarMaxMessageSizeKey
+		pt.PulsarMaxMessageSize = SuggestPulsarMaxMessageSize
 	} else {
 		maxMessageSize, err := strconv.Atoi(maxMessageSizeStr)
 		if err != nil {
-			pt.PulsarMaxMessageSize = SuggestPulsarMaxMessageSizeKey
+			pt.PulsarMaxMessageSize = SuggestPulsarMaxMessageSize
 		} else {
 			pt.PulsarMaxMessageSize = maxMessageSize
 		}

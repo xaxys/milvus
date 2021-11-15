@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package roles
 
@@ -51,6 +56,7 @@ func newMsgFactory(localMsg bool) msgstream.Factory {
 	return msgstream.NewPmsFactory()
 }
 
+// MilvusRoles determines to run which components.
 type MilvusRoles struct {
 	EnableRootCoord      bool `env:"ENABLE_ROOT_COORD"`
 	EnableProxy          bool `env:"ENABLE_PROXY"`
@@ -63,6 +69,7 @@ type MilvusRoles struct {
 	EnableMsgStreamCoord bool `env:"ENABLE_MSGSTREAM_COORD"`
 }
 
+// EnvValue not used now.
 func (mr *MilvusRoles) EnvValue(env string) bool {
 	env = strings.ToLower(env)
 	env = strings.Trim(env, " ")
@@ -96,11 +103,11 @@ func (mr *MilvusRoles) runRootCoord(ctx context.Context, localMsg bool) *compone
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
-		_ = rc.Run()
 		if !localMsg {
 			http.Handle(healthz.HealthzRouterPath, &componentsHealthzHandler{component: rc})
 		}
+		wg.Done()
+		_ = rc.Run()
 	}()
 	wg.Wait()
 
@@ -125,11 +132,11 @@ func (mr *MilvusRoles) runProxy(ctx context.Context, localMsg bool, alias string
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
-		_ = pn.Run()
 		if !localMsg {
 			http.Handle(healthz.HealthzRouterPath, &componentsHealthzHandler{component: pn})
 		}
+		wg.Done()
+		_ = pn.Run()
 	}()
 	wg.Wait()
 
@@ -153,11 +160,11 @@ func (mr *MilvusRoles) runQueryCoord(ctx context.Context, localMsg bool) *compon
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
-		_ = qs.Run()
 		if !localMsg {
 			http.Handle(healthz.HealthzRouterPath, &componentsHealthzHandler{component: qs})
 		}
+		wg.Done()
+		_ = qs.Run()
 	}()
 	wg.Wait()
 
@@ -182,11 +189,11 @@ func (mr *MilvusRoles) runQueryNode(ctx context.Context, localMsg bool, alias st
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
-		_ = qn.Run()
 		if !localMsg {
 			http.Handle(healthz.HealthzRouterPath, &componentsHealthzHandler{component: qn})
 		}
+		wg.Done()
+		_ = qn.Run()
 	}()
 	wg.Wait()
 
@@ -210,11 +217,11 @@ func (mr *MilvusRoles) runDataCoord(ctx context.Context, localMsg bool) *compone
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
-		_ = ds.Run()
 		if !localMsg {
 			http.Handle(healthz.HealthzRouterPath, &componentsHealthzHandler{component: ds})
 		}
+		wg.Done()
+		_ = ds.Run()
 	}()
 	wg.Wait()
 
@@ -238,11 +245,11 @@ func (mr *MilvusRoles) runDataNode(ctx context.Context, localMsg bool, alias str
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
-		_ = dn.Run()
 		if !localMsg {
 			http.Handle(healthz.HealthzRouterPath, &componentsHealthzHandler{component: dn})
 		}
+		wg.Done()
+		_ = dn.Run()
 	}()
 	wg.Wait()
 
@@ -265,11 +272,11 @@ func (mr *MilvusRoles) runIndexCoord(ctx context.Context, localMsg bool) *compon
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
-		_ = is.Run()
 		if !localMsg {
 			http.Handle(healthz.HealthzRouterPath, &componentsHealthzHandler{component: is})
 		}
+		wg.Done()
+		_ = is.Run()
 	}()
 	wg.Wait()
 
@@ -293,11 +300,11 @@ func (mr *MilvusRoles) runIndexNode(ctx context.Context, localMsg bool, alias st
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
-		_ = in.Run()
 		if !localMsg {
 			http.Handle(healthz.HealthzRouterPath, &componentsHealthzHandler{component: in})
 		}
+		wg.Done()
+		_ = in.Run()
 	}()
 	wg.Wait()
 
@@ -325,6 +332,7 @@ func (mr *MilvusRoles) runMsgStreamCoord(ctx context.Context) *components.MsgStr
 	return mss
 }
 
+// Run runs Milvus components.
 func (mr *MilvusRoles) Run(localMsg bool, alias string) {
 	if os.Getenv(metricsinfo.DeployModeEnvKey) == metricsinfo.StandaloneDeployMode {
 		closer := trace.InitTracing("standalone")
@@ -344,7 +352,7 @@ func (mr *MilvusRoles) Run(localMsg bool, alias string) {
 	} else {
 		err := os.Setenv(metricsinfo.DeployModeEnvKey, metricsinfo.ClusterDeployMode)
 		if err != nil {
-			log.Error("failed to set deploy mode: ", zap.Error(err))
+			log.Error("Failed to set deploy mode: ", zap.Error(err))
 		}
 	}
 
@@ -444,7 +452,7 @@ func (mr *MilvusRoles) Run(localMsg bool, alias string) {
 			w.Header().Set(healthz.ContentTypeHeader, healthz.ContentTypeText)
 			_, err := fmt.Fprint(w, "OK")
 			if err != nil {
-				log.Warn("failed to send response",
+				log.Warn("Failed to send response",
 					zap.Error(err))
 			}
 

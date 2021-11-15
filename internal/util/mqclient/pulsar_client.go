@@ -33,7 +33,7 @@ func GetPulsarClientInstance(opts pulsar.ClientOptions) (*pulsarClient, error) {
 	once.Do(func() {
 		c, err := pulsar.NewClient(opts)
 		if err != nil {
-			log.Error("Set pulsar client failed, error", zap.Error(err))
+			log.Error("Failed to set pulsar client: ", zap.Error(err))
 			return
 		}
 		cli := &pulsarClient{client: c}
@@ -67,9 +67,12 @@ func (pc *pulsarClient) Subscribe(options ConsumerOptions) (Consumer, error) {
 	if err != nil {
 		return nil, err
 	}
-	//consumer.Seek(pulsar.EarliestMessageID())
-	//consumer.SeekByTime(time.Unix(0, 0))
+
 	pConsumer := &pulsarConsumer{c: consumer, closeCh: make(chan struct{})}
+	// prevent seek to earliest patch applied when using latest position options
+	if options.SubscriptionInitialPosition == SubscriptionPositionLatest {
+		pConsumer.hasSeek = true
+	}
 
 	return pConsumer, nil
 }

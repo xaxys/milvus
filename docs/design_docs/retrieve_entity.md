@@ -13,7 +13,7 @@ QueryNode subscribes to the insert channel and will determine whether to use the
 ## Goals
 
 - Support to retrieve one or more entities from a collection through primary keys
-- Support to retrieve only some fields of a entity
+- Support to retrieve only some fields of an entity
 - Consider backward file format compatibility if a new file is defined
 
 ## Non-Goals
@@ -100,4 +100,4 @@ In the newly created collection, insert the records with the primary keys of 105
 
 ### Testcase 4
 
-In the newly created collection, insert a record with a primary key of 107, call the Flush interface, and check whether there are stats and bloomfilter files on minIO.
+In the newly created collection, insert a record with a primary key of 107, call the Flush interface, and check whether there are stats and bloomfilter files on MinIO.

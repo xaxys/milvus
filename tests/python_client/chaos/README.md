@@ -37,6 +37,9 @@ Please refer to [Run E2E Tests](https://github.com/milvus-io/milvus/blob/master/
 
 two direction(to and from) network isolation between a pod and the rest of the pods
 
+#### pod failure
+
+Set the pod（querynode, indexnode and datanode）as multiple replicas, make one of them failure, and test milvus's functionality
 ### Milvus in standalone mode
 1. standalone pod is killed
 
@@ -70,6 +73,15 @@ Run multiple test scenario in a category manually(take network partition chaos f
 
    pytest test_chaos.py --host ${Milvus_IP} -v
    ```
+### Automation Scripts
+Run test scenario automatically:
+1. update chaos type and pod in `chaos_test.sh`
+2. run the commands below:
+   ```bash
+   cd /milvus/tests/python_client/chaos
+   # in this step, script will install milvus and run testcase
+   bash chaos_test.sh
+   ```
 ### Github Action
 * [Pod Kill Chaos Test](https://github.com/milvus-io/milvus/actions/workflows/pod-kill-chaos-test.yaml)
 * [Network Partition Chaos Test](https://github.com/milvus-io/milvus/actions/workflows/network-partition-chaos-test.yaml)
@@ -78,9 +90,10 @@ Run multiple test scenario in a category manually(take network partition chaos f
 still in planning 
 
 ### Todo
-- [ ] pod_failure
+- [x] pod_failure
 - [ ] container_kill
 - [x] network attack
+- [x] memory stress
 
 ## How to contribute
 * Get familiar with chaos engineering and [Chaos Mesh](https://chaos-mesh.org)

@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
@@ -207,6 +212,44 @@ func TestFlowGraph_DDNode_Operate(to *testing.T) {
 		}
 	})
 
+	to.Run("Test DDNode Operate Delete Msg", func(te *testing.T) {
+		tests := []struct {
+			ddnCollID   UniqueID
+			inMsgCollID UniqueID
+
+			MsgEndTs Timestamp
+
+			expectedRtLen int
+			description   string
+		}{
+			{1, 1, 2000, 1, "normal"},
+			{1, 2, 4000, 0, "inMsgCollID(2) != ddnCollID"},
+		}
+
+		for _, test := range tests {
+			te.Run(test.description, func(t *testing.T) {
+				// Prepare ddNode states
+				ddn := ddNode{
+					collectionID: test.ddnCollID,
+				}
+
+				// Prepare delete messages
+				var dMsg msgstream.TsMsg = &msgstream.DeleteMsg{
+					BaseMsg: msgstream.BaseMsg{EndTimestamp: test.MsgEndTs},
+					DeleteRequest: internalpb.DeleteRequest{
+						Base:         &commonpb.MsgBase{MsgType: commonpb.MsgType_Delete},
+						CollectionID: test.inMsgCollID,
+					},
+				}
+				tsMessages := []msgstream.TsMsg{dMsg}
+				var msgStreamMsg Msg = flowgraph.GenerateMsgStreamMsg(tsMessages, 0, 0, nil, nil)
+
+				// Test
+				rt := ddn.Operate([]Msg{msgStreamMsg})
+				assert.Equal(t, test.expectedRtLen, len(rt[0].(*flowGraphMsg).deleteMessages))
+			})
+		}
+	})
 }
 
 func TestFlowGraph_DDNode_filterMessages(te *testing.T) {

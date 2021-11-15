@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package indexcoord
 
@@ -62,7 +67,6 @@ type IndexCoord struct {
 
 	sched   *TaskScheduler
 	session *sessionutil.Session
-	liveCh  <-chan bool
 
 	eventChan <-chan *sessionutil.SessionEvent
 
@@ -115,7 +119,7 @@ func (i *IndexCoord) Register() error {
 	if i.session == nil {
 		return errors.New("failed to initialize session")
 	}
-	i.liveCh = i.session.Init(typeutil.IndexCoordRole, Params.Address, true)
+	i.session.Init(typeutil.IndexCoordRole, Params.Address, true)
 	Params.SetLogger(typeutil.UniqueID(-1))
 	return nil
 }
@@ -248,8 +252,11 @@ func (i *IndexCoord) Start() error {
 		i.loopWg.Add(1)
 		go i.watchMetaLoop()
 
-		go i.session.LivenessCheck(i.loopCtx, i.liveCh, func() {
-			i.Stop()
+		go i.session.LivenessCheck(i.loopCtx, func() {
+			log.Error("Index Coord disconnected from etcd, process will exit", zap.Int64("Server Id", i.session.ServerID))
+			if err := i.Stop(); err != nil {
+				log.Fatal("failed to stop server", zap.Error(err))
+			}
 		})
 
 		startErr = i.sched.Start()
@@ -653,6 +660,10 @@ func (i *IndexCoord) recycleUnusedIndexFiles() {
 }
 
 // watchNodeLoop is used to monitor IndexNode going online and offline.
+//go:norace
+// fix datarace in unittest
+// startWatchService will only be invoked at start procedure
+// otherwise, remove the annotation and add atomic protection
 func (i *IndexCoord) watchNodeLoop() {
 	ctx, cancel := context.WithCancel(i.loopCtx)
 
@@ -664,7 +675,11 @@ func (i *IndexCoord) watchNodeLoop() {
 		select {
 		case <-ctx.Done():
 			return
-		case event := <-i.eventChan:
+		case event, ok := <-i.eventChan:
+			if !ok {
+				//TODO silverxia add retry
+				return
+			}
 			log.Debug("IndexCoord watchNodeLoop event updated")
 			switch event.EventType {
 			case sessionutil.SessionAddEvent:
@@ -767,19 +782,21 @@ func (i *IndexCoord) assignTaskLoop() {
 				log.Error("IndexCoord assignTaskLoop", zap.Any("GetSessions error", err))
 			}
 			if len(sessions) <= 0 {
-				log.Debug("There is no IndexNode available as this time.")
+				log.Warn("There is no IndexNode available as this time.")
 				break
 			}
 			var serverIDs []int64
 			for _, session := range sessions {
 				serverIDs = append(serverIDs, session.ServerID)
 			}
-			log.Debug("IndexCoord assignTaskLoop", zap.Int64s("Available IndexNode IDs", serverIDs))
 			metas := i.metaTable.GetUnassignedTasks(serverIDs)
 			sort.Slice(metas, func(i, j int) bool {
 				return metas[i].indexMeta.Version <= metas[j].indexMeta.Version
 			})
-			log.Debug("IndexCoord assignTaskLoop", zap.Int("Unassigned tasks number", len(metas)))
+			// only log if we find unassigned tasks
+			if len(metas) != 0 {
+				log.Debug("IndexCoord find unassigned tasks ", zap.Int("Unassigned tasks number", len(metas)), zap.Int64s("Available IndexNode IDs", serverIDs))
+			}
 			for index, meta := range metas {
 				indexBuildID := meta.indexMeta.IndexBuildID
 				if err = i.metaTable.UpdateVersion(indexBuildID); err != nil {

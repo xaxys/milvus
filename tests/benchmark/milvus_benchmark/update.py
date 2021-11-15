@@ -6,9 +6,57 @@ import argparse
 from yaml import full_load, dump
 import config
 import utils
+import requests
+import json
+
+
+def get_token(url):
+    """ get the request token and return the value """
+    rep = requests.get(url)
+    data = json.loads(rep.text)
+    if 'token' in data:
+        token = data['token']
+    else:
+        token = ''
+        print("Can not get token.")
+    return token
+
+
+def get_tags(url, token):
+    headers = {'Content-type': "application/json",
+               "charset": "UTF-8",
+               "Accept": "application/vnd.docker.distribution.manifest.v2+json",
+               "Authorization": "Bearer %s" % token}
+    try:
+        rep = requests.get(url, headers=headers)
+        data = json.loads(rep.text)
+
+        tags = []
+        if 'tags' in data:
+            tags = data["tags"]
+        else:
+            print("Can not get the tag list")
+        return tags
+    except:
+        print("Can not get the tag list")
+        return []
+
+
+def get_master_tags(tags_list):
+    _list = []
+
+    if not isinstance(tags_list, list):
+        print("tags_list is not a list.")
+        return _list
+
+    for tag in tags_list:
+        if "master" in tag and tag != "master-latest":
+            _list.append(tag)
+    return _list
 
 
 def parse_server_tag(server_tag):
+    """ paser server tag from server config"""
     # tag format: "8c"/"8c16m"/"8c16m1g"
     if server_tag[-1] == "c":
         p = r"(\d+)c"
@@ -16,6 +64,8 @@ def parse_server_tag(server_tag):
         p = r"(\d+)c(\d+)m"
     elif server_tag[-1] == "g":
         p = r"(\d+)c(\d+)m(\d+)g"
+    else:
+        raise Exception("Unable to parse server tag")
     m = re.match(p, server_tag)
     cpus = int(m.groups()[0])
     mems = None
@@ -27,11 +77,12 @@ def parse_server_tag(server_tag):
     return {"cpus": cpus, "mems": mems, "gpus": gpus}
 
 
-"""
-description: update values.yaml
-return: no return
-"""
 def update_values(src_values_file, deploy_params_file):
+    """
+    description: update values.yaml
+    return: no return
+    """
+
     # deploy_mode, hostname, server_tag, milvus_config, server_config=None
     try:
         with open(src_values_file) as f:
@@ -80,20 +131,30 @@ def update_values(src_values_file, deploy_params_file):
         cpus = res["cpus"]
         mems = res["mems"]
         gpus = res["gpus"]
-    if cpus and mems:
-        # Set the scope of cpu application according to the configuration
+    if cpus:
         resources = {
-                "limits": {
-                    "cpu": str(int(cpus)) + ".0",
-                    "memory": str(int(mems)) + "Gi"
-                },
-                "requests": {
-                    "cpu": str(int(cpus) // 2 + 1) + ".0",
-                    "memory": str(int(mems) // 2 + 1) + "Gi"
-                    # "cpu": "4.0"
-                    # "cpu": str(int(cpus) - 1) + ".0"
-                }
+            "limits": {
+                "cpu": str(int(cpus)) + ".0"
+            },
+            "requests": {
+                "cpu": str(int(cpus) // 2 + 1) + ".0"
+                # "cpu": "4.0"
+                # "cpu": str(int(cpus) - 1) + ".0"
             }
+        }
+    if cpus and mems:
+        resources_cluster = {
+            "limits": {
+                "cpu": str(int(cpus)) + ".0",
+                "memory": str(int(mems)) + "Gi"
+            },
+            "requests": {
+                "cpu": str(int(cpus) // 2 + 1) + ".0",
+                "memory": str(int(mems) // 2 + 1) + "Gi"
+                # "cpu": "4.0"
+                # "cpu": str(int(cpus) - 1) + ".0"
+            }
+        }
     # use external minio/s3
     
     # TODO: disable temp
@@ -135,9 +196,9 @@ def update_values(src_values_file, deploy_params_file):
             # values_dict['etcd']['nodeSelector'] = node_config
             # # set limit/request cpus in resources
             # values_dict['proxy']['resources'] = resources
-            values_dict['queryNode']['resources'] = resources
-            values_dict['indexNode']['resources'] = resources
-            values_dict['dataNode']['resources'] = resources
+            values_dict['queryNode']['resources'] = resources_cluster
+            values_dict['indexNode']['resources'] = resources_cluster
+            values_dict['dataNode']['resources'] = resources_cluster
             # values_dict['minio']['resources'] = resources
             # values_dict['pulsarStandalone']['resources'] = resources
         if mems:
@@ -157,7 +218,7 @@ def update_values(src_values_file, deploy_params_file):
         values_dict['dataNode']['tolerations'] = perf_tolerations
         values_dict['etcd']['tolerations'] = perf_tolerations
         values_dict['minio']['tolerations'] = perf_tolerations
-        if deploy_mode != config.CLUSTER_3RD_DEPLOY_MODE:
+        if deploy_mode == config.SINGLE_DEPLOY_MODE:
             values_dict['pulsarStandalone']['tolerations'] = perf_tolerations
         # TODO: for distributed deployment
         # values_dict['pulsar']['autoRecovery']['tolerations'] = perf_tolerations

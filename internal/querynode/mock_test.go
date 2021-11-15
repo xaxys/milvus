@@ -13,7 +13,6 @@ package querynode
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"math"
 	"math/rand"
@@ -23,6 +22,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/indexnode"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	minioKV "github.com/milvus-io/milvus/internal/kv/minio"
@@ -34,6 +34,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/planpb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
 )
@@ -49,6 +50,7 @@ const (
 
 	defaultVecFieldName   = "vec"
 	defaultConstFieldName = "const"
+	defaultPKFieldName    = "pk"
 	defaultTopK           = int64(10)
 	defaultRoundDecimal   = int64(6)
 	defaultDim            = 128
@@ -71,7 +73,10 @@ const (
 	defaultPartitionName  = "query-node-unittest-default-partition"
 )
 
-const defaultMsgLength = 100
+const (
+	defaultMsgLength = 100
+	defaultDelLength = 10
+)
 
 const (
 	buildID   = UniqueID(0)
@@ -105,6 +110,11 @@ var simpleConstField = constFieldParam{
 	dataType: schemapb.DataType_Int32,
 }
 
+var simplePKField = constFieldParam{
+	id:       102,
+	dataType: schemapb.DataType_Int64,
+}
+
 var uidField = constFieldParam{
 	id:       rowIDFieldID,
 	dataType: schemapb.DataType_Int64,
@@ -120,6 +130,16 @@ func genConstantField(param constFieldParam) *schemapb.FieldSchema {
 		FieldID:      param.id,
 		Name:         defaultConstFieldName,
 		IsPrimaryKey: false,
+		DataType:     param.dataType,
+	}
+	return field
+}
+
+func genPKField(param constFieldParam) *schemapb.FieldSchema {
+	field := &schemapb.FieldSchema{
+		FieldID:      param.id,
+		Name:         defaultPKFieldName,
+		IsPrimaryKey: true,
 		DataType:     param.dataType,
 	}
 	return field
@@ -281,13 +301,15 @@ func generateIndex(segmentID UniqueID) ([]string, error) {
 func genSimpleSegCoreSchema() *schemapb.CollectionSchema {
 	fieldVec := genFloatVectorField(simpleVecField)
 	fieldInt := genConstantField(simpleConstField)
+	fieldPK := genPKField(simplePKField)
 
 	schema := schemapb.CollectionSchema{ // schema for segCore
 		Name:   defaultCollectionName,
-		AutoID: true,
+		AutoID: false,
 		Fields: []*schemapb.FieldSchema{
 			fieldVec,
 			fieldInt,
+			fieldPK,
 		},
 	}
 	return &schema
@@ -575,7 +597,11 @@ func genCommonBlob(msgLength int, schema *schemapb.CollectionSchema) ([]*commonp
 			switch f.DataType {
 			case schemapb.DataType_Int32:
 				bs := make([]byte, 4)
-				binary.LittleEndian.PutUint32(bs, uint32(i))
+				common.Endian.PutUint32(bs, uint32(i))
+				rawData = append(rawData, bs...)
+			case schemapb.DataType_Int64:
+				bs := make([]byte, 8)
+				common.Endian.PutUint32(bs, uint32(i))
 				rawData = append(rawData, bs...)
 			case schemapb.DataType_FloatVector:
 				dim := simpleVecField.dim // if no dim specified, use simpleVecField's dim
@@ -591,7 +617,7 @@ func genCommonBlob(msgLength int, schema *schemapb.CollectionSchema) ([]*commonp
 				for j := 0; j < dim; j++ {
 					f := float32(i*j) * 0.1
 					buf := make([]byte, 4)
-					binary.LittleEndian.PutUint32(buf, math.Float32bits(f))
+					common.Endian.PutUint32(buf, math.Float32bits(f))
 					rawData = append(rawData, buf...)
 				}
 			default:
@@ -681,10 +707,27 @@ func genSimpleTimestampFieldData() []Timestamp {
 	return times
 }
 
+func genSimpleTimestampDeletedPK() []Timestamp {
+	times := make([]Timestamp, defaultDelLength)
+	for i := 0; i < defaultDelLength; i++ {
+		times[i] = Timestamp(i)
+	}
+	times[0] = 1
+	return times
+}
+
 func genSimpleRowIDField() []IntPrimaryKey {
 	ids := make([]IntPrimaryKey, defaultMsgLength)
 	for i := 0; i < defaultMsgLength; i++ {
 		ids[i] = IntPrimaryKey(i)
+	}
+	return ids
+}
+
+func genSimpleDeleteID() []IntPrimaryKey {
+	ids := make([]IntPrimaryKey, defaultDelLength)
+	for i := 0; i < defaultDelLength; i++ {
+		ids[0] = IntPrimaryKey(i)
 	}
 	return ids
 }
@@ -721,6 +764,21 @@ func genSimpleInsertMsg() (*msgstream.InsertMsg, error) {
 			Timestamps:     genSimpleTimestampFieldData(),
 			RowIDs:         genSimpleRowIDField(),
 			RowData:        rowData,
+		},
+	}, nil
+}
+
+func genSimpleDeleteMsg() (*msgstream.DeleteMsg, error) {
+	return &msgstream.DeleteMsg{
+		BaseMsg: genMsgStreamBaseMsg(),
+		DeleteRequest: internalpb.DeleteRequest{
+			Base:           genCommonMsgBase(commonpb.MsgType_Delete),
+			CollectionName: defaultCollectionName,
+			PartitionName:  defaultPartitionName,
+			CollectionID:   defaultCollectionID,
+			PartitionID:    defaultPartitionID,
+			PrimaryKeys:    genSimpleDeleteID(),
+			Timestamps:     genSimpleTimestampDeletedPK(),
 		},
 	}, nil
 }
@@ -771,7 +829,7 @@ func genSealedSegment(schemaForCreate *schemapb.CollectionSchema,
 		case *storage.DoubleFieldData:
 			numRows = fieldData.NumRows
 			data = fieldData.Data
-		case storage.StringFieldData:
+		case *storage.StringFieldData:
 			numRows = fieldData.NumRows
 			data = fieldData.Data
 		case *storage.FloatVectorFieldData:
@@ -865,7 +923,11 @@ func genSimpleStreaming(ctx context.Context) (*streaming, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := newStreaming(ctx, fac, kv)
+	historicalReplica, err := genSimpleReplica()
+	if err != nil {
+		return nil, err
+	}
+	s := newStreaming(ctx, fac, kv, historicalReplica)
 	r, err := genSimpleReplica()
 	if err != nil {
 		return nil, err
@@ -940,7 +1002,7 @@ func genSimplePlaceHolderGroup() ([]byte, error) {
 		var rawData []byte
 		for k, ele := range vec {
 			buf := make([]byte, 4)
-			binary.LittleEndian.PutUint32(buf, math.Float32bits(ele+float32(k*2)))
+			common.Endian.PutUint32(buf, math.Float32bits(ele+float32(k*2)))
 			rawData = append(rawData, buf...)
 		}
 		placeholderValue.Values = append(placeholderValue.Values, rawData)
@@ -1218,6 +1280,37 @@ func consumeSimpleRetrieveResult(stream msgstream.MsgStream) (*msgstream.Retriev
 	return res.Msgs[0].(*msgstream.RetrieveResultMsg), nil
 }
 
+func genSimpleChangeInfo() *querypb.SealedSegmentsChangeInfo {
+	changeInfo := &querypb.SegmentChangeInfo{
+		OnlineNodeID: Params.QueryNodeID,
+		OnlineSegments: []*querypb.SegmentInfo{
+			genSimpleSegmentInfo(),
+		},
+		OfflineNodeID: Params.QueryNodeID + 1,
+		OfflineSegments: []*querypb.SegmentInfo{
+			genSimpleSegmentInfo(),
+		},
+	}
+
+	return &querypb.SealedSegmentsChangeInfo{
+		Base:  genCommonMsgBase(commonpb.MsgType_LoadBalanceSegments),
+		Infos: []*querypb.SegmentChangeInfo{changeInfo},
+	}
+}
+
+func saveChangeInfo(key string, value string) error {
+	log.Debug(".. [query node unittest] Saving change info")
+
+	kv, err := genEtcdKV()
+	if err != nil {
+		return err
+	}
+
+	key = changeInfoMetaPrefix + "/" + key
+
+	return kv.Save(key, value)
+}
+
 // node
 func genSimpleQueryNode(ctx context.Context) (*QueryNode, error) {
 	fac, err := genFactory()
@@ -1225,6 +1318,13 @@ func genSimpleQueryNode(ctx context.Context) (*QueryNode, error) {
 		return nil, err
 	}
 	node := NewQueryNode(ctx, fac)
+
+	etcdKV, err := genEtcdKV()
+	if err != nil {
+		return nil, err
+	}
+
+	node.etcdKV = etcdKV
 
 	streaming, err := genSimpleStreaming(ctx)
 	if err != nil {
@@ -1249,4 +1349,119 @@ func genSimpleQueryNode(ctx context.Context) (*QueryNode, error) {
 	node.UpdateStateCode(internalpb.StateCode_Healthy)
 
 	return node, nil
+}
+
+func genFieldData(fieldName string, fieldID int64, fieldType schemapb.DataType, fieldValue interface{}, dim int64) *schemapb.FieldData {
+	var fieldData *schemapb.FieldData
+	switch fieldType {
+	case schemapb.DataType_Bool:
+		fieldData = &schemapb.FieldData{
+			Type:      schemapb.DataType_Bool,
+			FieldName: fieldName,
+			Field: &schemapb.FieldData_Scalars{
+				Scalars: &schemapb.ScalarField{
+					Data: &schemapb.ScalarField_BoolData{
+						BoolData: &schemapb.BoolArray{
+							Data: fieldValue.([]bool),
+						},
+					},
+				},
+			},
+			FieldId: fieldID,
+		}
+	case schemapb.DataType_Int32:
+		fieldData = &schemapb.FieldData{
+			Type:      schemapb.DataType_Int32,
+			FieldName: fieldName,
+			Field: &schemapb.FieldData_Scalars{
+				Scalars: &schemapb.ScalarField{
+					Data: &schemapb.ScalarField_IntData{
+						IntData: &schemapb.IntArray{
+							Data: fieldValue.([]int32),
+						},
+					},
+				},
+			},
+			FieldId: fieldID,
+		}
+	case schemapb.DataType_Int64:
+		fieldData = &schemapb.FieldData{
+			Type:      schemapb.DataType_Int64,
+			FieldName: fieldName,
+			Field: &schemapb.FieldData_Scalars{
+				Scalars: &schemapb.ScalarField{
+					Data: &schemapb.ScalarField_LongData{
+						LongData: &schemapb.LongArray{
+							Data: fieldValue.([]int64),
+						},
+					},
+				},
+			},
+			FieldId: fieldID,
+		}
+	case schemapb.DataType_Float:
+		fieldData = &schemapb.FieldData{
+			Type:      schemapb.DataType_Float,
+			FieldName: fieldName,
+			Field: &schemapb.FieldData_Scalars{
+				Scalars: &schemapb.ScalarField{
+					Data: &schemapb.ScalarField_FloatData{
+						FloatData: &schemapb.FloatArray{
+							Data: fieldValue.([]float32),
+						},
+					},
+				},
+			},
+			FieldId: fieldID,
+		}
+	case schemapb.DataType_Double:
+		fieldData = &schemapb.FieldData{
+			Type:      schemapb.DataType_Double,
+			FieldName: fieldName,
+			Field: &schemapb.FieldData_Scalars{
+				Scalars: &schemapb.ScalarField{
+					Data: &schemapb.ScalarField_DoubleData{
+						DoubleData: &schemapb.DoubleArray{
+							Data: fieldValue.([]float64),
+						},
+					},
+				},
+			},
+			FieldId: fieldID,
+		}
+	case schemapb.DataType_BinaryVector:
+		fieldData = &schemapb.FieldData{
+			Type:      schemapb.DataType_BinaryVector,
+			FieldName: fieldName,
+			Field: &schemapb.FieldData_Vectors{
+				Vectors: &schemapb.VectorField{
+					Dim: dim,
+					Data: &schemapb.VectorField_BinaryVector{
+						BinaryVector: fieldValue.([]byte),
+					},
+				},
+			},
+			FieldId: fieldID,
+		}
+	case schemapb.DataType_FloatVector:
+		fieldData = &schemapb.FieldData{
+			Type:      schemapb.DataType_FloatVector,
+			FieldName: fieldName,
+			Field: &schemapb.FieldData_Vectors{
+				Vectors: &schemapb.VectorField{
+					Dim: dim,
+					Data: &schemapb.VectorField_FloatVector{
+						FloatVector: &schemapb.FloatArray{
+							Data: fieldValue.([]float32),
+						},
+					},
+				},
+			},
+			FieldId: fieldID,
+		}
+	default:
+		log.Error("not supported field type", zap.String("field type", fieldType.String()))
+	}
+
+	return fieldData
 }

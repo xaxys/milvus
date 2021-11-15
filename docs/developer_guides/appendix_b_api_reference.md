@@ -4,22 +4,22 @@ In this section, we introduce the RPCs of milvus service. A brief description of
 
 | RPC                     | description                                                                                   |
 | :---------------------- | --------------------------------------------------------------------------------------------- |
-| CreateCollection        | create a collection base on schema statement                                                  |
+| CreateCollection        | create a collection based on schema statement                                                 |
 | DropCollection          | drop a collection                                                                             |
-| HasCollection           | whether a collection exists                                                                   |
+| HasCollection           | check whether a collection exists                                                             |
 | LoadCollection          | load collection to memory for future search                                                   |
-| ReleaseCollection       | release the memory the collection memory                                                      |
+| ReleaseCollection       | release the collection from memory                                                            |
 | DescribeCollection      | show a collection's schema and its descriptive statistics                                     |
 | GetCollectionStatistics | show a collection's statistics                                                                |
 | ShowCollections         | list all collections                                                                          |
 | CreatePartition         | create a partition                                                                            |
 | DropPartition           | drop a partition                                                                              |
-| HasPartition            | whether a partition exists                                                                    |
-| LoadPartition           | load collection to memory for future search                                                   |
-| ReleasePartitions       | release the memory the collection memory                                                      |
+| HasPartition            | check whether a partition exists                                                              |
+| LoadPartition           | load partition to memory for future search                                                   |
+| ReleasePartitions       | release partitions from memory                                                                |
 | GetPartitionStatistics  | show a partition's statistics                                                                 |
 | ShowPartitions          | list a collection's all partitions                                                            |
-| CreateIndex             | create index for a field in the collection                                                    |
+| CreateIndex             | create an index for a field in the collection                                                    |
 | DescribeIndex           | get index details for a field in the collection                                               |
 | GetIndexStates          | get build index state                                                                         |
 | DropIndex               | drop a specific index for a field in the collection                                           |
@@ -79,7 +79,7 @@ message CollectionSchema {
 
 CreateCollectionRequest contains **MsgBase**, **db_name**, **collection_name** and serialized collection schema **schema**. **db_name** contains only a string named **collection_name**. Collection with the same collection_name is going to be created.
 
-Collection schema contains all the base information of a collection including **collection name**, **description**, **autoID** and **fields**. Collection description is defined by the database manager to describe the collection. **autoID** determines whether the ID of each row of data is user-defined. If **autoID** is true, our system will generate a unique ID for each data. If **autoID** is false, users need to give each entity a ID when insert.
+Collection schema contains all the base information of a collection including **collection name**, **description**, **autoID** and **fields**. Collection description is defined by the database manager to describe the collection. **autoID** determines whether the ID of each row of data is user-defined. If **autoID** is true, our system will generate a unique ID for each data. If **autoID** is false, users need to give each entity a ID when inserting.
 
 **Fields** is a list of **FieldSchema**. Each schema should include Field **name**, **description**, **dataType**, **type_params** and **index_params**.
 
@@ -97,7 +97,7 @@ message FieldSchema {
 }
 ```
 
-**Field schema** contains all the base information of a field including **fieldID**, **name**, **description**, **data_type**, **type_params** and **index_params**. **data_type** is an enum type to distinguish different data types.Total enum is shown in the last of this doc
+**Field schema** contains all the base information of a field including **fieldID**, **name**, **description**, **data_type**, **type_params** and **index_params**. **data_type** is an enum type to distinguish different data types. Total enum is shown in the last of this doc
 
 **type_params** contains the detailed information of data_type. For example, vector data type should include dimension information. You can give a pair of <dim, 8> to let the field store an 8-dimension vector.
 
@@ -155,7 +155,7 @@ message Status {
 }
 ```
 
-**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 ###### 3.1.3 HasCollection
 
@@ -196,7 +196,7 @@ message BoolResponse {
 }
 ```
 
-**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 **value** represents whether the collection exists. If collection exists, value will be true. If collection doesn't exist, value will be false.
 
@@ -239,7 +239,7 @@ message Status {
 }
 ```
 
-**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 ###### 3.1.5 ReleaseCollection
 
@@ -280,7 +280,7 @@ message Status {
 }
 ```
 
-**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 ###### 3.1.6 DescribeCollection
 
@@ -309,7 +309,7 @@ message DescribeCollectionRequest {
 }
 ```
 
-The server finds the collection through **collection_name** and gets detailed collection information. And **collectionID** is for internel component to get collection details.
+The server finds the collection through **collection_name** and gets detailed collection information. And **collectionID** is for internal component to get collection details.
 
 **Returns:**
 
@@ -323,7 +323,7 @@ message DescribeCollectionResponse {
 }
 ```
 
-**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 **schema** is collection schema same as the collection schema in [CreateCollection](#311-createcollection).
 
@@ -439,7 +439,7 @@ message Status {
 }
 ```
 
-**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 ###### 3.1.10 DropPartition
 
@@ -481,7 +481,7 @@ message Status {
 }
 ```
 
-**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 ###### 3.1.11 HasPartition
 
@@ -523,7 +523,7 @@ message BoolResponse {
 }
 ```
 
-**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 **value** represents whether the partition exists. If partition exists, value will be true. If partition doesn't exist, value will be false.
 
@@ -567,7 +567,7 @@ message Status {
 }
 ```
 
-**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 ###### 3.1.13 ReleasePartitions
 
@@ -609,7 +609,7 @@ message Status {
 }
 ```
 
-**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 ###### 3.1.14 GetPartitionStatistics
 
@@ -651,7 +651,7 @@ message GetPartitionStatisticsResponse {
 }
 ```
 
-**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 **stats** is a map saving different statistics. For example, you can get row_count of a partition with key 'row_count'.
 
@@ -696,10 +696,10 @@ message ShowPartitionsResponse {
 }
 ```
 
-**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 **partition_names** is a list contains all partitions' name.
-**partitionIDs** is a list contains all partitions' ids. And the index of a parition in **partition_names** and **partitionIDs** are same.
+**partitionIDs** is a list contains all partitions' ids. And the index of a partition in **partition_names** and **partitionIDs** are same.
 
 #### 3.2 Manipulation Requsts
 
@@ -750,7 +750,7 @@ message InsertResponse {
 }
 ```
 
-**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describes the detailed error.
+**Status** represents the server error code. It doesn't contain grpc error but contains the server error code. We can get the executing result in common status. **error_code** is an enum type to distinguish the executing error type. The total Errorcode is shown in the last of this code. And the **reason** field is a string to describe the detailed error.
 
 **rowID_begin** and **rowID_end** are the ID of inserted values.
 
@@ -772,7 +772,7 @@ rpc CreateIndex(CreateIndexRequest) returns (common.Status){}
 
 **Description:**
 
-Create a index for a collection.
+Create an index for a collection.
 
 **Parameters:**
 
@@ -817,7 +817,7 @@ rpc DescribeIndex(DescribeIndexRequest) returns (common.Status){}
 
 **Description:**
 
-Get a index detailed info
+Get an index detailed info
 
 **Parameters:**
 
@@ -835,7 +835,7 @@ message DescribeIndexRequest {
 }
 ```
 
-Get a index details for the field with **field_name** in collection with **collection_name**.
+Get details of an index for the field with **field_name** in collection with **collection_name**.
 
 **index_name**： A field can create multiple indexes. And you can drop a specific index through index_name.
 
@@ -872,7 +872,7 @@ rpc GetIndexStates(GetIndexStatesRequest) returns (GetIndexStatesRequest){}
 
 **Description:**
 
-Get a index build progress info.
+Get index build progress info.
 
 **Parameters:**
 
@@ -883,14 +883,14 @@ GetIndexStatesRequest struct is shown as follows:
 ```protobuf
 message GetIndexStatesRequest {
   common.MsgBase base = 1;
-  string db_name = 2 ;
+  string db_name = 2;
   string collection_name = 3;
   string field_name = 4;
   string index_name = 5;
 }
 ```
 
-Get a index build progress info for the field with **field_name** in collection with **collection_name**.
+Get index build progress info for the field with **field_name** in collection with **collection_name**.
 
 **index_name**： A field can create multiple indexes. And you can get specific index state through index_name.
 
@@ -928,7 +928,7 @@ rpc DropIndex(DropIndexRequest) returns (common.Status){}
 
 **Description:**
 
-Drop a index for a collection.
+Drop an index for a collection.
 
 **Parameters:**
 

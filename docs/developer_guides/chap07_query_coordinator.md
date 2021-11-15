@@ -11,11 +11,17 @@ type QueryCoord interface {
 	Component
 	TimeTickProvider
 
+  // ShowCollections notifies RootCoord to list all collection names and other info in database at specified timestamp
 	ShowCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error)
+  // LoadCollection notifies Proxy to load a collection's data
 	LoadCollection(ctx context.Context, req *querypb.LoadCollectionRequest) (*commonpb.Status, error)
+  // ReleaseCollection notifies Proxy to release a collection's data
 	ReleaseCollection(ctx context.Context, req *querypb.ReleaseCollectionRequest) (*commonpb.Status, error)
+  // ShowPartitions notifies RootCoord to list all partition names and other info in the collection
 	ShowPartitions(ctx context.Context, req *querypb.ShowPartitionsRequest) (*querypb.ShowPartitionsResponse, error)
+  // LoadPartitions notifies Proxy to load partition's data
 	LoadPartitions(ctx context.Context, req *querypb.LoadPartitionsRequest) (*commonpb.Status, error)
+  // ReleasePartitions notifies Proxy to release collection's data
 	ReleasePartitions(ctx context.Context, req *querypb.ReleasePartitionsRequest) (*commonpb.Status, error)
 	CreateQueryChannel(ctx context.Context) (*querypb.CreateQueryChannelResponse, error)
 	GetPartitionStates(ctx context.Context, req *querypb.GetPartitionStatesRequest) (*querypb.GetPartitionStatesResponse, error)
@@ -233,9 +239,12 @@ type QueryNode interface {
 	Component
 	TimeTickProvider
 
+	// AddQueryChannel notifies QueryNode to subscribe a query channel and be a producer of a query result channel.
 	AddQueryChannel(ctx context.Context, req *querypb.AddQueryChannelRequest) (*commonpb.Status, error)
 	RemoveQueryChannel(ctx context.Context, req *querypb.RemoveQueryChannelRequest) (*commonpb.Status, error)
 	WatchDmChannels(ctx context.Context, req *querypb.WatchDmChannelsRequest) (*commonpb.Status, error)
+	// LoadSegments notifies QueryNode to load the sealed segments from storage. The load tasks are sync to this
+	// rpc, QueryNode will return after all the sealed segments are loaded.
 	LoadSegments(ctx context.Context, req *querypb.LoadSegmentsRequest) (*commonpb.Status, error)
 	ReleaseCollection(ctx context.Context, req *querypb.ReleaseCollectionRequest) (*commonpb.Status, error)
 	ReleasePartitions(ctx context.Context, req *querypb.ReleasePartitionsRequest) (*commonpb.Status, error)

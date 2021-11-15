@@ -4,26 +4,24 @@ This document will help to setup your development environment and run tests. If 
 
 Table of contents
 =================
-- [Development](#development)
-- [Table of contents](#table-of-contents)
-  - [Building Milvus with Docker](#building-milvus-with-docker)
-  - [Building Milvus on a local OS/shell environment](#building-milvus-on-a-local-osshell-environment)
-    - [Hardware Requirements](#hardware-requirements)
-    - [Software Requirements](#software-requirements)
-      - [Dependencies](#dependencies)
-      - [CMake](#cmake)
-      - [Go](#go)
-      - [Docker & Docker Compose](#docker--docker-compose)
-    - [Building Milvus](#building-milvus)
-  - [A Quick Start for Testing Milvus](#a-quick-start-for-testing-milvus)
-    - [Presubmission Verification](#presubmission-verification)
-    - [Unit Tests](#unit-tests)
-    - [Code coverage](#code-coverage)
-    - [E2E Tests](#e2e-tests)
-    - [Test on local branch](#test-on-local-branch)
-      - [On Linux](#on-linux)
-      - [With docker](#with-docker)
-  - [GitHub Flow](#github-flow)
+- [Building Milvus with Docker](#building-milvus-with-docker)
+- [Building Milvus on a local OS/shell environment](#building-milvus-on-a-local-osshell-environment)
+  - [Hardware Requirements](#hardware-requirements)
+  - [Software Requirements](#software-requirements)
+    - [Dependencies](#dependencies)
+    - [CMake](#cmake)
+    - [Go](#go)
+    - [Docker & Docker Compose](#docker--docker-compose)
+  - [Building Milvus](#building-milvus)
+- [A Quick Start for Testing Milvus](#a-quick-start-for-testing-milvus)
+  - [Presubmission Verification](#presubmission-verification)
+  - [Unit Tests](#unit-tests)
+  - [Code coverage](#code-coverage)
+  - [E2E Tests](#e2e-tests)
+  - [Test on local branch](#test-on-local-branch)
+    - [On Linux](#on-linux)
+    - [With docker](#with-docker)
+- [GitHub Flow](#github-flow)
 
 
 ## Building Milvus with Docker
@@ -120,7 +118,7 @@ Note: go1.15 is required to build Milvus.
 
 #### Docker & Docker Compose
 
-Milvus depends on Etcd, Pulsar and MinIO. Using Docker Compose to manage these is an easy way in a local development. To install Docker and Docker Compose in your development environment, follow the instructions from the Docker website below:
+Milvus depends on etcd, Pulsar and MinIO. Using Docker Compose to manage these is an easy way in local development. To install Docker and Docker Compose in your development environment, follow the instructions from the Docker website below:
 
 -   Docker: https://docs.docker.com/get-docker/
 -   Docker Compose: https://docs.docker.com/compose/install/
@@ -135,7 +133,7 @@ $ make all
 
 If this command succeed, you will now have an executable at `bin/milvus` off of your Milvus project directory.
 
-If you want to update proto file before make, we can use the following command:
+If you want to update proto file before `make`, we can use the following command:
 ```shell
 $ make generated-proto-go
 ```
@@ -219,7 +217,7 @@ $ make codecov-cpp
 
 ### E2E Tests
 
-Milvus uses Python SDK to write test cases to verify the correctness of Milvus functions. Before run E2E tests, you need a running Milvus:
+Milvus uses Python SDK to write test cases to verify the correctness of Milvus functions. Before running E2E tests, you need a running Milvus:
 
 ```shell
 # Running Milvus cluster
@@ -235,7 +233,7 @@ $ cd ../../../
 $ ./scripts/start_standalone.sh
 ```
 
-To run E2E tests, use these command:
+To run E2E tests, use these commands:
 
 ```shell
 $ cd tests/python_client

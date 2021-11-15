@@ -1,3 +1,19 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package datacoord
 
 import (
@@ -280,18 +296,39 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	resp := &commonpb.Status{
 		ErrorCode: commonpb.ErrorCode_UnexpectedError,
 	}
+
 	if s.isClosed() {
 		resp.Reason = serverNotServingErrMsg
 		return resp, nil
 	}
+
 	log.Debug("receive SaveBinlogPaths request",
 		zap.Int64("collectionID", req.GetCollectionID()),
 		zap.Int64("segmentID", req.GetSegmentID()),
+		zap.Bool("isFlush", req.GetFlushed()),
 		zap.Any("checkpoints", req.GetCheckPoints()))
+
+	// validate
+	nodeID := req.GetBase().GetSourceID()
+	segmentID := req.GetSegmentID()
+	segment := s.meta.GetSegment(segmentID)
+
+	if segment == nil {
+		FailResponse(resp, fmt.Sprintf("failed to get segment %d", segmentID))
+		log.Error("failed to get segment", zap.Int64("segmentID", segmentID))
+		return resp, nil
+	}
+
+	channel := segment.GetInsertChannel()
+	if !s.channelManager.Match(nodeID, channel) {
+		FailResponse(resp, fmt.Sprintf("channel %s is not watched on node %d", channel, nodeID))
+		log.Warn("node is not matched with channel", zap.String("channel", channel), zap.Int64("nodeID", nodeID))
+	}
 
 	// set segment to SegmentState_Flushing and save binlogs and checkpoints
 	err := s.meta.UpdateFlushSegmentsInfo(req.GetSegmentID(), req.GetFlushed(),
-		req.GetField2BinlogPaths(), req.GetCheckPoints(), req.GetStartPositions())
+		req.GetField2BinlogPaths(), req.GetField2StatslogPaths(), req.GetDeltalogs(),
+		req.GetCheckPoints(), req.GetStartPositions())
 	if err != nil {
 		log.Error("save binlog and checkpoints failed",
 			zap.Int64("segmentID", req.GetSegmentID()),
@@ -299,6 +336,7 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 		resp.Reason = err.Error()
 		return resp, nil
 	}
+
 	log.Debug("flush segment with meta", zap.Int64("id", req.SegmentID),
 		zap.Any("meta", req.GetField2BinlogPaths()))
 
@@ -353,7 +391,11 @@ func (s *Server) GetRecoveryInfo(ctx context.Context, req *datapb.GetRecoveryInf
 	}
 	segmentIDs := s.meta.GetSegmentsOfPartition(collectionID, partitionID)
 	segment2Binlogs := make(map[UniqueID][]*datapb.FieldBinlog)
+	segment2StatsBinlogs := make(map[UniqueID][]*datapb.FieldBinlog)
+	segment2DeltaBinlogs := make(map[UniqueID][]*datapb.DeltaLogInfo)
 	segmentsNumOfRows := make(map[UniqueID]int64)
+
+	flushedIDs := make(map[int64]struct{})
 	for _, id := range segmentIDs {
 		segment := s.meta.GetSegment(id)
 		if segment == nil {
@@ -364,6 +406,10 @@ func (s *Server) GetRecoveryInfo(ctx context.Context, req *datapb.GetRecoveryInf
 		}
 		if segment.State != commonpb.SegmentState_Flushed && segment.State != commonpb.SegmentState_Flushing {
 			continue
+		}
+		_, ok := flushedIDs[id]
+		if !ok {
+			flushedIDs[id] = struct{}{}
 		}
 
 		binlogs := segment.GetBinlogs()
@@ -381,14 +427,32 @@ func (s *Server) GetRecoveryInfo(ctx context.Context, req *datapb.GetRecoveryInf
 		}
 
 		segmentsNumOfRows[id] = segment.NumOfRows
+
+		statsBinlogs := segment.GetStatslogs()
+		field2StatsBinlog := make(map[UniqueID][]string)
+		for _, field := range statsBinlogs {
+			field2StatsBinlog[field.GetFieldID()] = append(field2StatsBinlog[field.GetFieldID()], field.GetBinlogs()...)
+		}
+
+		for f, paths := range field2StatsBinlog {
+			fieldBinlogs := &datapb.FieldBinlog{
+				FieldID: f,
+				Binlogs: paths,
+			}
+			segment2StatsBinlogs[id] = append(segment2StatsBinlogs[id], fieldBinlogs)
+		}
+
+		segment2DeltaBinlogs[id] = append(segment2DeltaBinlogs[id], segment.GetDeltalogs()...)
 	}
 
 	binlogs := make([]*datapb.SegmentBinlogs, 0, len(segment2Binlogs))
-	for segmentID, fieldBinlogs := range segment2Binlogs {
+	for segmentID := range flushedIDs {
 		sbl := &datapb.SegmentBinlogs{
 			SegmentID:    segmentID,
 			NumOfRows:    segmentsNumOfRows[segmentID],
-			FieldBinlogs: fieldBinlogs,
+			FieldBinlogs: segment2Binlogs[segmentID],
+			Statslogs:    segment2StatsBinlogs[segmentID],
+			Deltalogs:    segment2DeltaBinlogs[segmentID],
 		}
 		binlogs = append(binlogs, sbl)
 	}
@@ -410,21 +474,10 @@ func (s *Server) GetRecoveryInfo(ctx context.Context, req *datapb.GetRecoveryInf
 	}
 
 	channels := dresp.GetVirtualChannelNames()
-	vchans := make([]vchannel, 0, len(channels))
+	channelInfos := make([]*datapb.VchannelInfo, 0, len(channels))
 	for _, c := range channels {
-		vchans = append(vchans, vchannel{
-			CollectionID: collectionID,
-			DmlChannel:   c,
-		})
-	}
-
-	channelInfos, err := s.GetVChanPositions(vchans, false)
-	if err != nil {
-		log.Error("get channel positions failed",
-			zap.Strings("channels", channels),
-			zap.Error(err))
-		resp.Status.Reason = err.Error()
-		return resp, nil
+		channelInfo := s.GetVChanPositions(c, collectionID, true)
+		channelInfos = append(channelInfos, channelInfo)
 	}
 
 	resp.Binlogs = binlogs

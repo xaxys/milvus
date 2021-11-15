@@ -3,7 +3,7 @@ The `Flush` operation is used to make sure that inserted data will be written in
 
 ![flush_collections](./graphs/flush_data_coord.png)
 
-1. Firstly, `SDK` starts a `Flush` request to `Proxy` via `Grpc`, the `proto` is defined as follows:
+1. Firstly, `SDK` sends a `Flush` request to `Proxy` via `Grpc`, the `proto` is defined as follows:
 ```proto
 service MilvusService {
   ...
@@ -25,7 +25,7 @@ message FlushResponse{
 ```
 
 
-2. When `Proxy` receives `Flush` request, it would wrap this request into `FlushTask`, and push this task into `DdTaskQueue` queue. After that, `Proxy` would call method `WatiToFinish` to wait until the task finished.
+2. When `Proxy` receives `Flush` request, it would wrap this request into `FlushTask`, and push this task into `DdTaskQueue` queue. After that, `Proxy` would call `WatiToFinish` to wait until the task finished.
 ```go
 type task interface {
 	TraceCtx() context.Context
@@ -53,7 +53,7 @@ type FlushTask struct {
 }
 ```
 
-3. There is a backgroud service in `Proxy`. This service gets `FlushTask` from `DdTaskQueue`, and executes in three phases:
+3. There is a background service in `Proxy`. This service gets `FlushTask` from `DdTaskQueue`, and executes in three phases:
     - `PreExecute`
 
       `FlushTask` does nothing at this phase, and returns directly
@@ -144,7 +144,7 @@ message DataNodeTtMsg {
 }
  ```
 
-8. There is a backgroud service, `startDataNodeTsLoop`, in `DataCoord` to process the message of `DataNodeTtMsg`.
+8. There is a background service, `startDataNodeTsLoop`, in `DataCoord` to process the message of `DataNodeTtMsg`.
     - Firstly, `DataCoord` would extract `channel_name` from `DataNodeTtMsg`, and filter out all sealed segments that are attached on this `channel_name`
     - Compare the timestamp when the segment enters into state of `Sealed` with the `DataNodeTtMsg.timestamp`, if `DataNodeTtMsg.timestamp` is greater, which means that all `ID`s belonging to that segment have been consumed by `DataNode`, it's safe to notify `DataNode` to write that segment into persistent storage. The `proto` is defined as follows:
 ```proto

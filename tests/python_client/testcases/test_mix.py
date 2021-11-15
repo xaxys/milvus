@@ -18,7 +18,6 @@ top_k = 1
 nprobe = 1
 epsilon = 0.001
 nlist = 128
-# index_params = {'index_type': IndexType.IVFLAT, 'nlist': 16384}
 default_index = {"index_type": "IVF_FLAT", "params": {"nlist": 16384}, "metric_type": "L2"}
 
 
@@ -36,9 +35,9 @@ class TestMixBase:
         index = connect.describe_index(collection, "")
         create_target_index(default_index, default_float_vec_field_name)
         assert index == default_index
-        query, vecs = gen_query_vectors(default_float_vec_field_name, entities, default_top_k, nq)
+        query, vecs = gen_search_vectors_params(default_float_vec_field_name, entities, default_top_k, nq)
         connect.load_collection(collection)
-        res = connect.search(collection, query)
+        res = connect.search(collection, **query)
         assert len(res) == nq
         assert len(res[0]) == default_top_k
         assert res[0]._distances[0] <= epsilon
@@ -97,12 +96,12 @@ class TestMixBase:
 
     @pytest.mark.tags(CaseLabel.L2)
     def _test_mix_multi_collections(self, connect):
-        '''
+        """
         target: test functions with multiple collections of different metric_types and index_types
         method: create 60 collections which 30 are L2 and the other are IP, add vectors into them
                 and test describe index and search
         expected: status ok
-        '''
+        """
         nq = 10000
         collection_list = []
         idx = []
@@ -198,3 +197,4 @@ def check_id_result(result, id):
         return id in ids[:limit_in]
     else:
         return id in ids
+

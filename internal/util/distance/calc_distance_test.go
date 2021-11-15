@@ -47,7 +47,7 @@ func TestValidateFloatArrayLength(t *testing.T) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-func CreateFloatArray(n int64, dim int64) []float32 {
+func CreateFloatArray(n, dim int64) []float32 {
 	rand.Seed(time.Now().UnixNano())
 	num := n * dim
 	array := make([]float32, num)
@@ -58,7 +58,7 @@ func CreateFloatArray(n int64, dim int64) []float32 {
 	return array
 }
 
-func DistanceL2(left []float32, right []float32) float32 {
+func DistanceL2(left, right []float32) float32 {
 	if len(left) != len(right) {
 		panic("array dimension not equal")
 	}
@@ -71,7 +71,7 @@ func DistanceL2(left []float32, right []float32) float32 {
 	return sum
 }
 
-func DistanceIP(left []float32, right []float32) float32 {
+func DistanceIP(left, right []float32) float32 {
 	if len(left) != len(right) {
 		panic("array dimension not equal")
 	}
@@ -122,6 +122,7 @@ func Test_CalcFloatDistance(t *testing.T) {
 	left := CreateFloatArray(leftNum, dim)
 	right := CreateFloatArray(rightNum, dim)
 
+	// Verify illegal cases
 	_, err := CalcFloatDistance(dim, left, right, "HAMMIN")
 	assert.Error(t, err)
 
@@ -137,6 +138,7 @@ func Test_CalcFloatDistance(t *testing.T) {
 	distances, err := CalcFloatDistance(dim, left, right, "L2")
 	assert.Nil(t, err)
 
+	// Verify the L2 distance algorithm is correct
 	invalid := CreateFloatArray(rightNum, 10)
 	_, err = CalcFloatDistance(dim, left, invalid, "L2")
 	assert.Error(t, err)
@@ -150,6 +152,7 @@ func Test_CalcFloatDistance(t *testing.T) {
 		}
 	}
 
+	// Verify the IP distance algorithm is correct
 	distances, err = CalcFloatDistance(dim, left, right, "IP")
 	assert.Nil(t, err)
 
@@ -164,7 +167,7 @@ func Test_CalcFloatDistance(t *testing.T) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-func CreateBinaryArray(n int64, dim int64) []byte {
+func CreateBinaryArray(n, dim int64) []byte {
 	rand.Seed(time.Now().UnixNano())
 	num := n * dim / 8
 	if num*8 < n*dim {

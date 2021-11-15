@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
@@ -17,22 +22,20 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"path"
+	"io"
 	"strconv"
 	"sync"
-	"unsafe"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/opentracing/opentracing-go"
 	"go.uber.org/zap"
 
-	"github.com/milvus-io/milvus/internal/kv"
-	miniokv "github.com/milvus-io/milvus/internal/kv/minio"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/trace"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
@@ -56,15 +59,12 @@ type insertBufferNode struct {
 	idAllocator  allocatorInterface
 
 	flushMap         sync.Map
-	flushChan        <-chan *flushMsg
+	flushChan        <-chan flushMsg
 	flushingSegCache *Cache
-
-	minIOKV kv.BaseKV
+	flushManager     flushManager
 
 	timeTickStream          msgstream.MsgStream
 	segmentStatisticsStream msgstream.MsgStream
-
-	dsSaveBinlog func(fu *segmentFlushUnit) error
 }
 
 type segmentCheckPoint struct {
@@ -146,7 +146,7 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 
 	fgMsg, ok := in[0].(*flowGraphMsg)
 	if !ok {
-		log.Error("type assertion failed for flowGraphMsg")
+		log.Warn("type assertion failed for flowGraphMsg")
 		ibNode.Close()
 		return []Msg{}
 	}
@@ -217,134 +217,94 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 			zap.Int64("buffer limit", bd.(*BufferData).limit))
 	}
 
+	segmentsToFlush := make([]UniqueID, 0, len(seg2Upload)+1) //auto flush number + possible manual flush
+
+	type flushTask struct {
+		buffer    *BufferData
+		segmentID UniqueID
+		flushed   bool
+	}
+	flushTaskList := make([]flushTask, 0, len(seg2Upload)+1)
+
 	// Auto Flush
-	finishCh := make(chan segmentFlushUnit, len(seg2Upload))
-	finishCnt := sync.WaitGroup{}
 	for _, segToFlush := range seg2Upload {
 		// If full, auto flush
 		if bd, ok := ibNode.insertBuffer.Load(segToFlush); ok && bd.(*BufferData).effectiveCap() <= 0 {
-
-			// Move data from insertBuffer to flushBuffer
+			log.Warn("Auto flush", zap.Int64("segment id", segToFlush))
 			ibuffer := bd.(*BufferData)
-			ibNode.flushMap.Store(segToFlush, ibuffer.buffer)
-			ibNode.insertBuffer.Delete(segToFlush)
 
-			log.Debug(". Insert Buffer full, auto flushing ", zap.Int64("num of rows", ibuffer.size))
-
-			collMeta, err := ibNode.getCollMetabySegID(segToFlush, fgMsg.timeRange.timestampMax)
-			if err != nil {
-				log.Error("Auto flush failed .. cannot get collection meta ..", zap.Error(err))
-				continue
-			}
-
-			collID, partitionID, err := ibNode.getCollectionandPartitionIDbySegID(segToFlush)
-			if err != nil {
-				log.Error("Auto flush failed .. cannot get collection ID or partition ID..", zap.Error(err))
-				continue
-			}
-			finishCnt.Add(1)
-
-			go flushSegment(collMeta, segToFlush, partitionID, collID,
-				&ibNode.flushMap, ibNode.minIOKV, finishCh, &finishCnt, ibNode, ibNode.idAllocator)
-		}
-	}
-	finishCnt.Wait()
-	close(finishCh)
-	for fu := range finishCh {
-		if fu.field2Path == nil {
-			log.Debug("segment is empty")
-			continue
-		}
-		fu.checkPoint = ibNode.replica.listSegmentsCheckPoints()
-		fu.flushed = false
-		if err := ibNode.dsSaveBinlog(&fu); err != nil {
-			log.Debug("data service save bin log path failed", zap.Error(err))
+			flushTaskList = append(flushTaskList, flushTask{
+				buffer:    ibuffer,
+				segmentID: segToFlush,
+				flushed:   false,
+			})
 		}
 	}
 
 	// Manual Flush
 	select {
 	case fmsg := <-ibNode.flushChan:
-		currentSegID := fmsg.segmentID
 		log.Debug(". Receiving flush message",
-			zap.Int64("segmentID", currentSegID),
+			zap.Int64("segmentID", fmsg.segmentID),
 			zap.Int64("collectionID", fmsg.collectionID),
 		)
-
-		bd, ok := ibNode.insertBuffer.Load(currentSegID)
-
-		if !ok || bd.(*BufferData).size <= 0 { // Buffer empty
-			log.Debug(".. Buffer empty ...")
-			err = ibNode.dsSaveBinlog(&segmentFlushUnit{
-				collID:     fmsg.collectionID,
-				segID:      currentSegID,
-				field2Path: map[UniqueID]string{},
-				checkPoint: ibNode.replica.listSegmentsCheckPoints(),
-				flushed:    true,
-			})
-			if err != nil {
-				log.Debug("insert buffer node save binlog failed", zap.Error(err))
+		// merging auto&manual flush segment same segment id
+		dup := false
+		for i, task := range flushTaskList {
+			if task.segmentID == fmsg.segmentID {
+				flushTaskList[i].flushed = fmsg.flushed
+				dup = true
 				break
 			}
-			ibNode.replica.segmentFlushed(currentSegID)
-		} else { // Buffer not empty
-			log.Debug(".. Buffer not empty, flushing ..")
-			finishCh := make(chan segmentFlushUnit, 1)
-
-			ibNode.flushMap.Store(currentSegID, bd.(*BufferData).buffer)
-			clearFn := func() {
-				finishCh <- segmentFlushUnit{field2Path: nil}
-				log.Debug(".. Clearing flush Buffer ..")
-				ibNode.flushMap.Delete(currentSegID)
-				close(finishCh)
-			}
-
-			collID, partitionID, err := ibNode.getCollectionandPartitionIDbySegID(currentSegID)
-			if err != nil {
-				log.Error("Flush failed .. cannot get segment ..", zap.Error(err))
-				clearFn()
-				break
-				// TODO add error handling
-			}
-
-			collMeta, err := ibNode.getCollMetabySegID(currentSegID, fgMsg.timeRange.timestampMax)
-			if err != nil {
-				log.Error("Flush failed .. cannot get collection schema ..", zap.Error(err))
-				clearFn()
-				break
-				// TODO add error handling
-			}
-
-			flushSegment(collMeta, currentSegID, partitionID, collID,
-				&ibNode.flushMap, ibNode.minIOKV, finishCh, nil, ibNode, ibNode.idAllocator)
-			fu := <-finishCh
-			close(finishCh)
-			if fu.field2Path != nil {
-				fu.checkPoint = ibNode.replica.listSegmentsCheckPoints()
-				fu.flushed = true
-				if err := ibNode.dsSaveBinlog(&fu); err != nil {
-					log.Debug("Data service save binlog path failed", zap.Error(err))
-				} else {
-					ibNode.replica.segmentFlushed(fu.segID)
-					ibNode.insertBuffer.Delete(fu.segID)
-				}
-			}
-			//always remove from flushing seg cache
-			ibNode.flushingSegCache.Remove(fu.segID)
 		}
-
+		// if merged, skip load buffer and create task
+		if !dup {
+			currentSegID := fmsg.segmentID
+			bd, ok := ibNode.insertBuffer.Load(currentSegID)
+			var buf *BufferData
+			if ok {
+				buf = bd.(*BufferData)
+			}
+			flushTaskList = append(flushTaskList, flushTask{
+				buffer:    buf,
+				segmentID: currentSegID,
+				flushed:   fmsg.flushed,
+			})
+		}
 	default:
+	}
+
+	for _, task := range flushTaskList {
+		err := ibNode.flushManager.flushBufferData(task.buffer, task.segmentID, task.flushed, endPositions[0])
+		if err != nil {
+			log.Warn("failed to invoke flushBufferData", zap.Error(err))
+		} else {
+			segmentsToFlush = append(segmentsToFlush, task.segmentID)
+			if task.flushed {
+				ibNode.replica.segmentFlushed(task.segmentID)
+			}
+			ibNode.insertBuffer.Delete(task.segmentID)
+		}
 	}
 
 	if err := ibNode.writeHardTimeTick(fgMsg.timeRange.timestampMax); err != nil {
 		log.Error("send hard time tick into pulsar channel failed", zap.Error(err))
 	}
 
+	res := flowGraphMsg{
+		deleteMessages:  fgMsg.deleteMessages,
+		timeRange:       fgMsg.timeRange,
+		startPositions:  fgMsg.startPositions,
+		endPositions:    fgMsg.endPositions,
+		segmentsToFlush: segmentsToFlush,
+	}
+
 	for _, sp := range spans {
 		sp.Finish()
 	}
 
-	return nil
+	// send delete msg to DeleteNode
+	return []Msg{&res}
 }
 
 // updateSegStatesInReplica updates statistics in replica for the segments in insertMsgs.
@@ -435,12 +395,16 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 	idata := buffer.buffer
 
 	// 1.2 Get Fields
-	var pos int = 0 // Record position of blob
 	var fieldIDs []int64
 	var fieldTypes []schemapb.DataType
 	for _, field := range collSchema.Fields {
 		fieldIDs = append(fieldIDs, field.FieldID)
 		fieldTypes = append(fieldTypes, field.DataType)
+	}
+
+	blobReaders := make([]io.Reader, 0)
+	for _, blob := range msg.RowData {
+		blobReaders = append(blobReaders, bytes.NewReader(blob.GetValue()))
 	}
 
 	for _, field := range collSchema.Fields {
@@ -467,18 +431,14 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 			}
 
 			fieldData := idata.Data[field.FieldID].(*storage.FloatVectorFieldData)
+			for _, r := range blobReaders {
+				var v []float32 = make([]float32, dim)
 
-			var offset int
-			for _, blob := range msg.RowData {
-				offset = 0
-				for j := 0; j < dim; j++ {
-					var v float32
-					readBinary(blob.GetValue()[pos+offset:], &v, field.DataType)
-					fieldData.Data = append(fieldData.Data, v)
-					offset += int(unsafe.Sizeof(*(&v)))
-				}
+				readBinary(r, &v, field.DataType)
+
+				fieldData.Data = append(fieldData.Data, v...)
 			}
-			pos += offset
+
 			fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 
 		case schemapb.DataType_BinaryVector:
@@ -503,13 +463,13 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 			}
 			fieldData := idata.Data[field.FieldID].(*storage.BinaryVectorFieldData)
 
-			var offset int
-			for _, blob := range msg.RowData {
-				bv := blob.GetValue()[pos : pos+(dim/8)]
-				fieldData.Data = append(fieldData.Data, bv...)
-				offset = len(bv)
+			for _, r := range blobReaders {
+				var v []byte = make([]byte, dim/8)
+				readBinary(r, &v, field.DataType)
+
+				fieldData.Data = append(fieldData.Data, v...)
 			}
-			pos += offset
+
 			fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 
 		case schemapb.DataType_Bool:
@@ -521,12 +481,13 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 			}
 
 			fieldData := idata.Data[field.FieldID].(*storage.BoolFieldData)
-			var v bool
-			for _, blob := range msg.RowData {
-				readBinary(blob.GetValue()[pos:], &v, field.DataType)
+			for _, r := range blobReaders {
+				var v bool
+				readBinary(r, &v, field.DataType)
+
 				fieldData.Data = append(fieldData.Data, v)
 			}
-			pos += int(unsafe.Sizeof(*(&v)))
+
 			fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 
 		case schemapb.DataType_Int8:
@@ -538,12 +499,13 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 			}
 
 			fieldData := idata.Data[field.FieldID].(*storage.Int8FieldData)
-			var v int8
-			for _, blob := range msg.RowData {
-				readBinary(blob.GetValue()[pos:], &v, field.DataType)
+			for _, r := range blobReaders {
+				var v int8
+				readBinary(r, &v, field.DataType)
+
 				fieldData.Data = append(fieldData.Data, v)
 			}
-			pos += int(unsafe.Sizeof(*(&v)))
+
 			fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 
 		case schemapb.DataType_Int16:
@@ -555,12 +517,13 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 			}
 
 			fieldData := idata.Data[field.FieldID].(*storage.Int16FieldData)
-			var v int16
-			for _, blob := range msg.RowData {
-				readBinary(blob.GetValue()[pos:], &v, field.DataType)
+			for _, r := range blobReaders {
+				var v int16
+				readBinary(r, &v, field.DataType)
+
 				fieldData.Data = append(fieldData.Data, v)
 			}
-			pos += int(unsafe.Sizeof(*(&v)))
+
 			fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 
 		case schemapb.DataType_Int32:
@@ -572,12 +535,13 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 			}
 
 			fieldData := idata.Data[field.FieldID].(*storage.Int32FieldData)
-			var v int32
-			for _, blob := range msg.RowData {
-				readBinary(blob.GetValue()[pos:], &v, field.DataType)
+			for _, r := range blobReaders {
+				var v int32
+				readBinary(r, &v, field.DataType)
+
 				fieldData.Data = append(fieldData.Data, v)
 			}
-			pos += int(unsafe.Sizeof(*(&v)))
+
 			fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 
 		case schemapb.DataType_Int64:
@@ -599,13 +563,18 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 				}
 				fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 			default:
-				var v int64
-				for _, blob := range msg.RowData {
-					readBinary(blob.GetValue()[pos:], &v, field.DataType)
+				for _, r := range blobReaders {
+					var v int64
+					readBinary(r, &v, field.DataType)
+
 					fieldData.Data = append(fieldData.Data, v)
 				}
-				pos += int(unsafe.Sizeof(*(&v)))
+
 				fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
+			}
+			if field.IsPrimaryKey {
+				// update segment pk filter
+				ibNode.replica.updateSegmentPKRange(currentSegID, fieldData.Data)
 			}
 
 		case schemapb.DataType_Float:
@@ -617,12 +586,13 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 			}
 
 			fieldData := idata.Data[field.FieldID].(*storage.FloatFieldData)
-			var v float32
-			for _, blob := range msg.RowData {
-				readBinary(blob.GetValue()[pos:], &v, field.DataType)
+
+			for _, r := range blobReaders {
+				var v float32
+				readBinary(r, &v, field.DataType)
+
 				fieldData.Data = append(fieldData.Data, v)
 			}
-			pos += int(unsafe.Sizeof(*(&v)))
 			fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 
 		case schemapb.DataType_Double:
@@ -634,13 +604,13 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 			}
 
 			fieldData := idata.Data[field.FieldID].(*storage.DoubleFieldData)
-			var v float64
-			for _, blob := range msg.RowData {
-				readBinary(blob.GetValue()[pos:], &v, field.DataType)
+
+			for _, r := range blobReaders {
+				var v float64
+				readBinary(r, &v, field.DataType)
+
 				fieldData.Data = append(fieldData.Data, v)
 			}
-
-			pos += int(unsafe.Sizeof(*(&v)))
 			fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 		}
 	}
@@ -654,126 +624,17 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 	// store current endPositions as Segment->EndPostion
 	ibNode.replica.updateSegmentEndPosition(currentSegID, endPos)
 
-	// update segment pk filter
-	ibNode.replica.updateSegmentPKRange(currentSegID, msg.GetRowIDs())
 	return nil
 }
 
 // readBinary read data in bytes and write it into receiver.
 //  The receiver can be any type in int8, int16, int32, int64, float32, float64 and bool
 //  readBinary uses LittleEndian ByteOrder.
-func readBinary(data []byte, receiver interface{}, dataType schemapb.DataType) {
-	buf := bytes.NewReader(data)
-	err := binary.Read(buf, binary.LittleEndian, receiver)
+func readBinary(reader io.Reader, receiver interface{}, dataType schemapb.DataType) {
+	err := binary.Read(reader, common.Endian, receiver)
 	if err != nil {
 		log.Error("binary.Read failed", zap.Any("data type", dataType), zap.Error(err))
 	}
-}
-
-func flushSegment(
-	collMeta *etcdpb.CollectionMeta,
-	segID, partitionID, collID UniqueID,
-	insertData *sync.Map,
-	kv kv.BaseKV,
-	flushUnit chan<- segmentFlushUnit,
-	wgFinish *sync.WaitGroup,
-	ibNode *insertBufferNode,
-	idAllocator allocatorInterface) {
-
-	if wgFinish != nil {
-		defer wgFinish.Done()
-	}
-
-	clearFn := func(isSuccess bool) {
-		if !isSuccess {
-			flushUnit <- segmentFlushUnit{field2Path: nil}
-		}
-
-		log.Debug(".. Clearing flush Buffer ..")
-		insertData.Delete(segID)
-	}
-
-	inCodec := storage.NewInsertCodec(collMeta)
-
-	// buffer data to binlogs
-	data, ok := insertData.Load(segID)
-	if !ok {
-		log.Error("Flush failed ... cannot load insertData ..")
-		clearFn(false)
-		return
-	}
-
-	binLogs, statsBinlogs, err := inCodec.Serialize(partitionID, segID, data.(*InsertData))
-	if err != nil {
-		log.Error("Flush failed ... cannot generate binlog ..", zap.Error(err))
-		clearFn(false)
-		return
-	}
-
-	log.Debug(".. Saving binlogs to MinIO ..", zap.Int("number", len(binLogs)))
-	field2Path := make(map[UniqueID]string, len(binLogs))
-	kvs := make(map[string]string, len(binLogs))
-	paths := make([]string, 0, len(binLogs))
-	field2Logidx := make(map[UniqueID]UniqueID, len(binLogs))
-
-	// write insert binlog
-	for _, blob := range binLogs {
-		fieldID, err := strconv.ParseInt(blob.GetKey(), 10, 64)
-		if err != nil {
-			log.Error("Flush failed ... cannot parse string to fieldID ..", zap.Error(err))
-			clearFn(false)
-			return
-		}
-		log.Debug("save binlog", zap.Int64("fieldID", fieldID))
-
-		logidx, err := idAllocator.allocID()
-		if err != nil {
-			log.Error("Flush failed ... cannot alloc ID ..", zap.Error(err))
-			clearFn(false)
-			return
-		}
-
-		// no error raise if alloc=false
-		k, _ := idAllocator.genKey(false, collID, partitionID, segID, fieldID, logidx)
-
-		key := path.Join(Params.InsertBinlogRootPath, k)
-		paths = append(paths, key)
-		kvs[key] = string(blob.Value[:])
-		field2Path[fieldID] = key
-		field2Logidx[fieldID] = logidx
-	}
-
-	// write stats binlog
-	for _, blob := range statsBinlogs {
-		fieldID, err := strconv.ParseInt(blob.GetKey(), 10, 64)
-		if err != nil {
-			log.Error("Flush failed ... cannot parse string to fieldID ..", zap.Error(err))
-			clearFn(false)
-			return
-		}
-
-		logidx := field2Logidx[fieldID]
-
-		// no error raise if alloc=false
-		k, _ := idAllocator.genKey(false, collID, partitionID, segID, fieldID, logidx)
-
-		key := path.Join(Params.StatsBinlogRootPath, k)
-		kvs[key] = string(blob.Value[:])
-	}
-	log.Debug("save binlog file to MinIO/S3")
-
-	err = kv.MultiSave(kvs)
-	if err != nil {
-		log.Error("Flush failed ... cannot save to MinIO ..", zap.Error(err))
-		_ = kv.MultiRemove(paths)
-		clearFn(false)
-		return
-	}
-
-	ibNode.replica.updateSegmentCheckPoint(segID)
-	startPos := ibNode.replica.listNewSegmentsStartPositions()
-	flushUnit <- segmentFlushUnit{collID: collID, segID: segID, field2Path: field2Path, startPositions: startPos}
-	clearFn(true)
 }
 
 // writeHardTimeTick writes timetick once insertBufferNode operates.
@@ -866,41 +727,15 @@ func (ibNode *insertBufferNode) getCollectionandPartitionIDbySegID(segmentID Uni
 	return ibNode.replica.getCollectionAndPartitionID(segmentID)
 }
 
-func newInsertBufferNode(
-	ctx context.Context,
-	replica Replica,
-	factory msgstream.Factory,
-	idAllocator allocatorInterface,
-	flushCh <-chan *flushMsg,
-	saveBinlog func(*segmentFlushUnit) error,
-	channelName string,
-	flushingSegCache *Cache,
-) (*insertBufferNode, error) {
-
-	maxQueueLength := Params.FlowGraphMaxQueueLength
-	maxParallelism := Params.FlowGraphMaxParallelism
+func newInsertBufferNode(ctx context.Context, flushCh <-chan flushMsg, fm flushManager,
+	flushingSegCache *Cache, config *nodeConfig) (*insertBufferNode, error) {
 
 	baseNode := BaseNode{}
-	baseNode.SetMaxQueueLength(maxQueueLength)
-	baseNode.SetMaxParallelism(maxParallelism)
-
-	// MinIO
-	option := &miniokv.Option{
-		Address:           Params.MinioAddress,
-		AccessKeyID:       Params.MinioAccessKeyID,
-		SecretAccessKeyID: Params.MinioSecretAccessKey,
-		UseSSL:            Params.MinioUseSSL,
-		CreateBucket:      true,
-		BucketName:        Params.MinioBucketName,
-	}
-
-	minIOKV, err := miniokv.NewMinIOKV(ctx, option)
-	if err != nil {
-		return nil, err
-	}
+	baseNode.SetMaxQueueLength(config.maxQueueLength)
+	baseNode.SetMaxParallelism(config.maxParallelism)
 
 	//input stream, data node time tick
-	wTt, err := factory.NewMsgStream(ctx)
+	wTt, err := config.msFactory.NewMsgStream(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -910,7 +745,7 @@ func newInsertBufferNode(
 	wTtMsgStream.Start()
 
 	// update statistics channel
-	segS, err := factory.NewMsgStream(ctx)
+	segS, err := config.msFactory.NewMsgStream(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -922,17 +757,17 @@ func newInsertBufferNode(
 	return &insertBufferNode{
 		BaseNode:     baseNode,
 		insertBuffer: sync.Map{},
-		minIOKV:      minIOKV,
-		channelName:  channelName,
 
 		timeTickStream:          wTtMsgStream,
 		segmentStatisticsStream: segStatisticsMsgStream,
 
-		replica:          replica,
 		flushMap:         sync.Map{},
 		flushChan:        flushCh,
-		idAllocator:      idAllocator,
-		dsSaveBinlog:     saveBinlog,
 		flushingSegCache: flushingSegCache,
+		flushManager:     fm,
+
+		replica:     config.replica,
+		idAllocator: config.allocator,
+		channelName: config.vChannelName,
 	}, nil
 }

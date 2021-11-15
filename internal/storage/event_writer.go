@@ -15,8 +15,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"strconv"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 )
 
@@ -77,6 +80,18 @@ func (event *descriptorEvent) Write(buffer io.Writer) error {
 	return nil
 }
 
+func readMagicNumber(buffer io.Reader) (int32, error) {
+	var magicNumber int32
+	if err := binary.Read(buffer, common.Endian, &magicNumber); err != nil {
+		return -1, err
+	}
+	if magicNumber != MagicNumber {
+		return -1, fmt.Errorf("parse magic number failed, expected: %s, actual: %s", strconv.Itoa(int(MagicNumber)), strconv.Itoa(int(magicNumber)))
+	}
+
+	return magicNumber, nil
+}
+
 func ReadDescriptorEvent(buffer io.Reader) (*descriptorEvent, error) {
 	header, err := readDescriptorEventHeader(buffer)
 	if err != nil {
@@ -134,7 +149,7 @@ func (writer *baseEventWriter) Write(buffer *bytes.Buffer) error {
 	if err != nil {
 		return err
 	}
-	if err := binary.Write(buffer, binary.LittleEndian, data); err != nil {
+	if err := binary.Write(buffer, common.Endian, data); err != nil {
 		return err
 	}
 	return nil

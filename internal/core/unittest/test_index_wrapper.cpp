@@ -9,18 +9,19 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
-#include <tuple>
-#include <map>
-#include <gtest/gtest.h>
 #include <google/protobuf/text_format.h>
+#include <gtest/gtest.h>
+#include <map>
+#include <tuple>
 
-#include "pb/index_cgo_msg.pb.h"
-#include "index/knowhere/knowhere/index/vector_index/helpers/IndexParameter.h"
-#include "index/knowhere/knowhere/index/vector_index/adapter/VectorAdapter.h"
 #include "indexbuilder/IndexWrapper.h"
 #include "indexbuilder/index_c.h"
-#include "test_utils/DataGen.h"
 #include "indexbuilder/utils.h"
+#include "index/knowhere/knowhere/index/vector_index/helpers/IndexParameter.h"
+#include "index/knowhere/knowhere/index/vector_index/adapter/VectorAdapter.h"
+#include "index/knowhere/knowhere/archive/KnowhereConfig.h"
+#include "pb/index_cgo_msg.pb.h"
+#include "test_utils/DataGen.h"
 #include "test_utils/indexbuilder_test_utils.h"
 
 constexpr int64_t NB = 1000;
@@ -32,6 +33,8 @@ class IndexWrapperTest : public ::testing::TestWithParam<Param> {
  protected:
     void
     SetUp() override {
+        milvus::engine::KnowhereConfig::SetStatisticsLevel(3);
+
         auto param = GetParam();
         index_type = param.first;
         metric_type = param.second;
@@ -124,6 +127,8 @@ TEST(IVFFLATNM, Build) {
 }
 
 TEST(IVFFLATNM, Query) {
+    milvus::engine::KnowhereConfig::SetStatisticsLevel(3);
+
     auto index_type = milvus::knowhere::IndexEnum::INDEX_FAISS_IVFFLAT;
     auto metric_type = milvus::knowhere::Metric::L2;
     auto conf = generate_conf(index_type, metric_type);
@@ -142,6 +147,13 @@ TEST(IVFFLATNM, Query) {
     auto xq_data = dataset.get_col<float>(0);
     auto xq_dataset = milvus::knowhere::GenDataset(NQ, DIM, xq_data.data());
     auto result = index->Query(xq_dataset, conf, nullptr);
+
+    index->UpdateIndexSize();
+    ASSERT_GT(index->IndexSize(), 0);
+
+    auto stats = index->GetStatistics();
+    ASSERT_TRUE(stats != nullptr);
+    index->ClearStatistics();
 }
 
 TEST(NSG, Query) {
@@ -190,6 +202,8 @@ print_query_result(const std::unique_ptr<milvus::indexbuilder::IndexWrapper::Que
 
 // test for: https://github.com/milvus-io/milvus/issues/6569
 TEST(BinIVFFlat, Build_and_Query) {
+    milvus::engine::KnowhereConfig::SetStatisticsLevel(2);
+
     auto index_type = milvus::knowhere::IndexEnum::INDEX_FAISS_BIN_IVFFLAT;
     auto metric_type = milvus::knowhere::Metric::TANIMOTO;
     auto conf = generate_conf(index_type, metric_type);
@@ -222,6 +236,13 @@ TEST(BinIVFFlat, Build_and_Query) {
     memcpy(query_res->distances.data(), distances, sizeof(float) * nq * topk);
 
     print_query_result(query_res);
+
+    index->UpdateIndexSize();
+    ASSERT_GT(index->IndexSize(), 0);
+
+    auto stats = index->GetStatistics();
+    ASSERT_TRUE(stats != nullptr);
+    index->ClearStatistics();
 }
 
 TEST(BINIDMAP, Build) {

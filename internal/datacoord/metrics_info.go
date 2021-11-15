@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datacoord
 
@@ -15,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"os"
+
+	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
 
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 
@@ -35,7 +42,7 @@ func (s *Server) getSystemInfoMetrics(
 	// TODO(dragondriver): add more detail metrics
 
 	// get datacoord info
-	nodes := s.cluster.GetNodes()
+	nodes := s.cluster.GetSessions()
 	clusterTopology := metricsinfo.DataClusterTopology{
 		Self:           s.getDataCoordMetrics(),
 		ConnectedNodes: make([]metricsinfo.DataNodeInfos, 0, len(nodes)),
@@ -102,6 +109,7 @@ func (s *Server) getDataCoordMetrics() metricsinfo.DataCoordInfos {
 			CreatedTime: Params.CreatedTime.String(),
 			UpdatedTime: Params.UpdatedTime.String(),
 			Type:        typeutil.DataCoordRole,
+			ID:          s.session.ServerID,
 		},
 		SystemConfigurations: metricsinfo.DataCoordConfiguration{
 			SegmentMaxSize: Params.SegmentMaxSize,
@@ -111,21 +119,23 @@ func (s *Server) getDataCoordMetrics() metricsinfo.DataCoordInfos {
 
 // getDataNodeMetrics composes data node infos
 // this function will invoke GetMetrics with data node specified in NodeInfo
-func (s *Server) getDataNodeMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, node *NodeInfo) (metricsinfo.DataNodeInfos, error) {
+func (s *Server) getDataNodeMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, node *Session) (metricsinfo.DataNodeInfos, error) {
 	infos := metricsinfo.DataNodeInfos{
 		BaseComponentInfos: metricsinfo.BaseComponentInfos{
 			HasError: true,
+			ID:       int64(uniquegenerator.GetUniqueIntGeneratorIns().GetInt()),
 		},
 	}
 	if node == nil {
 		return infos, errors.New("datanode is nil")
 	}
 
-	if node.GetClient() == nil {
-		return infos, errors.New("datanode client is nil")
+	cli, err := node.GetOrCreateClient(ctx)
+	if err != nil {
+		return infos, err
 	}
 
-	metrics, err := node.GetClient().GetMetrics(ctx, req)
+	metrics, err := cli.GetMetrics(ctx, req)
 	if err != nil {
 		log.Warn("invalid metrics of data node was found",
 			zap.Error(err))

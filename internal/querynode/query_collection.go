@@ -13,20 +13,21 @@ package querynode
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"sync"
 	"unsafe"
 
+	"github.com/golang/protobuf/proto"
 	oplog "github.com/opentracing/opentracing-go/log"
 	"go.uber.org/zap"
 
-	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
@@ -71,9 +72,9 @@ type queryCollection struct {
 	remoteChunkManager storage.ChunkManager
 	vectorChunkManager storage.ChunkManager
 	localCacheEnabled  bool
-}
 
-type ResultEntityIds []UniqueID
+	globalSegmentManager *globalSealedSegmentManager
+}
 
 func newQueryCollection(releaseCtx context.Context,
 	cancel context.CancelFunc,
@@ -110,9 +111,10 @@ func newQueryCollection(releaseCtx context.Context,
 		queryMsgStream:       queryStream,
 		queryResultMsgStream: queryResultStream,
 
-		localChunkManager:  localChunkManager,
-		remoteChunkManager: remoteChunkManager,
-		localCacheEnabled:  localCacheEnabled,
+		localChunkManager:    localChunkManager,
+		remoteChunkManager:   remoteChunkManager,
+		localCacheEnabled:    localCacheEnabled,
+		globalSegmentManager: newGlobalSealedSegmentManager(collectionID),
 	}
 
 	err := qc.registerCollectionTSafe()
@@ -136,6 +138,7 @@ func (q *queryCollection) close() {
 	if q.queryResultMsgStream != nil {
 		q.queryResultMsgStream.Close()
 	}
+	q.globalSegmentManager.close()
 }
 
 // registerCollectionTSafe registers tSafe watcher if vChannels exists
@@ -216,6 +219,8 @@ func (q *queryCollection) waitNewTSafe() (Timestamp, error) {
 	for !q.tSafeUpdate {
 		q.watcherCond.Wait()
 	}
+	q.tSafeUpdate = false
+	q.watcherCond.Broadcast()
 	q.watcherCond.L.Unlock()
 	q.tSafeWatchersMu.RLock()
 	defer q.tSafeWatchersMu.RUnlock()
@@ -280,12 +285,16 @@ func (q *queryCollection) consumeQuery() {
 					if err != nil {
 						log.Warn(err.Error())
 					}
-				case *msgstream.LoadBalanceSegmentsMsg:
-					q.loadBalance(sm)
 				case *msgstream.RetrieveMsg:
 					err := q.receiveQueryMsg(sm)
 					if err != nil {
 						log.Warn(err.Error())
+					}
+				case *msgstream.SealedSegmentsChangeInfoMsg:
+					err := q.adjustByChangeInfo(sm)
+					if err != nil {
+						// should not happen
+						log.Error(err.Error())
 					}
 				default:
 					log.Warn("unsupported msg type in search channel", zap.Any("msg", sm))
@@ -295,8 +304,40 @@ func (q *queryCollection) consumeQuery() {
 	}
 }
 
-func (q *queryCollection) loadBalance(msg *msgstream.LoadBalanceSegmentsMsg) {
-	//TODO:: get loadBalance info from etcd
+func (q *queryCollection) adjustByChangeInfo(msg *msgstream.SealedSegmentsChangeInfoMsg) error {
+	for _, info := range msg.Infos {
+		// for OnlineSegments:
+		for _, segment := range info.OnlineSegments {
+			// 1. update global sealed segments
+			err := q.globalSegmentManager.addGlobalSegmentInfo(segment)
+			if err != nil {
+				return err
+			}
+			// 2. update excluded segment, cluster have been loaded sealed segments,
+			// so we need to avoid getting growing segment from flow graph.
+			q.streaming.replica.addExcludedSegments(segment.CollectionID, []*datapb.SegmentInfo{
+				{
+					ID:            segment.SegmentID,
+					CollectionID:  segment.CollectionID,
+					PartitionID:   segment.PartitionID,
+					InsertChannel: segment.ChannelID,
+					NumOfRows:     segment.NumRows,
+					// TODO: add status, remove query pb segment status, use common pb segment status?
+					DmlPosition: &internalpb.MsgPosition{
+						// use max timestamp to filter out dm messages
+						Timestamp: typeutil.MaxTimestamp,
+					},
+				},
+			})
+		}
+
+		// for OfflineSegments:
+		for _, segment := range info.OfflineSegments {
+			// 1. update global sealed segments
+			q.globalSegmentManager.removeGlobalSegmentInfo(segment.SegmentID)
+		}
+	}
+	return nil
 }
 
 func (q *queryCollection) receiveQueryMsg(msg queryMsg) error {
@@ -369,9 +410,9 @@ func (q *queryCollection) receiveQueryMsg(msg queryMsg) error {
 	}
 
 	serviceTime := q.getServiceableTime()
+	gt, _ := tsoutil.ParseTS(guaranteeTs)
+	st, _ := tsoutil.ParseTS(serviceTime)
 	if guaranteeTs > serviceTime && len(collection.getVChannels()) > 0 {
-		gt, _ := tsoutil.ParseTS(guaranteeTs)
-		st, _ := tsoutil.ParseTS(serviceTime)
 		log.Debug("query node::receiveQueryMsg: add to unsolvedMsg",
 			zap.Any("collectionID", q.collectionID),
 			zap.Any("sm.GuaranteeTimestamp", gt),
@@ -394,6 +435,9 @@ func (q *queryCollection) receiveQueryMsg(msg queryMsg) error {
 
 	log.Debug("doing query in receiveQueryMsg...",
 		zap.Int64("collectionID", collectionID),
+		zap.Any("sm.GuaranteeTimestamp", gt),
+		zap.Any("serviceTime", st),
+		zap.Any("delta seconds", (guaranteeTs-serviceTime)/(1000*1000*1000)),
 		zap.Int64("msgID", msg.ID()),
 		zap.String("msgType", msgTypeStr),
 	)
@@ -468,7 +512,7 @@ func (q *queryCollection) doUnsolvedQueryMsg() {
 					zap.Any("guaranteeTime_l", guaranteeTs),
 					zap.Any("serviceTime_l", serviceTime),
 				)
-				if guaranteeTs <= serviceTime {
+				if guaranteeTs <= q.getServiceableTime() {
 					unSolvedMsg = append(unSolvedMsg, m)
 					continue
 				}
@@ -633,7 +677,7 @@ func translateHits(schema *typeutil.SchemaHelper, fieldIDs []int64, rawHits [][]
 			for _, hit := range hits {
 				for _, row := range hit.RowData {
 					dataBlob := row[blobOffset : blobOffset+blobLen]
-					data := int32(int16(binary.LittleEndian.Uint16(dataBlob)))
+					data := int32(int16(common.Endian.Uint16(dataBlob)))
 					colData = append(colData, data)
 				}
 			}
@@ -656,7 +700,7 @@ func translateHits(schema *typeutil.SchemaHelper, fieldIDs []int64, rawHits [][]
 			for _, hit := range hits {
 				for _, row := range hit.RowData {
 					dataBlob := row[blobOffset : blobOffset+blobLen]
-					data := int32(binary.LittleEndian.Uint32(dataBlob))
+					data := int32(common.Endian.Uint32(dataBlob))
 					colData = append(colData, data)
 				}
 			}
@@ -679,7 +723,7 @@ func translateHits(schema *typeutil.SchemaHelper, fieldIDs []int64, rawHits [][]
 			for _, hit := range hits {
 				for _, row := range hit.RowData {
 					dataBlob := row[blobOffset : blobOffset+blobLen]
-					data := int64(binary.LittleEndian.Uint64(dataBlob))
+					data := int64(common.Endian.Uint64(dataBlob))
 					colData = append(colData, data)
 				}
 			}
@@ -702,7 +746,7 @@ func translateHits(schema *typeutil.SchemaHelper, fieldIDs []int64, rawHits [][]
 			for _, hit := range hits {
 				for _, row := range hit.RowData {
 					dataBlob := row[blobOffset : blobOffset+blobLen]
-					data := math.Float32frombits(binary.LittleEndian.Uint32(dataBlob))
+					data := math.Float32frombits(common.Endian.Uint32(dataBlob))
 					colData = append(colData, data)
 				}
 			}
@@ -725,7 +769,7 @@ func translateHits(schema *typeutil.SchemaHelper, fieldIDs []int64, rawHits [][]
 			for _, hit := range hits {
 				for _, row := range hit.RowData {
 					dataBlob := row[blobOffset : blobOffset+blobLen]
-					data := math.Float64frombits(binary.LittleEndian.Uint64(dataBlob))
+					data := math.Float64frombits(common.Endian.Uint64(dataBlob))
 					colData = append(colData, data)
 				}
 			}
@@ -809,6 +853,11 @@ func translateHits(schema *typeutil.SchemaHelper, fieldIDs []int64, rawHits [][]
 // TODO:: cache map[dsl]plan
 // TODO: reBatched search requests
 func (q *queryCollection) search(msg queryMsg) error {
+	q.streaming.replica.queryRLock()
+	q.historical.replica.queryRLock()
+	defer q.historical.replica.queryRUnlock()
+	defer q.streaming.replica.queryRUnlock()
+
 	searchMsg := msg.(*msgstream.SearchMsg)
 	sp, ctx := trace.StartSpanFromContext(searchMsg.TraceCtx())
 	defer sp.Finish()
@@ -1159,59 +1208,60 @@ func (q *queryCollection) retrieve(msg queryMsg) error {
 	return nil
 }
 
-func getSegmentsByPKs(pks []int64, segments []*Segment) (map[int64][]int64, error) {
-	if pks == nil {
-		return nil, fmt.Errorf("pks is nil when getSegmentsByPKs")
-	}
-	if segments == nil {
-		return nil, fmt.Errorf("segments is nil when getSegmentsByPKs")
-	}
-	results := make(map[int64][]int64)
-	buf := make([]byte, 8)
-	for _, segment := range segments {
-		for _, pk := range pks {
-			binary.BigEndian.PutUint64(buf, uint64(pk))
-			exist := segment.pkFilter.Test(buf)
-			if exist {
-				results[segment.segmentID] = append(results[segment.segmentID], pk)
+func mergeRetrieveResults(retrieveResults []*segcorepb.RetrieveResults) (*segcorepb.RetrieveResults, error) {
+	var ret *segcorepb.RetrieveResults
+	var skipDupCnt int64 = 0
+	var idSet = make(map[int64]struct{})
+
+	// merge results and remove duplicates
+	for _, rr := range retrieveResults {
+		// skip empty result, it will break merge result
+		if rr == nil || len(rr.Offset) == 0 {
+			continue
+		}
+
+		if ret == nil {
+			ret = &segcorepb.RetrieveResults{
+				Ids: &schemapb.IDs{
+					IdField: &schemapb.IDs_IntId{
+						IntId: &schemapb.LongArray{
+							Data: []int64{},
+						},
+					},
+				},
+				FieldsData: make([]*schemapb.FieldData, len(rr.FieldsData)),
 			}
 		}
-	}
-	return results, nil
-}
 
-func mergeRetrieveResults(dataArr []*segcorepb.RetrieveResults) (*segcorepb.RetrieveResults, error) {
-	var final *segcorepb.RetrieveResults
-	for _, data := range dataArr {
-		// skip empty result, it will break merge result
-		if data == nil || len(data.Offset) == 0 {
-			continue
-		}
-
-		if final == nil {
-			final = proto.Clone(data).(*segcorepb.RetrieveResults)
-			continue
-		}
-
-		proto.Merge(final.Ids, data.Ids)
-		if len(final.FieldsData) != len(data.FieldsData) {
+		if len(ret.FieldsData) != len(rr.FieldsData) {
 			return nil, fmt.Errorf("mismatch FieldData in RetrieveResults")
 		}
 
-		for i := range final.FieldsData {
-			proto.Merge(final.FieldsData[i], data.FieldsData[i])
+		dstIds := ret.Ids.GetIntId()
+		for i, id := range rr.Ids.GetIntId().GetData() {
+			if _, ok := idSet[id]; !ok {
+				dstIds.Data = append(dstIds.Data, id)
+				typeutil.AppendFieldData(ret.FieldsData, rr.FieldsData, int64(i))
+				idSet[id] = struct{}{}
+			} else {
+				// primary keys duplicate
+				skipDupCnt++
+			}
 		}
+	}
+	if skipDupCnt > 0 {
+		log.Debug("skip duplicated query result", zap.Int64("count", skipDupCnt))
 	}
 
 	// not found, return default values indicating not result found
-	if final == nil {
-		final = &segcorepb.RetrieveResults{
-			Ids:        nil,
+	if ret == nil {
+		ret = &segcorepb.RetrieveResults{
+			Ids:        &schemapb.IDs{},
 			FieldsData: []*schemapb.FieldData{},
 		}
 	}
 
-	return final, nil
+	return ret, nil
 }
 
 func (q *queryCollection) publishQueryResult(msg msgstream.TsMsg, collectionID UniqueID) error {

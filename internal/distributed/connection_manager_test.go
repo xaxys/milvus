@@ -1,3 +1,19 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package distributed
 
 import (
@@ -148,6 +164,36 @@ func TestConnectionManager(t *testing.T) {
 			return len(indexNodes) == 1 && ok
 		}, 10*time.Second, 100*time.Millisecond)
 	})
+}
+
+func TestConnectionManager_processEvent(t *testing.T) {
+	cm := &ConnectionManager{
+		closeCh: make(chan struct{}),
+	}
+
+	ech := make(chan *sessionutil.SessionEvent)
+	flag := false
+	signal := make(chan struct{}, 1)
+	go func() {
+		cm.processEvent(ech)
+		flag = true
+		signal <- struct{}{}
+	}()
+
+	close(ech)
+	<-signal
+	assert.True(t, flag)
+
+	ech = make(chan *sessionutil.SessionEvent)
+	flag = false
+	go func() {
+		cm.processEvent(ech)
+		flag = true
+		signal <- struct{}{}
+	}()
+	close(cm.closeCh)
+	<-signal
+	assert.True(t, flag)
 }
 
 type testRootCoord struct {

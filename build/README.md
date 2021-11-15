@@ -6,7 +6,7 @@ Building Milvus is easy if you take advantage of the containerized build environ
   * **macOS** Install Docker for Mac. See installation instructions [here](https://docs.docker.com/docker-for-mac/).
      **Note**: You will want to set the Docker VM to have at least 2 vCPU and 8GB of initial memory or building will likely fail.
   * **Linux with local Docker**  Install Docker according to the [instructions](https://docs.docker.com/installation/#installation) for your OS.
-  * **Windows with Docker Desktop WSL2 backend**  Install Docker according to the [instructions](https://docs.docker.com/docker-for-windows/wsl-tech-preview/). Be sure to store your sources in the local Linux file system, not the Windows remote mount at `/mnt/c`.
+  * **Windows with Docker Desktop WSL2 backend**  Install Docker according to the [instructions](https://docs.docker.com/desktop/windows/wsl/). Be sure to store your sources in the local Linux file system, not the Windows remote mount at `/mnt/c`.
 2. **Optional** [Google Cloud SDK](https://developers.google.com/cloud/sdk/)
 
 You must install and configure Google Cloud SDK if you want to upload your release to Google Cloud Storage and may safely omit this otherwise.
@@ -60,11 +60,11 @@ Check Wikipedia [CPU with AVX](https://en.wikipedia.org/wiki/Advanced_Vector_Ext
 
 The following scripts are found in the [`build/`](.) directory. Note that all scripts must be run from the Milvus root directory.
 
-* [`build/builder.sh`](builder.sh): Run a command in a build docker container. Common invocations:
-  * `build/builder.sh make` Build just linux binary in the container. Pass options and packages as necessary.
-  * `build/builder.sh make verifiers`: Run all pre-submission verification check
-  * `build/builder.sh make unittest`: Run all unit tests
-  * `build/builder.sh make clean`: Clean up all the generated files
+* [`build/builder.sh`](builder.sh): Run a command in a build docker container. Common invocations are:
+  * `build/builder.sh make`: Build just linux binary in the container. Pass options and packages as necessary.
+  * `build/builder.sh make verifiers`: Run all pre-submission verification check.
+  * `build/builder.sh make unittest`: Run all unit tests.
+  * `build/builder.sh make clean`: Clean up all the generated files.
 
 You can specify different OS for builder by setting `OS_NAME` which defaults to `ubuntu18.04`. Valid OS are `ubuntu18.04`, `centos7`.
 
@@ -204,12 +204,6 @@ Modify vscode go setups if necessary, the setting path is **code -> preference -
 ```
 
 ![image](../docs/imgs/settings.png)
-
-Enable Code debug by remote debugging with dlv, you can enable debugging by run the following command inside your docker:
-
-```shell
-cp /go/bin/dlv /go/bin/dlv-dap
-```
 
 ### Integrate goland with docker
 TBD

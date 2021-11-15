@@ -84,7 +84,7 @@ def get_len_vectors_per_file(data_type, dimension):
 
 
 def get_vectors_from_binary(nq, dimension, data_type):
-    # use the first file, nq should be less than VECTORS_PER_FILE
+    # use the first file, nq should be less than VECTORS_PER_FILE 10001
     if nq > MAX_NQ:
         raise Exception("Over size nq")
     if data_type == "local":
@@ -97,6 +97,8 @@ def get_vectors_from_binary(nq, dimension, data_type):
         file_name = DEEP_SRC_DATA_DIR + 'query.npy'
     elif data_type == "binary":
         file_name = BINARY_SRC_DATA_DIR + 'query.npy'
+    else:
+        raise Exception("There is no corresponding file for this data type %s." % str(data_type))
     data = np.load(file_name)
     vectors = data[0:nq].tolist()
     return vectors
@@ -136,6 +138,7 @@ def metric_type_trans(metric_type):
 
 
 def get_dataset(hdf5_file_path):
+    """ Determine whether hdf5 file exists, and return the content of hdf5 file """
     if not os.path.exists(hdf5_file_path):
         raise Exception("%s not existed" % hdf5_file_path)
     dataset = h5py.File(hdf5_file_path)
@@ -143,6 +146,7 @@ def get_dataset(hdf5_file_path):
 
 
 def get_default_field_name(data_type=DataType.FLOAT_VECTOR):
+    """ Return fild name according to data type """
     if data_type == DataType.FLOAT_VECTOR:
         field_name = DEFAULT_F_FIELD_NAME
     elif data_type == DataType.BINARY_VECTOR:
@@ -158,6 +162,7 @@ def get_default_field_name(data_type=DataType.FLOAT_VECTOR):
 
 
 def get_vector_type(data_type):
+    """ Return vector type according to data type """
     vector_type = ''
     if data_type in ["random", "sift", "deep", "glove", "local"]:
         vector_type = DataType.FLOAT_VECTOR

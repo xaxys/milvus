@@ -16,8 +16,10 @@ exp_name = "name"
 exp_schema = "schema"
 exp_num = "num_entities"
 exp_primary = "primary"
+exp_shards_num = "shards_num"
 default_schema = cf.gen_default_collection_schema()
 default_binary_schema = cf.gen_default_binary_collection_schema()
+default_shards_num = 2
 uid_count = "collection_count"
 tag = "collection_count_tag"
 uid_stats = "get_collection_stats"
@@ -29,12 +31,10 @@ uid_list = "list_collections"
 uid_load = "load_collection"
 field_name = default_float_vec_field_name
 default_single_query = {
-    "bool": {
-        "must": [
-            {"vector": {field_name: {"topk": default_top_k, "query": gen_vectors(1, default_dim), "metric_type": "L2",
-                                     "params": {"nprobe": 10}}}}
-        ]
-    }
+    "data": gen_vectors(1, default_dim),
+    "anns_field": default_float_vec_field_name,
+    "param": {"metric_type": "L2", "params": {"nprobe": 10}},
+    "limit": default_top_k,
 }
 
 
@@ -81,11 +81,11 @@ class TestCollectionParams(TestcaseBase):
         assert c_name in self.utility_wrap.list_collections()[0]
 
     @pytest.mark.tags(CaseLabel.L0)
-    @pytest.mark.xfail(reason="exception not MilvusException")
+    @pytest.mark.xfail(reason="exception not Milvus Exception")
     def test_collection_empty_name(self):
         """
         target: test collection with empty name
-        method: create collection with a empty name
+        method: create collection with an empty name
         expected: raise exception
         """
         self._connect()
@@ -95,7 +95,7 @@ class TestCollectionParams(TestcaseBase):
                                              check_items=error)
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.xfail(reason="exception not MilvusException")
+    @pytest.mark.xfail(reason="exception not Milvus Exception")
     @pytest.mark.parametrize("name", [[], 1, [1, "2", 3], (1,), {1: 1}, None])
     def test_collection_illegal_name(self, name):
         """
@@ -305,7 +305,7 @@ class TestCollectionParams(TestcaseBase):
                                                  check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.xfail(reason="exception not MilvusException")
+    @pytest.mark.xfail(reason="exception not Milvus Exception")
     @pytest.mark.parametrize("name", [[], 1, (1,), {1: 1}, "12-s"])
     def test_collection_invalid_type_field(self, name):
         """
@@ -338,7 +338,7 @@ class TestCollectionParams(TestcaseBase):
         self.collection_wrap.init_collection(c_name, schema=schema, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.xfail(reason="exception not MilvusException")
+    @pytest.mark.xfail(reason="exception not Milvus Exception")
     def test_collection_none_field_name(self):
         """
         target: test field schema with None name
@@ -366,7 +366,7 @@ class TestCollectionParams(TestcaseBase):
                                                  check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
-    @pytest.mark.xfail(reason="exception not MilvusException")
+    @pytest.mark.xfail(reason="exception not Milvus Exception")
     def test_collection_field_dtype_float_value(self):
         """
         target: test collection with float type
@@ -574,7 +574,7 @@ class TestCollectionParams(TestcaseBase):
         assert self.collection_wrap.primary_field.name == ct.default_int64_field_name
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.xfail(reason="exception not MilvusException")
+    @pytest.mark.xfail(reason="exception not Milvus Exception")
     def test_collection_unsupported_primary_field(self, get_unsupported_primary_field):
         """
         target: test collection with unsupported primary field type
@@ -779,7 +779,7 @@ class TestCollectionParams(TestcaseBase):
         self.collection_wrap.init_collection(c_name, schema=schema, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.xfail(reason="exception not MilvusException")
+    @pytest.mark.xfail(reason="exception not Milvus Exception")
     def test_collection_vector_invalid_dim(self, get_invalid_dim):
         """
         target: test collection with invalid dimension
@@ -839,7 +839,7 @@ class TestCollectionParams(TestcaseBase):
                                              check_items={exp_name: c_name, exp_schema: schema})
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.xfail(reason="exception not MilvusException")
+    @pytest.mark.xfail(reason="exception not Milvus Exception")
     def test_collection_none_desc(self):
         """
         target: test collection with none description
@@ -880,6 +880,50 @@ class TestCollectionParams(TestcaseBase):
                                              check_task=CheckTasks.check_collection_property,
                                              check_items={exp_name: c_name, exp_schema: default_binary_schema})
         assert c_name in self.utility_wrap.list_collections()[0]
+
+    @pytest.mark.tag(CaseLabel.L0)
+    def test_collection_shards_num_with_default_value(self):
+        """
+        target:test collection with shards_num
+        method:create collection with shards_num
+        expected: no exception
+        """
+        self._connect()
+        c_name = cf.gen_unique_str(prefix)
+        self.collection_wrap.init_collection(c_name, schema=default_schema, shards_num=default_shards_num,
+                                             check_task=CheckTasks.check_collection_property,
+                                             check_items={exp_name: c_name, exp_shards_num: default_shards_num})
+        assert c_name in self.utility_wrap.list_collections()[0]
+
+    @pytest.mark.tag(CaseLabel.L0)
+    @pytest.mark.parametrize("shards_num", [-256, 0, 10, 256])
+    def test_collection_shards_num_with_not_default_value(self, shards_num):
+        """
+        target:test collection with shards_num
+        method:create collection with not default shards_num
+        expected: no exception
+        """
+        self._connect()
+        c_name = cf.gen_unique_str(prefix)
+        self.collection_wrap.init_collection(c_name, schema=default_schema, shards_num=shards_num,
+                                             check_task=CheckTasks.check_collection_property,
+                                             check_items={exp_name: c_name, exp_shards_num: shards_num})
+        assert c_name in self.utility_wrap.list_collections()[0]
+
+    @pytest.mark.tag(CaseLabel.L0)
+    def test_collection_shards_num_with_error_type(self):
+        """
+        target:test collection with error type shards_num
+        method:create collection with error type shards_num
+        expected: raise exception
+        """
+        self._connect()
+        c_name = cf.gen_unique_str(prefix)
+        error_type_shards_num = "2"  # suppose to be int rather than str
+        error = {ct.err_code: -1, ct.err_msg: f"expected one of: int, long"}
+        self.collection_wrap.init_collection(c_name, schema=default_schema, shards_num=error_type_shards_num,
+                                             check_task=CheckTasks.err_res,
+                                             check_items=error)
 
 
 class TestCollectionOperation(TestcaseBase):
@@ -2005,8 +2049,8 @@ class TestCreateCollection:
     @pytest.mark.tags(CaseLabel.L2)
     def test_create_collection_multithread(self, connect):
         """
-        target: test create collection with multithread
-        method: create collection using multithread,
+        target: test create collection with multi-thread
+        method: create collection using multi-thread,
         expected: collections are created
         """
         threads_num = 8
@@ -2219,8 +2263,8 @@ class TestDescribeCollection:
     @pytest.mark.tags(CaseLabel.L2)
     def test_describe_collection_multithread(self, connect):
         """
-        target: test create collection with multithread
-        method: create collection using multithread,
+        target: test create collection with multi-thread
+        method: create collection using multi-thread,
         expected: collections are created
         """
         threads_num = 4
@@ -2343,7 +2387,7 @@ class TestDropCollection:
         """
         target: test if collection not created
         method: random a collection name, which not existed in db,
-            assert the exception raised returned by drp_collection method
+                assert the exception raised returned by drp_collection method
         expected: False
         """
         collection_name = gen_unique_str(uid_drop)
@@ -2358,8 +2402,8 @@ class TestDropCollection:
     @pytest.mark.tags(CaseLabel.L2)
     def test_create_drop_collection_multithread(self, connect):
         """
-        target: test create and drop collection with multithread
-        method: create and drop collection using multithread,
+        target: test create and drop collection with multi-thread
+        method: create and drop collection using multi-thread,
         expected: collections are created, and dropped
         """
         threads_num = 8
@@ -2441,7 +2485,7 @@ class TestHasCollection:
         """
         target: test if collection not created
         method: random a collection name, create this collection then drop it,
-            assert the value returned by has_collection method
+                assert the value returned by has_collection method
         expected: False
         """
         collection_name = gen_unique_str(uid_has)
@@ -2453,8 +2497,8 @@ class TestHasCollection:
     @pytest.mark.tags(CaseLabel.L2)
     def test_has_collection_multithread(self, connect):
         """
-        target: test create collection with multithread
-        method: create collection using multithread,
+        target: test create collection with multi-thread
+        method: create collection using multi-thread,
         expected: collections are created
         """
         threads_num = 4
@@ -2573,8 +2617,8 @@ class TestListCollections:
     @pytest.mark.tags(CaseLabel.L2)
     def test_list_collections_multithread(self, connect):
         """
-        target: test list collection with multithread
-        method: list collection using multithread,
+        target: test list collection with multi-threads
+        method: list collection using multi-threads
         expected: list collections correctly
         """
         threads_num = 10
@@ -2655,9 +2699,9 @@ class TestLoadCollection:
     @pytest.mark.tags(CaseLabel.L0)
     def test_load_empty_collection(self, connect, collection):
         """
-        target: test load collection
-        method: no entities in collection, load collection with correct params
-        expected: load success
+        target: test load an empty collection with no data inserted
+        method: no entities in collection, load and release the collection
+        expected: load and release successfully
         """
         connect.load_collection(collection)
         connect.release_collection(collection)
@@ -2810,11 +2854,15 @@ class TestLoadCollection:
         """
         target: test load collection without flush
         method: insert entities without flush, then load collection
-        expected: load collection failed
+        expected: No exception and data can be queried
         """
-        result = connect.insert(collection, cons.default_entities)
-        assert len(result.primary_keys) == default_nb
+        result = connect.insert(collection, gen_entities(100))
+        assert len(result.primary_keys) == 100
         connect.load_collection(collection)
+        int_field_name = "int64"
+        term_expr = f'{int_field_name} in {result.primary_keys[:1]}'
+        res = connect.query(collection, term_expr)
+        assert res == [{int_field_name: result.primary_keys[0]}]
 
     # TODO
     @pytest.mark.tags(CaseLabel.L2)
@@ -2841,8 +2889,8 @@ class TestLoadCollection:
         connect.load_collection(collection)
         connect.release_partitions(collection, [default_tag])
         with pytest.raises(Exception) as e:
-            connect.search(collection, default_single_query, partition_names=[default_tag])
-        res = connect.search(collection, default_single_query, partition_names=[default_partition_name])
+            connect.search(collection, **default_single_query, partition_names=[default_tag])
+        res = connect.search(collection, **default_single_query, partition_names=[default_partition_name])
         assert len(res[0]) == default_top_k
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -2860,7 +2908,7 @@ class TestLoadCollection:
         connect.flush([collection])
         connect.load_collection(collection)
         connect.release_partitions(collection, [default_partition_name, default_tag])
-        res = connect.search(collection, default_single_query)
+        res = connect.search(collection, **default_single_query)
         assert len(res[0]) == 0
 
     @pytest.mark.tags(CaseLabel.L0)
@@ -2877,8 +2925,7 @@ class TestLoadCollection:
         connect.load_partitions(collection, [default_tag])
         connect.release_collection(collection)
         with pytest.raises(Exception):
-            connect.search(collection, default_single_query)
-        # assert len(res[0]) == 0
+            connect.search(collection, **default_single_query)
 
 
 class TestReleaseAdvanced:
@@ -2895,11 +2942,11 @@ class TestReleaseAdvanced:
         connect.insert(collection, cons.default_entities)
         connect.flush([collection])
         connect.load_collection(collection)
-        query, _ = gen_query_vectors(field_name, cons.default_entities, top_k, nq)
-        future = connect.search(collection, query, _async=True)
+        params, _ = gen_search_vectors_params(field_name, cons.default_entities, top_k, nq)
+        future = connect.search(collection, **params, _async=True)
         connect.release_collection(collection)
         with pytest.raises(Exception):
-            connect.search(collection, default_single_query)
+            connect.search(collection, **default_single_query)
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_release_partition_during_searching(self, connect, collection):
@@ -2911,14 +2958,14 @@ class TestReleaseAdvanced:
         nq = 1000
         top_k = 1
         connect.create_partition(collection, default_tag)
-        query, _ = gen_query_vectors(field_name, cons.default_entities, top_k, nq)
+        query, _ = gen_search_vectors_params(field_name, cons.default_entities, top_k, nq)
         connect.insert(collection, cons.default_entities, partition_name=default_tag)
         connect.flush([collection])
         connect.load_partitions(collection, [default_tag])
-        res = connect.search(collection, query, _async=True)
+        res = connect.search(collection, **query, _async=True)
         connect.release_partitions(collection, [default_tag])
         with pytest.raises(Exception) as e:
-            res = connect.search(collection, default_single_query)
+            res = connect.search(collection, **default_single_query)
 
     @pytest.mark.tags(CaseLabel.L0)
     def test_release_collection_during_searching_A(self, connect, collection):
@@ -2930,14 +2977,14 @@ class TestReleaseAdvanced:
         nq = 1000
         top_k = 1
         connect.create_partition(collection, default_tag)
-        query, _ = gen_query_vectors(field_name, cons.default_entities, top_k, nq)
+        query, _ = gen_search_vectors_params(field_name, cons.default_entities, top_k, nq)
         connect.insert(collection, cons.default_entities, partition_name=default_tag)
         connect.flush([collection])
         connect.load_partitions(collection, [default_tag])
-        res = connect.search(collection, query, _async=True)
+        res = connect.search(collection, **query, _async=True)
         connect.release_collection(collection)
         with pytest.raises(Exception):
-            connect.search(collection, default_single_query)
+            connect.search(collection, **default_single_query)
 
     def _test_release_collection_during_loading(self, connect, collection):
         """
@@ -2955,7 +3002,7 @@ class TestReleaseAdvanced:
         t.start()
         connect.release_collection(collection)
         with pytest.raises(Exception):
-            connect.search(collection, default_single_query)
+            connect.search(collection, **default_single_query)
 
     def _test_release_partition_during_loading(self, connect, collection):
         """
@@ -2973,7 +3020,7 @@ class TestReleaseAdvanced:
         t = threading.Thread(target=load, args=())
         t.start()
         connect.release_partitions(collection, [default_tag])
-        res = connect.search(collection, default_single_query)
+        res = connect.search(collection, **default_single_query)
         assert len(res[0]) == 0
 
     def _test_release_collection_during_inserting(self, connect, collection):
@@ -2993,8 +3040,7 @@ class TestReleaseAdvanced:
         t.start()
         connect.release_collection(collection)
         with pytest.raises(Exception):
-            res = connect.search(collection, default_single_query)
-        # assert len(res[0]) == 0
+            res = connect.search(collection, **default_single_query)
 
     def _test_release_collection_during_indexing(self, connect, collection):
         """

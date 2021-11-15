@@ -1,19 +1,23 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"math"
 	"sync"
@@ -22,10 +26,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/bits-and-blooms/bloom/v3"
+	"github.com/milvus-io/milvus/internal/common"
+	"github.com/milvus-io/milvus/internal/kv"
+	miniokv "github.com/milvus-io/milvus/internal/kv/minio"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 )
 
@@ -42,15 +50,18 @@ type Replica interface {
 	getCollectionAndPartitionID(segID UniqueID) (collID, partitionID UniqueID, err error)
 
 	addNewSegment(segID, collID, partitionID UniqueID, channelName string, startPos, endPos *internalpb.MsgPosition) error
-	addNormalSegment(segID, collID, partitionID UniqueID, channelName string, numOfRows int64, cp *segmentCheckPoint) error
+	addNormalSegment(segID, collID, partitionID UniqueID, channelName string, numOfRows int64, statsBinlog []*datapb.FieldBinlog, cp *segmentCheckPoint) error
 	filterSegments(channelName string, partitionID UniqueID) []*Segment
-	addFlushedSegment(segID, collID, partitionID UniqueID, channelName string, numOfRows int64) error
+	addFlushedSegment(segID, collID, partitionID UniqueID, channelName string, numOfRows int64, statsBinlog []*datapb.FieldBinlog) error
 	listNewSegmentsStartPositions() []*datapb.SegmentStartPosition
 	listSegmentsCheckPoints() map[UniqueID]segmentCheckPoint
 	updateSegmentEndPosition(segID UniqueID, endPos *internalpb.MsgPosition)
 	updateSegmentCheckPoint(segID UniqueID)
 	updateSegmentPKRange(segID UniqueID, rowIDs []int64)
+	refreshFlushedSegmentPKRange(segID UniqueID, rowIDs []int64)
+	addFlushedSegmentWithPKs(segID, collID, partID UniqueID, channelName string, numOfRow int64, rowIDs []int64)
 	hasSegment(segID UniqueID, countFlushed bool) bool
+	removeSegment(segID UniqueID)
 
 	updateStatistics(segID UniqueID, numRows int64)
 	getSegmentStatisticsUpdates(segID UniqueID) (*internalpb.SegmentStatisticsUpdates, error)
@@ -90,28 +101,44 @@ type SegmentReplica struct {
 	flushedSegments map[UniqueID]*Segment
 
 	metaService *metaService
+	minIOKV     kv.BaseKV
 }
 
-func (s *Segment) updatePKRange(rowIDs []int64) {
+func (s *Segment) updatePKRange(pks []int64) {
 	buf := make([]byte, 8)
-	for _, rowID := range rowIDs {
-		binary.BigEndian.PutUint64(buf, uint64(rowID))
+	for _, pk := range pks {
+		common.Endian.PutUint64(buf, uint64(pk))
 		s.pkFilter.Add(buf)
-		if rowID > s.maxPK {
-			s.maxPK = rowID
+		if pk > s.maxPK {
+			s.maxPK = pk
 		}
-		if rowID < s.minPK {
-			s.minPK = rowID
+		if pk < s.minPK {
+			s.minPK = pk
 		}
 	}
 }
 
 var _ Replica = &SegmentReplica{}
 
-func newReplica(rc types.RootCoord, collID UniqueID) Replica {
+func newReplica(ctx context.Context, rc types.RootCoord, collID UniqueID) (*SegmentReplica, error) {
+	// MinIO
+	option := &miniokv.Option{
+		Address:           Params.MinioAddress,
+		AccessKeyID:       Params.MinioAccessKeyID,
+		SecretAccessKeyID: Params.MinioSecretAccessKey,
+		UseSSL:            Params.MinioUseSSL,
+		CreateBucket:      true,
+		BucketName:        Params.MinioBucketName,
+	}
+
+	minIOKV, err := miniokv.NewMinIOKV(ctx, option)
+	if err != nil {
+		return nil, err
+	}
+
 	metaService := newMetaService(rc, collID)
 
-	var replica Replica = &SegmentReplica{
+	replica := &SegmentReplica{
 		collectionID: collID,
 
 		newSegments:     make(map[UniqueID]*Segment),
@@ -119,8 +146,10 @@ func newReplica(rc types.RootCoord, collID UniqueID) Replica {
 		flushedSegments: make(map[UniqueID]*Segment),
 
 		metaService: metaService,
+		minIOKV:     minIOKV,
 	}
-	return replica
+
+	return replica, nil
 }
 
 // segmentFlushed transfers a segment from *New* or *Normal* into *Flushed*.
@@ -179,6 +208,10 @@ func (replica *SegmentReplica) getCollectionAndPartitionID(segID UniqueID) (coll
 		return seg.collectionID, seg.partitionID, nil
 	}
 
+	if seg, ok := replica.flushedSegments[segID]; ok {
+		return seg.collectionID, seg.partitionID, nil
+	}
+
 	return 0, 0, fmt.Errorf("Cannot find segment, id = %v", segID)
 }
 
@@ -233,7 +266,7 @@ func (replica *SegmentReplica) filterSegments(channelName string, partitionID Un
 	results := make([]*Segment, 0)
 
 	isMatched := func(segment *Segment, chanName string, partID UniqueID) bool {
-		return segment.channelName == chanName && (partID == 0 || segment.partitionID == partID)
+		return segment.channelName == chanName && (partID == common.InvalidFieldID || segment.partitionID == partID)
 	}
 	for _, seg := range replica.newSegments {
 		if isMatched(seg, channelName, partitionID) {
@@ -255,10 +288,7 @@ func (replica *SegmentReplica) filterSegments(channelName string, partitionID Un
 
 // addNormalSegment adds a *NotNew* and *NotFlushed* segment. Before add, please make sure there's no
 // such segment by `hasSegment`
-func (replica *SegmentReplica) addNormalSegment(segID, collID, partitionID UniqueID, channelName string, numOfRows int64, cp *segmentCheckPoint) error {
-	replica.segMu.Lock()
-	defer replica.segMu.Unlock()
-
+func (replica *SegmentReplica) addNormalSegment(segID, collID, partitionID UniqueID, channelName string, numOfRows int64, statsBinlogs []*datapb.FieldBinlog, cp *segmentCheckPoint) error {
 	if collID != replica.collectionID {
 		log.Warn("Mismatch collection",
 			zap.Int64("input ID", collID),
@@ -283,24 +313,28 @@ func (replica *SegmentReplica) addNormalSegment(segID, collID, partitionID Uniqu
 		checkPoint: *cp,
 		endPos:     &cp.pos,
 
-		//TODO silverxia, normal segments bloom filter and pk range should be loaded from serialized files
 		pkFilter: bloom.NewWithEstimates(bloomFilterSize, maxBloomFalsePositive),
 		minPK:    math.MaxInt64, // use max value, represents no value
 		maxPK:    math.MinInt64, // use min value represents no value
+	}
+	err := replica.initPKBloomFilter(seg, statsBinlogs)
+	if err != nil {
+		return err
 	}
 
 	seg.isNew.Store(false)
 	seg.isFlushed.Store(false)
 
+	replica.segMu.Lock()
 	replica.normalSegments[segID] = seg
+	replica.segMu.Unlock()
+
 	return nil
 }
 
 // addFlushedSegment adds a *Flushed* segment. Before add, please make sure there's no
 // such segment by `hasSegment`
-func (replica *SegmentReplica) addFlushedSegment(segID, collID, partitionID UniqueID, channelName string, numOfRows int64) error {
-	replica.segMu.Lock()
-	defer replica.segMu.Unlock()
+func (replica *SegmentReplica) addFlushedSegment(segID, collID, partitionID UniqueID, channelName string, numOfRows int64, statsBinlogs []*datapb.FieldBinlog) error {
 
 	if collID != replica.collectionID {
 		log.Warn("Mismatch collection",
@@ -309,7 +343,7 @@ func (replica *SegmentReplica) addFlushedSegment(segID, collID, partitionID Uniq
 		return fmt.Errorf("Mismatch collection, ID=%d", collID)
 	}
 
-	log.Debug("Add Normal segment",
+	log.Debug("Add Flushed segment",
 		zap.Int64("segment ID", segID),
 		zap.Int64("collection ID", collID),
 		zap.Int64("partition ID", partitionID),
@@ -329,18 +363,82 @@ func (replica *SegmentReplica) addFlushedSegment(segID, collID, partitionID Uniq
 		maxPK:    math.MinInt64, // use min value represents no value
 	}
 
+	err := replica.initPKBloomFilter(seg, statsBinlogs)
+	if err != nil {
+		return err
+	}
+
 	seg.isNew.Store(false)
 	seg.isFlushed.Store(true)
 
+	replica.segMu.Lock()
 	replica.flushedSegments[segID] = seg
+	replica.segMu.Unlock()
+
+	return nil
+}
+
+func (replica *SegmentReplica) initPKBloomFilter(s *Segment, statsBinlogs []*datapb.FieldBinlog) error {
+	if len(statsBinlogs) == 0 {
+		log.Info("statsBinlogs is empty")
+	}
+	schema, err := replica.getCollectionSchema(s.collectionID, 0)
+	if err != nil {
+		return err
+	}
+
+	// get pkfield id
+	pkField := int64(-1)
+	for _, field := range schema.Fields {
+		if field.IsPrimaryKey {
+			pkField = field.FieldID
+			break
+		}
+	}
+
+	// filter stats binlog files which is pk field stats log
+	bloomFilterFiles := make([]string, 0)
+	for _, binlog := range statsBinlogs {
+		if binlog.FieldID != pkField {
+			continue
+		}
+		bloomFilterFiles = append(bloomFilterFiles, binlog.Binlogs...)
+	}
+
+	values, err := replica.minIOKV.MultiLoad(bloomFilterFiles)
+	if err != nil {
+		return err
+	}
+	blobs := make([]*Blob, 0)
+	for i := 0; i < len(values); i++ {
+		blobs = append(blobs, &Blob{Value: []byte(values[i])})
+	}
+
+	stats, err := storage.DeserializeStats(blobs)
+	if err != nil {
+		return err
+	}
+	for _, stat := range stats {
+		err = s.pkFilter.Merge(stat.BF)
+		if err != nil {
+			return err
+		}
+		if s.minPK > stat.Min {
+			s.minPK = stat.Min
+		}
+
+		if s.maxPK < stat.Max {
+			s.maxPK = stat.Max
+		}
+	}
 	return nil
 }
 
 // listNewSegmentsStartPositions gets all *New Segments* start positions and
 //   transfer segments states from *New* to *Normal*.
 func (replica *SegmentReplica) listNewSegmentsStartPositions() []*datapb.SegmentStartPosition {
-	replica.segMu.RLock()
-	defer replica.segMu.RUnlock()
+	replica.segMu.Lock()
+	defer replica.segMu.Unlock()
 
 	result := make([]*datapb.SegmentStartPosition, 0, len(replica.newSegments))
 	for id, seg := range replica.newSegments {
@@ -394,27 +492,38 @@ func (replica *SegmentReplica) updateSegmentEndPosition(segID UniqueID, endPos *
 	log.Warn("No match segment", zap.Int64("ID", segID))
 }
 
-func (replica *SegmentReplica) updateSegmentPKRange(segID UniqueID, rowIDs []int64) {
+func (replica *SegmentReplica) updateSegmentPKRange(segID UniqueID, pks []int64) {
 	replica.segMu.Lock()
 	defer replica.segMu.Unlock()
 
 	seg, ok := replica.newSegments[segID]
 	if ok {
-		seg.updatePKRange(rowIDs)
+		seg.updatePKRange(pks)
 		return
 	}
 
 	seg, ok = replica.normalSegments[segID]
 	if ok {
-		seg.updatePKRange(rowIDs)
+		seg.updatePKRange(pks)
+		return
+	}
+
+	seg, ok = replica.flushedSegments[segID]
+	if ok {
+		seg.updatePKRange(pks)
 		return
 	}
 
 	log.Warn("No match segment to update PK range", zap.Int64("ID", segID))
 }
 
-func (replica *SegmentReplica) removeSegment(segID UniqueID) error {
-	return nil
+func (replica *SegmentReplica) removeSegment(segID UniqueID) {
+	replica.segMu.Lock()
+	defer replica.segMu.Unlock()
+
+	delete(replica.newSegments, segID)
+	delete(replica.normalSegments, segID)
+	delete(replica.flushedSegments, segID)
 }
 
 // hasSegment checks whether this replica has a segment according to segment ID.
@@ -472,6 +581,11 @@ func (replica *SegmentReplica) getSegmentStatisticsUpdates(segID UniqueID) (*int
 		return updates, nil
 	}
 
+	if seg, ok := replica.flushedSegments[segID]; ok {
+		updates.NumRows = seg.numRows
+		return updates, nil
+	}
+
 	return nil, fmt.Errorf("Error, there's no segment %v", segID)
 }
 
@@ -483,9 +597,6 @@ func (replica *SegmentReplica) getCollectionID() UniqueID {
 // getCollectionSchema gets collection schema from rootcoord for a certain timestamp.
 //   If you want the latest collection schema, ts should be 0.
 func (replica *SegmentReplica) getCollectionSchema(collID UniqueID, ts Timestamp) (*schemapb.CollectionSchema, error) {
-	replica.segMu.Lock()
-	defer replica.segMu.Unlock()
-
 	if !replica.validCollection(collID) {
 		log.Warn("Mismatch collection for the replica",
 			zap.Int64("Want", replica.collectionID),
@@ -523,4 +634,56 @@ func (replica *SegmentReplica) updateSegmentCheckPoint(segID UniqueID) {
 	}
 
 	log.Warn("There's no segment", zap.Int64("ID", segID))
+}
+
+// please call hasSegment first
+func (replica *SegmentReplica) refreshFlushedSegmentPKRange(segID UniqueID, rowIDs []int64) {
+	replica.segMu.Lock()
+	defer replica.segMu.Unlock()
+
+	seg, ok := replica.flushedSegments[segID]
+	if ok {
+		seg.pkFilter.ClearAll()
+		seg.updatePKRange(rowIDs)
+		return
+	}
+
+	log.Warn("No match segment to update PK range", zap.Int64("ID", segID))
+}
+
+func (replica *SegmentReplica) addFlushedSegmentWithPKs(segID, collID, partID UniqueID, channelName string, numOfRows int64, rowIDs []int64) {
+	if collID != replica.collectionID {
+		log.Warn("Mismatch collection",
+			zap.Int64("input ID", collID),
+			zap.Int64("expected ID", replica.collectionID))
+		return
+	}
+
+	log.Debug("Add Flushed segment",
+		zap.Int64("segment ID", segID),
+		zap.Int64("collection ID", collID),
+		zap.Int64("partition ID", partID),
+		zap.String("channel name", channelName),
+	)
+
+	seg := &Segment{
+		collectionID: collID,
+		partitionID:  partID,
+		segmentID:    segID,
+		channelName:  channelName,
+		numRows:      numOfRows,
+
+		pkFilter: bloom.NewWithEstimates(bloomFilterSize, maxBloomFalsePositive),
+		minPK:    math.MaxInt64, // use max value, represents no value
+		maxPK:    math.MinInt64, // use min value represents no value
+	}
+
+	seg.updatePKRange(rowIDs)
+
+	seg.isNew.Store(false)
+	seg.isFlushed.Store(true)
+
+	replica.segMu.Lock()
+	replica.flushedSegments[segID] = seg
+	replica.segMu.Unlock()
 }

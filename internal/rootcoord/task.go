@@ -135,9 +135,16 @@ func (t *CreateCollectionReqTask) Execute(ctx context.Context) error {
 
 	vchanNames := make([]string, t.Req.ShardsNum)
 	chanNames := make([]string, t.Req.ShardsNum)
+	deltaChanNames := make([]string, t.Req.ShardsNum)
 	for i := int32(0); i < t.Req.ShardsNum; i++ {
 		vchanNames[i] = fmt.Sprintf("%s_%dv%d", t.core.dmlChannels.GetDmlMsgStreamName(), collID, i)
 		chanNames[i] = ToPhysicalChannel(vchanNames[i])
+
+		deltaChanNames[i] = t.core.deltaChannels.GetDmlMsgStreamName()
+		deltaChanName, err1 := ConvertChannelName(chanNames[i], Params.DmlChannelName, Params.DeltaChannelName)
+		if err1 != nil || deltaChanName != deltaChanNames[i] {
+			return fmt.Errorf("dmlChanName %s and deltaChanName %s mis-match", chanNames[i], deltaChanNames[i])
+		}
 	}
 
 	collInfo := etcdpb.CollectionInfo{
@@ -174,17 +181,18 @@ func (t *CreateCollectionReqTask) Execute(ctx context.Context) error {
 		PhysicalChannelNames: chanNames,
 	}
 
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddCollReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddCollReq, CreateCollectionDDType)
-	}
-
 	reason := fmt.Sprintf("create collection %d", collID)
 	ts, err := t.core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
+	}
+
+	// build DdOperation and save it into etcd, when ddmsg send fail,
+	// system can restore ddmsg from etcd and re-send
+	ddCollReq.Base.Timestamp = ts
+	ddOpStr, err := EncodeDdOperation(&ddCollReq, CreateCollectionDDType)
+	if err != nil {
+		return fmt.Errorf("EncodeDdOperation fail, error = %w", err)
 	}
 
 	// use lambda function here to guarantee all resources to be released
@@ -200,6 +208,9 @@ func (t *CreateCollectionReqTask) Execute(ctx context.Context) error {
 		// add dml channel before send dd msg
 		t.core.dmlChannels.AddProducerChannels(chanNames...)
 
+		// also add delta channels
+		t.core.deltaChannels.AddProducerChannels(deltaChanNames...)
+
 		ids, err := t.core.SendDdCreateCollectionReq(ctx, &ddCollReq, chanNames)
 		if err != nil {
 			return fmt.Errorf("send dd create collection req failed, error = %w", err)
@@ -210,9 +221,10 @@ func (t *CreateCollectionReqTask) Execute(ctx context.Context) error {
 				Data: ids[pchan],
 			})
 		}
-		err = t.core.MetaTable.AddCollection(&collInfo, ts, idxInfo, ddOp)
+		err = t.core.MetaTable.AddCollection(&collInfo, ts, idxInfo, ddOpStr)
 		if err != nil {
 			t.core.dmlChannels.RemoveProducerChannels(chanNames...)
+			t.core.deltaChannels.RemoveProducerChannels(deltaChanNames...)
 			// it's ok just to leave create collection message sent, datanode and querynode does't process CreateCollection logic
 			return fmt.Errorf("meta table add collection failed,error = %w", err)
 		}
@@ -264,17 +276,18 @@ func (t *DropCollectionReqTask) Execute(ctx context.Context) error {
 		CollectionID:   collMeta.ID,
 	}
 
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddReq, DropCollectionDDType)
-	}
-
 	reason := fmt.Sprintf("drop collection %d", collMeta.ID)
 	ts, err := t.core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
+	}
+
+	// build DdOperation and save it into etcd, when ddmsg send fail,
+	// system can restore ddmsg from etcd and re-send
+	ddReq.Base.Timestamp = ts
+	ddOpStr, err := EncodeDdOperation(&ddReq, DropCollectionDDType)
+	if err != nil {
+		return fmt.Errorf("EncodeDdOperation fail, error = %w", err)
 	}
 
 	aliases := t.core.MetaTable.ListAliases(collMeta.ID)
@@ -289,7 +302,7 @@ func (t *DropCollectionReqTask) Execute(ctx context.Context) error {
 		// clear ddl timetick in all conditions
 		defer t.core.chanTimeTick.RemoveDdlTimeTick(ts, reason)
 
-		err = t.core.MetaTable.DeleteCollection(collMeta.ID, ts, ddOp)
+		err = t.core.MetaTable.DeleteCollection(collMeta.ID, ts, ddOpStr)
 		if err != nil {
 			return err
 		}
@@ -307,6 +320,16 @@ func (t *DropCollectionReqTask) Execute(ctx context.Context) error {
 
 		// remove dml channel after send dd msg
 		t.core.dmlChannels.RemoveProducerChannels(collMeta.PhysicalChannelNames...)
+
+		// remove delta channels
+		deltaChanNames := make([]string, len(collMeta.PhysicalChannelNames))
+		for i, chanName := range collMeta.PhysicalChannelNames {
+			deltaChanNames[i], err = ConvertChannelName(chanName, Params.DmlChannelName, Params.DeltaChannelName)
+			if err != nil {
+				return err
+			}
+		}
+		t.core.deltaChannels.RemoveProducerChannels(deltaChanNames...)
 		return nil
 	}
 
@@ -317,7 +340,7 @@ func (t *DropCollectionReqTask) Execute(ctx context.Context) error {
 
 	//notify query service to release collection
 	if err = t.core.CallReleaseCollectionService(t.core.ctx, ts, 0, collMeta.ID); err != nil {
-		log.Error("CallReleaseCollectionService failed", zap.String("error", err.Error()))
+		log.Error("Failed to CallReleaseCollectionService", zap.String("error", err.Error()))
 		return err
 	}
 
@@ -421,7 +444,7 @@ func (t *DescribeCollectionReqTask) Execute(ctx context.Context) error {
 
 	t.Rsp.CreatedTimestamp = collInfo.CreateTime
 	createdPhysicalTime, _ := tsoutil.ParseHybridTs(collInfo.CreateTime)
-	t.Rsp.CreatedUtcTimestamp = createdPhysicalTime
+	t.Rsp.CreatedUtcTimestamp = uint64(createdPhysicalTime)
 	t.Rsp.Aliases = t.core.MetaTable.ListAliases(collInfo.ID)
 	t.Rsp.StartPositions = collInfo.GetStartPositions()
 	return nil
@@ -453,7 +476,7 @@ func (t *ShowCollectionReqTask) Execute(ctx context.Context) error {
 		t.Rsp.CollectionIds = append(t.Rsp.CollectionIds, meta.ID)
 		t.Rsp.CreatedTimestamps = append(t.Rsp.CreatedTimestamps, meta.CreateTime)
 		physical, _ := tsoutil.ParseHybridTs(meta.CreateTime)
-		t.Rsp.CreatedUtcTimestamps = append(t.Rsp.CreatedUtcTimestamps, physical)
+		t.Rsp.CreatedUtcTimestamps = append(t.Rsp.CreatedUtcTimestamps, uint64(physical))
 	}
 	return nil
 }
@@ -493,17 +516,18 @@ func (t *CreatePartitionReqTask) Execute(ctx context.Context) error {
 		PartitionID:    partID,
 	}
 
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddReq, CreatePartitionDDType)
-	}
-
 	reason := fmt.Sprintf("create partition %s", t.Req.PartitionName)
 	ts, err := t.core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
+	}
+
+	// build DdOperation and save it into etcd, when ddmsg send fail,
+	// system can restore ddmsg from etcd and re-send
+	ddReq.Base.Timestamp = ts
+	ddOpStr, err := EncodeDdOperation(&ddReq, CreatePartitionDDType)
+	if err != nil {
+		return fmt.Errorf("EncodeDdOperation fail, error = %w", err)
 	}
 
 	// use lambda function here to guarantee all resources to be released
@@ -516,7 +540,7 @@ func (t *CreatePartitionReqTask) Execute(ctx context.Context) error {
 		// clear ddl timetick in all conditions
 		defer t.core.chanTimeTick.RemoveDdlTimeTick(ts, reason)
 
-		err = t.core.MetaTable.AddPartition(collMeta.ID, t.Req.PartitionName, partID, ts, ddOp)
+		err = t.core.MetaTable.AddPartition(collMeta.ID, t.Req.PartitionName, partID, ts, ddOpStr)
 		if err != nil {
 			return err
 		}
@@ -588,17 +612,18 @@ func (t *DropPartitionReqTask) Execute(ctx context.Context) error {
 		PartitionID:    partID,
 	}
 
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddReq, DropPartitionDDType)
-	}
-
 	reason := fmt.Sprintf("drop partition %s", t.Req.PartitionName)
 	ts, err := t.core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
+	}
+
+	// build DdOperation and save it into etcd, when ddmsg send fail,
+	// system can restore ddmsg from etcd and re-send
+	ddReq.Base.Timestamp = ts
+	ddOpStr, err := EncodeDdOperation(&ddReq, DropPartitionDDType)
+	if err != nil {
+		return fmt.Errorf("EncodeDdOperation fail, error = %w", err)
 	}
 
 	// use lambda function here to guarantee all resources to be released
@@ -611,7 +636,7 @@ func (t *DropPartitionReqTask) Execute(ctx context.Context) error {
 		// clear ddl timetick in all conditions
 		defer t.core.chanTimeTick.RemoveDdlTimeTick(ts, reason)
 
-		_, err = t.core.MetaTable.DeletePartition(collInfo.ID, t.Req.PartitionName, ts, ddOp)
+		_, err = t.core.MetaTable.DeletePartition(collInfo.ID, t.Req.PartitionName, ts, ddOpStr)
 		if err != nil {
 			return err
 		}
@@ -646,7 +671,7 @@ func (t *DropPartitionReqTask) Execute(ctx context.Context) error {
 
 	//notify query service to release partition
 	if err = t.core.CallReleasePartitionService(t.core.ctx, ts, 0, collInfo.ID, []typeutil.UniqueID{partID}); err != nil {
-		log.Error("CallReleaseCollectionService failed", zap.String("error", err.Error()))
+		log.Error("Failed to CallReleaseCollectionService", zap.String("error", err.Error()))
 		return err
 	}
 
@@ -712,7 +737,7 @@ func (t *ShowPartitionReqTask) Execute(ctx context.Context) error {
 	t.Rsp.CreatedUtcTimestamps = make([]uint64, 0, len(coll.PartitionCreatedTimestamps))
 	for _, ts := range coll.PartitionCreatedTimestamps {
 		physical, _ := tsoutil.ParseHybridTs(ts)
-		t.Rsp.CreatedUtcTimestamps = append(t.Rsp.CreatedUtcTimestamps, physical)
+		t.Rsp.CreatedUtcTimestamps = append(t.Rsp.CreatedUtcTimestamps, uint64(physical))
 	}
 
 	return nil
@@ -742,7 +767,7 @@ func (t *DescribeSegmentReqTask) Execute(ctx context.Context) error {
 	exist := false
 	segIDs, err := t.core.CallGetFlushedSegmentsService(ctx, t.Req.CollectionID, -1)
 	if err != nil {
-		log.Debug("get flushed segment from data coord failed", zap.String("collection_name", coll.Schema.Name), zap.Error(err))
+		log.Debug("Get flushed segment from data coord failed", zap.String("collection_name", coll.Schema.Name), zap.Error(err))
 		exist = true
 	} else {
 		for _, id := range segIDs {
@@ -802,7 +827,7 @@ func (t *ShowSegmentReqTask) Execute(ctx context.Context) error {
 	}
 	segIDs, err := t.core.CallGetFlushedSegmentsService(ctx, t.Req.CollectionID, t.Req.PartitionID)
 	if err != nil {
-		log.Debug("get flushed segments from data coord failed", zap.String("collection name", coll.Schema.Name), zap.Int64("partition id", t.Req.PartitionID), zap.Error(err))
+		log.Debug("Get flushed segments from data coord failed", zap.String("collection name", coll.Schema.Name), zap.Int64("partition id", t.Req.PartitionID), zap.Error(err))
 		return err
 	}
 
@@ -847,11 +872,11 @@ func (t *CreateIndexReqTask) Execute(ctx context.Context) error {
 		flushedSegs = append(flushedSegs, k)
 	}
 	if err != nil {
-		log.Debug("get flushed segments from data coord failed", zap.String("collection_name", collMeta.Schema.Name), zap.Error(err))
+		log.Debug("Get flushed segments from data coord failed", zap.String("collection_name", collMeta.Schema.Name), zap.Error(err))
 		return err
 	}
 
-	segIDs, field, err := t.core.MetaTable.GetNotIndexedSegments(t.Req.CollectionName, t.Req.FieldName, idxInfo, flushedSegs, t.Req.Base.GetTimestamp())
+	segIDs, field, err := t.core.MetaTable.GetNotIndexedSegments(t.Req.CollectionName, t.Req.FieldName, idxInfo, flushedSegs)
 	if err != nil {
 		log.Debug("RootCoord CreateIndexReqTask metaTable.GetNotIndexedSegments", zap.Error(err))
 		return err
@@ -876,8 +901,7 @@ func (t *CreateIndexReqTask) Execute(ctx context.Context) error {
 		if info.BuildID != 0 {
 			info.EnableIndex = true
 		}
-		ts, _ := t.core.TSOAllocator(1)
-		if err := t.core.MetaTable.AddIndex(&info, ts); err != nil {
+		if err := t.core.MetaTable.AddIndex(&info); err != nil {
 			log.Debug("Add index into meta table failed", zap.Int64("collection_id", collMeta.ID), zap.Int64("index_id", info.IndexID), zap.Int64("build_id", info.BuildID), zap.Error(err))
 		}
 	}
@@ -909,7 +933,7 @@ func (t *DescribeIndexReqTask) Execute(ctx context.Context) error {
 	for _, i := range idx {
 		f, err := GetFieldSchemaByIndexID(&coll, typeutil.UniqueID(i.IndexID))
 		if err != nil {
-			log.Warn("get field schema by index id failed", zap.String("collection name", t.Req.CollectionName), zap.String("index name", t.Req.IndexName), zap.Error(err))
+			log.Warn("Get field schema by index id failed", zap.String("collection name", t.Req.CollectionName), zap.String("index name", t.Req.IndexName), zap.Error(err))
 			continue
 		}
 		desc := &milvuspb.IndexDescription{
@@ -954,8 +978,7 @@ func (t *DropIndexReqTask) Execute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ts, _ := t.core.TSOAllocator(1)
-	_, _, err = t.core.MetaTable.DropIndex(t.Req.CollectionName, t.Req.FieldName, t.Req.IndexName, ts)
+	_, _, err = t.core.MetaTable.DropIndex(t.Req.CollectionName, t.Req.FieldName, t.Req.IndexName)
 	return err
 }
 
@@ -976,48 +999,16 @@ func (t *CreateAliasReqTask) Execute(ctx context.Context) error {
 		return fmt.Errorf("create alias, msg type = %s", commonpb.MsgType_name[int32(t.Type())])
 	}
 
-	ddReq := internalpb.CreateAliasRequest{
-		Base:           t.Req.Base,
-		CollectionName: t.Req.CollectionName,
-		Alias:          t.Req.Alias,
-	}
-
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddReq, CreateAliasDDType)
-	}
-
-	reason := fmt.Sprintf("create alias %s", t.Req.Alias)
 	ts, err := t.core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
 	}
-
-	// use lambda function here to guarantee all resources to be released
-	createAliasFn := func() error {
-		// lock for ddl operation
-		t.core.ddlLock.Lock()
-		defer t.core.ddlLock.Unlock()
-
-		t.core.chanTimeTick.AddDdlTimeTick(ts, reason)
-		// clear ddl timetick in all conditions
-		defer t.core.chanTimeTick.RemoveDdlTimeTick(ts, reason)
-		err = t.core.MetaTable.AddAlias(t.Req.Alias, t.Req.CollectionName, ts, ddOp)
-		if err != nil {
-			return err
-		}
-		return t.core.SendTimeTick(ts, reason)
-	}
-
-	err = createAliasFn()
+	err = t.core.MetaTable.AddAlias(t.Req.Alias, t.Req.CollectionName, ts)
 	if err != nil {
-		return err
+		return fmt.Errorf("meta table add alias failed, error = %w", err)
 	}
 
-	// Update DDOperation in etcd
-	return t.core.setDdMsgSendFlag(true)
+	return nil
 }
 
 // DropAliasReqTask drop alias request task
@@ -1037,44 +1028,13 @@ func (t *DropAliasReqTask) Execute(ctx context.Context) error {
 		return fmt.Errorf("create alias, msg type = %s", commonpb.MsgType_name[int32(t.Type())])
 	}
 
-	ddReq := internalpb.DropAliasRequest{
-		Base:  t.Req.Base,
-		Alias: t.Req.Alias,
-	}
-
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddReq, DropAliasDDType)
-	}
-
-	reason := fmt.Sprintf("create alias %s", t.Req.Alias)
 	ts, err := t.core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
 	}
-
-	// use lambda function here to guarantee all resources to be released
-	dropAliasFn := func() error {
-		// lock for ddl operation
-		t.core.ddlLock.Lock()
-		defer t.core.ddlLock.Unlock()
-
-		t.core.chanTimeTick.AddDdlTimeTick(ts, reason)
-		// clear ddl timetick in all conditions
-		defer t.core.chanTimeTick.RemoveDdlTimeTick(ts, reason)
-		err = t.core.MetaTable.DeleteAlias(t.Req.Alias, ts, ddOp)
-		if err != nil {
-			return err
-		}
-		t.core.SendTimeTick(ts, reason)
-		return nil
-	}
-
-	err = dropAliasFn()
+	err = t.core.MetaTable.DropAlias(t.Req.Alias, ts)
 	if err != nil {
-		return err
+		return fmt.Errorf("meta table drop alias failed, error = %w", err)
 	}
 
 	req := proxypb.InvalidateCollMetaCacheRequest{
@@ -1089,8 +1049,7 @@ func (t *DropAliasReqTask) Execute(ctx context.Context) error {
 	// error doesn't matter here
 	t.core.proxyClientManager.InvalidateCollectionMetaCache(ctx, &req)
 
-	// Update DDOperation in etcd
-	return t.core.setDdMsgSendFlag(true)
+	return nil
 }
 
 // AlterAliasReqTask alter alias request task
@@ -1110,44 +1069,13 @@ func (t *AlterAliasReqTask) Execute(ctx context.Context) error {
 		return fmt.Errorf("alter alias, msg type = %s", commonpb.MsgType_name[int32(t.Type())])
 	}
 
-	ddReq := internalpb.DropAliasRequest{
-		Base:  t.Req.Base,
-		Alias: t.Req.Alias,
-	}
-
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddReq, AlterAliasDDType)
-	}
-
-	reason := fmt.Sprintf("alter alias %s", t.Req.Alias)
 	ts, err := t.core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
 	}
-
-	// use lambda function here to guarantee all resources to be released
-	alterAliasFn := func() error {
-		// lock for ddl operation
-		t.core.ddlLock.Lock()
-		defer t.core.ddlLock.Unlock()
-
-		t.core.chanTimeTick.AddDdlTimeTick(ts, reason)
-		// clear ddl timetick in all conditions
-		defer t.core.chanTimeTick.RemoveDdlTimeTick(ts, reason)
-		err = t.core.MetaTable.AlterAlias(t.Req.Alias, t.Req.CollectionName, ts, ddOp)
-		if err != nil {
-			return err
-		}
-		t.core.SendTimeTick(ts, reason)
-		return nil
-	}
-
-	err = alterAliasFn()
+	err = t.core.MetaTable.AlterAlias(t.Req.Alias, t.Req.CollectionName, ts)
 	if err != nil {
-		return err
+		return fmt.Errorf("meta table alter alias failed, error = %w", err)
 	}
 
 	req := proxypb.InvalidateCollMetaCacheRequest{
@@ -1162,6 +1090,5 @@ func (t *AlterAliasReqTask) Execute(ctx context.Context) error {
 	// error doesn't matter here
 	t.core.proxyClientManager.InvalidateCollectionMetaCache(ctx, &req)
 
-	// Update DDOperation in etcd
-	return t.core.setDdMsgSendFlag(true)
+	return nil
 }

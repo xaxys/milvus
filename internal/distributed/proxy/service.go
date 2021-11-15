@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package grpcproxy
 
@@ -27,6 +32,7 @@ import (
 	grpcindexcoordclient "github.com/milvus-io/milvus/internal/distributed/indexcoord/client"
 	grpcquerycoordclient "github.com/milvus-io/milvus/internal/distributed/querycoord/client"
 	rcc "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
+	"github.com/milvus-io/milvus/internal/types"
 
 	grpc_opentracing "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
 	"github.com/milvus-io/milvus/internal/log"
@@ -48,20 +54,21 @@ const (
 type Server struct {
 	ctx        context.Context
 	wg         sync.WaitGroup
-	proxy      *proxy.Proxy
+	proxy      types.ProxyComponent
 	grpcServer *grpc.Server
 
 	grpcErrChan chan error
 
-	rootCoordClient  *rcc.GrpcClient
-	dataCoordClient  *grpcdatacoordclient.Client
-	queryCooedClient *grpcquerycoordclient.Client
-	indexCoordClient *grpcindexcoordclient.Client
+	rootCoordClient  types.RootCoord
+	dataCoordClient  types.DataCoord
+	queryCooedClient types.QueryCoord
+	indexCoordClient types.IndexCoord
 
 	tracer opentracing.Tracer
 	closer io.Closer
 }
 
+// NewServer create a Proxy server.
 func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
 
 	var err error
@@ -116,12 +123,12 @@ func (s *Server) Run() error {
 	if err := s.init(); err != nil {
 		return err
 	}
-	log.Debug("proxy node init done ...")
+	log.Debug("Proxy node init done ...")
 
 	if err := s.start(); err != nil {
 		return err
 	}
-	log.Debug("proxy node start done ...")
+	log.Debug("Proxy node start done ...")
 	return nil
 }
 
@@ -168,10 +175,13 @@ func (s *Server) init() error {
 
 	rootCoordAddr := Params.RootCoordAddress
 	log.Debug("Proxy", zap.String("RootCoord address", rootCoordAddr))
-	s.rootCoordClient, err = rcc.NewClient(s.ctx, proxy.Params.MetaRootPath, proxy.Params.EtcdEndpoints)
-	if err != nil {
-		log.Debug("Proxy new rootCoordClient failed ", zap.Error(err))
-		return err
+
+	if s.rootCoordClient == nil {
+		s.rootCoordClient, err = rcc.NewClient(s.ctx, proxy.Params.MetaRootPath, proxy.Params.EtcdEndpoints)
+		if err != nil {
+			log.Debug("Proxy new rootCoordClient failed ", zap.Error(err))
+			return err
+		}
 	}
 	err = s.rootCoordClient.Init()
 	if err != nil {
@@ -188,10 +198,13 @@ func (s *Server) init() error {
 
 	dataCoordAddr := Params.DataCoordAddress
 	log.Debug("Proxy", zap.String("data coordinator address", dataCoordAddr))
-	s.dataCoordClient, err = grpcdatacoordclient.NewClient(s.ctx, proxy.Params.MetaRootPath, proxy.Params.EtcdEndpoints)
-	if err != nil {
-		log.Debug("Proxy new dataCoordClient failed ", zap.Error(err))
-		return err
+
+	if s.dataCoordClient == nil {
+		s.dataCoordClient, err = grpcdatacoordclient.NewClient(s.ctx, proxy.Params.MetaRootPath, proxy.Params.EtcdEndpoints)
+		if err != nil {
+			log.Debug("Proxy new dataCoordClient failed ", zap.Error(err))
+			return err
+		}
 	}
 	err = s.dataCoordClient.Init()
 	if err != nil {
@@ -204,10 +217,13 @@ func (s *Server) init() error {
 
 	indexCoordAddr := Params.IndexCoordAddress
 	log.Debug("Proxy", zap.String("index coordinator address", indexCoordAddr))
-	s.indexCoordClient, err = grpcindexcoordclient.NewClient(s.ctx, proxy.Params.MetaRootPath, proxy.Params.EtcdEndpoints)
-	if err != nil {
-		log.Debug("Proxy new indexCoordClient failed ", zap.Error(err))
-		return err
+
+	if s.indexCoordClient == nil {
+		s.indexCoordClient, err = grpcindexcoordclient.NewClient(s.ctx, proxy.Params.MetaRootPath, proxy.Params.EtcdEndpoints)
+		if err != nil {
+			log.Debug("Proxy new indexCoordClient failed ", zap.Error(err))
+			return err
+		}
 	}
 	err = s.indexCoordClient.Init()
 	if err != nil {
@@ -220,9 +236,12 @@ func (s *Server) init() error {
 
 	queryCoordAddr := Params.QueryCoordAddress
 	log.Debug("Proxy", zap.String("query coordinator address", queryCoordAddr))
-	s.queryCooedClient, err = grpcquerycoordclient.NewClient(s.ctx, proxy.Params.MetaRootPath, proxy.Params.EtcdEndpoints)
-	if err != nil {
-		return err
+
+	if s.queryCooedClient == nil {
+		s.queryCooedClient, err = grpcquerycoordclient.NewClient(s.ctx, proxy.Params.MetaRootPath, proxy.Params.EtcdEndpoints)
+		if err != nil {
+			return err
+		}
 	}
 	err = s.queryCooedClient.Init()
 	if err != nil {

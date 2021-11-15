@@ -13,7 +13,6 @@ package querynode
 
 import (
 	"context"
-	"encoding/binary"
 	"log"
 	"math"
 	"sync"
@@ -22,6 +21,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
@@ -101,11 +101,11 @@ func TestSegment_getRowCount(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -160,11 +160,11 @@ func TestSegment_retrieve(t *testing.T) {
 		var rawData []byte
 		for _, ele := range vec {
 			buf := make([]byte, 4)
-			binary.LittleEndian.PutUint32(buf, math.Float32bits(ele+float32(i)*float32(N)))
+			common.Endian.PutUint32(buf, math.Float32bits(ele+float32(i)*float32(N)))
 			rawData = append(rawData, buf...)
 		}
 		bs := make([]byte, 4)
-		binary.LittleEndian.PutUint32(bs, uint32(i+1))
+		common.Endian.PutUint32(bs, uint32(i+1))
 		rawData = append(rawData, bs...)
 		blob := &commonpb.Blob{
 			Value: rawData,
@@ -264,11 +264,11 @@ func TestSegment_getDeletedCount(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -326,11 +326,11 @@ func TestSegment_getMemSize(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -374,11 +374,11 @@ func TestSegment_segmentInsert(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -434,11 +434,11 @@ func TestSegment_segmentDelete(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -484,11 +484,11 @@ func TestSegment_segmentSearch(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -508,7 +508,7 @@ func TestSegment_segmentSearch(t *testing.T) {
 	var searchRawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		searchRawData = append(searchRawData, buf...)
 	}
 	placeholderValue := milvuspb.PlaceholderValue{
@@ -587,11 +587,11 @@ func TestSegment_segmentPreInsert(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -629,11 +629,11 @@ func TestSegment_segmentPreDelete(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -655,6 +655,34 @@ func TestSegment_segmentPreDelete(t *testing.T) {
 
 	deleteSegment(segment)
 	deleteCollection(collection)
+}
+
+func TestSegment_segmentLoadDeletedRecord(t *testing.T) {
+	fieldParam := constFieldParam{
+		id:       100,
+		dataType: schemapb.DataType_Int64,
+	}
+	field := genPKField(fieldParam)
+	schema := &schemapb.CollectionSchema{
+		Name:   defaultCollectionName,
+		AutoID: false,
+		Fields: []*schemapb.FieldSchema{
+			field,
+		},
+	}
+
+	seg := newSegment(newCollection(defaultCollectionID, schema),
+		defaultSegmentID,
+		defaultPartitionID,
+		defaultCollectionID,
+		defaultVChannel,
+		segmentTypeSealed,
+		true)
+	pks := []IntPrimaryKey{1, 2, 3}
+	timestamps := []Timestamp{10, 10, 10}
+	var rowCount int64 = 3
+	error := seg.segmentLoadDeletedRecord(pks, timestamps, rowCount)
+	assert.NoError(t, error)
 }
 
 func TestSegment_segmentLoadFieldData(t *testing.T) {

@@ -14,10 +14,12 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 	"time"
 	"unsafe"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/stretchr/testify/assert"
@@ -52,6 +54,23 @@ func TestDescriptorEvent(t *testing.T) {
 	var buf bytes.Buffer
 
 	err := desc.Write(&buf)
+	assert.NotNil(t, err)
+
+	sizeTotal := 20 // not important
+	desc.AddExtra(originalSizeKey, sizeTotal)
+
+	// original size not in string format
+	err = desc.Write(&buf)
+	assert.NotNil(t, err)
+
+	desc.AddExtra(originalSizeKey, "not in int format")
+
+	err = desc.Write(&buf)
+	assert.NotNil(t, err)
+
+	desc.AddExtra(originalSizeKey, fmt.Sprintf("%v", sizeTotal))
+
+	err = desc.Write(&buf)
 	assert.Nil(t, err)
 
 	buffer := buf.Bytes()
@@ -1224,7 +1243,7 @@ func TestReadFixPartError(t *testing.T) {
 	assert.NotNil(t, err)
 
 	event := newDescriptorEventData()
-	err = binary.Write(buf, binary.LittleEndian, event.DescriptorEventDataFixPart)
+	err = binary.Write(buf, common.Endian, event.DescriptorEventDataFixPart)
 	assert.Nil(t, err)
 	_, err = readDescriptorEventData(buf)
 	assert.NotNil(t, err)
@@ -1266,7 +1285,7 @@ func TestEventReaderError(t *testing.T) {
 		StartTimestamp: 1000,
 		EndTimestamp:   2000,
 	}
-	err = binary.Write(buf, binary.LittleEndian, insertData)
+	err = binary.Write(buf, common.Endian, insertData)
 	assert.Nil(t, err)
 
 	r, err = newEventReader(schemapb.DataType_Int64, buf)

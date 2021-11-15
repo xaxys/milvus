@@ -12,6 +12,7 @@
 package querycoord
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 )
 
@@ -37,6 +39,10 @@ func (tk *testKv) Save(key, value string) error {
 	return tk.returnFn()
 }
 
+func (tk *testKv) MultiSave(saves map[string]string) error {
+	return tk.returnFn()
+}
+
 func (tk *testKv) Remove(key string) error {
 	return tk.returnFn()
 }
@@ -45,11 +51,15 @@ func (tk *testKv) LoadWithPrefix(key string) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
+func (tk *testKv) Load(key string) (string, error) {
+	return "", nil
+}
+
 func TestReplica_Release(t *testing.T) {
 	refreshParams()
 	etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
 	assert.Nil(t, err)
-	meta, err := newMeta(etcdKV)
+	meta, err := newMeta(context.Background(), etcdKV, nil, nil)
 	assert.Nil(t, err)
 	err = meta.addCollection(1, nil)
 	require.NoError(t, err)
@@ -80,10 +90,11 @@ func TestMetaFunc(t *testing.T) {
 	kv, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
 	assert.Nil(t, err)
 	meta := &MetaReplica{
-		client:            kv,
-		collectionInfos:   map[UniqueID]*querypb.CollectionInfo{},
-		segmentInfos:      map[UniqueID]*querypb.SegmentInfo{},
-		queryChannelInfos: map[UniqueID]*querypb.QueryChannelInfo{},
+		client:             kv,
+		collectionInfos:    map[UniqueID]*querypb.CollectionInfo{},
+		segmentInfos:       map[UniqueID]*querypb.SegmentInfo{},
+		queryChannelInfos:  map[UniqueID]*querypb.QueryChannelInfo{},
+		globalSeekPosition: &internalpb.MsgPosition{},
 	}
 
 	nodeID := int64(100)
@@ -110,11 +121,6 @@ func TestMetaFunc(t *testing.T) {
 		assert.Equal(t, false, hasReleasePartition)
 	})
 
-	t.Run("Test HasSegmentInfoFalse", func(t *testing.T) {
-		hasSegmentInfo := meta.hasSegmentInfo(defaultSegmentID)
-		assert.Equal(t, false, hasSegmentInfo)
-	})
-
 	t.Run("Test GetSegmentInfoByIDFail", func(t *testing.T) {
 		res, err := meta.getSegmentInfoByID(defaultSegmentID)
 		assert.NotNil(t, err)
@@ -129,8 +135,8 @@ func TestMetaFunc(t *testing.T) {
 
 	t.Run("Test GetQueryChannelInfoByIDFail", func(t *testing.T) {
 		res, err := meta.getQueryChannelInfoByID(defaultCollectionID)
-		assert.NotNil(t, err)
-		assert.Nil(t, res)
+		assert.Nil(t, err)
+		assert.NotNil(t, res)
 	})
 
 	t.Run("Test GetPartitionStatesByIDFail", func(t *testing.T) {
@@ -222,7 +228,9 @@ func TestMetaFunc(t *testing.T) {
 			CollectionID: defaultCollectionID,
 			NodeID:       nodeID,
 		}
-		err := meta.setSegmentInfo(defaultSegmentID, info)
+		segmentInfos := make(map[UniqueID]*querypb.SegmentInfo)
+		segmentInfos[defaultSegmentID] = info
+		err := meta.setSegmentInfos(segmentInfos)
 		assert.Nil(t, err)
 	})
 
@@ -232,10 +240,10 @@ func TestMetaFunc(t *testing.T) {
 		assert.Equal(t, defaultSegmentID, infos[0].SegmentID)
 	})
 
-	t.Run("Test GetQueryChannel", func(t *testing.T) {
-		reqChannel, resChannel, err := meta.GetQueryChannel(defaultCollectionID)
-		assert.NotNil(t, reqChannel)
-		assert.NotNil(t, resChannel)
+	t.Run("Test getQueryChannel", func(t *testing.T) {
+		info, err := meta.getQueryChannelInfoByID(defaultCollectionID)
+		assert.NotNil(t, info.QueryChannelID)
+		assert.NotNil(t, info.QueryResultChannelID)
 		assert.Nil(t, err)
 	})
 
@@ -340,4 +348,20 @@ func TestReloadMetaFromKV(t *testing.T) {
 	assert.Equal(t, true, ok)
 	_, ok = meta.queryChannelInfos[defaultCollectionID]
 	assert.Equal(t, true, ok)
+
+	t.Run("test no global query seek position", func(t *testing.T) {
+		err = kv.Remove(globalQuerySeekPositionPrefix)
+		assert.NoError(t, err)
+
+		err = meta.reloadFromKV()
+		assert.NoError(t, err)
+	})
+
+	t.Run("test wrong global query seek position", func(t *testing.T) {
+		err = kv.Save(globalQuerySeekPositionPrefix, "&%*&^*^(&%*&%&^%")
+		assert.NoError(t, err)
+
+		err = meta.reloadFromKV()
+		assert.Error(t, err)
+	})
 }

@@ -1,14 +1,14 @@
 ## 6. Proxy
 
-As the user access layer of Milvus, Proxy mainly plays a role that do some check and preprocessing for requests from
-clients and then forward these requests to other components, such as Root Coordinator, Data Coordinator, Query
-Coordinator, Index Coordinator. The below figure shows that how Proxy interacts with other components.
+As the user access layer of Milvus, Proxy mainly plays a role that does some checks and preprocessing for requests from
+clients and then forwards these requests to other components, such as Root Coordinator, Data Coordinator, Query
+Coordinator, Index Coordinator. The below figure shows how Proxy interacts with other components.
 
 <img src="./graphs/proxy.png" width=700>
 
 Proxy divides requests from clients into three classes: `DdRequest`, `DmRequest`, `DqRequest`.
 
-DdRequest is the shorthand of `Data Definition Request`. It means a operation on the meta information of
+DdRequest is the shorthand of `Data Definition Request`. It means an operation on the meta information of
 collections, including two parts. One part is of the writing operations on collections, such as defining a schema,
 creating or dropping a partition, creating or dropping the index and etc. Another part is of the reading operations on
 collections, such as listing all collections or partitions, checking if a collection or a partition exists.
@@ -21,60 +21,57 @@ collection, querying for specific records of a collection and etc.
 
 For every request, Proxy will first check if it's valid to be executed by Milvus and if the request is invalid then
 Proxy will return the error to clients and won't continue to forward this request to other components. The check
-operation of Proxy includes two part, one part is static check and another is dynamic check. Static check includes
-parameters check, constraints check and etc. Dynamic check will check some related dependency of the request, take
+operation of Proxy includes two parts, one part is static check and another is dynamic check. Static check includes
+parameters check, constraints check and etc. Dynamic check will check some related dependencies of the request, take
 search requests for example, Proxy should check if the related collection exists in Milvus.
 
-Also, Proxy will do some preprocessing for every request. Proxy will do little thing for some requests in the
-preprocessing stage and a lot more for other requests. Every object in Milvus will be assigned with a `ID`, such as 
-`CollectionID`, `PartitionID`, `IndexID`,  `SegmentID` and etc. Components in Milvus communicate with each other by the 
-ID of object, however, users only knows the object name. So as the user access layser of Milvus, Proxy should translate
+Also, Proxy will do some preprocessing for every request. Proxy will do little things for some requests in the
+preprocessing stage and a lot more for other requests. Every object in Milvus will be assigned with a `ID`, such as
+`CollectionID`, `PartitionID`, `IndexID`, `SegmentID`, etc. Components in Milvus communicate with each other by the
+object IDs, however, users only know the object name. So as a user access layer of Milvus, Proxy should translate
 the object name into object ID. Also taking search request as example, Proxy should translate the `CollectionName` into
 `CollectionID` and then the Query Node will recognize the request. Proxy holds a cache that translate object name into
 object id and dynamically updates the cache.
 
-#### 6.0 Service Discovery based on ETCD
+#### 6.0 Service Discovery based on etcd
 
-As you know, Proxy depends on some other components. So how Proxy knows their node information such as host and port,
-it is also called how Milvus implements the service discovery mechanism? As a cloud-native vector database, Milvus use
-the ETCD to provide service registration and service discovery. Every node in Milvus will register their node
-information(including host, port, ID and etc) into ETCD after startup. They should specific the prefix and key of ETCD
-when registration. Nodes with same type have same prefix in ETCD, while nodes with different type have different prefix.
-The key in ETCD can be assigned with a lease and you can specific the `time-to-live(ttl)` of lease. Milvus uses this
-mechanism to check if a node is online. When a node is healthy, it will continuously renew the lease in ETCD. Otherwise
-if some exception occurs in the node and the node stopped to renew the lease, ETCD will delete the related node
-information. By using this mechanism, nodes in Milvus can know if there are any other nodes going to be online or
-offline and synchronize the latest node information.
+As you know, Proxy depends on some other components. So how Proxy knows the other nodes' information such as host and port,
+it is also called how Milvus implements the service discovery mechanism? As a cloud-native vector database, Milvus uses
+etcd to provide service registration and service discovery. Every node in Milvus registers its node information(including host,
+port, ID etc) into etcd after startup. Nodes should specify the prefix and key of etcd when registration. Nodes with the
+same type have the same prefix in etcd, while nodes with different types have different prefixes. Every key in etcd can be assigned with a lease, and you can specify the `time-to-live(ttl)` of the
+lease. Milvus uses this mechanism to check if a node is online. When a node is healthy, it will continuously renew the
+lease in etcd. Otherwise, if some exceptions occurred in a node, or a node stopped to renew the lease, etcd would delete
+the related node information. By using this mechanism, nodes in Milvus know if there are any other nodes going to be
+online or offline and synchronize the latest node information.
 
-
-
-#### 6.0 Interaction with Root Coordinator
+#### 6.1 Interaction with Root Coordinator
 
 Proxy will forward the DdRequest to Root Coordinator. These requests include:
 
-	- CreateCollection
-	- DropCollection
-	- HasCollection
-	- DescribeCollection
-	- ShowCollections
-	- CreatePartition
-	- DropPartition
-	- HasPartition
-	- ShowPartitions
-	- CreateIndex
-	- DropIndex
-	- DescribeIndex
-	- GetIndexBuildProgress
-	- GetIndexState
+    - CreateCollection
+    - DropCollection
+    - HasCollection
+    - DescribeCollection
+    - ShowCollections
+    - CreatePartition
+    - DropPartition
+    - HasPartition
+    - ShowPartitions
+    - CreateIndex
+    - DropIndex
+    - DescribeIndex
+    - GetIndexBuildProgress
+    - GetIndexState
 
-Proxy handles the DdRequest sequentially. Only when the request entered earlier was done, the next request can be handled.
-Proxy forwards these requests to Root Coordinator, waits for Root Coordinator returning the result and then returns the
-result or error message to clients.
+Proxy handles the DdRequest sequentially. When and only when the earlier entered requests are done, the next request
+would be handled. Proxy forwards these requests to Root Coordinator, waits until getting results from Root Coordinator, and then
+returns to clients with results or errors.
 
-Milvus does not support transaction, but it should gurantee the deterministic execution of every operation. A timestamp
-is tagged on each request. When a request entered Milvus, Proxy will tag a timestamp for it. The timestamp was assigned
-by Root Coordinator. The component used to assign timestamp of Root Coordinator is called `Timestamp Oracle (tso)`, tso
-will ensure that the assigned timestamp is globally increasing.
+Milvus does not support transaction, but it should guarantee the deterministic execution of every operation. A timestamp
+is tagged on each request. When a request enters Milvus, Proxy tags a timestamp that was assigned by Root Coordinator.
+The component that assigns timestamp in Root Coordinator is called `Timestamp Oracle (TSO)`. TSO ensures that each
+timestamp is globally increasing.
 
 Milvus 2.0 implements the unified Lambda architecture, which integrates the processing of the incremental and historical
 data. Compared with the Kappa architecture, Milvus 2.0 introduces log backfill, which stores log snapshots and indexes
@@ -84,28 +81,27 @@ packs according to write time or event time, and maintains a timeline for users 
 
 To support this watermark mechanism, Proxy should report the timestamp statistics of physical channel to Root
 Coordinator periodically. When Proxy knows all operations of a specific were done before a `ts`, then Proxy will report
-the `ts` and inform Root Coordinator that udpates the timestmap statistics.
+the `ts` and inform Root Coordinator that udpates the timestamp statistics.
 
-Proxy holds a cache about meta information of collections. These meta information includes `CollectionID`, `Schema`,
-`PartitionID` and etc. Components in Milvus communicate with each other using `CollectionID` and `PartitionID`, so the
+Proxy holds a cache about meta information of collections. The meta information includes `CollectionID`, `Schema`,
+`PartitionID`, etc. Components in Milvus communicate with each other using `CollectionID` and `PartitionID`, so the
 object name in request will be translated to object ID in Proxy. When the meta is not hit in cache, Proxy will update
 the cache from Root Coordinator. At the same time, in order to keep the consistency of cache, when there are any changes
-of meta information in Root Coordinator, it will inform all Proxies to clear the related meta cache and the later
-requests that need these meta will get the newest meta information.
+of meta information in Root Coordinator, it will inform all Proxies to clear the related meta cache, and any newer
+requests will get the latest meta information.
 
-For Insert request whose related collection has a auto-generated primary field, Proxy should assign primary key for
-every row of insert request, now the only supported data type of auto-generated primary field is `int64`. The assignment
-of primary keys was done by Root Coordinator, Proxy will apply for a batch of primary keys first and cache them for
-local assignment. When the primary keys in cache is not enough, Proxy will continue to apply for another batch of
-primary keys.
+For inserts to a collection which is auto_id configured in the collection schema, Proxy assigns a primary key for
+every row of insert request. For now the only supported data type of auto-generated primary field is `int64`. Proxy 
+applies for a batch of primary keys from Root Coordinator, and caches them for local assignments. When the primary keys in cache
+is not enough, Proxy will continue to apply for another batch of primary keys.
 
-Proxy will forward ReleaseCollection and ReleasePartition to Query Coordinator, Query Coordinator will inform Root
-Coordinator this event and then Root Coordinator will inform all Proxies to close the search-related and
+Proxy forwards ReleaseCollection and ReleasePartition to Query Coordinator, Query Coordinator then informs Root
+Coordinator the events. After that, Root Coordinator will inform all Proxies to close the search-related and
 search-result-related message streams.
 
 #### 6.2 Interaction with MsgStream
 
-In Milvus 2.0, the log broker serves as the system' backbone: All data insert and update operations must go through the
+In Milvus 2.0, the log broker serves as the system 'backbone': All data insert and update operations must go through the
 log broker, and worker nodes execute CRUD operations by subscribing to and consuming logs. This design reduces system
 complexity by moving core functions such as data persistence and flashback down to the storage layer, and log pub-sub
 make the system even more flexible and better positioned for future scaling.
@@ -119,13 +115,13 @@ and the corresponding results of query requests will be written to DqResultChann
 As the number of tables increases, the number of DmChannels increases on demand, and the number of physical channels
 also increases on demand. In the future, the number of physical channels in the system can also be limited to a fixed
 number, such as 1024. In this case, the same physical channel will be mapped to virtual channels of different
-collections. As shown in the figure below.
+collections. Shown as the figure below.
 
 ![collection_dm_channels](./graphs/collection_dm_channels.png)
 
-When each collection is created, the Root Coordinator needs to decide the number of its DmChannels and the physical
-channels mapped by each virtual channel, and persist these information as the meta information of the collection; In
-addition, when the system finds that the collection receives DmRequest frequently, we can allocate more virtual channels
+When a collection is created, Root Coordinator need to decide the number of its DmChannels and the physical
+channels mapped by each virtual channel, and persist these kinds of information as the meta information of the collection; 
+In addition, when the system finds that the collection receives DmRequest frequently, we can allocate more virtual channels
 to the collection to increase the parallelism and thus increase the system throughput. This function is a key point of
 future work.
 
@@ -157,10 +153,10 @@ nodes will store the data in the object storage in the unit of segment (in the a
 be divided into multiple small files for writing). In Milvus, segment is uniquely identified by segment ID, and the
 allocation logic of segment ID is the responsibility of the Data Coordinator. The SegmentID to which each row of data is
 written needs to be determined before writing to DmChannel. For a write operation, the proxy will hash each row of data
-again according to the hash value of its primary key, and then determine which DmChannel each row of data enters. After
+again according to the hash value of its primary key, and then determine into which DmChannel each row of data enters. After
 collecting the number of pieces to be written by each DmChannel, apply to the data coordinator for which SegmentIDs the
-newly written data of these dmchannels belong. In the specific implementation, the proxy needs to preallocate some
-quotas to the Data Coordinator to avoid frequent direct GPRC communication with the Data Coordinator.
+newly written data of these dmchannels belong. In the specific implementation, the proxy need to preallocate some
+quotas to the Data Coordinator to avoid frequent direct GRPC communication with the Data Coordinator.
 
 One consideration for uniformly assigning SegmentIDs by Data Coordinator is that Data Coordinator is responsible for
 coordinating the total number of each segment not to be too large, and the location is near a water level, so that the
@@ -229,26 +225,28 @@ Collection and Partition.
 
 There are three main functions in taskScheduler:
 
-	- Schedule task
-	- Maintain the snapshot of timestamp statistics
-	- Receive the search results from stream and then distribute them to related task
+    - Schedule task
+    - Maintain the snapshot of timestamp statistics
+    - Receive the search results from stream and then distribute them to related task
 
 taskScheduler maintains three queues: ddQueue, dmQueue and dqQueue correspond to DdRequest, DmRequest, and DqRequest
 respectively. The interface of taskQueue is defined as follows:
 
 ```go
-type TaskQueue interface {
-   utChan() <-chan int
-   utEmpty() bool
-   utFull() bool
-   addUnissuedTask(t task) error
-   FrontUnissuedTask() task
-   PopUnissuedTask() task
-   AddActiveTask(t task)
-   PopActiveTask(tID UniqueID) task
-   getTaskByReqID(reqID UniqueID) task
-   TaskDoneTest(ts Timestamp) bool
-   Enqueue(t task) error
+type taskQueue interface {
+  utChan() <-chan int
+  utEmpty() bool
+  utFull() bool
+  addUnissuedTask(t task) error
+  FrontUnissuedTask() task
+  PopUnissuedTask() task
+  AddActiveTask(t task)
+  PopActiveTask(tID UniqueID) task
+  getTaskByReqID(reqID UniqueID) task
+  TaskDoneTest(ts Timestamp) bool
+  Enqueue(t task) error
+	setMaxTaskNum(num int64)
+	getMaxTaskNum() int64
 }
 ```
 
@@ -257,20 +255,20 @@ definition of the task interface is as follows:
 
 ```go
 type task interface {
-   TraceCtx() context.Context
-   ID() UniqueID       // return ReqID
-   SetID(uid UniqueID) // set ReqID
-   Name() string
-   Type() commonpb.MsgType
-   BeginTs() Timestamp
-   EndTs() Timestamp
-   SetTs(ts Timestamp)
-   OnEnqueue() error
-   PreExecute(ctx context.Context) error
-   Execute(ctx context.Context) error
-   PostExecute(ctx context.Context) error
-   WaitToFinish() error
-   Notify(err error)
+  TraceCtx() context.Context
+  ID() UniqueID       // return ReqID
+  SetID(uid UniqueID) // set ReqID
+  Name() string
+  Type() commonpb.MsgType
+  BeginTs() Timestamp
+  EndTs() Timestamp
+  SetTs(ts Timestamp)
+  OnEnqueue() error
+  PreExecute(ctx context.Context) error
+  Execute(ctx context.Context) error
+  PostExecute(ctx context.Context) error
+  WaitToFinish() error
+  Notify(err error)
 }
 ```
 
@@ -368,7 +366,7 @@ writes the request to the DqRequestChannel, it will attach the ReqID, and the qu
 when writing the search result back to the DqResultChannel. taskScheduler will start a background coroutine to consume
 search result from DqResultChannel, and then distribute messages according to the ReqID in it. When several results of
 the same ReqID are collected and the termination condition is reached, these results will be passed to the blocking task
-coroutine which is  waiting. The waken task will reduce the search results and then send the final search result to
+coroutine which is waiting. The waken task will reduce the search results and then send the final search result to
 clients.
 
 ##### 6.6.2 channelsMgr

@@ -13,8 +13,10 @@ package querycoord
 
 import (
 	"context"
+	"errors"
+
+	"fmt"
 	"math/rand"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -24,6 +26,7 @@ import (
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/internal/allocator"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
@@ -34,7 +37,12 @@ import (
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
+)
+
+const (
+	handoffSegmentPrefix = "querycoord-handoff"
 )
 
 // Timestamp is an alias for the Int64 type
@@ -59,6 +67,7 @@ type QueryCoord struct {
 	cluster      Cluster
 	newNodeFn    newQueryNodeFn
 	scheduler    *TaskScheduler
+	idAllocator  func() (UniqueID, error)
 
 	metricsCacheManager *metricsinfo.MetricsCacheManager
 
@@ -66,7 +75,6 @@ type QueryCoord struct {
 	rootCoordClient types.RootCoord
 
 	session   *sessionutil.Session
-	liveCh    <-chan bool
 	eventChan <-chan *sessionutil.SessionEvent
 
 	stateCode  atomic.Value
@@ -79,7 +87,7 @@ type QueryCoord struct {
 func (qc *QueryCoord) Register() error {
 	log.Debug("query coord session info", zap.String("metaPath", Params.MetaRootPath), zap.Strings("etcdEndPoints", Params.EtcdEndpoints), zap.String("address", Params.Address))
 	qc.session = sessionutil.NewSession(qc.loopCtx, Params.MetaRootPath, Params.EtcdEndpoints)
-	qc.liveCh = qc.session.Init(typeutil.QueryCoordRole, Params.Address, true)
+	qc.session.Init(typeutil.QueryCoordRole, Params.Address, true)
 	Params.NodeID = uint64(qc.session.ServerID)
 	Params.SetLogger(typeutil.UniqueID(-1))
 	return nil
@@ -87,6 +95,8 @@ func (qc *QueryCoord) Register() error {
 
 // Init function initializes the queryCoord's meta, cluster, etcdKV and task scheduler
 func (qc *QueryCoord) Init() error {
+	log.Debug("query coordinator start init")
+	//connect etcd
 	connectEtcdFn := func() error {
 		etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
 		if err != nil {
@@ -104,19 +114,39 @@ func (qc *QueryCoord) Init() error {
 			return
 		}
 		log.Debug("query coordinator try to connect etcd success")
-		qc.meta, initError = newMeta(qc.kvClient)
+
+		// init id allocator
+		var idAllocatorKV *etcdkv.EtcdKV
+		idAllocatorKV, initError = tsoutil.NewTSOKVBase(Params.EtcdEndpoints, Params.KvRootPath, "queryCoordTaskID")
+		if initError != nil {
+			return
+		}
+		idAllocator := allocator.NewGlobalIDAllocator("idTimestamp", idAllocatorKV)
+		initError = idAllocator.Initialize()
+		if initError != nil {
+			log.Debug("query coordinator idAllocator initialize failed", zap.Error(initError))
+			return
+		}
+		qc.idAllocator = func() (UniqueID, error) {
+			return idAllocator.AllocOne()
+		}
+
+		// init meta
+		qc.meta, initError = newMeta(qc.loopCtx, qc.kvClient, qc.msFactory, qc.idAllocator)
 		if initError != nil {
 			log.Error("query coordinator init meta failed", zap.Error(initError))
 			return
 		}
 
+		// init cluster
 		qc.cluster, initError = newQueryNodeCluster(qc.loopCtx, qc.meta, qc.kvClient, qc.newNodeFn, qc.session)
 		if initError != nil {
 			log.Error("query coordinator init cluster failed", zap.Error(initError))
 			return
 		}
 
-		qc.scheduler, initError = NewTaskScheduler(qc.loopCtx, qc.meta, qc.cluster, qc.kvClient, qc.rootCoordClient, qc.dataCoordClient)
+		// init task scheduler
+		qc.scheduler, initError = NewTaskScheduler(qc.loopCtx, qc.meta, qc.cluster, qc.kvClient, qc.rootCoordClient, qc.dataCoordClient, qc.idAllocator)
 		if initError != nil {
 			log.Error("query coordinator init task scheduler failed", zap.Error(initError))
 			return
@@ -130,18 +160,33 @@ func (qc *QueryCoord) Init() error {
 
 // Start function starts the goroutines to watch the meta and node updates
 func (qc *QueryCoord) Start() error {
+	m := map[string]interface{}{
+		"PulsarAddress":  Params.PulsarAddress,
+		"ReceiveBufSize": 1024,
+		"PulsarBufSize":  1024}
+	err := qc.msFactory.SetParams(m)
+	if err != nil {
+		return err
+	}
 	qc.scheduler.Start()
 	log.Debug("start scheduler ...")
+
+	Params.CreatedTime = time.Now()
+	Params.UpdatedTime = time.Now()
+
 	qc.UpdateStateCode(internalpb.StateCode_Healthy)
 
 	qc.loopWg.Add(1)
 	go qc.watchNodeLoop()
 
 	qc.loopWg.Add(1)
-	go qc.watchMetaLoop()
+	go qc.watchHandoffSegmentLoop()
 
-	go qc.session.LivenessCheck(qc.loopCtx, qc.liveCh, func() {
-		qc.Stop()
+	go qc.session.LivenessCheck(qc.loopCtx, func() {
+		log.Error("Query Coord disconnected from etcd, process will exit", zap.Int64("Server Id", qc.session.ServerID))
+		if err := qc.Stop(); err != nil {
+			log.Fatal("failed to stop server", zap.Error(err))
+		}
 	})
 
 	return nil
@@ -163,6 +208,7 @@ func (qc *QueryCoord) UpdateStateCode(code internalpb.StateCode) {
 	qc.stateCode.Store(code)
 }
 
+// NewQueryCoord creates a QueryCoord object.
 func NewQueryCoord(ctx context.Context, factory msgstream.Factory) (*QueryCoord, error) {
 	rand.Seed(time.Now().UnixNano())
 	queryChannels := make([]*queryChannelInfo, 0)
@@ -191,13 +237,23 @@ func NewQueryCoord(ctx context.Context, factory msgstream.Factory) (*QueryCoord,
 }
 
 // SetRootCoord sets root coordinator's client
-func (qc *QueryCoord) SetRootCoord(rootCoord types.RootCoord) {
+func (qc *QueryCoord) SetRootCoord(rootCoord types.RootCoord) error {
+	if rootCoord == nil {
+		return errors.New("null root coordinator interface")
+	}
+
 	qc.rootCoordClient = rootCoord
+	return nil
 }
 
 // SetDataCoord sets data coordinator's client
-func (qc *QueryCoord) SetDataCoord(dataCoord types.DataCoord) {
+func (qc *QueryCoord) SetDataCoord(dataCoord types.DataCoord) error {
+	if dataCoord == nil {
+		return errors.New("null data coordinator interface")
+	}
+
 	qc.dataCoordClient = dataCoord
+	return nil
 }
 
 func (qc *QueryCoord) watchNodeLoop() {
@@ -220,19 +276,17 @@ func (qc *QueryCoord) watchNodeLoop() {
 			SourceNodeIDs: offlineNodeIDs,
 		}
 
-		loadBalanceTask := &LoadBalanceTask{
-			BaseTask: BaseTask{
-				ctx:              qc.loopCtx,
-				Condition:        NewTaskCondition(qc.loopCtx),
-				triggerCondition: querypb.TriggerCondition_nodeDown,
-			},
+		baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_nodeDown)
+		loadBalanceTask := &loadBalanceTask{
+			baseTask:           baseTask,
 			LoadBalanceRequest: loadBalanceSegment,
 			rootCoord:          qc.rootCoordClient,
 			dataCoord:          qc.dataCoordClient,
 			cluster:            qc.cluster,
 			meta:               qc.meta,
 		}
-		qc.scheduler.Enqueue([]task{loadBalanceTask})
+		//TODO::deal enqueue error
+		qc.scheduler.Enqueue(loadBalanceTask)
 		log.Debug("start a loadBalance task", zap.Any("task", loadBalanceTask))
 	}
 
@@ -241,7 +295,10 @@ func (qc *QueryCoord) watchNodeLoop() {
 		select {
 		case <-ctx.Done():
 			return
-		case event := <-qc.eventChan:
+		case event, ok := <-qc.eventChan:
+			if !ok {
+				return
+			}
 			switch event.EventType {
 			case sessionutil.SessionAddEvent:
 				serverID := event.Session.ServerID
@@ -270,57 +327,100 @@ func (qc *QueryCoord) watchNodeLoop() {
 					BalanceReason: querypb.TriggerCondition_nodeDown,
 				}
 
-				loadBalanceTask := &LoadBalanceTask{
-					BaseTask: BaseTask{
-						ctx:              qc.loopCtx,
-						Condition:        NewTaskCondition(qc.loopCtx),
-						triggerCondition: querypb.TriggerCondition_nodeDown,
-					},
+				baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_nodeDown)
+				loadBalanceTask := &loadBalanceTask{
+					baseTask:           baseTask,
 					LoadBalanceRequest: loadBalanceSegment,
 					rootCoord:          qc.rootCoordClient,
 					dataCoord:          qc.dataCoordClient,
 					cluster:            qc.cluster,
 					meta:               qc.meta,
 				}
-				qc.scheduler.Enqueue([]task{loadBalanceTask})
-				log.Debug("start a loadBalance task", zap.Any("task", loadBalanceTask))
 				qc.metricsCacheManager.InvalidateSystemInfoMetrics()
+				//TODO:: deal enqueue error
+				qc.scheduler.Enqueue(loadBalanceTask)
+				log.Debug("start a loadBalance task", zap.Any("task", loadBalanceTask))
 			}
 		}
 	}
 }
 
-func (qc *QueryCoord) watchMetaLoop() {
+func (qc *QueryCoord) watchHandoffSegmentLoop() {
 	ctx, cancel := context.WithCancel(qc.loopCtx)
 
 	defer cancel()
 	defer qc.loopWg.Done()
-	log.Debug("query coordinator start watch MetaReplica loop")
+	log.Debug("query coordinator start watch segment loop")
 
-	watchChan := qc.kvClient.WatchWithPrefix("queryNode-segmentMeta")
+	// TODO:: recover handoff task when coord down
+	watchChan := qc.kvClient.WatchWithPrefix(handoffSegmentPrefix)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case resp := <-watchChan:
-			log.Debug("segment MetaReplica updated.")
 			for _, event := range resp.Events {
-				segmentID, err := strconv.ParseInt(filepath.Base(string(event.Kv.Key)), 10, 64)
-				if err != nil {
-					log.Error("watch MetaReplica loop error when get segmentID", zap.Any("error", err.Error()))
-				}
 				segmentInfo := &querypb.SegmentInfo{}
-				err = proto.Unmarshal(event.Kv.Value, segmentInfo)
+				err := proto.Unmarshal(event.Kv.Value, segmentInfo)
 				if err != nil {
-					log.Error("watch MetaReplica loop error when unmarshal", zap.Any("error", err.Error()))
+					log.Error("watchHandoffSegmentLoop: unmarshal failed", zap.Any("error", err.Error()))
+					continue
 				}
 				switch event.Type {
 				case mvccpb.PUT:
-					//TODO::
-					qc.meta.setSegmentInfo(segmentID, segmentInfo)
-				case mvccpb.DELETE:
-					//TODO::
+					collectionID := segmentInfo.CollectionID
+					partitionID := segmentInfo.PartitionID
+					segmentID := segmentInfo.SegmentID
+					if Params.AutoHandoff {
+						log.Debug("watchHandoffSegmentLoop: handoff segment received",
+							zap.Any("collectionID", collectionID),
+							zap.Any("partitionID", partitionID),
+							zap.Any("segmentID", segmentID),
+							zap.Any("channel", segmentInfo.ChannelID),
+						)
+						baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_handoff)
+						handoffReq := &querypb.HandoffSegmentsRequest{
+							Base: &commonpb.MsgBase{
+								MsgType: commonpb.MsgType_HandoffSegments,
+							},
+							SegmentInfos: []*querypb.SegmentInfo{segmentInfo},
+						}
+						handoffTask := &handoffTask{
+							baseTask:               baseTask,
+							HandoffSegmentsRequest: handoffReq,
+							dataCoord:              qc.dataCoordClient,
+							cluster:                qc.cluster,
+							meta:                   qc.meta,
+						}
+						err = qc.scheduler.Enqueue(handoffTask)
+						if err != nil {
+							log.Error("watchHandoffSegmentLoop: handoffTask enqueue failed", zap.Error(err))
+							break
+						}
+
+						go func() {
+							err := handoffTask.waitToFinish()
+							if err != nil {
+								log.Error("watchHandoffSegmentLoop: handoffTask failed", zap.Error(err))
+							}
+						}()
+
+						log.Debug("watchHandoffSegmentLoop: handoffTask completed",
+							zap.Any("collectionID", collectionID),
+							zap.Any("partitionID", partitionID),
+							zap.Any("segmentID", segmentID),
+							zap.Any("channel", segmentInfo.ChannelID),
+						)
+					}
+
+					buildQuerySegmentPath := fmt.Sprintf("%s/%d/%d/%d", handoffSegmentPrefix, collectionID, partitionID, segmentID)
+					err = qc.kvClient.Remove(buildQuerySegmentPath)
+					if err != nil {
+						log.Error("watchHandoffSegmentLoop: remove handoff segment from etcd failed", zap.Error(err))
+					}
+				default:
+					// do nothing
 				}
 			}
 		}

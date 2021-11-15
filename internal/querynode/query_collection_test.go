@@ -1,3 +1,14 @@
+// Copyright (C) 2019-2020 Zilliz. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License
+// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+// or implied. See the License for the specific language governing permissions and limitations under the License.
+
 package querynode
 
 import (
@@ -9,15 +20,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bits-and-blooms/bloom/v3"
 	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus/internal/common"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
@@ -61,6 +73,34 @@ func genSimpleQueryCollection(ctx context.Context, cancel context.CancelFunc) (*
 	return queryCollection, err
 }
 
+func genSimpleSegmentInfo() *querypb.SegmentInfo {
+	return &querypb.SegmentInfo{
+		SegmentID:    defaultSegmentID,
+		CollectionID: defaultCollectionID,
+		PartitionID:  defaultPartitionID,
+	}
+}
+
+func genSimpleSealedSegmentsChangeInfo() *querypb.SealedSegmentsChangeInfo {
+	changeInfo := &querypb.SegmentChangeInfo{
+		OnlineNodeID:    Params.QueryNodeID,
+		OnlineSegments:  []*querypb.SegmentInfo{},
+		OfflineNodeID:   Params.QueryNodeID,
+		OfflineSegments: []*querypb.SegmentInfo{},
+	}
+	return &querypb.SealedSegmentsChangeInfo{
+		Base:  genCommonMsgBase(commonpb.MsgType_SealedSegmentsChangeInfo),
+		Infos: []*querypb.SegmentChangeInfo{changeInfo},
+	}
+}
+
+func genSimpleSealedSegmentsChangeInfoMsg() *msgstream.SealedSegmentsChangeInfoMsg {
+	return &msgstream.SealedSegmentsChangeInfoMsg{
+		BaseMsg:                  genMsgStreamBaseMsg(),
+		SealedSegmentsChangeInfo: *genSimpleSealedSegmentsChangeInfo(),
+	}
+}
+
 func updateTSafe(queryCollection *queryCollection, timestamp Timestamp) {
 	// register
 	queryCollection.tSafeWatchers[defaultVChannel] = newTSafeWatcher()
@@ -72,6 +112,7 @@ func updateTSafe(queryCollection *queryCollection, timestamp Timestamp) {
 }
 
 func TestQueryCollection_withoutVChannel(t *testing.T) {
+	ctx := context.Background()
 	m := map[string]interface{}{
 		"PulsarAddress":  Params.PulsarAddress,
 		"ReceiveBufSize": 1024,
@@ -109,7 +150,7 @@ func TestQueryCollection_withoutVChannel(t *testing.T) {
 	assert.Nil(t, err)
 
 	//create a streaming
-	streaming := newStreaming(context.Background(), factory, etcdKV)
+	streaming := newStreaming(ctx, factory, etcdKV, historical.replica)
 	err = streaming.replica.addCollection(0, schema)
 	assert.Nil(t, err)
 	err = streaming.replica.addPartition(0, 1)
@@ -133,12 +174,12 @@ func TestQueryCollection_withoutVChannel(t *testing.T) {
 	var searchRawData2 []byte
 	for i, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele+float32(i*2)))
+		common.Endian.PutUint32(buf, math.Float32bits(ele+float32(i*2)))
 		searchRawData1 = append(searchRawData1, buf...)
 	}
 	for i, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele+float32(i*4)))
+		common.Endian.PutUint32(buf, math.Float32bits(ele+float32(i*4)))
 		searchRawData2 = append(searchRawData2, buf...)
 	}
 
@@ -182,56 +223,6 @@ func TestQueryCollection_withoutVChannel(t *testing.T) {
 	queryCollection.close()
 	historical.close()
 	streaming.close()
-}
-
-func TestGetSegmentsByPKs(t *testing.T) {
-	buf := make([]byte, 8)
-	filter1 := bloom.NewWithEstimates(1000000, 0.01)
-	for i := 0; i < 3; i++ {
-		binary.BigEndian.PutUint64(buf, uint64(i))
-		filter1.Add(buf)
-	}
-	filter2 := bloom.NewWithEstimates(1000000, 0.01)
-	for i := 3; i < 5; i++ {
-		binary.BigEndian.PutUint64(buf, uint64(i))
-		filter2.Add(buf)
-	}
-	segment1 := &Segment{
-		segmentID: 1,
-		pkFilter:  filter1,
-	}
-	segment2 := &Segment{
-		segmentID: 2,
-		pkFilter:  filter1,
-	}
-	segment3 := &Segment{
-		segmentID: 3,
-		pkFilter:  filter1,
-	}
-	segment4 := &Segment{
-		segmentID: 4,
-		pkFilter:  filter2,
-	}
-	segment5 := &Segment{
-		segmentID: 5,
-		pkFilter:  filter2,
-	}
-	segments := []*Segment{segment1, segment2, segment3, segment4, segment5}
-	results, err := getSegmentsByPKs([]int64{0, 1, 2, 3, 4}, segments)
-	assert.Nil(t, err)
-	expected := map[int64][]int64{
-		1: {0, 1, 2},
-		2: {0, 1, 2},
-		3: {0, 1, 2},
-		4: {3, 4},
-		5: {3, 4},
-	}
-	assert.Equal(t, expected, results)
-
-	_, err = getSegmentsByPKs(nil, segments)
-	assert.NotNil(t, err)
-	_, err = getSegmentsByPKs([]int64{0, 1, 2, 3, 4}, nil)
-	assert.NotNil(t, err)
 }
 
 func TestQueryCollection_unsolvedMsg(t *testing.T) {
@@ -306,6 +297,15 @@ func TestQueryCollection_consumeQuery(t *testing.T) {
 		runConsumeQuery(msg)
 	})
 
+	t.Run("consume SimpleSealedSegmentsChangeInfoMsg", func(t *testing.T) {
+		// test is success if it doesn't block
+		msg := genSimpleSealedSegmentsChangeInfoMsg()
+		simpleInfo := genSimpleSegmentInfo()
+		simpleInfo.CollectionID = 1000
+		msg.Infos[0].OnlineSegments = append(msg.Infos[0].OnlineSegments, simpleInfo)
+		runConsumeQuery(msg)
+	})
+
 	t.Run("consume invalid msg", func(t *testing.T) {
 		msg, err := genSimpleRetrieveMsg()
 		assert.NoError(t, err)
@@ -331,49 +331,49 @@ func TestQueryCollection_TranslateHits(t *testing.T) {
 		case schemapb.DataType_Bool:
 			var buf bytes.Buffer
 			for i := 0; i < defaultMsgLength; i++ {
-				err := binary.Write(&buf, binary.LittleEndian, true)
+				err := binary.Write(&buf, common.Endian, true)
 				assert.NoError(t, err)
 			}
 			rawData = append(rawData, buf.Bytes())
 		case schemapb.DataType_Int8:
 			var buf bytes.Buffer
 			for i := 0; i < defaultMsgLength; i++ {
-				err := binary.Write(&buf, binary.LittleEndian, int8(i))
+				err := binary.Write(&buf, common.Endian, int8(i))
 				assert.NoError(t, err)
 			}
 			rawData = append(rawData, buf.Bytes())
 		case schemapb.DataType_Int16:
 			var buf bytes.Buffer
 			for i := 0; i < defaultMsgLength; i++ {
-				err := binary.Write(&buf, binary.LittleEndian, int16(i))
+				err := binary.Write(&buf, common.Endian, int16(i))
 				assert.NoError(t, err)
 			}
 			rawData = append(rawData, buf.Bytes())
 		case schemapb.DataType_Int32:
 			var buf bytes.Buffer
 			for i := 0; i < defaultMsgLength; i++ {
-				err := binary.Write(&buf, binary.LittleEndian, int32(i))
+				err := binary.Write(&buf, common.Endian, int32(i))
 				assert.NoError(t, err)
 			}
 			rawData = append(rawData, buf.Bytes())
 		case schemapb.DataType_Int64:
 			var buf bytes.Buffer
 			for i := 0; i < defaultMsgLength; i++ {
-				err := binary.Write(&buf, binary.LittleEndian, int64(i))
+				err := binary.Write(&buf, common.Endian, int64(i))
 				assert.NoError(t, err)
 			}
 			rawData = append(rawData, buf.Bytes())
 		case schemapb.DataType_Float:
 			var buf bytes.Buffer
 			for i := 0; i < defaultMsgLength; i++ {
-				err := binary.Write(&buf, binary.LittleEndian, float32(i))
+				err := binary.Write(&buf, common.Endian, float32(i))
 				assert.NoError(t, err)
 			}
 			rawData = append(rawData, buf.Bytes())
 		case schemapb.DataType_Double:
 			var buf bytes.Buffer
 			for i := 0; i < defaultMsgLength; i++ {
-				err := binary.Write(&buf, binary.LittleEndian, float64(i))
+				err := binary.Write(&buf, common.Endian, float64(i))
 				assert.NoError(t, err)
 			}
 			rawData = append(rawData, buf.Bytes())
@@ -500,31 +500,51 @@ func TestQueryCollection_waitNewTSafe(t *testing.T) {
 }
 
 func TestQueryCollection_mergeRetrieveResults(t *testing.T) {
-	fieldData := []*schemapb.FieldData{
-		{
-			Type:      schemapb.DataType_FloatVector,
-			FieldName: defaultVecFieldName,
-			FieldId:   simpleVecField.id,
-			Field: &schemapb.FieldData_Vectors{
-				Vectors: &schemapb.VectorField{
-					Dim: defaultDim,
-					Data: &schemapb.VectorField_FloatVector{
-						FloatVector: &schemapb.FloatArray{
-							Data: []float32{1.1, 2.2, 3.3, 4.4},
-						},
-					},
+	const (
+		Dim                  = 8
+		Int64FieldName       = "Int64Field"
+		FloatVectorFieldName = "FloatVectorField"
+		Int64FieldID         = common.StartOfUserFieldID + 1
+		FloatVectorFieldID   = common.StartOfUserFieldID + 2
+	)
+	Int64Array := []int64{11, 22}
+	FloatVector := []float32{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 11.0, 22.0, 33.0, 44.0, 55.0, 66.0, 77.0, 88.0}
+
+	var fieldDataArray1 []*schemapb.FieldData
+	fieldDataArray1 = append(fieldDataArray1, genFieldData(Int64FieldName, Int64FieldID, schemapb.DataType_Int64, Int64Array[0:2], 1))
+	fieldDataArray1 = append(fieldDataArray1, genFieldData(FloatVectorFieldName, FloatVectorFieldID, schemapb.DataType_FloatVector, FloatVector[0:16], Dim))
+
+	var fieldDataArray2 []*schemapb.FieldData
+	fieldDataArray2 = append(fieldDataArray2, genFieldData(Int64FieldName, Int64FieldID, schemapb.DataType_Int64, Int64Array[0:2], 1))
+	fieldDataArray2 = append(fieldDataArray2, genFieldData(FloatVectorFieldName, FloatVectorFieldID, schemapb.DataType_FloatVector, FloatVector[0:16], Dim))
+
+	result1 := &segcorepb.RetrieveResults{
+		Ids: &schemapb.IDs{
+			IdField: &schemapb.IDs_IntId{
+				IntId: &schemapb.LongArray{
+					Data: []int64{0, 1},
 				},
 			},
 		},
+		Offset:     []int64{0, 1},
+		FieldsData: fieldDataArray1,
 	}
-	result := &segcorepb.RetrieveResults{
-		Ids:        &schemapb.IDs{},
-		Offset:     []int64{0},
-		FieldsData: fieldData,
+	result2 := &segcorepb.RetrieveResults{
+		Ids: &schemapb.IDs{
+			IdField: &schemapb.IDs_IntId{
+				IntId: &schemapb.LongArray{
+					Data: []int64{0, 1},
+				},
+			},
+		},
+		Offset:     []int64{0, 1},
+		FieldsData: fieldDataArray2,
 	}
 
-	_, err := mergeRetrieveResults([]*segcorepb.RetrieveResults{result})
+	result, err := mergeRetrieveResults([]*segcorepb.RetrieveResults{result1, result2})
 	assert.NoError(t, err)
+	assert.Equal(t, 2, len(result.FieldsData[0].GetScalars().GetLongData().Data))
+	assert.Equal(t, 2*Dim, len(result.FieldsData[1].GetVectors().GetFloatVector().Data))
 
 	_, err = mergeRetrieveResults(nil)
 	assert.NoError(t, err)
@@ -630,4 +650,58 @@ func TestQueryCollection_AddPopUnsolvedMsg(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		assert.EqualValues(t, i, unsolved[i].ID())
 	}
+}
+
+func TestQueryCollection_adjustByChangeInfo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.TODO())
+
+	t.Run("test adjustByChangeInfo", func(t *testing.T) {
+		qc, err := genSimpleQueryCollection(ctx, cancel)
+		assert.Nil(t, err)
+
+		segmentChangeInfos := genSimpleSealedSegmentsChangeInfoMsg()
+
+		// test online
+		segmentChangeInfos.Infos[0].OnlineSegments = append(segmentChangeInfos.Infos[0].OnlineSegments, genSimpleSegmentInfo())
+		err = qc.adjustByChangeInfo(segmentChangeInfos)
+		assert.NoError(t, err)
+		ids := qc.globalSegmentManager.getGlobalSegmentIDs()
+		assert.Len(t, ids, 1)
+
+		// test offline
+		segmentChangeInfos.Infos[0].OnlineSegments = make([]*querypb.SegmentInfo, 0)
+		segmentChangeInfos.Infos[0].OfflineSegments = append(segmentChangeInfos.Infos[0].OfflineSegments, genSimpleSegmentInfo())
+		err = qc.adjustByChangeInfo(segmentChangeInfos)
+		assert.NoError(t, err)
+		ids = qc.globalSegmentManager.getGlobalSegmentIDs()
+		assert.Len(t, ids, 0)
+	})
+
+	t.Run("test mismatch collectionID when adjustByChangeInfo", func(t *testing.T) {
+		qc, err := genSimpleQueryCollection(ctx, cancel)
+		assert.Nil(t, err)
+
+		segmentChangeInfos := genSimpleSealedSegmentsChangeInfoMsg()
+
+		// test online
+		simpleInfo := genSimpleSegmentInfo()
+		simpleInfo.CollectionID = 1000
+		segmentChangeInfos.Infos[0].OnlineSegments = append(segmentChangeInfos.Infos[0].OnlineSegments, simpleInfo)
+		err = qc.adjustByChangeInfo(segmentChangeInfos)
+		assert.Error(t, err)
+	})
+
+	t.Run("test no segment when adjustByChangeInfo", func(t *testing.T) {
+		qc, err := genSimpleQueryCollection(ctx, cancel)
+		assert.Nil(t, err)
+
+		err = qc.historical.replica.removeSegment(defaultSegmentID)
+		assert.NoError(t, err)
+
+		segmentChangeInfos := genSimpleSealedSegmentsChangeInfoMsg()
+		segmentChangeInfos.Infos[0].OfflineSegments = append(segmentChangeInfos.Infos[0].OfflineSegments, genSimpleSegmentInfo())
+
+		err = qc.adjustByChangeInfo(segmentChangeInfos)
+		assert.Nil(t, err)
+	})
 }

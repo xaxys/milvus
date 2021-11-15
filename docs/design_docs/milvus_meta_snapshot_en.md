@@ -67,7 +67,7 @@ The output of above test program should look like this:
 --- PASS: TestMVCC (0.01s)
 ```
 
-In `etcd`, each write operation would add 1 to `Revision`. So if we specify the `Revision` value at query, we can get the historical value under that `Revision`.
+In `etcd`, each write operation would add `1` to `Revision`. So if we specify the `Revision` value at query, we can get the historical value under that `Revision`.
 
 `metaSnapShot` is based on this feature of `etcd`. We will write an extra `Timestamp` on each write operation. `etcd`'s `Txn` makes sure that the `Timestamp` would have the same `Revision` with user data.
 
@@ -98,11 +98,11 @@ type SnapShotKV interface {
 
 For the `Read` operations (`Load` and `LoadWithPrefix`), the input parameter `typeutil.Timestamp` is used to tell `metaSnapShot` to load the value based on that `Timestamp`.
 
-For the `Write` operations (`Save`, `MiltiSave`, `MultiSaveAndRemoveWithPrefix`), return values include `typeutil.Timestamp`, which is used to tell the caller when these write operations happened.
+For the `Write` operations (`Save`, `MultiSave`, `MultiSaveAndRemoveWithPrefix`), return values include `typeutil.Timestamp`, which is used to tell the caller when these write operations happened.
 
 You might be curious about the parameter `additions` of `MultiSave` and `MultiSaveAndRemoveWithPrefix`: What does `additions` do, and why?
 
-`additions` is an array of  `func(ts typeutil.Timestamp) (string, string, error)`. So it's a function, receiving `typeutil.Timestamp` as an input, and returns two `sting` which is `key-value` pair. If `error` is `nil` in the return value, `metaSnapShot` would write this `key-value` pair into `etcd`.
+`additions` is an array of  `func(ts typeutil.Timestamp) (string, string, error)`. So it's a function, receiving `typeutil.Timestamp` as an input, and returns two `string` which is `key-value` pair. If `error` is `nil` in the return value, `metaSnapShot` would write this `key-value` pair into `etcd`.
 
 Refer to the document of `CreateCollection`, a timestamp is created for `Collection`, which is the timestamp when the `Collection`'s meta have been written into `etcd`, not the timestamp when `RootCoord` receives the request. So before writing the `Collection`'s meta into `etcd`, `metaSnapshot` would allocate a timestamp, and call all the `additions`. This would make sure the timestamp created for the `Collection` is correct.
 

@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 // Package datacoord contains core functions in datacoord
 package datacoord
@@ -17,19 +22,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/log"
 	"go.uber.org/zap"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/kv"
-
+	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 )
 
 const (
-	metaPrefix    = "datacoord-meta"
-	segmentPrefix = metaPrefix + "/s"
+	metaPrefix           = "datacoord-meta"
+	segmentPrefix        = metaPrefix + "/s"
+	handoffSegmentPrefix = "querycoord-handoff"
 )
 
 type meta struct {
@@ -154,7 +160,7 @@ func (m *meta) SetState(segmentID UniqueID, state commonpb.SegmentState) error {
 // `flushed` parameter indicating whether segment is flushed completely or partially
 // `binlogs`, `checkpoints` and `statPositions` are persistence data for segment
 func (m *meta) UpdateFlushSegmentsInfo(segmentID UniqueID, flushed bool,
-	binlogs []*datapb.FieldBinlog, checkpoints []*datapb.CheckPoint,
+	binlogs, statslogs []*datapb.FieldBinlog, deltalogs []*datapb.DeltaLogInfo, checkpoints []*datapb.CheckPoint,
 	startPositions []*datapb.SegmentStartPosition) error {
 	m.Lock()
 	defer m.Unlock()
@@ -164,15 +170,18 @@ func (m *meta) UpdateFlushSegmentsInfo(segmentID UniqueID, flushed bool,
 		return nil
 	}
 
+	clonedSegment := segment.Clone()
+
 	kv := make(map[string]string)
-	modSegments := make(map[UniqueID]struct{})
+	modSegments := make(map[UniqueID]*SegmentInfo)
 
 	if flushed {
-		m.segments.SetState(segmentID, commonpb.SegmentState_Flushing)
-		modSegments[segmentID] = struct{}{}
+		clonedSegment.State = commonpb.SegmentState_Flushing
+		modSegments[segmentID] = clonedSegment
 	}
 
-	currBinlogs := segment.Clone().SegmentInfo.GetBinlogs()
+	currBinlogs := clonedSegment.GetBinlogs()
+
 	var getFieldBinlogs = func(id UniqueID, binlogs []*datapb.FieldBinlog) *datapb.FieldBinlog {
 		for _, binlog := range binlogs {
 			if id == binlog.GetFieldID() {
@@ -181,6 +190,7 @@ func (m *meta) UpdateFlushSegmentsInfo(segmentID UniqueID, flushed bool,
 		}
 		return nil
 	}
+	// binlogs
 	for _, tBinlogs := range binlogs {
 		fieldBinlogs := getFieldBinlogs(tBinlogs.GetFieldID(), currBinlogs)
 		if fieldBinlogs == nil {
@@ -189,32 +199,66 @@ func (m *meta) UpdateFlushSegmentsInfo(segmentID UniqueID, flushed bool,
 			fieldBinlogs.Binlogs = append(fieldBinlogs.Binlogs, tBinlogs.Binlogs...)
 		}
 	}
-	m.segments.SetBinlogs(segmentID, currBinlogs)
-	modSegments[segmentID] = struct{}{}
+	clonedSegment.Binlogs = currBinlogs
+	// statlogs
+	currStatsLogs := clonedSegment.GetStatslogs()
+	for _, tStatsLogs := range statslogs {
+		fieldStatsLog := getFieldBinlogs(tStatsLogs.GetFieldID(), currStatsLogs)
+		if fieldStatsLog == nil {
+			currStatsLogs = append(currStatsLogs, tStatsLogs)
+		} else {
+			fieldStatsLog.Binlogs = append(fieldStatsLog.Binlogs, tStatsLogs.Binlogs...)
+		}
+	}
+	clonedSegment.Statslogs = currStatsLogs
+	// deltalogs
+	clonedSegment.Deltalogs = append(clonedSegment.Deltalogs, deltalogs...)
+
+	modSegments[segmentID] = clonedSegment
+
+	var getClonedSegment = func(segmentID UniqueID) *SegmentInfo {
+		if s, ok := modSegments[segmentID]; ok {
+			return s
+		}
+		if s := m.segments.GetSegment(segmentID); s != nil {
+			return s.Clone()
+		}
+		return nil
+	}
 
 	for _, pos := range startPositions {
 		if len(pos.GetStartPosition().GetMsgID()) == 0 {
 			continue
 		}
-		m.segments.SetStartPosition(pos.GetSegmentID(), pos.GetStartPosition())
-		modSegments[segmentID] = struct{}{}
+		s := getClonedSegment(pos.GetSegmentID())
+		if s == nil {
+			continue
+		}
+
+		s.StartPosition = pos.GetStartPosition()
+		modSegments[pos.GetSegmentID()] = s
 	}
 
 	for _, cp := range checkpoints {
-		if segment.DmlPosition != nil && segment.DmlPosition.Timestamp >= cp.Position.Timestamp {
+		s := getClonedSegment(cp.GetSegmentID())
+		if s == nil {
+			continue
+		}
+
+		if s.DmlPosition != nil && s.DmlPosition.Timestamp >= cp.Position.Timestamp {
 			// segment position in etcd is larger than checkpoint, then dont change it
 			continue
 		}
-		m.segments.SetDmlPosition(cp.GetSegmentID(), cp.GetPosition())
-		m.segments.SetRowCount(cp.GetSegmentID(), cp.GetNumOfRows())
-		modSegments[segmentID] = struct{}{}
+
+		s.DmlPosition = cp.GetPosition()
+		s.NumOfRows = cp.GetNumOfRows()
+		modSegments[cp.GetSegmentID()] = s
 	}
 
 	for id := range modSegments {
 		if segment := m.segments.GetSegment(id); segment != nil {
 			segBytes, err := proto.Marshal(segment.SegmentInfo)
 			if err != nil {
-				log.Error("DataCoord UpdateFlushSegmentsInfo marshal failed", zap.Int64("segmentID", segment.GetID()), zap.Error(err))
 				return fmt.Errorf("DataCoord UpdateFlushSegmentsInfo segmentID:%d, marshal failed:%w", segment.GetID(), err)
 			}
 			key := buildSegmentPath(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
@@ -222,8 +266,17 @@ func (m *meta) UpdateFlushSegmentsInfo(segmentID UniqueID, flushed bool,
 		}
 	}
 
+	if len(kv) == 0 {
+		return nil
+	}
+
 	if err := m.saveKvTxn(kv); err != nil {
 		return err
+	}
+
+	// update memory status
+	for id, s := range modSegments {
+		m.segments.SetSegment(id, s)
 	}
 	return nil
 }
@@ -327,6 +380,20 @@ func (m *meta) GetFlushingSegments() []*SegmentInfo {
 	return ret
 }
 
+// SelectSegments select segments with selector
+func (m *meta) SelectSegments(selector SegmentInfoSelector) []*SegmentInfo {
+	m.RLock()
+	defer m.RUnlock()
+	var ret []*SegmentInfo
+	segments := m.segments.GetSegments()
+	for _, info := range segments {
+		if selector(info) {
+			ret = append(ret, info)
+		}
+	}
+	return ret
+}
+
 // AddAllocation add allocation in segment
 func (m *meta) AddAllocation(segmentID UniqueID, allocation *Allocation) error {
 	m.Lock()
@@ -391,8 +458,27 @@ func (m *meta) saveSegmentInfo(segment *SegmentInfo) error {
 		log.Error("DataCoord saveSegmentInfo marshal failed", zap.Int64("segmentID", segment.GetID()), zap.Error(err))
 		return fmt.Errorf("DataCoord saveSegmentInfo segmentID:%d, marshal failed:%w", segment.GetID(), err)
 	}
-	key := buildSegmentPath(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
-	return m.client.Save(key, string(segBytes))
+	kvs := make(map[string]string)
+	dataKey := buildSegmentPath(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
+	kvs[dataKey] = string(segBytes)
+	if segment.State == commonpb.SegmentState_Flushed {
+		handoffSegmentInfo := &querypb.SegmentInfo{
+			SegmentID:    segment.ID,
+			CollectionID: segment.CollectionID,
+			PartitionID:  segment.PartitionID,
+			ChannelID:    segment.InsertChannel,
+			SegmentState: querypb.SegmentState_sealed,
+		}
+		handoffSegBytes, err := proto.Marshal(handoffSegmentInfo)
+		if err != nil {
+			log.Error("DataCoord saveSegmentInfo marshal handoffSegInfo failed", zap.Int64("segmentID", segment.GetID()), zap.Error(err))
+			return fmt.Errorf("DataCoord saveSegmentInfo segmentID:%d, marshal handoffSegInfo failed:%w", segment.GetID(), err)
+		}
+		queryKey := buildQuerySegmentPath(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
+		kvs[queryKey] = string(handoffSegBytes)
+	}
+
+	return m.client.MultiSave(kvs)
 }
 
 // removeSegmentInfo utility function removing segment info from kv store
@@ -410,6 +496,11 @@ func (m *meta) saveKvTxn(kv map[string]string) error {
 // buildSegmentPath common logic mapping segment info to corresponding key in kv store
 func buildSegmentPath(collectionID UniqueID, partitionID UniqueID, segmentID UniqueID) string {
 	return fmt.Sprintf("%s/%d/%d/%d", segmentPrefix, collectionID, partitionID, segmentID)
+}
+
+// buildQuerySegmentPath common logic mapping segment info to corresponding key of queryCoord in kv store
+func buildQuerySegmentPath(collectionID UniqueID, partitionID UniqueID, segmentID UniqueID) string {
+	return fmt.Sprintf("%s/%d/%d/%d", handoffSegmentPrefix, collectionID, partitionID, segmentID)
 }
 
 // buildSegment utility function for compose datapb.SegmentInfo struct with provided info

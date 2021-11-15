@@ -22,7 +22,7 @@ uid = "test_index"
 BUILD_TIMEOUT = 300
 field_name = default_float_vec_field_name
 binary_field_name = default_binary_vec_field_name
-query, query_vecs = gen_query_vectors(field_name, default_entities, default_top_k, 1)
+# query = gen_search_vectors_params(field_name, default_entities, default_top_k, 1)
 default_index = {"index_type": "IVF_FLAT", "params": {"nlist": 128}, "metric_type": "L2"}
 
 
@@ -263,6 +263,7 @@ class TestIndexOperation(TestcaseBase):
         pass
 
     @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.tags(CaseLabel.L1)
     def test_index_drop_index(self):
         """
         target: test index.drop
@@ -501,9 +502,9 @@ class TestIndexBase:
         nq = get_nq
         index_type = get_simple_index["index_type"]
         search_param = get_search_param(index_type)
-        query, vecs = gen_query_vectors(field_name, default_entities, default_top_k, nq, search_params=search_param)
+        params, _ = gen_search_vectors_params(field_name, default_entities, default_top_k, nq, search_params=search_param)
         connect.load_collection(collection)
-        res = connect.search(collection, query)
+        res = connect.search(collection, **params)
         assert len(res) == nq
 
     @pytest.mark.timeout(BUILD_TIMEOUT)
@@ -538,8 +539,8 @@ class TestIndexBase:
     def test_create_index_collection_not_existed(self, connect):
         """
         target: test create index interface when collection name not existed
-        method: create collection and add entities in it, create index
-            , make sure the collection name not in index
+        method: create collection and add entities in it, create index,
+                make sure the collection name not in index
         expected: create index failed
         """
         collection_name = gen_unique_str(uid)
@@ -701,8 +702,9 @@ class TestIndexBase:
         nq = get_nq
         index_type = get_simple_index["index_type"]
         search_param = get_search_param(index_type)
-        query, vecs = gen_query_vectors(field_name, default_entities, default_top_k, nq, metric_type=metric_type, search_params=search_param)
-        res = connect.search(collection, query)
+        params, _ = gen_search_vectors_params(field_name, default_entities, default_top_k, nq,
+                                              metric_type=metric_type, search_params=search_param)
+        res = connect.search(collection, **params)
         assert len(res) == nq
 
     @pytest.mark.timeout(BUILD_TIMEOUT)
@@ -738,8 +740,8 @@ class TestIndexBase:
     def test_create_index_collection_not_existed_ip(self, connect, collection):
         """
         target: test create index interface when collection name not existed
-        method: create collection and add entities in it, create index
-            , make sure the collection name not in index
+        method: create collection and add entities in it, create index,
+                make sure the collection name not in index
         expected: return code not equals to 0, create index failed
         """
         collection_name = gen_unique_str(uid)
@@ -851,8 +853,8 @@ class TestIndexBase:
     def test_drop_index_collection_not_existed(self, connect):
         """
         target: test drop index interface when collection name not existed
-        method: create collection and add entities in it, create index
-            , make sure the collection name not in index, and then drop it
+        method: create collection and add entities in it, create index,
+                make sure the collection name not in index, and then drop it
         expected: return code not equals to 0, drop index failed
         """
         collection_name = gen_unique_str(uid)
@@ -1044,10 +1046,11 @@ class TestIndexBinary:
         connect.flush([binary_collection])
         connect.create_index(binary_collection, binary_field_name, get_jaccard_index)
         connect.load_collection(binary_collection)
-        query, vecs = gen_query_vectors(binary_field_name, default_binary_entities, default_top_k, nq, metric_type="JACCARD")
         search_param = get_search_param(get_jaccard_index["index_type"], metric_type="JACCARD")
-        logging.getLogger().info(search_param)
-        res = connect.search(binary_collection, query, search_params=search_param)
+        params, _ = gen_search_vectors_params(binary_field_name, default_binary_entities, default_top_k, nq,
+                                              search_params=search_param, metric_type="JACCARD")
+        logging.getLogger().info(params)
+        res = connect.search(binary_collection, **params)
         assert len(res) == nq
 
     @pytest.mark.timeout(BUILD_TIMEOUT)
@@ -1135,7 +1138,8 @@ class TestIndexBinary:
     def test_drop_index_partition(self, connect, binary_collection, get_jaccard_index):
         """
         target: test drop index interface
-        method: create collection, create partition and add entities in it, create index on collection, call drop collection index
+        method: create collection, create partition and add entities in it,
+                create index on collection, call drop collection index
         expected: return code 0, and default index param
         """
         connect.create_partition(binary_collection, default_tag)

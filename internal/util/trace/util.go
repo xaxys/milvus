@@ -80,7 +80,7 @@ func StartSpanFromContext(ctx context.Context, opts ...opentracing.StartSpanOpti
 // name is upper @skip call stacks of the function
 func StartSpanFromContextWithSkip(ctx context.Context, skip int, opts ...opentracing.StartSpanOption) (opentracing.Span, context.Context) {
 	if ctx == nil {
-		return NoopSpan(), ctx
+		return NoopSpan(), nil
 	}
 
 	var pcs [1]uintptr
@@ -118,7 +118,7 @@ func StartSpanFromContextWithOperationName(ctx context.Context, operationName st
 // And will log print the current call line number and file name.
 func StartSpanFromContextWithOperationNameWithSkip(ctx context.Context, operationName string, skip int, opts ...opentracing.StartSpanOption) (opentracing.Span, context.Context) {
 	if ctx == nil {
-		return NoopSpan(), ctx
+		return NoopSpan(), nil
 	}
 
 	var pcs [1]uintptr
@@ -165,7 +165,7 @@ func LogError(span opentracing.Span, err error) {
 }
 
 // InfoFromSpan is a method return span details.
-func InfoFromSpan(span opentracing.Span) (traceID string, sampled bool, found bool) {
+func InfoFromSpan(span opentracing.Span) (traceID string, sampled, found bool) {
 	if span != nil {
 		if spanContext, ok := span.Context().(jaeger.SpanContext); ok {
 			traceID = spanContext.TraceID().String()
@@ -177,7 +177,7 @@ func InfoFromSpan(span opentracing.Span) (traceID string, sampled bool, found bo
 }
 
 // InfoFromContext is a method return details of span associated with context.
-func InfoFromContext(ctx context.Context) (traceID string, sampled bool, found bool) {
+func InfoFromContext(ctx context.Context) (traceID string, sampled, found bool) {
 	if ctx != nil {
 		if span := opentracing.SpanFromContext(ctx); span != nil {
 			return InfoFromSpan(span)

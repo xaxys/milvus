@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package indexnode
 
@@ -71,7 +76,6 @@ type IndexNode struct {
 
 	kv      kv.BaseKV
 	session *sessionutil.Session
-	liveCh  <-chan bool
 
 	// Add callback functions at different stages
 	startCallbacks []func()
@@ -110,7 +114,7 @@ func (i *IndexNode) Register() error {
 	if i.session == nil {
 		return errors.New("failed to initialize session")
 	}
-	i.liveCh = i.session.Init(typeutil.IndexNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
+	i.session.Init(typeutil.IndexNodeRole, Params.IP+":"+strconv.Itoa(Params.Port), false)
 	Params.NodeID = i.session.ServerID
 	Params.SetLogger(Params.NodeID)
 	return nil
@@ -141,11 +145,11 @@ func (i *IndexNode) Init() error {
 		}
 		err := retry.Do(i.loopCtx, connectEtcdFn, retry.Attempts(300))
 		if err != nil {
-			log.Error("IndexNode try connect etcd failed", zap.Error(err))
+			log.Error("IndexNode failed to connect to etcd", zap.Error(err))
 			initErr = err
 			return
 		}
-		log.Debug("IndexNode connect to etcd successfully")
+		log.Debug("IndexNode connected to etcd successfully")
 
 		option := &miniokv.Option{
 			Address:           Params.MinIOAddress,
@@ -164,7 +168,7 @@ func (i *IndexNode) Init() error {
 
 		i.kv = kv
 
-		log.Debug("IndexNode NewMinIOKV successfully")
+		log.Debug("IndexNode NewMinIOKV succeeded")
 		i.closer = trace.InitTracing("index_node")
 
 		i.initKnowhere()
@@ -185,8 +189,11 @@ func (i *IndexNode) Start() error {
 		Params.UpdatedTime = time.Now()
 
 		//start liveness check
-		go i.session.LivenessCheck(i.loopCtx, i.liveCh, func() {
-			i.Stop()
+		go i.session.LivenessCheck(i.loopCtx, func() {
+			log.Error("Index Node disconnected from etcd, process will exit", zap.Int64("Server Id", i.session.ServerID))
+			if err := i.Stop(); err != nil {
+				log.Fatal("failed to stop server", zap.Error(err))
+			}
 		})
 
 		i.UpdateStateCode(internalpb.StateCode_Healthy)
@@ -243,13 +250,13 @@ func (i *IndexNode) CreateIndex(ctx context.Context, request *indexpb.CreateInde
 		zap.Any("TypeParams", request.TypeParams),
 		zap.Any("IndexParams", request.IndexParams))
 
-	sp, ctx := trace.StartSpanFromContextWithOperationName(ctx, "IndexNode-CreateIndex")
+	sp, ctx2 := trace.StartSpanFromContextWithOperationName(i.loopCtx, "IndexNode-CreateIndex")
 	defer sp.Finish()
 	sp.SetTag("IndexBuildID", strconv.FormatInt(request.IndexBuildID, 10))
 
 	t := &IndexBuildTask{
 		BaseTask: BaseTask{
-			ctx:  ctx,
+			ctx:  ctx2,
 			done: make(chan error),
 		},
 		req:    request,
@@ -269,7 +276,7 @@ func (i *IndexNode) CreateIndex(ctx context.Context, request *indexpb.CreateInde
 		ret.Reason = err.Error()
 		return ret, nil
 	}
-	log.Info("IndexNode successfully schedule", zap.Int64("indexBuildID", request.IndexBuildID))
+	log.Info("IndexNode successfully scheduled", zap.Int64("indexBuildID", request.IndexBuildID))
 
 	return ret, nil
 }

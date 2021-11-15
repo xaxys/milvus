@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datacoord
 
@@ -35,6 +40,7 @@ type ParamTable struct {
 	KvRootPath              string
 	SegmentBinlogSubPath    string
 	CollectionBinlogSubPath string
+	ChannelWatchSubPath     string
 
 	// --- Pulsar ---
 	PulsarAddress string
@@ -82,6 +88,7 @@ func (p *ParamTable) Init() {
 	p.initKvRootPath()
 	p.initSegmentBinlogSubPath()
 	p.initCollectionBinlogSubPath()
+	p.initChannelWatchPrefix()
 
 	p.initPulsarAddress()
 	p.initRocksmqPath()
@@ -175,15 +182,15 @@ func (p *ParamTable) initCollectionBinlogSubPath() {
 }
 
 func (p *ParamTable) initSegmentMaxSize() {
-	p.SegmentMaxSize = p.ParseFloat("datacoord.segment.maxSize")
+	p.SegmentMaxSize = p.ParseFloatWithDefault("dataCoord.segment.maxSize", 512.0)
 }
 
 func (p *ParamTable) initSegmentSealProportion() {
-	p.SegmentSealProportion = p.ParseFloat("datacoord.segment.sealProportion")
+	p.SegmentSealProportion = p.ParseFloatWithDefault("dataCoord.segment.sealProportion", 0.75)
 }
 
 func (p *ParamTable) initSegAssignmentExpiration() {
-	p.SegAssignmentExpiration = p.ParseInt64("datacoord.segment.assignmentExpiration")
+	p.SegAssignmentExpiration = p.ParseInt64WithDefault("dataCoord.segment.assignmentExpiration", 2000)
 }
 
 func (p *ParamTable) initClusterMsgChannelPrefix() {
@@ -257,4 +264,10 @@ func (p *ParamTable) initStatsStreamPosSubPath() {
 		panic(err)
 	}
 	p.StatsStreamPosSubPath = subPath
+}
+
+func (p *ParamTable) initChannelWatchPrefix() {
+	// WARN: this value should not be put to milvus.yaml. It's a default value for channel watch path.
+	// This will be removed after we reconstruct our config module.
+	p.ChannelWatchSubPath = "channelwatch"
 }

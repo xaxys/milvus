@@ -16,6 +16,9 @@ import (
 	"fmt"
 	"strconv"
 
+	"go.uber.org/zap"
+
+	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 )
 
@@ -97,7 +100,7 @@ func CreateSchemaHelper(schema *schemapb.CollectionSchema) (*SchemaHelper, error
 // GetPrimaryKeyField returns the schema of the primary key
 func (helper *SchemaHelper) GetPrimaryKeyField() (*schemapb.FieldSchema, error) {
 	if helper.primaryKeyOffset == -1 {
-		return nil, fmt.Errorf("no primary in schema")
+		return nil, fmt.Errorf("Failed to get primary key field: no primary in schema")
 	}
 	return helper.schema.Fields[helper.primaryKeyOffset], nil
 }
@@ -106,7 +109,7 @@ func (helper *SchemaHelper) GetPrimaryKeyField() (*schemapb.FieldSchema, error) 
 func (helper *SchemaHelper) GetFieldFromName(fieldName string) (*schemapb.FieldSchema, error) {
 	offset, ok := helper.nameOffset[fieldName]
 	if !ok {
-		return nil, fmt.Errorf("fieldName(%s) not found", fieldName)
+		return nil, fmt.Errorf("Failed to get field schema by name: fieldName(%s) not found", fieldName)
 	}
 	return helper.schema.Fields[offset], nil
 }
@@ -121,8 +124,8 @@ func (helper *SchemaHelper) GetFieldFromID(fieldID int64) (*schemapb.FieldSchema
 }
 
 // GetVectorDimFromID returns the dimension of specified field
-func (helper *SchemaHelper) GetVectorDimFromID(filedID int64) (int, error) {
-	sch, err := helper.GetFieldFromID(filedID)
+func (helper *SchemaHelper) GetVectorDimFromID(fieldID int64) (int, error) {
+	sch, err := helper.GetFieldFromID(fieldID)
 	if err != nil {
 		return 0, err
 	}
@@ -138,7 +141,7 @@ func (helper *SchemaHelper) GetVectorDimFromID(filedID int64) (int, error) {
 			return dim, nil
 		}
 	}
-	return 0, fmt.Errorf("fieldID(%d) not has dim", filedID)
+	return 0, fmt.Errorf("fieldID(%d) not has dim", fieldID)
 }
 
 // IsVectorType returns true if input is a vector type, otherwise false
@@ -191,5 +194,115 @@ func IsNumberType(dataType schemapb.DataType) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// AppendFieldData appends fields data of specified index from src to dst
+func AppendFieldData(dst []*schemapb.FieldData, src []*schemapb.FieldData, idx int64) {
+	for i, fieldData := range src {
+		switch fieldType := fieldData.Field.(type) {
+		case *schemapb.FieldData_Scalars:
+			if dst[i] == nil || dst[i].GetScalars() == nil {
+				dst[i] = &schemapb.FieldData{
+					FieldName: fieldData.FieldName,
+					FieldId:   fieldData.FieldId,
+					Field: &schemapb.FieldData_Scalars{
+						Scalars: &schemapb.ScalarField{},
+					},
+				}
+			}
+			dstScalar := dst[i].GetScalars()
+			switch srcScalar := fieldType.Scalars.Data.(type) {
+			case *schemapb.ScalarField_BoolData:
+				if dstScalar.GetBoolData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_BoolData{
+						BoolData: &schemapb.BoolArray{
+							Data: []bool{srcScalar.BoolData.Data[idx]},
+						},
+					}
+				} else {
+					dstScalar.GetBoolData().Data = append(dstScalar.GetBoolData().Data, srcScalar.BoolData.Data[idx])
+				}
+			case *schemapb.ScalarField_IntData:
+				if dstScalar.GetIntData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_IntData{
+						IntData: &schemapb.IntArray{
+							Data: []int32{srcScalar.IntData.Data[idx]},
+						},
+					}
+				} else {
+					dstScalar.GetIntData().Data = append(dstScalar.GetIntData().Data, srcScalar.IntData.Data[idx])
+				}
+			case *schemapb.ScalarField_LongData:
+				if dstScalar.GetLongData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_LongData{
+						LongData: &schemapb.LongArray{
+							Data: []int64{srcScalar.LongData.Data[idx]},
+						},
+					}
+				} else {
+					dstScalar.GetLongData().Data = append(dstScalar.GetLongData().Data, srcScalar.LongData.Data[idx])
+				}
+			case *schemapb.ScalarField_FloatData:
+				if dstScalar.GetFloatData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_FloatData{
+						FloatData: &schemapb.FloatArray{
+							Data: []float32{srcScalar.FloatData.Data[idx]},
+						},
+					}
+				} else {
+					dstScalar.GetFloatData().Data = append(dstScalar.GetFloatData().Data, srcScalar.FloatData.Data[idx])
+				}
+			case *schemapb.ScalarField_DoubleData:
+				if dstScalar.GetDoubleData() == nil {
+					dstScalar.Data = &schemapb.ScalarField_DoubleData{
+						DoubleData: &schemapb.DoubleArray{
+							Data: []float64{srcScalar.DoubleData.Data[idx]},
+						},
+					}
+				} else {
+					dstScalar.GetDoubleData().Data = append(dstScalar.GetDoubleData().Data, srcScalar.DoubleData.Data[idx])
+				}
+			default:
+				log.Error("Not supported field type", zap.String("field type", fieldData.Type.String()))
+			}
+		case *schemapb.FieldData_Vectors:
+			dim := fieldType.Vectors.Dim
+			if dst[i] == nil || dst[i].GetVectors() == nil {
+				dst[i] = &schemapb.FieldData{
+					FieldName: fieldData.FieldName,
+					FieldId:   fieldData.FieldId,
+					Field: &schemapb.FieldData_Vectors{
+						Vectors: &schemapb.VectorField{
+							Dim: dim,
+						},
+					},
+				}
+			}
+			dstVector := dst[i].GetVectors()
+			switch srcVector := fieldType.Vectors.Data.(type) {
+			case *schemapb.VectorField_BinaryVector:
+				if dstVector.GetBinaryVector() == nil {
+					dstVector.Data = &schemapb.VectorField_BinaryVector{
+						BinaryVector: srcVector.BinaryVector[idx*(dim/8) : (idx+1)*(dim/8)],
+					}
+				} else {
+					dstBinaryVector := dstVector.Data.(*schemapb.VectorField_BinaryVector)
+					dstBinaryVector.BinaryVector = append(dstBinaryVector.BinaryVector, srcVector.BinaryVector[idx*(dim/8):(idx+1)*(dim/8)]...)
+				}
+			case *schemapb.VectorField_FloatVector:
+				if dstVector.GetFloatVector() == nil {
+					dstVector.Data = &schemapb.VectorField_FloatVector{
+						FloatVector: &schemapb.FloatArray{
+							Data: srcVector.FloatVector.Data[idx*dim : (idx+1)*dim],
+						},
+					}
+				} else {
+					dstVector.GetFloatVector().Data = append(dstVector.GetFloatVector().Data, srcVector.FloatVector.Data[idx*dim:(idx+1)*dim]...)
+				}
+			default:
+				log.Error("Not supported field type", zap.String("field type", fieldData.Type.String()))
+			}
+		}
 	}
 }

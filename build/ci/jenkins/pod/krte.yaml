@@ -26,7 +26,7 @@ spec:
         memory: 12Gi
         ephemeral-storage: "100Gi"
       requests:
-        cpu: "3"
+        cpu: "2"
         memory: 10Gi
         ephemeral-storage: "100Gi"
     volumeMounts:
@@ -47,6 +47,8 @@ spec:
     env:
     - name: ETCD_LOG_LEVEL
       value: debug
+    - name: ETCD_LOGGER
+      value: zap
     - name: ETCD_QUOTA_BACKEND_BYTES
       value: "4294967296"
     - name: ETCD_AUTO_COMPACTION_MODE
@@ -65,6 +67,9 @@ spec:
       limits:
         cpu: "2"
         memory: "6Gi"
+      requests:
+        cpu: "1"
+        memory: "4Gi"
     ports:
     - containerPort: 2379
       name: client
@@ -91,8 +96,8 @@ spec:
       requiredDuringSchedulingIgnoredDuringExecution:
       - labelSelector:
           matchExpressions:
-          - key: app
+          - key: jenkins/label
             operator: In
             values:
-            - milvus-e2e
+            - milvus-e2e-test-kind-nightly
         topologyKey: kubernetes.io/hostname

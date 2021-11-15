@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
@@ -28,8 +33,10 @@ import (
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
+	s "github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
@@ -159,7 +166,7 @@ func (ds *DataCoordFactory) SaveBinlogPaths(ctx context.Context, req *datapb.Sav
 	return &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}, nil
 }
 
-func (mf *MetaFactory) CollectionMetaFactory(collectionID UniqueID, collectionName string) *etcdpb.CollectionMeta {
+func (mf *MetaFactory) GetCollectionMeta(collectionID UniqueID, collectionName string) *etcdpb.CollectionMeta {
 	sch := schemapb.CollectionSchema{
 		Name:        collectionName,
 		Description: "test collection by meta factory",
@@ -258,12 +265,13 @@ func (mf *MetaFactory) CollectionMetaFactory(collectionID UniqueID, collectionNa
 				IndexParams: []*commonpb.KeyValuePair{},
 			},
 			{
-				FieldID:     106,
-				Name:        "int64_field",
-				Description: "field 106",
-				DataType:    schemapb.DataType_Int64,
-				TypeParams:  []*commonpb.KeyValuePair{},
-				IndexParams: []*commonpb.KeyValuePair{},
+				FieldID:      106,
+				Name:         "int64_field",
+				Description:  "field 106",
+				DataType:     schemapb.DataType_Int64,
+				TypeParams:   []*commonpb.KeyValuePair{},
+				IndexParams:  []*commonpb.KeyValuePair{},
+				IsPrimaryKey: true,
 			},
 			{
 				FieldID:     107,
@@ -306,7 +314,7 @@ func GenRowData() (rawData []byte) {
 	var fvector = [DIM]float32{1, 2}
 	for _, ele := range fvector {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 
@@ -319,7 +327,7 @@ func GenRowData() (rawData []byte) {
 	// Bool
 	var fieldBool = true
 	buf := new(bytes.Buffer)
-	if err := binary.Write(buf, binary.LittleEndian, fieldBool); err != nil {
+	if err := binary.Write(buf, common.Endian, fieldBool); err != nil {
 		panic(err)
 	}
 
@@ -328,7 +336,7 @@ func GenRowData() (rawData []byte) {
 	// int8
 	var dataInt8 int8 = 100
 	bint8 := new(bytes.Buffer)
-	if err := binary.Write(bint8, binary.LittleEndian, dataInt8); err != nil {
+	if err := binary.Write(bint8, common.Endian, dataInt8); err != nil {
 		panic(err)
 	}
 	rawData = append(rawData, bint8.Bytes()...)
@@ -336,7 +344,7 @@ func GenRowData() (rawData []byte) {
 	// int16
 	var dataInt16 int16 = 200
 	bint16 := new(bytes.Buffer)
-	if err := binary.Write(bint16, binary.LittleEndian, dataInt16); err != nil {
+	if err := binary.Write(bint16, common.Endian, dataInt16); err != nil {
 		panic(err)
 	}
 	rawData = append(rawData, bint16.Bytes()...)
@@ -344,7 +352,7 @@ func GenRowData() (rawData []byte) {
 	// int32
 	var dataInt32 int32 = 300
 	bint32 := new(bytes.Buffer)
-	if err := binary.Write(bint32, binary.LittleEndian, dataInt32); err != nil {
+	if err := binary.Write(bint32, common.Endian, dataInt32); err != nil {
 		panic(err)
 	}
 	rawData = append(rawData, bint32.Bytes()...)
@@ -352,7 +360,7 @@ func GenRowData() (rawData []byte) {
 	// int64
 	var dataInt64 int64 = 400
 	bint64 := new(bytes.Buffer)
-	if err := binary.Write(bint64, binary.LittleEndian, dataInt64); err != nil {
+	if err := binary.Write(bint64, common.Endian, dataInt64); err != nil {
 		panic(err)
 	}
 	rawData = append(rawData, bint64.Bytes()...)
@@ -360,7 +368,7 @@ func GenRowData() (rawData []byte) {
 	// float32
 	var datafloat float32 = 1.1
 	bfloat32 := new(bytes.Buffer)
-	if err := binary.Write(bfloat32, binary.LittleEndian, datafloat); err != nil {
+	if err := binary.Write(bfloat32, common.Endian, datafloat); err != nil {
 		panic(err)
 	}
 	rawData = append(rawData, bfloat32.Bytes()...)
@@ -368,7 +376,7 @@ func GenRowData() (rawData []byte) {
 	// float64
 	var datafloat64 = 2.2
 	bfloat64 := new(bytes.Buffer)
-	if err := binary.Write(bfloat64, binary.LittleEndian, datafloat64); err != nil {
+	if err := binary.Write(bfloat64, common.Endian, datafloat64); err != nil {
 		panic(err)
 	}
 	rawData = append(rawData, bfloat64.Bytes()...)
@@ -409,12 +417,99 @@ func (df *DataFactory) GetMsgStreamTsInsertMsgs(n int, chanName string) (inMsgs 
 	return
 }
 
-func (df *DataFactory) GetMsgStreamInsertMsgs(n int) (inMsgs []*msgstream.InsertMsg) {
+func (df *DataFactory) GetMsgStreamInsertMsgs(n int) (msgs []*msgstream.InsertMsg) {
 	for i := 0; i < n; i++ {
 		var msg = df.GenMsgStreamInsertMsg(i, "")
-		inMsgs = append(inMsgs, msg)
+		msgs = append(msgs, msg)
 	}
 	return
+}
+
+func (df *DataFactory) GenMsgStreamDeleteMsg(pks []int64, chanName string) *msgstream.DeleteMsg {
+	idx := 100
+	timestamps := make([]Timestamp, len(pks))
+	for i := 0; i < len(pks); i++ {
+		timestamps[i] = Timestamp(i) + 1000
+	}
+	var msg = &msgstream.DeleteMsg{
+		BaseMsg: msgstream.BaseMsg{
+			HashValues: []uint32{uint32(idx)},
+		},
+		DeleteRequest: internalpb.DeleteRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_Delete,
+				MsgID:     0,
+				Timestamp: Timestamp(idx + 1000),
+				SourceID:  0,
+			},
+			CollectionName: "col1",
+			PartitionName:  "default",
+			ShardName:      chanName,
+			PrimaryKeys:    pks,
+			Timestamps:     timestamps,
+		},
+	}
+	return msg
+}
+
+func GenFlowGraphInsertMsg(chanName string) flowGraphMsg {
+	timeRange := TimeRange{
+		timestampMin: 0,
+		timestampMax: math.MaxUint64,
+	}
+
+	startPos := []*internalpb.MsgPosition{
+		{
+			ChannelName: chanName,
+			MsgID:       make([]byte, 0),
+			Timestamp:   0,
+		},
+	}
+
+	var fgMsg = &flowGraphMsg{
+		insertMessages: make([]*msgstream.InsertMsg, 0),
+		timeRange: TimeRange{
+			timestampMin: timeRange.timestampMin,
+			timestampMax: timeRange.timestampMax,
+		},
+		startPositions: startPos,
+		endPositions:   startPos,
+	}
+
+	dataFactory := NewDataFactory()
+	fgMsg.insertMessages = append(fgMsg.insertMessages, dataFactory.GetMsgStreamInsertMsgs(2)...)
+
+	return *fgMsg
+}
+
+func GenFlowGraphDeleteMsg(pks []int64, chanName string) flowGraphMsg {
+	timeRange := TimeRange{
+		timestampMin: 0,
+		timestampMax: math.MaxUint64,
+	}
+
+	startPos := []*internalpb.MsgPosition{
+		{
+			ChannelName: chanName,
+			MsgID:       make([]byte, 0),
+			Timestamp:   0,
+		},
+	}
+
+	var fgMsg = &flowGraphMsg{
+		insertMessages: make([]*msgstream.InsertMsg, 0),
+		timeRange: TimeRange{
+			timestampMin: timeRange.timestampMin,
+			timestampMax: timeRange.timestampMax,
+		},
+		startPositions: startPos,
+		endPositions:   startPos,
+	}
+
+	dataFactory := NewDataFactory()
+	fgMsg.deleteMessages = append(fgMsg.deleteMessages, dataFactory.GenMsgStreamDeleteMsg(pks, chanName))
+
+	return *fgMsg
 }
 
 type AllocatorFactory struct {
@@ -436,6 +531,15 @@ func (alloc *AllocatorFactory) allocID() (UniqueID, error) {
 	alloc.Lock()
 	defer alloc.Unlock()
 	return alloc.r.Int63n(10000), nil
+}
+
+func (alloc *AllocatorFactory) allocIDBatch(count uint32) (UniqueID, uint32, error) {
+	if count == 0 {
+		return 0, 0, errors.New("count should be greater than zero")
+	}
+
+	start, err := alloc.allocID()
+	return start, count, err
 }
 
 func (alloc *AllocatorFactory) genKey(isalloc bool, ids ...UniqueID) (key string, err error) {
@@ -487,6 +591,7 @@ func (m *RootCoordFactory) AllocID(ctx context.Context, in *rootcoordpb.AllocIDR
 	}
 
 	resp.ID = m.ID
+	resp.Count = in.GetCount()
 	resp.Status.ErrorCode = commonpb.ErrorCode_Success
 	return resp, nil
 }
@@ -510,7 +615,7 @@ func (m *RootCoordFactory) ShowCollections(ctx context.Context, in *milvuspb.Sho
 
 func (m *RootCoordFactory) DescribeCollection(ctx context.Context, in *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
 	f := MetaFactory{}
-	meta := f.CollectionMetaFactory(m.collectionID, m.collectionName)
+	meta := f.GetCollectionMeta(m.collectionID, m.collectionName)
 	resp := &milvuspb.DescribeCollectionResponse{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -554,4 +659,56 @@ func (f *FailMessageStreamFactory) NewMsgStream(ctx context.Context) (msgstream.
 
 func (f *FailMessageStreamFactory) NewTtMsgStream(ctx context.Context) (msgstream.MsgStream, error) {
 	return nil, errors.New("mocked failure")
+}
+
+func genInsertData() *InsertData {
+	return &InsertData{
+		Data: map[int64]s.FieldData{
+			0: &s.Int64FieldData{
+				NumRows: []int64{2},
+				Data:    []int64{1, 2},
+			},
+			1: &s.Int64FieldData{
+				NumRows: []int64{2},
+				Data:    []int64{3, 4},
+			},
+			100: &s.FloatVectorFieldData{
+				NumRows: []int64{2},
+				Data:    []float32{1.0, 6.0, 7.0, 8.0},
+				Dim:     2,
+			},
+			101: &s.BinaryVectorFieldData{
+				NumRows: []int64{2},
+				Data:    []byte{0, 255, 255, 255, 128, 128, 128, 0},
+				Dim:     32,
+			},
+			102: &s.BoolFieldData{
+				NumRows: []int64{2},
+				Data:    []bool{true, false},
+			},
+			103: &s.Int8FieldData{
+				NumRows: []int64{2},
+				Data:    []int8{5, 6},
+			},
+			104: &s.Int16FieldData{
+				NumRows: []int64{2},
+				Data:    []int16{7, 8},
+			},
+			105: &s.Int32FieldData{
+				NumRows: []int64{2},
+				Data:    []int32{9, 10},
+			},
+			106: &s.Int64FieldData{
+				NumRows: []int64{2},
+				Data:    []int64{11, 12},
+			},
+			107: &s.FloatFieldData{
+				NumRows: []int64{2},
+				Data:    []float32{2.333, 2.334},
+			},
+			108: &s.DoubleFieldData{
+				NumRows: []int64{2},
+				Data:    []float64{3.333, 3.334},
+			},
+		}}
 }

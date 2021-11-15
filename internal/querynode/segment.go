@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -50,6 +51,11 @@ const (
 	segmentTypeIndexing
 )
 
+const (
+	bloomFilterSize       uint    = 100000
+	maxBloomFalsePositive float64 = 0.005
+)
+
 type VectorFieldInfo struct {
 	fieldBinlog *datapb.FieldBinlog
 }
@@ -60,7 +66,7 @@ func newVectorFieldInfo(fieldBinlog *datapb.FieldBinlog) *VectorFieldInfo {
 	}
 }
 
-//--------------------------------------------------------------------------------------
+// Segment is a wrapper of the underlying C-structure segment.
 type Segment struct {
 	segPtrMu   sync.RWMutex // guards segmentPtr
 	segmentPtr C.CSegmentInterface
@@ -95,7 +101,7 @@ type Segment struct {
 	pkFilter *bloom.BloomFilter //  bloom filter of pk inside a segment
 }
 
-//-------------------------------------------------------------------------------------- common interfaces
+// ID returns the identity number.
 func (s *Segment) ID() UniqueID {
 	return s.segmentID
 }
@@ -198,6 +204,8 @@ func newSegment(collection *Collection, segmentID UniqueID, partitionID UniqueID
 		onService:        onService,
 		indexInfos:       make(map[int64]*indexInfo),
 		vectorFieldInfos: make(map[UniqueID]*VectorFieldInfo),
+
+		pkFilter: bloom.NewWithEstimates(bloomFilterSize, maxBloomFalsePositive),
 	}
 
 	return segment
@@ -377,7 +385,7 @@ func (s *Segment) fillVectorFieldsData(collectionID UniqueID,
 				}
 				floatResult := make([]float32, dim)
 				buf := bytes.NewReader(content)
-				err = binary.Read(buf, binary.LittleEndian, &floatResult)
+				err = binary.Read(buf, common.Endian, &floatResult)
 				if err != nil {
 					return err
 				}
@@ -534,6 +542,14 @@ func (s *Segment) checkIndexReady(fieldID int64) bool {
 	return s.indexInfos[fieldID].getReadyLoad()
 }
 
+func (s *Segment) updateBloomFilter(pks []int64) {
+	buf := make([]byte, 8)
+	for _, pk := range pks {
+		common.Endian.PutUint64(buf, uint64(pk))
+		s.pkFilter.Add(buf)
+	}
+}
+
 //-------------------------------------------------------------------------------------- interfaces for growing segment
 func (s *Segment) segmentPreInsert(numOfRecords int) (int64, error) {
 	/*
@@ -593,11 +609,15 @@ func (s *Segment) segmentInsert(offset int64, entityIDs *[]UniqueID, timestamps 
 	if s.segmentPtr == nil {
 		return errors.New("null seg core pointer")
 	}
+
 	// Blobs to one big blob
 	var numOfRow = len(*entityIDs)
 	var sizeofPerRow = len((*records)[0].Value)
 
 	assert.Equal(nil, numOfRow, len(*records))
+	if numOfRow != len(*records) {
+		return errors.New("EntityIDs row num not equal to length of records")
+	}
 
 	var rawData = make([]byte, numOfRow*sizeofPerRow)
 	var copyOffset = 0
@@ -651,6 +671,11 @@ func (s *Segment) segmentDelete(offset int64, entityIDs *[]UniqueID, timestamps 
 	if s.segmentPtr == nil {
 		return errors.New("null seg core pointer")
 	}
+
+	if len(*entityIDs) != len(*timestamps) {
+		return errors.New("Length of entityIDs not equal to length of timestamps")
+	}
+
 	var cOffset = C.long(offset)
 	var cSize = C.long(len(*entityIDs))
 	var cEntityIdsPtr = (*C.long)(&(*entityIDs)[0])
@@ -762,6 +787,39 @@ func (s *Segment) segmentLoadFieldData(fieldID int64, rowCount int, data interfa
 		zap.Int("row count", rowCount),
 		zap.Int64("segmentID", s.ID()))
 
+	return nil
+}
+
+func (s *Segment) segmentLoadDeletedRecord(primaryKeys []IntPrimaryKey, timestamps []Timestamp, rowCount int64) error {
+	s.segPtrMu.RLock()
+	defer s.segPtrMu.RUnlock() // thread safe guaranteed by segCore, use RLock
+	if s.segmentPtr == nil {
+		return errors.New("null seg core pointer")
+	}
+	if s.segmentType != segmentTypeSealed {
+		errMsg := fmt.Sprintln("segmentLoadFieldData failed, illegal segment type ", s.segmentType, "segmentID = ", s.ID())
+		return errors.New(errMsg)
+	}
+	loadInfo := C.CLoadDeletedRecordInfo{
+		timestamps:   unsafe.Pointer(&timestamps[0]),
+		primary_keys: unsafe.Pointer(&primaryKeys[0]),
+		row_count:    C.int64_t(rowCount),
+	}
+	/*
+		CStatus
+		LoadDeletedRecord(CSegmentInterface c_segment, CLoadDeletedRecordInfo deleted_record_info)
+	*/
+	var status = C.LoadDeletedRecord(s.segmentPtr, loadInfo)
+	errorCode := status.error_code
+	if errorCode != 0 {
+		errorMsg := C.GoString(status.error_msg)
+		defer C.free(unsafe.Pointer(status.error_msg))
+		return errors.New("LoadDeletedRecord failed, C runtime error detected, error code = " + strconv.Itoa(int(errorCode)) + ", error msg = " + errorMsg)
+	}
+
+	log.Debug("load deleted record done",
+		zap.Int64("row count", rowCount),
+		zap.Int64("segmentID", s.ID()))
 	return nil
 }
 

@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package grpcquerycoord
 
@@ -37,6 +42,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 )
 
+// Server is the grpc server of QueryCoord.
 type Server struct {
 	wg         sync.WaitGroup
 	loopCtx    context.Context
@@ -45,16 +51,17 @@ type Server struct {
 
 	grpcErrChan chan error
 
-	queryCoord *qc.QueryCoord
+	queryCoord types.QueryCoordComponent
 
 	msFactory msgstream.Factory
 
-	dataCoord *dsc.Client
-	rootCoord *rcc.GrpcClient
+	dataCoord types.DataCoord
+	rootCoord types.RootCoord
 
 	closer io.Closer
 }
 
+// NewServer create a new QueryCoord grpc server.
 func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 	svr, err := qc.NewQueryCoord(ctx1, factory)
@@ -72,6 +79,7 @@ func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) 
 	}, nil
 }
 
+// Run initializes and starts QueryCoord's grpc service.
 func (s *Server) Run() error {
 
 	if err := s.init(); err != nil {
@@ -82,9 +90,11 @@ func (s *Server) Run() error {
 	if err := s.start(); err != nil {
 		return err
 	}
+	log.Debug("QueryCoord start done ...")
 	return nil
 }
 
+// init initializes QueryCoord's grpc service.
 func (s *Server) init() error {
 	Params.Init()
 
@@ -101,36 +111,40 @@ func (s *Server) init() error {
 	s.wg.Add(1)
 	go s.startGrpcLoop(Params.Port)
 	// wait for grpc server loop start
-	if err := <-s.grpcErrChan; err != nil {
+	err := <-s.grpcErrChan
+	if err != nil {
 		return err
 	}
 
 	// --- Master Server Client ---
 	log.Debug("QueryCoord try to new RootCoord client", zap.Any("RootCoordAddress", Params.RootCoordAddress))
-	rootCoord, err := rcc.NewClient(s.loopCtx, qc.Params.MetaRootPath, qc.Params.EtcdEndpoints)
-	if err != nil {
-		log.Debug("QueryCoord try to new RootCoord client failed", zap.Error(err))
-		panic(err)
+
+	if s.rootCoord == nil {
+		s.rootCoord, err = rcc.NewClient(s.loopCtx, qc.Params.MetaRootPath, qc.Params.EtcdEndpoints)
+		if err != nil {
+			log.Debug("QueryCoord try to new RootCoord client failed", zap.Error(err))
+			panic(err)
+		}
 	}
 
-	if err = rootCoord.Init(); err != nil {
+	if err = s.rootCoord.Init(); err != nil {
 		log.Debug("QueryCoord RootCoordClient Init failed", zap.Error(err))
 		panic(err)
 	}
 
-	if err = rootCoord.Start(); err != nil {
+	if err = s.rootCoord.Start(); err != nil {
 		log.Debug("QueryCoord RootCoordClient Start failed", zap.Error(err))
 		panic(err)
 	}
 	// wait for master init or healthy
 	log.Debug("QueryCoord try to wait for RootCoord ready")
-	err = funcutil.WaitForComponentInitOrHealthy(s.loopCtx, rootCoord, "RootCoord", 1000000, time.Millisecond*200)
+	err = funcutil.WaitForComponentInitOrHealthy(s.loopCtx, s.rootCoord, "RootCoord", 1000000, time.Millisecond*200)
 	if err != nil {
 		log.Debug("QueryCoord wait for RootCoord ready failed", zap.Error(err))
 		panic(err)
 	}
 
-	if err := s.SetRootCoord(rootCoord); err != nil {
+	if err := s.SetRootCoord(s.rootCoord); err != nil {
 		panic(err)
 	}
 	log.Debug("QueryCoord report RootCoord ready")
@@ -138,26 +152,29 @@ func (s *Server) init() error {
 	// --- Data service client ---
 	log.Debug("QueryCoord try to new DataCoord client", zap.Any("DataCoordAddress", Params.DataCoordAddress))
 
-	dataCoord, err := dsc.NewClient(s.loopCtx, qc.Params.MetaRootPath, qc.Params.EtcdEndpoints)
-	if err != nil {
-		log.Debug("QueryCoord try to new DataCoord client failed", zap.Error(err))
-		panic(err)
+	if s.dataCoord == nil {
+		s.dataCoord, err = dsc.NewClient(s.loopCtx, qc.Params.MetaRootPath, qc.Params.EtcdEndpoints)
+		if err != nil {
+			log.Debug("QueryCoord try to new DataCoord client failed", zap.Error(err))
+			panic(err)
+		}
 	}
-	if err = dataCoord.Init(); err != nil {
+
+	if err = s.dataCoord.Init(); err != nil {
 		log.Debug("QueryCoord DataCoordClient Init failed", zap.Error(err))
 		panic(err)
 	}
-	if err = dataCoord.Start(); err != nil {
+	if err = s.dataCoord.Start(); err != nil {
 		log.Debug("QueryCoord DataCoordClient Start failed", zap.Error(err))
 		panic(err)
 	}
 	log.Debug("QueryCoord try to wait for DataCoord ready")
-	err = funcutil.WaitForComponentInitOrHealthy(s.loopCtx, dataCoord, "DataCoord", 1000000, time.Millisecond*200)
+	err = funcutil.WaitForComponentInitOrHealthy(s.loopCtx, s.dataCoord, "DataCoord", 1000000, time.Millisecond*200)
 	if err != nil {
 		log.Debug("QueryCoord wait for DataCoord ready failed", zap.Error(err))
 		panic(err)
 	}
-	if err := s.SetDataCoord(dataCoord); err != nil {
+	if err := s.SetDataCoord(s.dataCoord); err != nil {
 		panic(err)
 	}
 	log.Debug("QueryCoord report DataCoord ready")
@@ -201,10 +218,12 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	}
 }
 
+// start starts QueryCoord's grpc service.
 func (s *Server) start() error {
 	return s.queryCoord.Start()
 }
 
+// Stop stops QueryCoord's grpc service.
 func (s *Server) Stop() error {
 	if s.closer != nil {
 		if err := s.closer.Close(); err != nil {
@@ -219,64 +238,79 @@ func (s *Server) Stop() error {
 	return err
 }
 
+// SetRootCoord sets the RootCoord's client for QueryCoord component.
 func (s *Server) SetRootCoord(m types.RootCoord) error {
 	s.queryCoord.SetRootCoord(m)
 	return nil
 }
 
+// SetDataCoord sets the DataCoord's client for QueryCoord component.
 func (s *Server) SetDataCoord(d types.DataCoord) error {
 	s.queryCoord.SetDataCoord(d)
 	return nil
 }
 
+// GetComponentStates gets the component states of QueryCoord.
 func (s *Server) GetComponentStates(ctx context.Context, req *internalpb.GetComponentStatesRequest) (*internalpb.ComponentStates, error) {
 	return s.queryCoord.GetComponentStates(ctx)
 }
 
+// GetTimeTickChannel gets the time tick channel of QueryCoord.
 func (s *Server) GetTimeTickChannel(ctx context.Context, req *internalpb.GetTimeTickChannelRequest) (*milvuspb.StringResponse, error) {
 	return s.queryCoord.GetTimeTickChannel(ctx)
 }
 
+// GetStatisticsChannel gets the statistics channel of QueryCoord.
 func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
 	return s.queryCoord.GetStatisticsChannel(ctx)
 }
 
+// ShowCollections shows the collections in the QueryCoord.
 func (s *Server) ShowCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
 	return s.queryCoord.ShowCollections(ctx, req)
 }
 
+// LoadCollection loads the data of the specified collection in QueryCoord.
 func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollectionRequest) (*commonpb.Status, error) {
 	return s.queryCoord.LoadCollection(ctx, req)
 }
 
+// ReleaseCollection releases the data of the specified collection in QueryCoord.
 func (s *Server) ReleaseCollection(ctx context.Context, req *querypb.ReleaseCollectionRequest) (*commonpb.Status, error) {
 	return s.queryCoord.ReleaseCollection(ctx, req)
 }
 
+// ShowPartitions shows the partitions in the QueryCoord.
 func (s *Server) ShowPartitions(ctx context.Context, req *querypb.ShowPartitionsRequest) (*querypb.ShowPartitionsResponse, error) {
 	return s.queryCoord.ShowPartitions(ctx, req)
 }
 
+// GetPartitionStates gets the states of the specified partition.
 func (s *Server) GetPartitionStates(ctx context.Context, req *querypb.GetPartitionStatesRequest) (*querypb.GetPartitionStatesResponse, error) {
 	return s.queryCoord.GetPartitionStates(ctx, req)
 }
 
+// LoadPartitions loads the data of the specified partition in QueryCoord.
 func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitionsRequest) (*commonpb.Status, error) {
 	return s.queryCoord.LoadPartitions(ctx, req)
 }
 
+// ReleasePartitions releases the data of the specified partition in QueryCoord.
 func (s *Server) ReleasePartitions(ctx context.Context, req *querypb.ReleasePartitionsRequest) (*commonpb.Status, error) {
 	return s.queryCoord.ReleasePartitions(ctx, req)
 }
 
+// CreateQueryChannel creates the channels for querying in QueryCoord.
 func (s *Server) CreateQueryChannel(ctx context.Context, req *querypb.CreateQueryChannelRequest) (*querypb.CreateQueryChannelResponse, error) {
 	return s.queryCoord.CreateQueryChannel(ctx, req)
 }
 
+// GetSegmentInfo gets the information of the specified segment from QueryCoord.
 func (s *Server) GetSegmentInfo(ctx context.Context, req *querypb.GetSegmentInfoRequest) (*querypb.GetSegmentInfoResponse, error) {
 	return s.queryCoord.GetSegmentInfo(ctx, req)
 }
 
+// GetMetrics gets the metrics information of QueryCoord.
 func (s *Server) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return s.queryCoord.GetMetrics(ctx, req)
 }

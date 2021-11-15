@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package kv
 
@@ -15,6 +20,44 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
+
+// Value is interface for kv-value, needed to support string and byte slice
+type Value interface {
+	Serialize() []byte
+	String() string
+}
+
+// StringValue type alias for string to implement Value
+type StringValue string
+
+// Serialize serialize the StringValue to byte array.
+func (s StringValue) Serialize() []byte {
+	return []byte(s)
+}
+
+// String return the value of StringValue.
+func (s StringValue) String() string {
+	return string(s)
+}
+
+// BytesValue type alias for byte slice to implement value
+type BytesValue []byte
+
+// Serialize return the byte array.
+func (s BytesValue) Serialize() []byte {
+	return s
+}
+
+// String return the string of byte array.
+func (s BytesValue) String() string {
+	return string(s)
+}
+
+// ValueKV example usage to change KV interface to
+type ValueKV interface {
+	Save(key string, value Value) error
+	Load(key string) (Value, error)
+}
 
 // BaseKV contains base operations of kv. Include save, load and remove.
 type BaseKV interface {
@@ -28,6 +71,13 @@ type BaseKV interface {
 	RemoveWithPrefix(key string) error
 
 	Close()
+}
+
+// DataKV persists the data.
+type DataKV interface {
+	BaseKV
+	LoadPartial(key string, start, end int64) ([]byte, error)
+	GetSize(key string) (int64, error)
 }
 
 // TxnKV contains extra txn operations of kv. The extra operations is transactional.
@@ -59,7 +109,7 @@ type MetaKv interface {
 type SnapShotKV interface {
 	Save(key string, value string, ts typeutil.Timestamp) error
 	Load(key string, ts typeutil.Timestamp) (string, error)
-	MultiSave(kvs map[string]string, ts typeutil.Timestamp, additions ...func(ts typeutil.Timestamp) (string, string, error)) error
+	MultiSave(kvs map[string]string, ts typeutil.Timestamp) error
 	LoadWithPrefix(key string, ts typeutil.Timestamp) ([]string, []string, error)
-	MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string, ts typeutil.Timestamp, additions ...func(ts typeutil.Timestamp) (string, string, error)) error
+	MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string, ts typeutil.Timestamp) error
 }

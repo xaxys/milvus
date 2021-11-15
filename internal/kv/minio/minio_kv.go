@@ -1,19 +1,25 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package miniokv
 
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"sync"
 
 	"io"
@@ -26,12 +32,15 @@ import (
 	"go.uber.org/zap"
 )
 
+// MinIOKV implements DataKV interface and relies on underling MinIO service.
+// MinIOKV object contains a client which can be used to access the MinIO service.
 type MinIOKV struct {
 	ctx         context.Context
 	minioClient *minio.Client
 	bucketName  string
 }
 
+// Option option when creates MinIOKV.
 type Option struct {
 	Address           string
 	AccessKeyID       string
@@ -45,7 +54,6 @@ type Option struct {
 func NewMinIOKV(ctx context.Context, option *Option) (*MinIOKV, error) {
 	var minIOClient *minio.Client
 	var err error
-	log.Debug("MinioKV NewMinioKV", zap.Any("option", option))
 	minIOClient, err = minio.New(option.Address, &minio.Options{
 		Creds:  credentials.NewStaticV4(option.AccessKeyID, option.SecretAccessKeyID, ""),
 		Secure: option.UseSSL,
@@ -104,13 +112,14 @@ func (kv *MinIOKV) LoadWithPrefix(key string) ([]string, []string, error) {
 	}
 	objectsValues, err := kv.MultiLoad(objectsKeys)
 	if err != nil {
-		log.Debug("MinIO", zap.String("cannot load value with prefix:%s", key))
+		log.Error(fmt.Sprintf("MinIO load with prefix error. path = %s", key), zap.Error(err))
+		return nil, nil, err
 	}
 
 	return objectsKeys, objectsValues, nil
 }
 
-// LoadWithPrefix load an object with @key.
+// Load loads an object with @key.
 func (kv *MinIOKV) Load(key string) (string, error) {
 	object, err := kv.minioClient.GetObject(kv.ctx, kv.bucketName, key, minio.GetObjectOptions{})
 	if object != nil {
@@ -190,8 +199,8 @@ func (kv *MinIOKV) Save(key, value string) error {
 	return err
 }
 
-// Save MultiObject, the path is the key of @kvs. The object value is the value
-// of @kvs.
+// MultiSave save multiple objects, the path is the key of @kvs.
+// The object value is the value of @kvs.
 func (kv *MinIOKV) MultiSave(kvs map[string]string) error {
 	var resultErr error
 	for key, value := range kvs {
@@ -205,7 +214,7 @@ func (kv *MinIOKV) MultiSave(kvs map[string]string) error {
 	return resultErr
 }
 
-// LoadWithPrefix remove all objects with the same prefix @prefix from minio .
+// RemoveWithPrefix remove all objects with the same prefix @prefix from minio.
 func (kv *MinIOKV) RemoveWithPrefix(prefix string) error {
 	objectsCh := make(chan minio.ObjectInfo)
 
@@ -245,6 +254,43 @@ func (kv *MinIOKV) MultiRemove(keys []string) error {
 	return resultErr
 }
 
+// LoadPartial loads partial data ranged in [start, end) with @key.
+func (kv *MinIOKV) LoadPartial(key string, start, end int64) ([]byte, error) {
+	switch {
+	case start < 0 || end < 0:
+		return nil, fmt.Errorf("invalid range specified: start=%d end=%d",
+			start, end)
+	case start >= end:
+		return nil, fmt.Errorf("invalid range specified: start=%d end=%d",
+			start, end)
+	}
+
+	opts := minio.GetObjectOptions{}
+	err := opts.SetRange(start, end-1)
+	if err != nil {
+		return nil, err
+	}
+
+	object, err := kv.minioClient.GetObject(kv.ctx, kv.bucketName, key, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer object.Close()
+
+	return ioutil.ReadAll(object)
+}
+
+// GetSize obtains the data size of the object with @key.
+func (kv *MinIOKV) GetSize(key string) (int64, error) {
+	objectInfo, err := kv.minioClient.StatObject(kv.ctx, kv.bucketName, key, minio.StatObjectOptions{})
+	if err != nil {
+		return 0, err
+	}
+
+	return objectInfo.Size, nil
+}
+
+// Close close the MinIOKV.
 func (kv *MinIOKV) Close() {
 
 }

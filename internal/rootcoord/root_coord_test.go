@@ -362,17 +362,18 @@ func createCollectionInMeta(dbName, collName string, core *Core, shardsNum int32
 		PhysicalChannelNames: chanNames,
 	}
 
-	// build DdOperation and save it into etcd, when ddmsg send fail,
-	// system can restore ddmsg from etcd and re-send
-	ddOp := func(ts typeutil.Timestamp) (string, error) {
-		ddCollReq.Base.Timestamp = ts
-		return EncodeDdOperation(&ddCollReq, CreateCollectionDDType)
-	}
-
 	reason := fmt.Sprintf("create collection %d", collID)
 	ts, err := core.TSOAllocator(1)
 	if err != nil {
 		return fmt.Errorf("TSO alloc fail, error = %w", err)
+	}
+
+	// build DdOperation and save it into etcd, when ddmsg send fail,
+	// system can restore ddmsg from etcd and re-send
+	ddCollReq.Base.Timestamp = ts
+	ddOpStr, err := EncodeDdOperation(&ddCollReq, CreateCollectionDDType)
+	if err != nil {
+		return fmt.Errorf("EncodeDdOperation fail, error = %w", err)
 	}
 
 	// use lambda function here to guarantee all resources to be released
@@ -385,7 +386,7 @@ func createCollectionInMeta(dbName, collName string, core *Core, shardsNum int32
 		// clear ddl timetick in all conditions
 		defer core.chanTimeTick.RemoveDdlTimeTick(ts, reason)
 
-		err = core.MetaTable.AddCollection(&collInfo, ts, idxInfo, ddOp)
+		err = core.MetaTable.AddCollection(&collInfo, ts, idxInfo, ddOpStr)
 		if err != nil {
 			return fmt.Errorf("meta table add collection failed,error = %w", err)
 		}
@@ -529,6 +530,7 @@ func TestRootCoord(t *testing.T) {
 	Params.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.KvRootPath)
 	Params.MsgChannelSubName = fmt.Sprintf("subname-%d", randVal)
 	Params.DmlChannelName = fmt.Sprintf("rootcoord-dml-test-%d", randVal)
+	Params.DeltaChannelName = fmt.Sprintf("rootcoord-delta-test-%d", randVal)
 
 	err = core.Register()
 	assert.Nil(t, err)
@@ -673,17 +675,21 @@ func TestRootCoord(t *testing.T) {
 
 		assert.Equal(t, shardsNum, int32(core.dmlChannels.GetNumChannels()))
 
-		pChan := core.MetaTable.ListCollectionPhysicalChannels()
-		dmlStream.AsConsumer([]string{pChan[0]}, Params.MsgChannelSubName)
+		createMeta, err := core.MetaTable.GetCollectionByName(collName, 0)
+		assert.Nil(t, err)
+		dmlStream.AsConsumer([]string{createMeta.PhysicalChannelNames[0]}, Params.MsgChannelSubName)
 		dmlStream.Start()
+
+		pChanMap := core.MetaTable.ListCollectionPhysicalChannels()
+		assert.Greater(t, len(pChanMap[createMeta.ID]), 0)
+		vChanMap := core.MetaTable.ListCollectionVirtualChannels()
+		assert.Greater(t, len(vChanMap[createMeta.ID]), 0)
 
 		// get CreateCollectionMsg
 		msgs := getNotTtMsg(ctx, 1, dmlStream.Chan())
 		assert.Equal(t, 1, len(msgs))
 		createMsg, ok := (msgs[0]).(*msgstream.CreateCollectionMsg)
 		assert.True(t, ok)
-		createMeta, err := core.MetaTable.GetCollectionByName(collName, 0)
-		assert.Nil(t, err)
 		assert.Equal(t, createMeta.ID, createMsg.CollectionID)
 		assert.Equal(t, 1, len(createMeta.PartitionIDs))
 		assert.Equal(t, createMeta.PartitionIDs[0], createMsg.PartitionID)
@@ -718,10 +724,10 @@ func TestRootCoord(t *testing.T) {
 		core.chanTimeTick.lock.Unlock()
 
 		// check DD operation info
-		flag, err := core.MetaTable.client.Load(DDMsgSendPrefix, 0)
+		flag, err := core.MetaTable.txn.Load(DDMsgSendPrefix)
 		assert.Nil(t, err)
 		assert.Equal(t, "true", flag)
-		ddOpStr, err := core.MetaTable.client.Load(DDOperationPrefix, 0)
+		ddOpStr, err := core.MetaTable.txn.Load(DDOperationPrefix)
 		assert.Nil(t, err)
 		var ddOp DdOperation
 		err = DecodeDdOperation(ddOpStr, &ddOp)
@@ -888,10 +894,10 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, collName, pnm.GetCollArray()[0])
 
 		// check DD operation info
-		flag, err := core.MetaTable.client.Load(DDMsgSendPrefix, 0)
+		flag, err := core.MetaTable.txn.Load(DDMsgSendPrefix)
 		assert.Nil(t, err)
 		assert.Equal(t, "true", flag)
-		ddOpStr, err := core.MetaTable.client.Load(DDOperationPrefix, 0)
+		ddOpStr, err := core.MetaTable.txn.Load(DDOperationPrefix)
 		assert.Nil(t, err)
 		var ddOp DdOperation
 		err = DecodeDdOperation(ddOpStr, &ddOp)
@@ -1223,10 +1229,10 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, collName, pnm.GetCollArray()[1])
 
 		// check DD operation info
-		flag, err := core.MetaTable.client.Load(DDMsgSendPrefix, 0)
+		flag, err := core.MetaTable.txn.Load(DDMsgSendPrefix)
 		assert.Nil(t, err)
 		assert.Equal(t, "true", flag)
-		ddOpStr, err := core.MetaTable.client.Load(DDOperationPrefix, 0)
+		ddOpStr, err := core.MetaTable.txn.Load(DDOperationPrefix)
 		assert.Nil(t, err)
 		var ddOp DdOperation
 		err = DecodeDdOperation(ddOpStr, &ddOp)
@@ -1313,10 +1319,10 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, collName, collArray[2])
 
 		// check DD operation info
-		flag, err := core.MetaTable.client.Load(DDMsgSendPrefix, 0)
+		flag, err := core.MetaTable.txn.Load(DDMsgSendPrefix)
 		assert.Nil(t, err)
 		assert.Equal(t, "true", flag)
-		ddOpStr, err := core.MetaTable.client.Load(DDOperationPrefix, 0)
+		ddOpStr, err := core.MetaTable.txn.Load(DDOperationPrefix)
 		assert.Nil(t, err)
 		var ddOp DdOperation
 		err = DecodeDdOperation(ddOpStr, &ddOp)
@@ -1726,6 +1732,11 @@ func TestRootCoord(t *testing.T) {
 		cn1 := core.dmlChannels.GetDmlMsgStreamName()
 		cn2 := core.dmlChannels.GetDmlMsgStreamName()
 		core.dmlChannels.AddProducerChannels(cn0, cn1, cn2)
+
+		dn0 := core.deltaChannels.GetDmlMsgStreamName()
+		dn1 := core.deltaChannels.GetDmlMsgStreamName()
+		dn2 := core.deltaChannels.GetDmlMsgStreamName()
+		core.deltaChannels.AddProducerChannels(dn0, dn1, dn2)
 
 		msg0 := &internalpb.ChannelTimeTickMsg{
 			Base: &commonpb.MsgBase{
@@ -2271,9 +2282,10 @@ func TestRootCoord2(t *testing.T) {
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
 
-		pChan := core.MetaTable.ListCollectionPhysicalChannels()
+		collInfo, err := core.MetaTable.GetCollectionByName(collName, 0)
+		assert.Nil(t, err)
 		dmlStream, _ := msFactory.NewMsgStream(ctx)
-		dmlStream.AsConsumer([]string{pChan[0]}, Params.MsgChannelSubName)
+		dmlStream.AsConsumer([]string{collInfo.PhysicalChannelNames[0]}, Params.MsgChannelSubName)
 		dmlStream.Start()
 
 		msgs := getNotTtMsg(ctx, 1, dmlStream.Chan())

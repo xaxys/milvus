@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
@@ -38,6 +43,7 @@ type ParamTable struct {
 	FlushInsertBufferSize   int64
 	InsertBinlogRootPath    string
 	StatsBinlogRootPath     string
+	DeleteBinlogRootPath    string
 	Alias                   string // Different datanode in one machine
 
 	// Pulsar address
@@ -58,9 +64,10 @@ type ParamTable struct {
 	// Channel subscribition name -
 	MsgChannelSubName string
 
-	// ETCD
-	EtcdEndpoints []string
-	MetaRootPath  string
+	// --- ETCD ---
+	EtcdEndpoints       []string
+	MetaRootPath        string
+	ChannelWatchSubPath string
 
 	// MinIO
 
@@ -103,6 +110,7 @@ func (p *ParamTable) Init() {
 	p.initFlushInsertBufferSize()
 	p.initInsertBinlogRootPath()
 	p.initStatsBinlogRootPath()
+	p.initDeleteBinlogRootPath()
 
 	p.initPulsarAddress()
 	p.initRocksmqPath()
@@ -114,6 +122,7 @@ func (p *ParamTable) Init() {
 
 	p.initEtcdEndpoints()
 	p.initMetaRootPath()
+	p.initChannelWatchPath()
 
 	p.initMinioAddress()
 	p.initMinioAccessKeyID()
@@ -151,6 +160,14 @@ func (p *ParamTable) initStatsBinlogRootPath() {
 		panic(err)
 	}
 	p.StatsBinlogRootPath = path.Join(rootPath, "stats_log")
+}
+
+func (p *ParamTable) initDeleteBinlogRootPath() {
+	rootPath, err := p.Load("minio.rootPath")
+	if err != nil {
+		panic(err)
+	}
+	p.DeleteBinlogRootPath = path.Join(rootPath, "delta_log")
 }
 
 func (p *ParamTable) initPulsarAddress() {
@@ -224,6 +241,11 @@ func (p *ParamTable) initMetaRootPath() {
 	p.MetaRootPath = path.Join(rootPath, subPath)
 }
 
+func (p *ParamTable) initChannelWatchPath() {
+	p.ChannelWatchSubPath = "channelwatch"
+}
+
+// --- MinIO ---
 func (p *ParamTable) initMinioAddress() {
 	endpoint, err := p.Load("_MinioAddress")
 	if err != nil {
@@ -233,7 +255,7 @@ func (p *ParamTable) initMinioAddress() {
 }
 
 func (p *ParamTable) initMinioAccessKeyID() {
-	keyID, err := p.Load("minio.accessKeyID")
+	keyID, err := p.Load("_MinioAccessKeyID")
 	if err != nil {
 		panic(err)
 	}
@@ -241,7 +263,7 @@ func (p *ParamTable) initMinioAccessKeyID() {
 }
 
 func (p *ParamTable) initMinioSecretAccessKey() {
-	key, err := p.Load("minio.secretAccessKey")
+	key, err := p.Load("_MinioSecretAccessKey")
 	if err != nil {
 		panic(err)
 	}
@@ -249,7 +271,7 @@ func (p *ParamTable) initMinioSecretAccessKey() {
 }
 
 func (p *ParamTable) initMinioUseSSL() {
-	usessl, err := p.Load("minio.useSSL")
+	usessl, err := p.Load("_MinioUseSSL")
 	if err != nil {
 		panic(err)
 	}
@@ -257,7 +279,7 @@ func (p *ParamTable) initMinioUseSSL() {
 }
 
 func (p *ParamTable) initMinioBucketName() {
-	bucketName, err := p.Load("minio.bucketName")
+	bucketName, err := p.Load("_MinioBucketName")
 	if err != nil {
 		panic(err)
 	}

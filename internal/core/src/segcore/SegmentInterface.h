@@ -29,11 +29,12 @@
 
 namespace milvus::segcore {
 
-// common interface of SegmentSealed and SegmentGrowing
-// used by C API
+// common interface of SegmentSealed and SegmentGrowing used by C API
 class SegmentInterface {
  public:
-    // fill results according to target_entries in plan
+    virtual void
+    FillPrimaryKeys(const query::Plan* plan, SearchResult& results) const = 0;
+
     virtual void
     FillTargetEntry(const query::Plan* plan, SearchResult& results) const = 0;
 
@@ -51,6 +52,12 @@ class SegmentInterface {
 
     virtual const Schema&
     get_schema() const = 0;
+
+    virtual int64_t
+    PreDelete(int64_t size) = 0;
+
+    virtual Status
+    Delete(int64_t reserved_offset, int64_t size, const int64_t* row_ids, const Timestamp* timestamps) = 0;
 
     virtual ~SegmentInterface() = default;
 
@@ -84,6 +91,9 @@ class SegmentInternalInterface : public SegmentInterface {
            Timestamp timestamp) const override;
 
     void
+    FillPrimaryKeys(const query::Plan* plan, SearchResult& results) const override;
+
+    void
     FillTargetEntry(const query::Plan* plan, SearchResult& results) const override;
 
     std::unique_ptr<proto::segcore::RetrieveResults>
@@ -101,6 +111,9 @@ class SegmentInternalInterface : public SegmentInterface {
                   Timestamp timestamp,
                   const BitsetView& bitset,
                   SearchResult& output) const = 0;
+
+    virtual BitsetView
+    get_filtered_bitmap(const BitsetView& bitset, int64_t ins_barrier, Timestamp timestamp) const = 0;
 
     // count of chunk that has index available
     virtual int64_t
@@ -122,6 +135,9 @@ class SegmentInternalInterface : public SegmentInterface {
 
     virtual std::vector<SegOffset>
     search_ids(const std::shared_ptr<arrow::BooleanArray>& view, Timestamp timestamp) const = 0;
+
+    virtual std::vector<SegOffset>
+    search_ids(const BitsetView& view, Timestamp timestamp) const = 0;
 
  protected:
     // internal API: return chunk_data in span

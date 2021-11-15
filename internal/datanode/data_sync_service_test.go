@@ -1,24 +1,34 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"math"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/internal/common"
+	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -121,13 +131,14 @@ func TestDataSyncService_newDataSyncService(te *testing.T) {
 		te.Run(test.description, func(t *testing.T) {
 			df := &DataCoordFactory{}
 
-			replica := newReplica(&RootCoordFactory{}, test.collID)
+			replica, err := newReplica(context.Background(), &RootCoordFactory{}, test.collID)
+			assert.Nil(t, err)
 			if test.replicaNil {
 				replica = nil
 			}
 
 			ds, err := newDataSyncService(ctx,
-				&flushChans{make(chan *flushMsg), make(chan *flushMsg)},
+				make(chan flushMsg),
 				replica,
 				NewAllocatorFactory(),
 				test.inMsgFactory,
@@ -144,28 +155,6 @@ func TestDataSyncService_newDataSyncService(te *testing.T) {
 				assert.NoError(t, err)
 				assert.NotNil(t, ds)
 
-				// save binlog
-				fu := &segmentFlushUnit{
-					collID:     1,
-					segID:      100,
-					field2Path: map[UniqueID]string{100: "path1"},
-					checkPoint: map[UniqueID]segmentCheckPoint{100: {100, internalpb.MsgPosition{}}},
-				}
-
-				df.SaveBinlogPathError = true
-				err := ds.saveBinlog(fu)
-				assert.Error(t, err)
-
-				df.SaveBinlogPathError = false
-				df.SaveBinlogPathNotSucess = true
-				err = ds.saveBinlog(fu)
-				assert.Error(t, err)
-
-				df.SaveBinlogPathError = false
-				df.SaveBinlogPathNotSucess = false
-				err = ds.saveBinlog(fu)
-				assert.NoError(t, err)
-
 				// start
 				ds.fg = nil
 				ds.start()
@@ -177,6 +166,7 @@ func TestDataSyncService_newDataSyncService(te *testing.T) {
 
 // NOTE: start pulsar before test
 func TestDataSyncService_Start(t *testing.T) {
+	t.Skip()
 	const ctxTimeInMillisecond = 2000
 
 	delay := time.Now().Add(ctxTimeInMillisecond * time.Millisecond)
@@ -187,12 +177,13 @@ func TestDataSyncService_Start(t *testing.T) {
 	pulsarURL := Params.PulsarAddress
 
 	Factory := &MetaFactory{}
-	collMeta := Factory.CollectionMetaFactory(UniqueID(0), "coll1")
+	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1")
 	mockRootCoord := &RootCoordFactory{}
 	collectionID := UniqueID(1)
 
-	flushChan := &flushChans{make(chan *flushMsg, 100), make(chan *flushMsg, 100)}
-	replica := newReplica(mockRootCoord, collectionID)
+	flushChan := make(chan flushMsg, 100)
+	replica, err := newReplica(context.Background(), mockRootCoord, collectionID)
+	assert.Nil(t, err)
 
 	allocFactory := NewAllocatorFactory(1)
 	msFactory := msgstream.NewPmsFactory()
@@ -200,7 +191,7 @@ func TestDataSyncService_Start(t *testing.T) {
 		"pulsarAddress":  pulsarURL,
 		"receiveBufSize": 1024,
 		"pulsarBufSize":  1024}
-	err := msFactory.SetParams(m)
+	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
 
 	insertChannelName := "data_sync_service_test_dml"
@@ -302,4 +293,69 @@ func TestDataSyncService_Start(t *testing.T) {
 	<-sync.ctx.Done()
 
 	sync.close()
+}
+
+func genBytes() (rawData []byte) {
+	const DIM = 2
+	const N = 1
+
+	// Float vector
+	var fvector = [DIM]float32{1, 2}
+	for _, ele := range fvector {
+		buf := make([]byte, 4)
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
+		rawData = append(rawData, buf...)
+	}
+
+	// Binary vector
+	// Dimension of binary vector is 32
+	// size := 4,  = 32 / 8
+	var bvector = []byte{255, 255, 255, 0}
+	rawData = append(rawData, bvector...)
+
+	// Bool
+	var fieldBool = true
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, common.Endian, fieldBool); err != nil {
+		panic(err)
+	}
+
+	rawData = append(rawData, buf.Bytes()...)
+
+	// int8
+	var dataInt8 int8 = 100
+	bint8 := new(bytes.Buffer)
+	if err := binary.Write(bint8, common.Endian, dataInt8); err != nil {
+		panic(err)
+	}
+	rawData = append(rawData, bint8.Bytes()...)
+	log.Debug("Rawdata length:", zap.Int("Length of rawData", len(rawData)))
+	return
+}
+
+func TestBytesReader(t *testing.T) {
+	rawData := genBytes()
+
+	// Bytes Reader is able to recording the position
+	rawDataReader := bytes.NewReader(rawData)
+
+	var fvector []float32 = make([]float32, 2)
+	err := binary.Read(rawDataReader, common.Endian, &fvector)
+	assert.Nil(t, err)
+	assert.ElementsMatch(t, fvector, []float32{1, 2})
+
+	var bvector []byte = make([]byte, 4)
+	err = binary.Read(rawDataReader, common.Endian, &bvector)
+	assert.Nil(t, err)
+	assert.ElementsMatch(t, bvector, []byte{255, 255, 255, 0})
+
+	var fieldBool bool
+	err = binary.Read(rawDataReader, common.Endian, &fieldBool)
+	assert.Nil(t, err)
+	assert.Equal(t, true, fieldBool)
+
+	var dataInt8 int8
+	err = binary.Read(rawDataReader, common.Endian, &dataInt8)
+	assert.Nil(t, err)
+	assert.Equal(t, int8(100), dataInt8)
 }

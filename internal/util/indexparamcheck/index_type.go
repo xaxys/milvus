@@ -11,9 +11,11 @@
 
 package indexparamcheck
 
+// IndexType string.
 type IndexType = string
 
 const (
+	// IndexFaissIDMap represents "FLAT" which means no index is built.
 	IndexFaissIDMap      IndexType = "FLAT"
 	IndexFaissIvfFlat    IndexType = "IVF_FLAT"
 	IndexFaissIvfPQ      IndexType = "IVF_PQ"

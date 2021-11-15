@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package grpcdatanode
 
@@ -41,7 +46,7 @@ import (
 )
 
 type Server struct {
-	datanode    *dn.DataNode
+	datanode    types.DataNodeComponent
 	wg          sync.WaitGroup
 	grpcErrChan chan error
 	grpcServer  *grpc.Server
@@ -113,23 +118,23 @@ func (s *Server) startGrpcLoop(listener net.Listener) {
 }
 
 func (s *Server) SetRootCoordInterface(ms types.RootCoord) error {
-	return s.datanode.SetRootCoordInterface(ms)
+	return s.datanode.SetRootCoord(ms)
 }
 
 func (s *Server) SetDataCoordInterface(ds types.DataCoord) error {
-	return s.datanode.SetDataCoordInterface(ds)
+	return s.datanode.SetDataCoord(ds)
 }
 
 func (s *Server) Run() error {
 	if err := s.init(); err != nil {
 		return err
 	}
-	log.Debug("data node init done ...")
+	log.Debug("DataNode init done ...")
 
 	if err := s.start(); err != nil {
 		return err
 	}
-	log.Debug("data node start done ...")
+	log.Debug("DataNode start done ...")
 	return nil
 }
 
@@ -240,7 +245,7 @@ func (s *Server) init() error {
 		}
 	}
 
-	s.datanode.NodeID = dn.Params.NodeID
+	s.datanode.SetNodeID(dn.Params.NodeID)
 	s.datanode.UpdateStateCode(internalpb.StateCode_Initializing)
 
 	if err := s.datanode.Init(); err != nil {
@@ -276,7 +281,7 @@ func (s *Server) WatchDmChannels(ctx context.Context, req *datapb.WatchDmChannel
 }
 
 func (s *Server) FlushSegments(ctx context.Context, req *datapb.FlushSegmentsRequest) (*commonpb.Status, error) {
-	if s.datanode.State.Load().(internalpb.StateCode) != internalpb.StateCode_Healthy {
+	if s.datanode.GetStateCode() != internalpb.StateCode_Healthy {
 		return &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
 			Reason:    "DataNode isn't healthy.",

@@ -576,8 +576,8 @@ func TestStream_PulsarMsgStream_DeleteRepackFunc(t *testing.T) {
 		},
 		CollectionName: "Collection",
 		ShardName:      "chan-1",
-		Timestamp:      Timestamp(1),
-		PrimaryKeys:    []int64{},
+		Timestamps:     []Timestamp{1},
+		PrimaryKeys:    []int64{1},
 	}
 	deleteMsg := &DeleteMsg{
 		BaseMsg:       baseMsg,
@@ -1263,7 +1263,73 @@ func TestStream_BroadcastMark(t *testing.T) {
 	assert.NotNil(t, err)
 
 	outputStream.Close()
+}
 
+func TestStream_ProduceMark(t *testing.T) {
+	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	c1 := funcutil.RandomString(8)
+	c2 := funcutil.RandomString(8)
+	producerChannels := []string{c1, c2}
+
+	factory := ProtoUDFactory{}
+	pulsarClient, err := mqclient.GetPulsarClientInstance(pulsar.ClientOptions{URL: pulsarAddress})
+	assert.Nil(t, err)
+	outputStream, err := NewMqMsgStream(context.Background(), 100, 100, pulsarClient, factory.NewUnmarshalDispatcher())
+	assert.Nil(t, err)
+
+	// add producer channels
+	outputStream.AsProducer(producerChannels)
+	outputStream.Start()
+
+	msgPack0 := MsgPack{}
+	msgPack0.Msgs = append(msgPack0.Msgs, getTimeTickMsg(0))
+
+	ids, err := outputStream.ProduceMark(&msgPack0)
+	assert.Nil(t, err)
+	assert.NotNil(t, ids)
+	assert.Equal(t, len(msgPack0.Msgs), len(ids))
+	for _, c := range producerChannels {
+		if id, ok := ids[c]; ok {
+			assert.Equal(t, len(msgPack0.Msgs), len(id))
+		}
+	}
+
+	msgPack1 := MsgPack{}
+	msgPack1.Msgs = append(msgPack1.Msgs, getTsMsg(commonpb.MsgType_Insert, 1))
+	msgPack1.Msgs = append(msgPack1.Msgs, getTsMsg(commonpb.MsgType_Insert, 2))
+
+	ids, err = outputStream.ProduceMark(&msgPack1)
+	assert.Nil(t, err)
+	assert.NotNil(t, ids)
+	assert.Equal(t, len(producerChannels), len(ids))
+	for _, c := range producerChannels {
+		ids, ok := ids[c]
+		assert.True(t, ok)
+		assert.Equal(t, 1, len(ids))
+	}
+
+	// edge cases
+	_, err = outputStream.ProduceMark(nil)
+	assert.NotNil(t, err)
+
+	msgPack2 := MsgPack{}
+	msgPack2.Msgs = append(msgPack2.Msgs, &MarshalFailTsMsg{BaseMsg: BaseMsg{HashValues: []uint32{1}}})
+	_, err = outputStream.ProduceMark(&msgPack2)
+	assert.NotNil(t, err)
+
+	// mock send fail
+	for k, p := range outputStream.producers {
+		outputStream.producers[k] = &mockSendFailProducer{Producer: p}
+	}
+	_, err = outputStream.ProduceMark(&msgPack1)
+	assert.NotNil(t, err)
+
+	// mock producers is nil
+	outputStream.producers = nil
+	_, err = outputStream.ProduceMark(&msgPack1)
+	assert.NotNil(t, err)
+
+	outputStream.Close()
 }
 
 var _ TsMsg = (*MarshalFailTsMsg)(nil)
@@ -1359,7 +1425,8 @@ func getTsMsg(msgType MsgType, reqID UniqueID) TsMsg {
 			},
 			CollectionName: "Collection",
 			ShardName:      "1",
-			Timestamp:      Timestamp(1),
+			Timestamps:     []Timestamp{time},
+			PrimaryKeys:    []int64{1},
 		}
 		deleteMsg := &DeleteMsg{
 			BaseMsg:       baseMsg,
@@ -1551,4 +1618,43 @@ func printMsgPack(msgPack *MsgPack) {
 		}
 	}
 	log.Println("================")
+}
+
+func TestStream_RmqTtMsgStream_AsConsumerWithPosition(t *testing.T) {
+
+	producerChannels := []string{"insert1"}
+	consumerChannels := []string{"insert1"}
+	consumerSubName := "subInsert"
+
+	rocksdbName := "/tmp/rocksmq_asconsumer_withpos"
+	etcdKV := initRmq(rocksdbName)
+	factory := ProtoUDFactory{}
+
+	rmqClient, _ := mqclient.NewRmqClient(client.ClientOptions{Server: rocksmq.Rmq})
+
+	otherInputStream, _ := NewMqMsgStream(context.Background(), 100, 100, rmqClient, factory.NewUnmarshalDispatcher())
+	otherInputStream.AsProducer([]string{"root_timetick"})
+	otherInputStream.Start()
+	otherInputStream.Produce(getTimeTickMsgPack(999))
+
+	inputStream, _ := NewMqMsgStream(context.Background(), 100, 100, rmqClient, factory.NewUnmarshalDispatcher())
+	inputStream.AsProducer(producerChannels)
+	inputStream.Start()
+
+	for i := 0; i < 100; i++ {
+		inputStream.Produce(getTimeTickMsgPack(int64(i)))
+	}
+
+	rmqClient2, _ := mqclient.NewRmqClient(client.ClientOptions{Server: rocksmq.Rmq})
+	outputStream, _ := NewMqMsgStream(context.Background(), 100, 100, rmqClient2, factory.NewUnmarshalDispatcher())
+	outputStream.AsConsumerWithPosition(consumerChannels, consumerSubName, mqclient.SubscriptionPositionLatest)
+	outputStream.Start()
+
+	inputStream.Produce(getTimeTickMsgPack(1000))
+	pack := outputStream.Consume()
+	assert.NotNil(t, pack)
+	assert.Equal(t, 1, len(pack.Msgs))
+	assert.EqualValues(t, 1000, pack.Msgs[0].BeginTs())
+
+	Close(rocksdbName, inputStream, outputStream, etcdKV)
 }

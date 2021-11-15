@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package miniokv_test
 
@@ -189,6 +194,61 @@ func TestMinIOKV_Remove(t *testing.T) {
 	assert.Empty(t, val)
 }
 
+func TestMinIOKV_LoadPartial(t *testing.T) {
+	Params.Init()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bucketName := "fantastic-tech-test"
+	minIOKV, err := newMinIOKVClient(ctx, bucketName)
+	assert.Nil(t, err)
+
+	defer minIOKV.RemoveWithPrefix("")
+
+	key := "TestMinIOKV_LoadPartial_key"
+	value := "TestMinIOKV_LoadPartial_value"
+
+	err = minIOKV.Save(key, value)
+	assert.NoError(t, err)
+
+	var start, end int64
+	var partial []byte
+
+	start, end = 1, 2
+	partial, err = minIOKV.LoadPartial(key, start, end)
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, partial, []byte(value[start:end]))
+
+	start, end = 0, int64(len(value))
+	partial, err = minIOKV.LoadPartial(key, start, end)
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, partial, []byte(value[start:end]))
+
+	// error case
+	start, end = 5, 3
+	_, err = minIOKV.LoadPartial(key, start, end)
+	assert.Error(t, err)
+
+	start, end = 1, 1
+	_, err = minIOKV.LoadPartial(key, start, end)
+	assert.Error(t, err)
+
+	start, end = -1, 1
+	_, err = minIOKV.LoadPartial(key, start, end)
+	assert.Error(t, err)
+
+	start, end = 1, -1
+	_, err = minIOKV.LoadPartial(key, start, end)
+	assert.Error(t, err)
+
+	err = minIOKV.Remove(key)
+	assert.NoError(t, err)
+	start, end = 1, 2
+	_, err = minIOKV.LoadPartial(key, start, end)
+	assert.Error(t, err)
+}
+
 func TestMinIOKV_FGetObject(t *testing.T) {
 	Params.Init()
 	path := "/tmp/milvus/data"
@@ -278,4 +338,32 @@ func TestMinIOKV_FGetObjects(t *testing.T) {
 	assert.Equal(t, value2, string(content2))
 	defer file1.Close()
 	defer os.Remove(path + name2)
+}
+
+func TestMinIOKV_GetSize(t *testing.T) {
+	Params.Init()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bucketName := "fantastic-tech-test"
+	minIOKV, err := newMinIOKVClient(ctx, bucketName)
+	assert.Nil(t, err)
+	defer minIOKV.RemoveWithPrefix("")
+
+	key := "TestMinIOKV_GetSize_key"
+	value := "TestMinIOKV_GetSize_value"
+
+	err = minIOKV.Save(key, value)
+	assert.NoError(t, err)
+
+	size, err := minIOKV.GetSize(key)
+	assert.NoError(t, err)
+	assert.Equal(t, size, int64(len(value)))
+
+	key2 := "TestMemoryKV_GetSize_key2"
+
+	size, err = minIOKV.GetSize(key2)
+	assert.Error(t, err)
+	assert.Equal(t, int64(0), size)
 }

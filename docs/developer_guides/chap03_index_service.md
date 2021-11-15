@@ -1,8 +1,4 @@
-
-
 ## 3. Index Service
-
-
 
 #### 3.1 Overview
 
@@ -15,7 +11,11 @@ type IndexCoord interface {
 	Component
 	TimeTickProvider
 
+  // BuildIndex receives request from RootCoordinator to build an index.
 	BuildIndex(ctx context.Context, req *indexpb.BuildIndexRequest) (*indexpb.BuildIndexResponse, error)
+  // DropIndex deletes indexes based on IndexID. One IndexID corresponds to the index of an entire column. A column is
+	// divided into many segments, and each segment corresponds to an IndexBuildID. IndexCoord uses IndexBuildID to record
+	// index tasks. Therefore, when DropIndex is called, delete all tasks corresponding to IndexBuildID corresponding to IndexID.
 	DropIndex(ctx context.Context, req *indexpb.DropIndexRequest) (*commonpb.Status, error)
 	GetIndexStates(ctx context.Context, req *indexpb.GetIndexStatesRequest) (*indexpb.GetIndexStatesResponse, error)
 	GetIndexFilePaths(ctx context.Context, req *indexpb.GetIndexFilePathsRequest) (*indexpb.GetIndexFilePathsResponse, error)
@@ -23,9 +23,7 @@ type IndexCoord interface {
 }
 ```
 
-
-
-* *RegisterNode*
+- _RegisterNode_
 
 ```go
 type MsgBase struct {
@@ -56,7 +54,7 @@ type RegisterNodeResponse struct {
 }
 ```
 
-* *BuildIndex*
+- _BuildIndex_
 
 ```go
 type KeyValuePair struct {
@@ -79,7 +77,7 @@ type BuildIndexResponse struct {
 }
 ```
 
-* *DropIndex*
+- _DropIndex_
 
 ```go
 type DropIndexRequest struct {
@@ -87,7 +85,7 @@ type DropIndexRequest struct {
 }
 ```
 
-* *GetIndexStates*
+- _GetIndexStates_
 
 ```go
 type GetIndexStatesRequest struct {
@@ -117,7 +115,7 @@ type GetIndexStatesResponse struct {
 }
 ```
 
-* *GetIndexFilePaths*
+- _GetIndexFilePaths_
 
 ```go
 type GetIndexFilePathsRequest struct {
@@ -137,7 +135,7 @@ type GetIndexFilePathsResponse struct {
 
 ```
 
-* *NotifyBuildIndex*
+- _NotifyBuildIndex_
 
 ```go
 type NotifyBuildIndexRequest struct {
@@ -148,8 +146,6 @@ type NotifyBuildIndexRequest struct {
 }
 ```
 
-
-
 #### 3.3 Index Node Interface
 
 ```go
@@ -157,12 +153,15 @@ type IndexNode interface {
 	Component
 	TimeTickProvider
 
+	// CreateIndex receives request from IndexCoordinator to build an index.
+	// Index building is asynchronous, so when an index building request comes, IndexNode records the task and returns.
 	BuildIndex(ctx context.Context, req *indexpb.BuildIndexRequest) (*commonpb.Status, error)
+	// GetMetrics gets the metrics about IndexNode.
 	DropIndex(ctx context.Context, req *indexpb.DropIndexRequest) (*commonpb.Status, error)
 }
 ```
 
-* *BuildIndex*
+- _BuildIndex_
 
 ```go
 
@@ -181,7 +180,7 @@ type BuildIndexRequest struct {
 }
 ```
 
-* *DropIndex*
+- _DropIndex_
 
 ```go
 type DropIndexRequest struct {

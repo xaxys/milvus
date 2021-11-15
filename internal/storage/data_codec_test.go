@@ -251,13 +251,13 @@ func TestInsertCodec(t *testing.T) {
 			},
 		},
 	}
-	Blobs1, _, err := insertCodec.Serialize(PartitionID, SegmentID, insertData1)
+	Blobs1, statsBlob1, err := insertCodec.Serialize(PartitionID, SegmentID, insertData1)
 	assert.Nil(t, err)
 	for _, blob := range Blobs1 {
 		blob.Key = fmt.Sprintf("1/insert_log/2/3/4/5/%d", 100)
 		assert.Equal(t, blob.GetKey(), blob.Key)
 	}
-	Blobs2, _, err := insertCodec.Serialize(PartitionID, SegmentID, insertData2)
+	Blobs2, statsBlob2, err := insertCodec.Serialize(PartitionID, SegmentID, insertData2)
 	assert.Nil(t, err)
 	for _, blob := range Blobs2 {
 		blob.Key = fmt.Sprintf("1/insert_log/2/3/4/5/%d", 99)
@@ -302,20 +302,23 @@ func TestInsertCodec(t *testing.T) {
 	assert.NotNil(t, err)
 	_, _, _, _, err = insertCodec.DeserializeAll(blobs)
 	assert.NotNil(t, err)
+
+	_, err = DeserializeStats(statsBlob1)
+	assert.Nil(t, err)
+
+	_, err = DeserializeStats(statsBlob2)
+	assert.Nil(t, err)
 }
 
 func TestDeleteCodec(t *testing.T) {
-	schema := &etcdpb.CollectionMeta{
-		ID: CollectionID,
-	}
-	deleteCodec := NewDeleteCodec(schema)
+	deleteCodec := NewDeleteCodec()
 	deleteData := &DeleteData{
-		Data: map[string]int64{"1": 43757345, "2": 23578294723},
+		Data: map[int64]int64{1: 43757345, 2: 23578294723},
 	}
-	blob, err := deleteCodec.Serialize(1, 1, deleteData)
+	blob, err := deleteCodec.Serialize(CollectionID, 1, 1, deleteData)
 	assert.Nil(t, err)
 
-	pid, sid, data, err := deleteCodec.Deserialize(blob)
+	pid, sid, data, err := deleteCodec.Deserialize([]*Blob{blob})
 	assert.Nil(t, err)
 	assert.Equal(t, pid, int64(1))
 	assert.Equal(t, sid, int64(1))
@@ -468,7 +471,7 @@ func TestIndexCodec(t *testing.T) {
 	blobsInput, err := indexCodec.Serialize(blobs, indexParams, "index_test_name", 1234)
 	assert.Nil(t, err)
 	assert.EqualValues(t, 4, len(blobsInput))
-	assert.EqualValues(t, IndexParamsFile, blobsInput[3].Key)
+	assert.EqualValues(t, IndexParamsKey, blobsInput[3].Key)
 	blobsOutput, indexParamsOutput, indexName, indexID, err := indexCodec.Deserialize(blobsInput)
 	assert.Nil(t, err)
 	assert.EqualValues(t, 3, len(blobsOutput))

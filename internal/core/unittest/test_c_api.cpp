@@ -9,25 +9,25 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
-#include <iostream>
-#include <string>
-#include <random>
 #include <gtest/gtest.h>
 #include <chrono>
 #include <google/protobuf/text_format.h>
+#include <iostream>
+#include <random>
+#include <string>
+#include <unordered_set>
 
+#include "common/LoadInfo.h"
+#include "index/knowhere/knowhere/index/vector_index/helpers/IndexParameter.h"
+#include "index/knowhere/knowhere/index/vector_index/adapter/VectorAdapter.h"
+#include "index/knowhere/knowhere/index/vector_index/VecIndexFactory.h"
+#include "index/knowhere/knowhere/index/vector_index/IndexIVFPQ.h"
 #include "pb/milvus.pb.h"
+#include "pb/plan.pb.h"
+#include "segcore/Collection.h"
 #include "segcore/reduce_c.h"
-
-#include <index/knowhere/knowhere/index/vector_index/helpers/IndexParameter.h>
-#include <index/knowhere/knowhere/index/vector_index/adapter/VectorAdapter.h>
-#include <index/knowhere/knowhere/index/vector_index/VecIndexFactory.h>
-#include <index/knowhere/knowhere/index/vector_index/IndexIVFPQ.h>
-#include <common/LoadInfo.h>
-#include <utils/Types.h>
-#include <segcore/Collection.h>
-#include <pb/plan.pb.h>
 #include "test_utils/DataGen.h"
+#include "utils/Types.h"
 
 namespace chrono = std::chrono;
 
@@ -239,6 +239,11 @@ TEST(CApiTest, SearchTest) {
     auto [raw_data, timestamps, uids] = generate_data(N);
     auto line_sizeof = (sizeof(int) + sizeof(float) * DIM);
 
+    int64_t ts_offset = 1000;
+    for (int i = 0; i < N; i++) {
+        timestamps[i] = ts_offset + i;
+    }
+
     int64_t offset;
     PreInsert(segment, N, &offset);
 
@@ -279,12 +284,17 @@ TEST(CApiTest, SearchTest) {
     timestamps.push_back(1);
 
     CSearchResult search_result;
-    auto res = Search(segment, plan, placeholderGroup, timestamps[0], &search_result);
+    auto res = Search(segment, plan, placeholderGroup, N + ts_offset, &search_result);
     ASSERT_EQ(res.error_code, Success);
+
+    CSearchResult search_result2;
+    auto res2 = Search(segment, plan, placeholderGroup, ts_offset, &search_result2);
+    ASSERT_EQ(res2.error_code, Success);
 
     DeleteSearchPlan(plan);
     DeletePlaceholderGroup(placeholderGroup);
     DeleteSearchResult(search_result);
+    DeleteSearchResult(search_result2);
     DeleteCollection(collection);
     DeleteSegment(segment);
 }
@@ -447,6 +457,131 @@ TEST(CApiTest, MergeInto) {
     ASSERT_EQ(distance[0], 2);
     ASSERT_EQ(uids[1], 1);
     ASSERT_EQ(distance[1], 5);
+}
+
+void
+CheckSearchResultDuplicate(const std::vector<CSearchResult>& results) {
+    auto sr = (SearchResult*)results[0];
+    auto topk = sr->topk_;
+    auto num_queries = sr->num_queries_;
+
+    // fill primary keys
+    std::vector<int64_t> result_pks(num_queries * topk);
+    for (int i = 0; i < results.size(); i++) {
+        auto search_result = (SearchResult*)results[i];
+        auto size = search_result->result_offsets_.size();
+        if (size == 0) {
+            continue;
+        }
+        for (int j = 0; j < size; j++) {
+            auto offset = search_result->result_offsets_[j];
+            result_pks[offset] = search_result->primary_keys_[j];
+        }
+    }
+
+    // check primary key duplicates
+    int64_t cnt = 0;
+    std::unordered_set<int64_t> pk_set;
+    for (int qi = 0; qi < num_queries; qi++) {
+        pk_set.clear();
+        for (int k = 0; k < topk; k++) {
+            int64_t idx = topk * qi + k;
+            pk_set.insert(result_pks[idx]);
+        }
+        cnt += pk_set.size();
+    }
+    assert(cnt == topk * num_queries);
+}
+
+TEST(CApiTest, ReduceRemoveDuplicates) {
+    auto collection = NewCollection(get_default_schema_config());
+    auto segment = NewSegment(collection, 0, Growing);
+
+    int N = 10000;
+    auto [raw_data, timestamps, uids] = generate_data(N);
+    auto line_sizeof = (sizeof(int) + sizeof(float) * DIM);
+
+    int64_t offset;
+    PreInsert(segment, N, &offset);
+    auto ins_res = Insert(segment, offset, N, uids.data(), timestamps.data(), raw_data.data(), (int)line_sizeof, N);
+    assert(ins_res.error_code == Success);
+
+    const char* dsl_string = R"(
+    {
+        "bool": {
+            "vector": {
+                "fakevec": {
+                    "metric_type": "L2",
+                    "params": {
+                        "nprobe": 10
+                    },
+                    "query": "$0",
+                    "topk": 10,
+                    "round_decimal": 3
+                }
+            }
+        }
+    })";
+
+    int num_queries = 10;
+    auto blob = generate_query_data(num_queries);
+
+    void* plan = nullptr;
+    auto status = CreateSearchPlan(collection, dsl_string, &plan);
+    assert(status.error_code == Success);
+
+    void* placeholderGroup = nullptr;
+    status = ParsePlaceholderGroup(plan, blob.data(), blob.length(), &placeholderGroup);
+    assert(status.error_code == Success);
+
+    std::vector<CPlaceholderGroup> placeholderGroups;
+    placeholderGroups.push_back(placeholderGroup);
+    timestamps.clear();
+    timestamps.push_back(1);
+
+    {
+        std::vector<CSearchResult> results;
+        CSearchResult res1, res2;
+        status = Search(segment, plan, placeholderGroup, timestamps[0], &res1);
+        assert(status.error_code == Success);
+        status = Search(segment, plan, placeholderGroup, timestamps[0], &res2);
+        assert(status.error_code == Success);
+        results.push_back(res1);
+        results.push_back(res2);
+
+        status = ReduceSearchResultsAndFillData(plan, results.data(), results.size());
+        assert(status.error_code == Success);
+        CheckSearchResultDuplicate(results);
+
+        DeleteSearchResult(res1);
+        DeleteSearchResult(res2);
+    }
+    {
+        std::vector<CSearchResult> results;
+        CSearchResult res1, res2, res3;
+        status = Search(segment, plan, placeholderGroup, timestamps[0], &res1);
+        assert(status.error_code == Success);
+        status = Search(segment, plan, placeholderGroup, timestamps[0], &res2);
+        assert(status.error_code == Success);
+        status = Search(segment, plan, placeholderGroup, timestamps[0], &res3);
+        assert(status.error_code == Success);
+        results.push_back(res1);
+        results.push_back(res2);
+        results.push_back(res3);
+
+        status = ReduceSearchResultsAndFillData(plan, results.data(), results.size());
+        assert(status.error_code == Success);
+        CheckSearchResultDuplicate(results);
+
+        DeleteSearchResult(res1);
+        DeleteSearchResult(res2);
+        DeleteSearchResult(res3);
+    }
+
+    DeleteSearchPlan(plan);
+    DeletePlaceholderGroup(placeholderGroup);
+    DeleteCollection(collection);
+    DeleteSegment(segment);
 }
 
 TEST(CApiTest, Reduce) {
@@ -2484,6 +2619,99 @@ TEST(CApiTest, SealedSegment_search_float_Predicate_Range) {
     DeleteSearchPlan(plan);
     DeletePlaceholderGroup(placeholderGroup);
     DeleteSearchResult(c_search_result_on_bigIndex);
+    DeleteCollection(collection);
+    DeleteSegment(segment);
+}
+
+TEST(CApiTest, SealedSegment_search_without_predicates) {
+    constexpr auto TOPK = 5;
+    std::string schema_string = generate_collection_schema("L2", DIM, false);
+    auto collection = NewCollection(schema_string.c_str());
+    auto schema = ((segcore::Collection*)collection)->get_schema();
+    auto segment = NewSegment(collection, 0, Sealed);
+
+    auto N = ROW_COUNT;
+    uint64_t ts_offset = 1000;
+    auto dataset = DataGen(schema, N, ts_offset);
+    auto vec_col = dataset.get_col<float>(0);
+    auto counter_col = dataset.get_col<int64_t>(1);
+    auto query_ptr = vec_col.data() + 42000 * DIM;
+
+    const char* dsl_string = R"(
+    {
+         "bool": {
+             "vector": {
+                 "fakevec": {
+                     "metric_type": "L2",
+                     "params": {
+                         "nprobe": 10
+                     },
+                     "query": "$0",
+                     "topk": 5,
+                     "round_decimal": -1
+                 }
+             }
+         }
+    })";
+
+    auto c_vec_field_data = CLoadFieldDataInfo{
+        100,
+        vec_col.data(),
+        N,
+    };
+    auto status = LoadFieldData(segment, c_vec_field_data);
+    assert(status.error_code == Success);
+
+    auto c_counter_field_data = CLoadFieldDataInfo{
+        101,
+        counter_col.data(),
+        N,
+    };
+    status = LoadFieldData(segment, c_counter_field_data);
+    assert(status.error_code == Success);
+
+    auto c_id_field_data = CLoadFieldDataInfo{
+        0,
+        counter_col.data(),
+        N,
+    };
+    status = LoadFieldData(segment, c_id_field_data);
+    assert(status.error_code == Success);
+
+    auto c_ts_field_data = CLoadFieldDataInfo{
+        1,
+        counter_col.data(),
+        N,
+    };
+    status = LoadFieldData(segment, c_ts_field_data);
+    assert(status.error_code == Success);
+
+    int num_queries = 10;
+    auto blob = generate_query_data(num_queries);
+
+    void* plan = nullptr;
+    status = CreateSearchPlan(collection, dsl_string, &plan);
+    ASSERT_EQ(status.error_code, Success);
+
+    void* placeholderGroup = nullptr;
+    status = ParsePlaceholderGroup(plan, blob.data(), blob.length(), &placeholderGroup);
+    ASSERT_EQ(status.error_code, Success);
+
+    std::vector<CPlaceholderGroup> placeholderGroups;
+    placeholderGroups.push_back(placeholderGroup);
+    CSearchResult search_result;
+    auto res = Search(segment, plan, placeholderGroup, N + ts_offset, &search_result);
+    std::cout << res.error_msg << std::endl;
+    ASSERT_EQ(res.error_code, Success);
+
+    CSearchResult search_result2;
+    auto res2 = Search(segment, plan, placeholderGroup, ts_offset, &search_result);
+    ASSERT_EQ(res2.error_code, Success);
+
+    DeleteSearchPlan(plan);
+    DeletePlaceholderGroup(placeholderGroup);
+    DeleteSearchResult(search_result);
+    DeleteSearchResult(search_result2);
     DeleteCollection(collection);
     DeleteSegment(segment);
 }

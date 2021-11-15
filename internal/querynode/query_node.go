@@ -27,11 +27,16 @@ import "C"
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
+	"github.com/golang/protobuf/proto"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/kv"
@@ -39,25 +44,20 @@ import (
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
-type Base interface {
-	types.QueryNode
-
-	UpdateStateCode(code internalpb.StateCode)
-	SetRootCoord(rc types.RootCoord) error
-	SetIndexCoord(index types.IndexCoord) error
-}
+const changeInfoMetaPrefix = "queryCoord-sealedSegmentChangeInfo"
 
 // make sure QueryNode implements types.QueryNode
 var _ types.QueryNode = (*QueryNode)(nil)
 
-// make sure QueryNode implements Base
-var _ Base = (*QueryNode)(nil)
+// make sure QueryNode implements types.QueryNodeComponent
+var _ types.QueryNodeComponent = (*QueryNode)(nil)
 
 // QueryNode communicates with outside services and union all
 // services in querynode package.
@@ -74,8 +74,6 @@ type QueryNode struct {
 
 	//call once
 	initOnce sync.Once
-	// liveness channel with etcd
-	liveCh <-chan bool
 
 	// internal components
 	historical *historical
@@ -117,7 +115,15 @@ func NewQueryNode(ctx context.Context, factory msgstream.Factory) *QueryNode {
 func (node *QueryNode) Register() error {
 	log.Debug("query node session info", zap.String("metaPath", Params.MetaRootPath), zap.Strings("etcdEndPoints", Params.EtcdEndpoints))
 	node.session = sessionutil.NewSession(node.queryNodeLoopCtx, Params.MetaRootPath, Params.EtcdEndpoints)
-	node.liveCh = node.session.Init(typeutil.QueryNodeRole, Params.QueryNodeIP+":"+strconv.FormatInt(Params.QueryNodePort, 10), false)
+	node.session.Init(typeutil.QueryNodeRole, Params.QueryNodeIP+":"+strconv.FormatInt(Params.QueryNodePort, 10), false)
+	// start liveness check
+	go node.session.LivenessCheck(node.queryNodeLoopCtx, func() {
+		log.Error("Query Node disconnected from etcd, process will exit", zap.Int64("Server Id", node.session.ServerID))
+		if err := node.Stop(); err != nil {
+			log.Fatal("failed to stop server", zap.Error(err))
+		}
+	})
+
 	Params.QueryNodeID = node.session.ServerID
 	Params.SetLogger(Params.QueryNodeID)
 	log.Debug("query nodeID", zap.Int64("nodeID", Params.QueryNodeID))
@@ -145,6 +151,7 @@ func (node *QueryNode) InitSegcore() {
 	C.free(unsafe.Pointer(cSimdType))
 }
 
+// Init function init historical and streaming module to manage segments
 func (node *QueryNode) Init() error {
 	var initError error = nil
 	node.initOnce.Do(func() {
@@ -177,7 +184,7 @@ func (node *QueryNode) Init() error {
 			node.indexCoord,
 			node.msFactory,
 			node.etcdKV)
-		node.streaming = newStreaming(node.queryNodeLoopCtx, node.msFactory, node.etcdKV)
+		node.streaming = newStreaming(node.queryNodeLoopCtx, node.msFactory, node.etcdKV, node.historical.replica)
 
 		node.InitSegcore()
 
@@ -193,6 +200,7 @@ func (node *QueryNode) Init() error {
 	return initError
 }
 
+// Start mainly start QueryNode's query service.
 func (node *QueryNode) Start() error {
 	var err error
 	m := map[string]interface{}{
@@ -216,16 +224,16 @@ func (node *QueryNode) Start() error {
 
 	// start services
 	go node.historical.start()
+	go node.watchChangeInfo()
 
-	// start liveness check
-	go node.session.LivenessCheck(node.queryNodeLoopCtx, node.liveCh, func() {
-		node.Stop()
-	})
+	Params.CreatedTime = time.Now()
+	Params.UpdatedTime = time.Now()
 
 	node.UpdateStateCode(internalpb.StateCode_Healthy)
 	return nil
 }
 
+// Stop mainly stop QueryNode's query service, historical loop and streaming loop.
 func (node *QueryNode) Stop() error {
 	node.UpdateStateCode(internalpb.StateCode_Abnormal)
 	node.queryNodeLoopCancel()
@@ -243,10 +251,12 @@ func (node *QueryNode) Stop() error {
 	return nil
 }
 
+// UpdateStateCode updata the state of query node, which can be initializing, healthy, and abnormal
 func (node *QueryNode) UpdateStateCode(code internalpb.StateCode) {
 	node.stateCode.Store(code)
 }
 
+// SetRootCoord assigns parameter rc to its member rootCoord.
 func (node *QueryNode) SetRootCoord(rc types.RootCoord) error {
 	if rc == nil {
 		return errors.New("null root coordinator interface")
@@ -255,10 +265,140 @@ func (node *QueryNode) SetRootCoord(rc types.RootCoord) error {
 	return nil
 }
 
+// SetIndexCoord assigns parameter index to its member indexCoord.
 func (node *QueryNode) SetIndexCoord(index types.IndexCoord) error {
 	if index == nil {
 		return errors.New("null index coordinator interface")
 	}
 	node.indexCoord = index
+	return nil
+}
+
+func (node *QueryNode) watchChangeInfo() {
+	log.Debug("query node watchChangeInfo start")
+	watchChan := node.etcdKV.WatchWithPrefix(changeInfoMetaPrefix)
+
+	for {
+		select {
+		case <-node.queryNodeLoopCtx.Done():
+			log.Debug("query node watchChangeInfo close")
+			return
+		case resp := <-watchChan:
+			for _, event := range resp.Events {
+				switch event.Type {
+				case mvccpb.PUT:
+					infoID, err := strconv.ParseInt(filepath.Base(string(event.Kv.Key)), 10, 64)
+					if err != nil {
+						log.Warn("Parse SealedSegmentsChangeInfo id failed", zap.Any("error", err.Error()))
+						continue
+					}
+					log.Debug("get SealedSegmentsChangeInfo from etcd",
+						zap.Any("infoID", infoID),
+					)
+					info := &querypb.SealedSegmentsChangeInfo{}
+					err = proto.Unmarshal(event.Kv.Value, info)
+					if err != nil {
+						log.Warn("Unmarshal SealedSegmentsChangeInfo failed", zap.Any("error", err.Error()))
+						continue
+					}
+					go func() {
+						err = node.adjustByChangeInfo(info)
+						if err != nil {
+							log.Warn("adjustByChangeInfo failed", zap.Any("error", err.Error()))
+						}
+					}()
+				default:
+					// do nothing
+				}
+			}
+		}
+	}
+}
+
+func (node *QueryNode) waitChangeInfo(segmentChangeInfos *querypb.SealedSegmentsChangeInfo) error {
+	fn := func() error {
+		for _, info := range segmentChangeInfos.Infos {
+			canDoLoadBalance := true
+			// Check online segments:
+			for _, segmentInfo := range info.OnlineSegments {
+				if node.queryService.hasQueryCollection(segmentInfo.CollectionID) {
+					qc, err := node.queryService.getQueryCollection(segmentInfo.CollectionID)
+					if err != nil {
+						canDoLoadBalance = false
+						break
+					}
+					if info.OnlineNodeID == Params.QueryNodeID && !qc.globalSegmentManager.hasGlobalSegment(segmentInfo.SegmentID) {
+						canDoLoadBalance = false
+						break
+					}
+				}
+			}
+			// Check offline segments:
+			for _, segmentInfo := range info.OfflineSegments {
+				if node.queryService.hasQueryCollection(segmentInfo.CollectionID) {
+					qc, err := node.queryService.getQueryCollection(segmentInfo.CollectionID)
+					if err != nil {
+						canDoLoadBalance = false
+						break
+					}
+					if info.OfflineNodeID == Params.QueryNodeID && qc.globalSegmentManager.hasGlobalSegment(segmentInfo.SegmentID) {
+						canDoLoadBalance = false
+						break
+					}
+				}
+			}
+			if canDoLoadBalance {
+				return nil
+			}
+			return errors.New(fmt.Sprintln("waitChangeInfo failed, infoID = ", segmentChangeInfos.Base.GetMsgID()))
+		}
+
+		return nil
+	}
+
+	return retry.Do(context.TODO(), fn, retry.Attempts(10))
+}
+
+func (node *QueryNode) adjustByChangeInfo(segmentChangeInfos *querypb.SealedSegmentsChangeInfo) error {
+	err := node.waitChangeInfo(segmentChangeInfos)
+	if err != nil {
+		log.Error("waitChangeInfo failed", zap.Any("error", err.Error()))
+		return err
+	}
+
+	node.streaming.replica.queryLock()
+	node.historical.replica.queryLock()
+	defer node.streaming.replica.queryUnlock()
+	defer node.historical.replica.queryUnlock()
+	for _, info := range segmentChangeInfos.Infos {
+		// For online segments:
+		for _, segmentInfo := range info.OnlineSegments {
+			// delete growing segment because these segments are loaded in historical.
+			hasGrowingSegment := node.streaming.replica.hasSegment(segmentInfo.SegmentID)
+			if hasGrowingSegment {
+				err := node.streaming.replica.removeSegment(segmentInfo.SegmentID)
+				if err != nil {
+
+					return err
+				}
+				log.Debug("remove growing segment in adjustByChangeInfo",
+					zap.Any("collectionID", segmentInfo.CollectionID),
+					zap.Any("segmentID", segmentInfo.SegmentID),
+					zap.Any("infoID", segmentChangeInfos.Base.GetMsgID()),
+				)
+			}
+		}
+
+		// For offline segments:
+		for _, segment := range info.OfflineSegments {
+			// load balance or compaction, remove old sealed segments.
+			if info.OfflineNodeID == Params.QueryNodeID {
+				err := node.historical.replica.removeSegment(segment.SegmentID)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return nil
 }

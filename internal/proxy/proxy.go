@@ -37,7 +37,10 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+// UniqueID is alias of typeutil.UniqueID
 type UniqueID = typeutil.UniqueID
+
+// Timestamp is alias of typeutil.Timestamp
 type Timestamp = typeutil.Timestamp
 
 const sendTimeTickMsgInterval = 200 * time.Millisecond
@@ -69,7 +72,7 @@ type Proxy struct {
 	chTicker channelsTimeTicker
 
 	idAllocator  *allocator.IDAllocator
-	tsoAllocator *TimestampAllocator
+	tsoAllocator *timestampAllocator
 	segAssigner  *segIDAssigner
 
 	metricsCacheManager *metricsinfo.MetricsCacheManager
@@ -105,11 +108,18 @@ func (node *Proxy) Register() error {
 	Params.ProxyID = node.session.ServerID
 	Params.SetLogger(Params.ProxyID)
 	Params.initProxySubName()
+	go node.session.LivenessCheck(node.ctx, func() {
+		log.Error("Proxy disconnected from etcd, process will exit", zap.Int64("Server Id", node.session.ServerID))
+		if err := node.Stop(); err != nil {
+			log.Fatal("failed to stop server", zap.Error(err))
+		}
+	})
 	// TODO Reset the logger
 	//Params.initLogCfg()
 	return nil
 }
 
+// Init initialize proxy.
 func (node *Proxy) Init() error {
 	// wait for datacoord state changed to Healthy
 	if node.dataCoord != nil {
@@ -180,7 +190,7 @@ func (node *Proxy) Init() error {
 
 	node.idAllocator = idAllocator
 
-	tsoAllocator, err := NewTimestampAllocator(node.ctx, node.rootCoord, Params.ProxyID)
+	tsoAllocator, err := newTimestampAllocator(node.ctx, node.rootCoord, Params.ProxyID)
 	if err != nil {
 		return err
 	}
@@ -210,6 +220,7 @@ func (node *Proxy) Init() error {
 	return nil
 }
 
+// sendChannelsTimeTickLoop starts a goroutine that synchronize the time tick information.
 func (node *Proxy) sendChannelsTimeTickLoop() {
 	node.wg.Add(1)
 	go func() {
@@ -281,6 +292,7 @@ func (node *Proxy) sendChannelsTimeTickLoop() {
 	}()
 }
 
+// Start starts a proxy node.
 func (node *Proxy) Start() error {
 	err := InitMetaCache(node.rootCoord)
 	if err != nil {
@@ -316,12 +328,16 @@ func (node *Proxy) Start() error {
 		cb()
 	}
 
+	Params.CreatedTime = time.Now()
+	Params.UpdatedTime = time.Now()
+
 	node.UpdateStateCode(internalpb.StateCode_Healthy)
 	log.Debug("Proxy", zap.Any("State", node.stateCode.Load()))
 
 	return nil
 }
 
+// Stop stops a proxy node.
 func (node *Proxy) Stop() error {
 	node.cancel()
 
@@ -364,6 +380,7 @@ func (node *Proxy) AddCloseCallback(callbacks ...func()) {
 	node.closeCallbacks = append(node.closeCallbacks, callbacks...)
 }
 
+// SetRootCoordClient set rootcoord client for proxy.
 func (node *Proxy) SetRootCoordClient(cli types.RootCoord) {
 	node.rootCoord = cli
 }

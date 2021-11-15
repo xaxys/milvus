@@ -251,6 +251,39 @@ class TestQueryParams(TestcaseBase):
         self.collection_wrap.query(term_expr, output_fields=["*"],
                                    check_task=CheckTasks.check_query_results, check_items={exp_res: res})
 
+    @pytest.fixture(scope="function", params=cf.gen_normal_expressions())
+    def get_normal_expr(self, request):
+        if request.param == "":
+            pytest.skip("query with "" expr is invalid")
+        yield request.param
+
+    @pytest.mark.tags(CaseLabel.L2)
+    def test_query_with_expression(self, get_normal_expr):
+        """
+        target: test query with different expr
+        method: query with different boolean expr
+        expected: verify query result
+        """
+        # 1. initialize with data
+        nb = 1000
+        collection_w, _vectors, _, insert_ids = self.init_collection_general(prefix, True, nb)[0:4]
+
+        # filter result with expression in collection
+        _vectors = _vectors[0]
+        expr = get_normal_expr
+        expression = expr.replace("&&", "and").replace("||", "or")
+        filter_ids = []
+        for i, _id in enumerate(insert_ids):
+            int64 = _vectors.int64[i]
+            float = _vectors.float[i]
+            if not expression or eval(expression):
+                filter_ids.append(_id)
+
+        # query and verify result
+        res = collection_w.query(expr=expression)[0]
+        query_ids = set(map(lambda x: x[ct.default_int64_field_name], res))
+        assert query_ids == set(filter_ids)
+
     @pytest.mark.tags(CaseLabel.L1)
     def test_query_expr_wrong_term_keyword(self):
         """
@@ -903,7 +936,9 @@ class TestQueryOperation(TestcaseBase):
     def test_query_after_index(self):
         """
         target: test query after creating index
-        method: query after index
+        method: 1. indexing
+                2. load
+                3. query
         expected: query result is correct
         """
         collection_w, vectors, binary_raw_vectors = self.init_collection_general(prefix, insert_data=True)[0:3]
@@ -922,14 +957,15 @@ class TestQueryOperation(TestcaseBase):
     def test_query_after_search(self):
         """
         target: test query after search
-        method: query after search
+        method: 1. search
+                2. query without load again
         expected: query result is correct
         """
 
         limit = 1000
         nb_old = 500
         collection_w, vectors, binary_raw_vectors, insert_ids = \
-            self.init_collection_general(prefix, True, nb_old)
+            self.init_collection_general(prefix, True, nb_old)[0:4]
 
         # 2. search for original data after load
         vectors_s = [[random.random() for _ in range(ct.default_dim)] for _ in range(ct.default_nq)]
@@ -1059,6 +1095,29 @@ class TestQueryOperation(TestcaseBase):
         res, _ = collection_w.query(term_expr, partition_names=[ct.default_partition_name, partition_w.name])
         assert len(res) == 1
         assert res[0][ct.default_int64_field_name] == half
+
+    @pytest.mark.tags(CaseLabel.L1)
+    def test_query_growing_segment_data(self):
+        """
+        target: test query data in the growing segment
+        method: 1. create collection
+                2.load collection
+                3.insert without flush
+                4.query
+        expected: Data can be queried
+        """
+        import time
+        collection_w = self.init_collection_wrap(name=cf.gen_unique_str(prefix))
+        # load collection
+        collection_w.load()
+        tmp_nb = 100
+        df = cf.gen_default_dataframe_data(tmp_nb)
+        collection_w.insert(df)
+
+        res = df.iloc[1:2, :1].to_dict('records')
+        time.sleep(1)
+        collection_w.query(f'{ct.default_int64_field_name} in [1]',
+                           check_task=CheckTasks.check_query_results, check_items={exp_res: res})
 
     """
     ******************************************************************
@@ -1204,5 +1263,3 @@ class TestQueryBase:
             if res[index][default_int_field_name] == entities[0]["values"][index]:
                 assert res[index][default_float_field_name] == entities[1]["values"][index]
                 ut.assert_equal_vector(res[index][ut.default_float_vec_field_name], entities[2]["values"][index])
-
-

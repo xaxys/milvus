@@ -94,7 +94,6 @@ func (queue *baseTaskQueue) FrontUnissuedTask() task {
 	defer queue.utLock.RUnlock()
 
 	if queue.unissuedTasks.Len() <= 0 {
-		log.Warn("sorry, but the unissued task list is empty!")
 		return nil
 	}
 
@@ -106,7 +105,6 @@ func (queue *baseTaskQueue) PopUnissuedTask() task {
 	defer queue.utLock.Unlock()
 
 	if queue.unissuedTasks.Len() <= 0 {
-		log.Warn("sorry, but the unissued task list is empty!")
 		return nil
 	}
 
@@ -425,6 +423,7 @@ func (sched *taskScheduler) processTask(t task, q taskQueue) {
 			"ID":   t.ID(),
 		})
 	defer span.Finish()
+	traceID, _, _ := trace.InfoFromSpan(span)
 
 	span.LogFields(oplog.Int64("scheduler process AddActiveTask", t.ID()))
 	q.AddActiveTask(t)
@@ -442,6 +441,8 @@ func (sched *taskScheduler) processTask(t task, q taskQueue) {
 	}()
 	if err != nil {
 		trace.LogError(span, err)
+		log.Error("Failed to pre-execute task: "+err.Error(),
+			zap.String("traceID", traceID))
 		return
 	}
 
@@ -449,11 +450,20 @@ func (sched *taskScheduler) processTask(t task, q taskQueue) {
 	err = t.Execute(ctx)
 	if err != nil {
 		trace.LogError(span, err)
+		log.Error("Failed to execute task: "+err.Error(),
+			zap.String("traceID", traceID))
 		return
 	}
 
 	span.LogFields(oplog.Int64("scheduler process PostExecute", t.ID()))
 	err = t.PostExecute(ctx)
+
+	if err != nil {
+		trace.LogError(span, err)
+		log.Error("Failed to post-execute task: "+err.Error(),
+			zap.String("traceID", traceID))
+		return
+	}
 }
 
 func (sched *taskScheduler) definitionLoop() {

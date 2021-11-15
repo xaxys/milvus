@@ -43,15 +43,20 @@ const (
 // Address.
 // Exclusive indicates that this server can only start one.
 type Session struct {
-	ctx        context.Context
+	ctx context.Context
+	// When outside context done, Session cancels its goroutines first, then uses
+	// keepAliceCancel to cancel the etcd KeepAlive
+	keepAliveCancel context.CancelFunc
+
 	ServerID   int64  `json:"ServerID,omitempty"`
 	ServerName string `json:"ServerName,omitempty"`
 	Address    string `json:"Address,omitempty"`
 	Exclusive  bool   `json:"Exclusive,omitempty"`
 
-	etcdCli  *clientv3.Client
-	leaseID  clientv3.LeaseID
-	cancel   context.CancelFunc
+	liveCh  <-chan bool
+	etcdCli *clientv3.Client
+	leaseID clientv3.LeaseID
+
 	metaRoot string
 }
 
@@ -60,10 +65,8 @@ type Session struct {
 // metaRoot is a path in etcd to save session information.
 // etcdEndpoints is to init etcdCli when NewSession
 func NewSession(ctx context.Context, metaRoot string, etcdEndpoints []string) *Session {
-	ctx, cancel := context.WithCancel(ctx)
 	session := &Session{
 		ctx:      ctx,
-		cancel:   cancel,
 		metaRoot: metaRoot,
 	}
 
@@ -94,7 +97,7 @@ func NewSession(ctx context.Context, metaRoot string, etcdEndpoints []string) *S
 // Init will initialize base struct of the Session, including ServerName, ServerID,
 // Address, Exclusive. ServerID is obtained in getServerID.
 // Finally it will process keepAliveResponse to keep alive with etcd.
-func (s *Session) Init(serverName, address string, exclusive bool) <-chan bool {
+func (s *Session) Init(serverName, address string, exclusive bool) {
 	s.ServerName = serverName
 	s.Address = address
 	s.Exclusive = exclusive
@@ -108,7 +111,7 @@ func (s *Session) Init(serverName, address string, exclusive bool) <-chan bool {
 	if err != nil {
 		panic(err)
 	}
-	return s.processKeepAliveResponse(ch)
+	s.liveCh = s.processKeepAliveResponse(ch)
 }
 
 func (s *Session) getServerID() (int64, error) {
@@ -213,7 +216,9 @@ func (s *Session) registerService() (<-chan *clientv3.LeaseKeepAliveResponse, er
 			return fmt.Errorf("function CompareAndSwap error for compare is false for key: %s", key)
 		}
 
-		ch, err = s.etcdCli.KeepAlive(s.ctx, resp.ID)
+		keepAliveCtx, keepAliveCancel := context.WithCancel(context.Background())
+		s.keepAliveCancel = keepAliveCancel
+		ch, err = s.etcdCli.KeepAlive(keepAliveCtx, resp.ID)
 		if err != nil {
 			fmt.Printf("keep alive error %s\n", err)
 			return err
@@ -236,16 +241,19 @@ func (s *Session) processKeepAliveResponse(ch <-chan *clientv3.LeaseKeepAliveRes
 		for {
 			select {
 			case <-s.ctx.Done():
-				log.Error("keep alive", zap.Error(errors.New("context done")))
+				log.Warn("keep alive", zap.Error(errors.New("context done")))
+				if s.keepAliveCancel != nil {
+					s.keepAliveCancel()
+				}
 				return
 			case resp, ok := <-ch:
 				if !ok {
-					log.Debug("session keepalive channel closed")
+					log.Warn("session keepalive channel closed")
 					close(failCh)
 					return
 				}
 				if resp == nil {
-					log.Debug("session keepalive response failed")
+					log.Warn("session keepalive response failed")
 					close(failCh)
 					return
 				}
@@ -308,6 +316,12 @@ func (s *Session) WatchServices(prefix string, revision int64) (eventChannel <-c
 				if !ok {
 					return
 				}
+				if wresp.Err() != nil {
+					//close event channel
+					log.Warn("Watch service found error", zap.Error(wresp.Err()))
+					close(eventCh)
+					return
+				}
 				for _, ev := range wresp.Events {
 					session := &Session{}
 					var eventType SessionEventType
@@ -348,10 +362,10 @@ func (s *Session) WatchServices(prefix string, revision int64) (eventChannel <-c
 // ctx controls the liveness check loop
 // ch is the liveness signal channel, ch is closed only when the session is expired
 // callback is the function to call when ch is closed, note that callback will not be invoked when loop exits due to context
-func (s *Session) LivenessCheck(ctx context.Context, ch <-chan bool, callback func()) {
+func (s *Session) LivenessCheck(ctx context.Context, callback func()) {
 	for {
 		select {
-		case _, ok := <-ch:
+		case _, ok := <-s.liveCh:
 			// ok, still alive
 			if ok {
 				continue
@@ -364,6 +378,10 @@ func (s *Session) LivenessCheck(ctx context.Context, ch <-chan bool, callback fu
 			return
 		case <-ctx.Done():
 			log.Debug("liveness exits due to context done")
+			// cancel the etcd keepAlive context
+			if s.keepAliveCancel != nil {
+				s.keepAliveCancel()
+			}
 			return
 		}
 	}

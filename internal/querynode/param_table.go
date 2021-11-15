@@ -16,13 +16,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 )
 
+// ParamTable is used to record configuration items.
 type ParamTable struct {
 	paramtable.BaseTable
 
@@ -35,7 +38,9 @@ type ParamTable struct {
 	QueryNodeIP   string
 	QueryNodePort int64
 	QueryNodeID   UniqueID
-	CacheSize     int64
+	// TODO: remove cacheSize
+	CacheSize   int64 // deprecated
+	InContainer bool
 
 	// channel prefix
 	ClusterChannelPrefix     string
@@ -76,31 +81,36 @@ type ParamTable struct {
 	// segcore
 	ChunkRows int64
 	SimdType  string
+
+	CreatedTime time.Time
+	UpdatedTime time.Time
 }
 
+// Params is a package scoped variable of type ParamTable.
 var Params ParamTable
 var once sync.Once
 
+// InitAlias initializes an alias for the QueryNode role.
 func (p *ParamTable) InitAlias(alias string) {
 	p.Alias = alias
 }
 
+// InitOnce is used to initialize configuration items, and it will only be called once.
 func (p *ParamTable) InitOnce() {
 	once.Do(func() {
 		p.Init()
 	})
 }
 
+// Init is used to initialize configuration items.
 func (p *ParamTable) Init() {
 	p.BaseTable.Init()
 	if err := p.LoadYaml("advanced/query_node.yaml"); err != nil {
 		panic(err)
 	}
-	if err := p.LoadYaml("advanced/knowhere.yaml"); err != nil {
-		panic(err)
-	}
 
 	p.initCacheSize()
+	p.initInContainer()
 
 	p.initMinioEndPoint()
 	p.initMinioAccessKeyID()
@@ -155,6 +165,15 @@ func (p *ParamTable) initCacheSize() {
 		return
 	}
 	p.CacheSize = value
+}
+
+func (p *ParamTable) initInContainer() {
+	var err error
+	p.InContainer, err = metricsinfo.InContainer()
+	if err != nil {
+		panic(err)
+	}
+	log.Debug("init InContainer", zap.Any("is query node running inside a container? :", p.InContainer))
 }
 
 // ---------------------------------------------------------- minio
@@ -313,11 +332,9 @@ func (p *ParamTable) initSegcoreChunkRows() {
 }
 
 func (p *ParamTable) initKnowhereSimdType() {
-	simdType, err := p.LoadWithDefault("knowhere.simdType", "auto")
-	if err != nil {
-		panic(err)
-	}
+	simdType := p.LoadWithDefault("knowhere.simdType", "auto")
 	p.SimdType = simdType
+	log.Debug("initialize the knowhere simd type", zap.String("simd_type", p.SimdType))
 }
 
 func (p *ParamTable) initRoleName() {

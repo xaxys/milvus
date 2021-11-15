@@ -121,6 +121,8 @@ type MilvusService interface {
 
 	GetQuerySegmentInfo(ctx context.Context, req *milvuspb.QuerySegmentInfoRequest) (*milvuspb.QuerySegmentInfoResponse, error)
 	GetPersistentSegmentInfo(ctx context.Context, req *milvuspb.PersistentSegmentInfoRequest) (*milvuspb.PersistentSegmentInfoResponse, error)
+  GetQuerySegmentInfo(ctx context.Context, in *GetQuerySegmentInfoRequest, opts ...grpc.CallOption) (*GetQuerySegmentInfoResponse, error)
+
 }
 }
 ```
@@ -488,7 +490,7 @@ type baseTaskQueue struct {
 }
 ```
 
-_AddUnissuedTask(task \*task)_ will put a new task into _unissuedTasks_, while maintaining the list by timestamp order.
+_AddUnissuedTask(task \*task)_ will push a new task into _unissuedTasks_, while maintaining the list by timestamp order.
 
 _TaskDoneTest(ts Timestamp)_ will check both _unissuedTasks_ and _unissuedTasks_. If no task found before _ts_, then the function returns _true_, indicates that all the tasks before _ts_ are completed.
 
@@ -504,7 +506,7 @@ func (queue *ddTaskQueue) Enqueue(task *task) error
 func newDdTaskQueue() *ddTaskQueue
 ```
 
-Data definition tasks (i.e. _CreateCollectionTask_) will be put into _DdTaskQueue_. If a task is enqueued, _Enqueue(task \*task)_ will set _Ts_, _ReqId_, _ProxyId_, then push it into _queue_. The timestamps of the enqueued tasks should be strictly monotonically increasing. As _Enqueue(task \*task)_ will be called in parallel, setting timestamp and queue insertion need to be done atomically.
+Data definition tasks (i.e. _CreateCollectionTask_) will be pushed into _DdTaskQueue_. If a task is enqueued, _Enqueue(task \*task)_ will set _Ts_, _ReqId_, _ProxyId_, then push it into _queue_. The timestamps of the enqueued tasks should be strictly monotonically increasing. As _Enqueue(task \*task)_ will be called in parallel, setting timestamp and queue insertion need to be done atomically.
 
 - Data Manipulation Task Queue
 
@@ -517,7 +519,7 @@ func (queue *dmTaskQueue) Enqueue(task *task) error
 func newDmTaskQueue() *dmTaskQueue
 ```
 
-Insert tasks and delete tasks will be put into _DmTaskQueue_.
+Insert tasks and delete tasks will be pushed into _DmTaskQueue_.
 
 If a _insertTask_ is enqueued, _Enqueue(task \*task)_ will set _Ts_, _ReqId_, _ProxyId_, _SegIdAssigner_, _RowIdAllocator_, then push it into _queue_. The _SegIdAssigner_ and _RowIdAllocator_ will later be used in the task's execution phase.
 
@@ -532,7 +534,7 @@ func (queue *dqTaskQueue) Enqueue(task *task) error
 func newDqTaskQueue() *dqTaskQueue
 ```
 
-Queries will be put into _DqTaskQueue_.
+Queries will be pushed into _DqTaskQueue_.
 
 - Task Scheduler
 
@@ -624,7 +626,7 @@ func (tt *timeTick) synchronize() error
 func newTimeTick(ctx context.Context, tickStep Timestamp, syncInterval Timestamp, tsAllocator *TimestampAllocator, scheduler *taskScheduler, ttStream *MessageStream) *timeTick
 ```
 
-_Start()_ will enter a loop. On each _tickStep_, it tries to send a _TIME_TICK_ typed _TsMsg_ into _ttStream_. After each _syncInterval_, it sychronizes its _wallTick_ with _tsAllocator_ by calling _synchronize()_. When _currentTick + tickStep < wallTick_ holds, it will update _currentTick_ with _wallTick_ on next tick. Otherwise, it will update _currentTick_ with _currentTick + tickStep_.
+_Start()_ will enter a loop. On each _tickStep_, it tries to send a _TIME_TICK_ typed _TsMsg_ into _ttStream_. After each _syncInterval_, it synchronizes its _wallTick_ with _tsAllocator_ by calling _synchronize()_. When _currentTick + tickStep < wallTick_ holds, it will update _currentTick_ with _wallTick_ on next tick. Otherwise, it will update _currentTick_ with _currentTick + tickStep_.
 
 - Statistics
 

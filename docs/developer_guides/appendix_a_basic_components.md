@@ -2,7 +2,7 @@
 
 #### A.1 System Component
 
-Milvus has 9 different components and can be abstracted into basic Component.
+Milvus has 9 different components and can be abstracted into basic Components.
 
 ```go
 type Component interface {
@@ -42,7 +42,7 @@ type ComponentStates struct {
 
 ```
 
-If a component needs to process timetick message to align timetick, it needs to implement TimeTickProvider interface.
+If a component needs to process timetick message to align timetick, it needs to implement the TimeTickProvider interface.
 
 ```go
 type TimeTickProvider interface {
@@ -125,10 +125,10 @@ func (s *Session) GetSessions(prefix string) (map[string]*Session, int64, error)
 // eventChannel.
 // prefix is a parameter to know which service to watch and can be obtained in
 // typeutil.type.go.
-// revision is a etcd reversion to prevent missing key events and can be obtained
+// revision is an etcd reversion to prevent missing key events and can be obtained
 // in GetSessions.
-// If a server up, a event will be add to channel with eventType SessionAddType.
-// If a server down, a event will be add to channel with eventType SessionDelType.
+// If a server up, an event will be added to channel with eventType SessionAddType.
+// If a server down, an event will be added to channel with eventType SessionDelType.
 func (s *Session) WatchServices(prefix string, revision int64) (eventChannel <-chan *SessionEvent) {}
 
 
@@ -308,7 +308,7 @@ func NewIDAllocator(ctx context.Context, masterAddr string) (*IDAllocator, error
 
 ###### A.6.1 Timestamp
 
-Let's take a brief review of Hybrid Logical Clock (HLC). HLC uses 64bits timestamps which are composed of a 46-bits physical component (thought of as and always close to local wall time) and an 18-bits logical component (used to distinguish between events with the same physical component).
+Let's take a brief review of the Hybrid Logical Clock (HLC). HLC uses 64bits timestamps which are composed of a 46-bits physical component (thought of as and always close to local wall time) and an 18-bits logical component (used to distinguish between events with the same physical component).
 
 <img src="./figs/hlc.png" width=400>
 
@@ -320,7 +320,7 @@ B. or the logical part overflows.
 
 In either case, the physical part will be updated, and the logical part will be set to 0.
 
-Keep the physical part close to local wall time may face non-monotonic problems such as updates to POSIX time that could turn time backward. HLC avoids such problems, since if 'local wall time < HLC's physical part' holds, only case B is satisfied, thus monotonicity is guaranteed.
+Keeping the physical part close to local wall time may face non-monotonic problems such as updates to POSIX time that could turn time backward. HLC avoids such problems, since if 'local wall time < HLC's physical part' holds, only case B is satisfied, thus monotonicity is guaranteed.
 
 Milvus does not support transaction, but it should guarantee the deterministic execution of the multi-way WAL. The timestamp attached to each request should
 
@@ -472,6 +472,7 @@ func (kv *EtcdKV) MultiRemove(keys []string) error
 func (kv *EtcdKV) MultiSaveAndRemove(saves map[string]string, removals []string) error
 func (kv *EtcdKV) Watch(key string) clientv3.WatchChan
 func (kv *EtcdKV) WatchWithPrefix(key string) clientv3.WatchChan
+func (kv *EtcdKV) WatchWithRevision(key string, revision int64) clientv3.WatchChan
 
 func NewEtcdKV(etcdAddr string, rootPath string) *EtcdKV
 ```

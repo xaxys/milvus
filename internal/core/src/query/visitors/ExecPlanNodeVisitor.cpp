@@ -142,7 +142,9 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
         view = BitsetView(data, bitset.length());
     }
 
-    segment->vector_search(active_count, node.search_info_, src_data, num_queries, MAX_TIMESTAMP, view, ret);
+    auto final_bitset = segment->get_filtered_bitmap(view, active_count, MAX_TIMESTAMP);
+
+    segment->vector_search(active_count, node.search_info_, src_data, num_queries, MAX_TIMESTAMP, final_bitset, ret);
 
     ret_ = std::move(ret);
 }
@@ -186,7 +188,14 @@ ExecPlanNodeVisitor::visit(RetrievePlanNode& node) {
         }
     }
 
-    auto seg_offsets = segment->search_ids(bitset.array_as<arrow::BooleanArray>(), MAX_TIMESTAMP);
+    BitsetView view;
+    bitset = cp::Invert(bitset).ValueOrDie();
+    const uint8_t* data = bitset.array()->GetValuesSafe<uint8_t>(1, 0);
+    view = BitsetView(data, bitset.length());
+
+    auto final_bitset = segment->get_filtered_bitmap(view, active_count, MAX_TIMESTAMP);
+
+    auto seg_offsets = segment->search_ids(final_bitset, MAX_TIMESTAMP);
     ret.result_offsets_.assign((int64_t*)seg_offsets.data(), (int64_t*)seg_offsets.data() + seg_offsets.size());
     retrieve_ret_ = ret;
 }

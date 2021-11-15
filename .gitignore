@@ -83,3 +83,6 @@ venv/
 
 #antlr
 .antlr
+
+# docker compose volumes
+deployments/docker/*/volumes

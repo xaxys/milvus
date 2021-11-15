@@ -26,7 +26,7 @@ So what's DataNode's starting procedure?
 
 ### 1. Serveice Registration
 
-DataNode registers itself to Etcd after grpc server started, in *INITIALIZING* state.
+DataNode registers itself to etcd after grpc server started, in *INITIALIZING* state.
 
 ### 2. Service Discovery
 
@@ -41,18 +41,18 @@ After DataNode subscribes to a stateful vchannel, DataNode starts to work, or mo
 Vchannel is stateful because we don't want to process twice what's already processed. And a "processed" message means its
 already persistant. In DataNode's terminology, a message is processed if it's been flushed.
 
-DataCoord tells DataNode stateful vchannel infos through RPC `WatchDmChannels`, so that DataNode won't process
+DataCoord tells DataNode stateful vchannel info through RPC `WatchDmChannels`, so that DataNode won't process
 the same messages over and over again. So flowgraph needs ability to consume messages in the middle of a vchannel.
 
 DataNode tells DataCoord vchannel states after each flush through RPC `SaveBinlogPaths`, so that DataCoord
-keep the vchannel states update.
+keeps the vchannel states update.
 
 
 ## Some of the following interface/proto designs are outdated, will be updated soon
 
-### 1. DataNode no longer interacts with Etcd except service registering
+### 1. DataNode no longer interacts with etcd except service registering
 
-#### DataCoord rather than DataNode saves binlog paths into Etcd
+#### DataCoord rather than DataNode saves binlog paths into etcd
 
    ![datanode_design](graphs/datanode_design_01.jpg)
 
@@ -134,7 +134,7 @@ type dataSyncService struct {
 }
 ```
 
-DataNode Init -> Resigter to Etcd -> Discovery data service -> Discover master service -> IDLE
+DataNode Init -> Resigter to etcd -> Discovery data service -> Discover master service -> IDLE
 
 WatchDmChannels -> new dataSyncService -> HEALTH
 

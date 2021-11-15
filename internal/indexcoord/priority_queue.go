@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package indexcoord
 
@@ -22,6 +27,8 @@ type PQItem struct {
 
 	priority int // The priority of the item in the queue.
 	// The index is needed by update and is maintained by the heap.Interface methods.
+	weight int // The weight of the item in the queue.
+	// When the priority is the same, a smaller weight is more preferred.
 	index int // The index of the item in the heap.
 }
 
@@ -40,7 +47,8 @@ func (pq *PriorityQueue) Len() int {
 // must sort before the element with index j.
 func (pq *PriorityQueue) Less(i, j int) bool {
 	// We want Pop to give us the highest, not lowest, priority so we use greater than here.
-	return pq.items[i].priority < pq.items[j].priority
+	return (pq.items[i].priority < pq.items[j].priority) ||
+		(pq.items[i].priority == pq.items[j].priority && pq.items[i].weight < pq.items[j].weight)
 }
 
 // Swap swaps the elements with indexes i and j.
@@ -101,6 +109,9 @@ func (pq *PriorityQueue) IncPriority(key UniqueID, priority int) {
 	item := pq.getItemByKey(key)
 	if item != nil {
 		item.(*PQItem).priority += priority
+		if priority > 0 {
+			item.(*PQItem).weight += priority
+		}
 		heap.Fix(pq, item.(*PQItem).index)
 	}
 }
@@ -112,6 +123,7 @@ func (pq *PriorityQueue) UpdatePriority(key UniqueID, priority int) {
 	item := pq.getItemByKey(key)
 	if item != nil {
 		item.(*PQItem).priority = priority
+		item.(*PQItem).weight = priority
 		heap.Fix(pq, item.(*PQItem).index)
 	}
 }

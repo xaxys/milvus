@@ -17,13 +17,11 @@ default_nb = ut.default_nb
 row_count = ut.row_count
 default_tag = ut.default_tag
 default_single_query = {
-    "bool": {
-        "must": [
-            {"vector": {field_name: {"topk": 10, "query": ut.gen_vectors(1, ut.default_dim), "metric_type": "L2",
-                                     "params": {"nprobe": 10}}}}
-        ]
-    }
-}
+            "data": ut.gen_vectors(1, ut.default_dim),
+            "anns_field": ut.default_float_vec_field_name,
+            "param": {"metric_type": "L2", "params": {"nprobe": 10}},
+            "limit": 10,
+        }
 
 
 class TestInsertBase:
@@ -38,7 +36,6 @@ class TestInsertBase:
         params=ut.gen_simple_index()
     )
     def get_simple_index(self, request, connect):
-        # if str(connect._cmd("mode")) == "CPU":
         if request.param["index_type"] in ut.index_cpu_not_support():
             pytest.skip("CPU not support index_type: ivf_sq8h")
         logging.getLogger().info(request.param)
@@ -173,7 +170,7 @@ class TestInsertBase:
         result = connect.insert(collection, default_entities)
         connect.flush([collection])
         connect.load_collection(collection)
-        res = connect.search(collection, default_single_query)
+        res = connect.search(collection, **default_single_query)
         assert len(res[0]) == ut.default_top_k
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -202,7 +199,8 @@ class TestInsertBase:
     def test_insert_ids(self, connect, id_collection, insert_count):
         """
         target: test insert entities in collection, use customize ids
-        method: create collection and insert entities in it, check the ids returned and the collection length after entities inserted
+        method: create collection and insert entities in it, check the ids returned and
+                the collection length after entities inserted
         expected: the length of ids and the collection row count
         """
         nb = insert_count
@@ -221,7 +219,8 @@ class TestInsertBase:
     def test_insert_the_same_ids(self, connect, id_collection, insert_count):
         """
         target: test insert vectors in collection, use customize the same ids
-        method: create collection and insert vectors in it, check the ids returned and the collection length after vectors inserted
+        method: create collection and insert vectors in it, check the ids returned and
+                the collection length after vectors inserted
         expected: the length of ids and the collection row count
         """
         nb = insert_count
@@ -311,7 +310,7 @@ class TestInsertBase:
         """
         target: test insert vectors in collection, use customize ids, len(ids) != len(vectors)
         method: create collection and insert vectors in it
-        expected: raise an exception
+        expected: raise exception
         """
         ids = [i for i in range(1, default_nb)]
         logging.getLogger().info(len(ids))
@@ -326,7 +325,7 @@ class TestInsertBase:
         """
         target: test insert vectors in collection, use customize ids, len(ids) != len(vectors)
         method: create collection and insert vectors in it
-        expected: raise an exception
+        expected: raise exception
         """
         ids = [i for i in range(1, default_nb)]
         logging.getLogger().info(len(ids))
@@ -399,7 +398,7 @@ class TestInsertBase:
     def test_insert_partition_repeatedly(self, connect, collection):
         """
         target: test insert entities in collection created before
-        method: create collection and insert entities in it repeatly, with the partition_name param
+        method: create collection and insert entities in it repeatedly, with the partition_name param
         expected: the collection row count equals to nq
         """
         connect.create_partition(collection, default_tag)
@@ -542,7 +541,7 @@ class TestInsertBase:
         """
         target: test collection rows_count is correct or not with multi threading
         method: create collection and insert entities in it(idmap),
-            assert the value returned by count_entities method is equal to length of entities
+                assert the value returned by count_entities method is equal to length of entities
         expected: the count is equal to the length of entities
         """
         if args["handler"] == "HTTP":
@@ -569,8 +568,8 @@ class TestInsertBase:
     @pytest.mark.tags(CaseLabel.L2)
     def _test_insert_disable_auto_flush(self, connect, collection):
         """
-        target: test insert entities, with disable autoflush
-        method: disable autoflush and insert, get entity
+        target: test insert entities, with disable auto-flush
+        method: disable auto-flush and insert, get entity
         expected: the count is equal to 0
         """
         delete_nums = 500
@@ -673,10 +672,10 @@ class TestInsertBinary:
         """
         result = connect.insert(binary_collection, default_binary_entities)
         connect.flush([binary_collection])
-        query, vecs = ut.gen_query_vectors(binary_field_name, default_binary_entities, ut.default_top_k, 1,
-                                        metric_type="JACCARD")
+        query, _ = ut.gen_search_vectors_params(binary_field_name, default_binary_entities,
+                                                ut.default_top_k, 1, metric_type="JACCARD")
         connect.load_collection(binary_collection)
-        res = connect.search(binary_collection, query)
+        res = connect.search(binary_collection, **query)
         logging.getLogger().debug(res)
         assert len(res[0]) == ut.default_top_k
 
@@ -727,7 +726,6 @@ class TestInsertAsync:
         """
         nb = insert_count
         result = connect.insert(collection, ut.gen_entities(nb), _async=False)
-        # ids = future.result()
         connect.flush([collection])
         assert len(result.primary_keys) == nb
 
@@ -920,7 +918,7 @@ class TestInsertMultiCollections:
         collection_name = ut.gen_unique_str(uid)
         connect.create_collection(collection_name, default_fields)
         connect.load_collection(collection)
-        res = connect.search(collection, default_single_query)
+        res = connect.search(collection, **default_single_query)
         assert len(res[0]) == 0
         connect.insert(collection_name, default_entity)
         connect.flush([collection_name])
@@ -940,7 +938,7 @@ class TestInsertMultiCollections:
         result = connect.insert(collection, default_entity)
         connect.flush([collection])
         connect.load_collection(collection_name)
-        res = connect.search(collection_name, default_single_query)
+        res = connect.search(collection_name, **default_single_query)
         stats = connect.get_collection_stats(collection)
         assert stats[row_count] == 1
 
@@ -957,7 +955,7 @@ class TestInsertMultiCollections:
         result = connect.insert(collection, default_entity)
         connect.flush([collection])
         connect.load_collection(collection_name)
-        res = connect.search(collection_name, default_single_query)
+        res = connect.search(collection_name, **default_single_query)
         assert len(res[0]) == 0
 
     @pytest.mark.timeout(ADD_TIMEOUT)
@@ -1041,7 +1039,7 @@ class TestInsertInvalid(object):
         """
         target: test insert, with using customize ids, which are not int64
         method: create collection and insert entities in it
-        expected: raise an exception
+        expected: raise exception
         """
         entity_id = get_entity_id
         ids = [entity_id for _ in range(default_nb)]
@@ -1082,6 +1080,11 @@ class TestInsertInvalid(object):
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_insert_with_invalid_field_type(self, connect, collection, get_field_type):
+        """
+        target: test insert with invalid field
+        method: insert with invalid field type
+        expected: raise exception
+        """
         field_type = get_field_type
         tmp_entity = ut.update_field_type(copy.deepcopy(default_entity), 'float', field_type)
         with pytest.raises(Exception):
@@ -1202,7 +1205,7 @@ class TestInsertInvalidBinary(object):
         """
         target: test insert, with using customize ids, which are not int64
         method: create collection and insert entities in it
-        expected: raise an exception
+        expected: raise exception
         """
         entity_id = get_entity_id
         ids = [entity_id for _ in range(default_nb)]
@@ -1233,3 +1236,4 @@ class TestInsertInvalidBinary(object):
         src_vector[1] = get_field_vectors_value
         with pytest.raises(Exception):
             connect.insert(binary_collection, tmp_entities)
+

@@ -8,7 +8,7 @@ import traceback
 from multiprocessing import Process
 from pymilvus import Milvus, DataType
 import numpy as np
-import utils
+import utils as util
 import config
 from milvus_benchmark.runners import utils
 
@@ -41,6 +41,10 @@ def time_wrapper(func):
     """
 
     def wrapper(*args, **kwargs):
+        """
+        log: Specify output log
+        rps: Specify the rps of the return interface
+        """
         start = time.time()
         # logger.debug("Milvus {} start".format(func.__name__))
         log = kwargs.get("log", True)
@@ -55,7 +59,6 @@ def time_wrapper(func):
             if rps is not False:
                 return result, _rps
         return result
-
     return wrapper
 
 
@@ -224,6 +227,7 @@ class MilvusClient(object):
 
     @time_wrapper
     def delete(self, ids, collection_name=None):
+        # delete entity by id
         tmp_collection_name = self._collection_name if collection_name is None else collection_name
         self._milvus.delete_entity_by_id(tmp_collection_name, ids)
 
@@ -300,13 +304,19 @@ class MilvusClient(object):
     def query(self, vector_query, filter_query=None, collection_name=None, timeout=300):
         """ This method corresponds to the search method of milvus """
         tmp_collection_name = self._collection_name if collection_name is None else collection_name
-        must_params = [vector_query]
-        if filter_query:
-            must_params.extend(filter_query)
-        query = {
-            "bool": {"must": must_params}
-        }
-        result = self._milvus.search(tmp_collection_name, query, timeout=timeout)
+
+        params = util.search_param_analysis(vector_query, filter_query)
+        params.update({"timeout": timeout})
+        logger.debug("Params of search : %s" % str(params))
+        result = self._milvus.search(tmp_collection_name, **params)
+
+        # must_params = [vector_query]
+        # if filter_query:
+        #     must_params.extend(filter_query)
+        # query = {
+        #     "bool": {"must": must_params}
+        # }
+        # result = self._milvus.search(tmp_collection_name, query, timeout=timeout)
         return result
 
     @time_wrapper
@@ -325,7 +335,10 @@ class MilvusClient(object):
         }
         logger.debug("Start warm up query")
         for i in range(times):
-            self._milvus.search(self._collection_name, query)
+            params = util.search_param_analysis(vector_query, None)
+            self._milvus.search(self._collection_name, **params)
+
+            # self._milvus.search(self._collection_name, query)
         logger.debug("End warm up query")
 
     @time_wrapper
@@ -338,7 +351,12 @@ class MilvusClient(object):
             "bool": {"must": must_params}
         }
         self.load_collection(tmp_collection_name)
-        result = self._milvus.search(tmp_collection_name, query, timeout=timeout)
+
+        params = util.search_param_analysis(vector_query, filter_query)
+        params.update({"timeout": timeout})
+        result = self._milvus.search(tmp_collection_name, **params)
+
+        # result = self._milvus.search(tmp_collection_name, query, timeout=timeout)
         return result
 
     def get_ids(self, result):
@@ -400,6 +418,12 @@ class MilvusClient(object):
         return row_count
 
     def drop(self, timeout=120, collection_name=None):
+        """
+        drop steps:
+        1.drop collection
+        2.check collection exist
+        3.Set timeout to exit
+        """
         timeout = int(timeout)
         if collection_name is None:
             collection_name = self._collection_name
@@ -408,11 +432,6 @@ class MilvusClient(object):
         i = 0
         while i < timeout:
             try:
-                # row_count = self.count(collection_name=collection_name)
-                # if row_count:
-                #     time.sleep(1)
-                #     i = i + 1
-                #     continue
                 res = self._milvus.has_collection(collection_name)
                 if res:
                     time.sleep(1)
@@ -474,6 +493,15 @@ class MilvusClient(object):
 
     @time_wrapper
     def scene_test(self, collection_name=None, vectors=None, ids=None):
+        """
+        Scene test steps：
+        1.create collection with the specified collection name
+        2.insert data
+        3.flush data
+        4.create index
+        5.drop collection
+        """
+
         logger.debug("[scene_test] Start scene test : %s" % collection_name)
         self.create_collection(dimension=128, collection_name=collection_name)
         time.sleep(1)
@@ -489,12 +517,11 @@ class MilvusClient(object):
         logger.debug("[scene_test] Start create index : %s" % collection_name)
         self.create_index(field_name='float_vector', index_type="ivf_sq8", metric_type='l2',
                           collection_name=collection_name, index_param={'nlist': 2048})
-        # time.sleep(59)
+        time.sleep(59)
 
         logger.debug("[scene_test] Start drop : %s" % collection_name)
         self.drop(collection_name=collection_name)
         logger.debug("[scene_test]Scene test close : %s" % collection_name)
-        # time.sleep(1)
 
     # TODO: remove
     # def get_server_version(self):

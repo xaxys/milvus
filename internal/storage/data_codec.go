@@ -12,6 +12,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,9 +32,12 @@ import (
 )
 
 const (
-	Ts              = "ts"
-	DDL             = "ddl"
-	IndexParamsFile = "indexParams"
+	// Ts is blob key "ts"
+	Ts = "ts"
+	// DDL is blob key "ddl"
+	DDL = "ddl"
+	// IndexParamsKey is blob key "indexParams"
+	IndexParamsKey = "indexParams"
 )
 
 // when the blob of index file is too large, we can split blob into several rows,
@@ -45,8 +49,13 @@ const (
 const maxLengthPerRowOfIndexFile = 4 * 1024 * 1024
 
 type (
-	UniqueID  = typeutil.UniqueID
-	FieldID   = typeutil.UniqueID
+	// UniqueID is type alias of typeutil.UniqueID
+	UniqueID = typeutil.UniqueID
+
+	// FieldID represent the identity number of filed in collection and its type is UniqueID
+	FieldID = typeutil.UniqueID
+
+	// Timestamp is type alias of typeutil.Timestamp
 	Timestamp = typeutil.Timestamp
 )
 
@@ -83,7 +92,10 @@ func (b Blob) GetValue() []byte {
 	return b.Value
 }
 
-type FieldData interface{}
+type FieldData interface {
+	Length() int
+	Get(i int) interface{}
+}
 
 type BoolFieldData struct {
 	NumRows []int64
@@ -128,6 +140,73 @@ type FloatVectorFieldData struct {
 	Dim     int
 }
 
+func (data *BoolFieldData) Length() int         { return len(data.Data) }
+func (data *Int8FieldData) Length() int         { return len(data.Data) }
+func (data *Int16FieldData) Length() int        { return len(data.Data) }
+func (data *Int32FieldData) Length() int        { return len(data.Data) }
+func (data *Int64FieldData) Length() int        { return len(data.Data) }
+func (data *FloatFieldData) Length() int        { return len(data.Data) }
+func (data *DoubleFieldData) Length() int       { return len(data.Data) }
+func (data *StringFieldData) Length() int       { return len(data.Data) }
+func (data *BinaryVectorFieldData) Length() int { return len(data.Data) }
+func (data *FloatVectorFieldData) Length() int  { return len(data.Data) }
+
+func (data *BoolFieldData) Get(i int) interface{}         { return data.Data[i] }
+func (data *Int8FieldData) Get(i int) interface{}         { return data.Data[i] }
+func (data *Int16FieldData) Get(i int) interface{}        { return data.Data[i] }
+func (data *Int32FieldData) Get(i int) interface{}        { return data.Data[i] }
+func (data *Int64FieldData) Get(i int) interface{}        { return data.Data[i] }
+func (data *FloatFieldData) Get(i int) interface{}        { return data.Data[i] }
+func (data *DoubleFieldData) Get(i int) interface{}       { return data.Data[i] }
+func (data *StringFieldData) Get(i int) interface{}       { return data.Data[i] }
+func (data *BinaryVectorFieldData) Get(i int) interface{} { return data.Data[i] }
+func (data *FloatVectorFieldData) Get(i int) interface{}  { return data.Data[i] }
+
+// why not binary.Size(data) directly? binary.Size(data) return -1
+// binary.Size returns how many bytes Write would generate to encode the value v, which
+// must be a fixed-size value or a slice of fixed-size values, or a pointer to such data.
+// If v is neither of these, binary.Size returns -1.
+
+func (data *BoolFieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data)
+}
+
+func (data *Int8FieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data)
+}
+
+func (data *Int16FieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data)
+}
+
+func (data *Int32FieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data)
+}
+
+func (data *Int64FieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data)
+}
+
+func (data *FloatFieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data)
+}
+
+func (data *DoubleFieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data)
+}
+
+func (data *StringFieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data)
+}
+
+func (data *BinaryVectorFieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data) + binary.Size(data.Dim)
+}
+
+func (data *FloatVectorFieldData) GetMemorySize() int {
+	return binary.Size(data.NumRows) + binary.Size(data.Data) + binary.Size(data.Dim)
+}
+
 // system filed id:
 // 0: unique row id
 // 1: timestamp
@@ -165,8 +244,8 @@ func NewInsertCodec(schema *etcdpb.CollectionMeta) *InsertCodec {
 // For each field, it will create a binlog writer, and write a event to the binlog.
 // It returns binlog buffer in the end.
 func (insertCodec *InsertCodec) Serialize(partitionID UniqueID, segmentID UniqueID, data *InsertData) ([]*Blob, []*Blob, error) {
-	var blobs []*Blob
-	var statsBlobs []*Blob
+	blobs := make([]*Blob, 0)
+	statsBlobs := make([]*Blob, 0)
 	var writer *InsertBinlogWriter
 	timeFieldData, ok := data.Data[rootcoord.TimeStampField]
 	if !ok {
@@ -196,18 +275,25 @@ func (insertCodec *InsertCodec) Serialize(partitionID UniqueID, segmentID Unique
 		switch field.DataType {
 		case schemapb.DataType_Bool:
 			err = eventWriter.AddBoolToPayload(singleData.(*BoolFieldData).Data)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*BoolFieldData).GetMemorySize()))
 		case schemapb.DataType_Int8:
 			err = eventWriter.AddInt8ToPayload(singleData.(*Int8FieldData).Data)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*Int8FieldData).GetMemorySize()))
 		case schemapb.DataType_Int16:
 			err = eventWriter.AddInt16ToPayload(singleData.(*Int16FieldData).Data)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*Int16FieldData).GetMemorySize()))
 		case schemapb.DataType_Int32:
 			err = eventWriter.AddInt32ToPayload(singleData.(*Int32FieldData).Data)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*Int32FieldData).GetMemorySize()))
 		case schemapb.DataType_Int64:
 			err = eventWriter.AddInt64ToPayload(singleData.(*Int64FieldData).Data)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*Int64FieldData).GetMemorySize()))
 		case schemapb.DataType_Float:
 			err = eventWriter.AddFloatToPayload(singleData.(*FloatFieldData).Data)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*FloatFieldData).GetMemorySize()))
 		case schemapb.DataType_Double:
 			err = eventWriter.AddDoubleToPayload(singleData.(*DoubleFieldData).Data)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*DoubleFieldData).GetMemorySize()))
 		case schemapb.DataType_String:
 			for _, singleString := range singleData.(*StringFieldData).Data {
 				err = eventWriter.AddOneStringToPayload(singleString)
@@ -215,10 +301,13 @@ func (insertCodec *InsertCodec) Serialize(partitionID UniqueID, segmentID Unique
 					return nil, nil, err
 				}
 			}
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*StringFieldData).GetMemorySize()))
 		case schemapb.DataType_BinaryVector:
 			err = eventWriter.AddBinaryVectorToPayload(singleData.(*BinaryVectorFieldData).Data, singleData.(*BinaryVectorFieldData).Dim)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*BinaryVectorFieldData).GetMemorySize()))
 		case schemapb.DataType_FloatVector:
 			err = eventWriter.AddFloatVectorToPayload(singleData.(*FloatVectorFieldData).Data, singleData.(*FloatVectorFieldData).Dim)
+			writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", singleData.(*FloatVectorFieldData).GetMemorySize()))
 		default:
 			return nil, nil, fmt.Errorf("undefined data type %d", field.DataType)
 		}
@@ -243,19 +332,19 @@ func (insertCodec *InsertCodec) Serialize(partitionID UniqueID, segmentID Unique
 		})
 
 		// stats fields
-		statsWriter := &StatsWriter{}
 		switch field.DataType {
 		case schemapb.DataType_Int64:
-			err = statsWriter.StatsInt64(singleData.(*Int64FieldData).Data)
+			statsWriter := &StatsWriter{}
+			err = statsWriter.StatsInt64(field.FieldID, field.IsPrimaryKey, singleData.(*Int64FieldData).Data)
+			if err != nil {
+				return nil, nil, err
+			}
+			statsBuffer := statsWriter.GetBuffer()
+			statsBlobs = append(statsBlobs, &Blob{
+				Key:   blobKey,
+				Value: statsBuffer,
+			})
 		}
-		if err != nil {
-			return nil, nil, err
-		}
-		statsBuffer := statsWriter.GetBuffer()
-		statsBlobs = append(statsBlobs, &Blob{
-			Key:   blobKey,
-			Value: statsBuffer,
-		})
 	}
 
 	return blobs, statsBlobs, nil
@@ -516,26 +605,28 @@ func (insertCodec *InsertCodec) Close() error {
 // DeleteData saves each entity delete message represented as <primarykey,timestamp> map.
 // timestamp represents the time when this instance was deleted
 type DeleteData struct {
-	Data map[string]int64 // primary key to timestamp
+	Data map[int64]int64 // primary key to timestamp
 }
 
+// DeleteCodec serializes and deserializes the delete data
 type DeleteCodec struct {
-	Schema          *etcdpb.CollectionMeta
 	readerCloseFunc []func() error
 }
 
-func NewDeleteCodec(schema *etcdpb.CollectionMeta) *DeleteCodec {
-	return &DeleteCodec{Schema: schema}
+// NewDeleteCodec returns a DeleteCodec
+func NewDeleteCodec() *DeleteCodec {
+	return &DeleteCodec{}
 }
 
 // Serialize transfer delete data to blob. .
 // For each delete message, it will save "pk,ts" string to binlog.
-func (deleteCodec *DeleteCodec) Serialize(partitionID UniqueID, segmentID UniqueID, data *DeleteData) (*Blob, error) {
-	binlogWriter := NewDeleteBinlogWriter(schemapb.DataType_String, deleteCodec.Schema.ID, partitionID, segmentID)
+func (deleteCodec *DeleteCodec) Serialize(collectionID UniqueID, partitionID UniqueID, segmentID UniqueID, data *DeleteData) (*Blob, error) {
+	binlogWriter := NewDeleteBinlogWriter(schemapb.DataType_String, collectionID, partitionID, segmentID)
 	eventWriter, err := binlogWriter.NextDeleteEventWriter()
 	if err != nil {
 		return nil, err
 	}
+	sizeTotal := 0
 	startTs, endTs := math.MaxInt64, math.MinInt64
 	for key, value := range data.Data {
 		if value < int64(startTs) {
@@ -544,13 +635,22 @@ func (deleteCodec *DeleteCodec) Serialize(partitionID UniqueID, segmentID Unique
 		if value > int64(endTs) {
 			endTs = int(value)
 		}
-		err := eventWriter.AddOneStringToPayload(fmt.Sprintf("%s,%d", key, value))
+		err := eventWriter.AddOneStringToPayload(fmt.Sprintf("%d,%d", key, value))
 		if err != nil {
 			return nil, err
 		}
+		sizeTotal += binary.Size(key)
+		sizeTotal += binary.Size(value)
 	}
 	eventWriter.SetEventTimestamp(uint64(startTs), uint64(endTs))
 	binlogWriter.SetEventTimeStamp(uint64(startTs), uint64(endTs))
+
+	// https://github.com/milvus-io/milvus/issues/9620
+	// It's a little complicated to count the memory size of a map.
+	// See: https://stackoverflow.com/questions/31847549/computing-the-memory-footprint-or-byte-length-of-a-map
+	// Since the implementation of golang map may differ from version, so we'd better not to use this magic method.
+	binlogWriter.AddExtra(originalSizeKey, fmt.Sprintf("%v", sizeTotal))
+
 	err = binlogWriter.Close()
 	if err != nil {
 		return nil, err
@@ -566,44 +666,63 @@ func (deleteCodec *DeleteCodec) Serialize(partitionID UniqueID, segmentID Unique
 
 }
 
-func (deleteCodec *DeleteCodec) Deserialize(blob *Blob) (partitionID UniqueID, segmentID UniqueID, data *DeleteData, err error) {
-	if blob == nil {
+// Deserialize deserializes the deltalog blobs into DeleteData
+func (deleteCodec *DeleteCodec) Deserialize(blobs []*Blob) (partitionID UniqueID, segmentID UniqueID, data *DeleteData, err error) {
+	if len(blobs) == 0 {
 		return InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("blobs is empty")
 	}
 	readerClose := func(reader *BinlogReader) func() error {
 		return func() error { return reader.Close() }
 	}
-	binlogReader, err := NewBinlogReader(blob.Value)
-	if err != nil {
-		return InvalidUniqueID, InvalidUniqueID, nil, err
-	}
-	pid, sid := binlogReader.PartitionID, binlogReader.SegmentID
-	eventReader, err := binlogReader.NextEventReader()
-	if err != nil {
-		return InvalidUniqueID, InvalidUniqueID, nil, err
-	}
-	result := &DeleteData{
-		Data: make(map[string]int64),
-	}
-	length, err := eventReader.GetPayloadLengthFromReader()
-	for i := 0; i < length; i++ {
-		singleString, err := eventReader.GetOneStringFromPayload(i)
+
+	var pid, sid UniqueID
+	result := &DeleteData{Data: make(map[int64]int64)}
+	for _, blob := range blobs {
+		binlogReader, err := NewBinlogReader(blob.Value)
 		if err != nil {
 			return InvalidUniqueID, InvalidUniqueID, nil, err
 		}
-		splits := strings.Split(singleString, ",")
-		if len(splits) != 2 {
-			return InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("the format of delta log is incorrect")
-		}
-		ts, err := strconv.ParseInt(splits[1], 10, 64)
-		if err != nil {
-			return -1, -1, nil, err
-		}
-		result.Data[splits[0]] = ts
-	}
-	deleteCodec.readerCloseFunc = append(deleteCodec.readerCloseFunc, readerClose(binlogReader))
-	return pid, sid, result, nil
 
+		pid, sid = binlogReader.PartitionID, binlogReader.SegmentID
+		eventReader, err := binlogReader.NextEventReader()
+		if err != nil {
+			return InvalidUniqueID, InvalidUniqueID, nil, err
+		}
+
+		length, err := eventReader.GetPayloadLengthFromReader()
+		if err != nil {
+			return InvalidUniqueID, InvalidUniqueID, nil, err
+		}
+
+		for i := 0; i < length; i++ {
+			singleString, err := eventReader.GetOneStringFromPayload(i)
+			if err != nil {
+				return InvalidUniqueID, InvalidUniqueID, nil, err
+			}
+
+			splits := strings.Split(singleString, ",")
+			if len(splits) != 2 {
+				return InvalidUniqueID, InvalidUniqueID, nil, fmt.Errorf("the format of delta log is incorrect")
+			}
+
+			pk, err := strconv.ParseInt(splits[0], 10, 64)
+			if err != nil {
+				return InvalidUniqueID, InvalidUniqueID, nil, err
+			}
+
+			ts, err := strconv.ParseInt(splits[1], 10, 64)
+			if err != nil {
+				return InvalidUniqueID, InvalidUniqueID, nil, err
+			}
+
+			result.Data[pk] = ts
+		}
+
+		deleteCodec.readerCloseFunc = append(deleteCodec.readerCloseFunc, readerClose(binlogReader))
+
+	}
+
+	return pid, sid, result, nil
 }
 
 // Blob key example:
@@ -642,7 +761,12 @@ func (dataDefinitionCodec *DataDefinitionCodec) Serialize(ts []Timestamp, ddRequ
 	}
 	eventWriter.SetEventTimestamp(ts[0], ts[len(ts)-1])
 	writer.SetEventTimeStamp(ts[0], ts[len(ts)-1])
+
+	// https://github.com/milvus-io/milvus/issues/9620
+	writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", binary.Size(int64Ts)))
+
 	err = writer.Close()
+
 	if err != nil {
 		return nil, err
 	}
@@ -657,7 +781,9 @@ func (dataDefinitionCodec *DataDefinitionCodec) Serialize(ts []Timestamp, ddRequ
 
 	writer = NewDDLBinlogWriter(schemapb.DataType_String, dataDefinitionCodec.collectionID)
 
+	sizeTotal := 0
 	for pos, req := range ddRequests {
+		sizeTotal += len(req)
 		switch eventTypes[pos] {
 		case CreateCollectionEventType:
 			eventWriter, err := writer.NextCreateCollectionEventWriter()
@@ -702,6 +828,10 @@ func (dataDefinitionCodec *DataDefinitionCodec) Serialize(ts []Timestamp, ddRequ
 		}
 	}
 	writer.SetEventTimeStamp(ts[0], ts[len(ts)-1])
+
+	// https://github.com/milvus-io/milvus/issues/9620
+	writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", sizeTotal))
+
 	err = writer.Close()
 	if err != nil {
 		return nil, err
@@ -823,6 +953,11 @@ func (codec *IndexFileBinlogCodec) Serialize(
 	for pos := range datas {
 		writer := NewIndexFileBinlogWriter(indexBuildID, version, collectionID, partitionID, segmentID, fieldID, indexName, indexID, datas[pos].Key)
 
+		// https://github.com/milvus-io/milvus/issues/9449
+		// store index parameters to extra, in bytes format.
+		params, _ := json.Marshal(indexParams)
+		writer.descriptorEvent.AddExtra(IndexParamsKey, params)
+
 		eventWriter, err := writer.NextIndexFileEventWriter()
 		if err != nil {
 			return nil, err
@@ -845,6 +980,9 @@ func (codec *IndexFileBinlogCodec) Serialize(
 
 		writer.SetEventTimeStamp(ts, ts)
 
+		// https://github.com/milvus-io/milvus/issues/9620
+		writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", len(datas[pos].Value)))
+
 		err = writer.Close()
 		if err != nil {
 			return nil, err
@@ -862,7 +1000,7 @@ func (codec *IndexFileBinlogCodec) Serialize(
 	}
 
 	// save index params
-	writer := NewIndexFileBinlogWriter(indexBuildID, version, collectionID, partitionID, segmentID, fieldID, indexName, indexID, "indexParams")
+	writer := NewIndexFileBinlogWriter(indexBuildID, version, collectionID, partitionID, segmentID, fieldID, indexName, indexID, IndexParamsKey)
 
 	eventWriter, err := writer.NextIndexFileEventWriter()
 	if err != nil {
@@ -887,6 +1025,10 @@ func (codec *IndexFileBinlogCodec) Serialize(
 
 	writer.SetEventTimeStamp(ts, ts)
 
+	// https://github.com/milvus-io/milvus/issues/9620
+	// len(params) is also not accurate, indexParams is a map
+	writer.AddExtra(originalSizeKey, fmt.Sprintf("%v", len(params)))
+
 	err = writer.Close()
 	if err != nil {
 		return nil, err
@@ -897,7 +1039,7 @@ func (codec *IndexFileBinlogCodec) Serialize(
 	}
 
 	blobs = append(blobs, &Blob{
-		Key: "indexParams",
+		Key: IndexParamsKey,
 		//Key:   strconv.Itoa(len(datas)),
 		Value: buffer,
 	})
@@ -999,7 +1141,7 @@ func (codec *IndexFileBinlogCodec) DeserializeImpl(blobs []*Blob) (
 					content = append(content, []byte(singleString)...)
 				}
 
-				if key == "indexParams" {
+				if key == IndexParamsKey {
 					_ = json.Unmarshal(content, &indexParams)
 				} else {
 					datas = append(datas, &Blob{
@@ -1057,14 +1199,14 @@ func (indexCodec *IndexCodec) Serialize(blobs []*Blob, params map[string]string,
 	if err != nil {
 		return nil, err
 	}
-	blobs = append(blobs, &Blob{Key: IndexParamsFile, Value: paramsBytes})
+	blobs = append(blobs, &Blob{Key: IndexParamsKey, Value: paramsBytes})
 	return blobs, nil
 }
 
 func (indexCodec *IndexCodec) Deserialize(blobs []*Blob) ([]*Blob, map[string]string, string, UniqueID, error) {
 	var file *Blob
 	for i := 0; i < len(blobs); i++ {
-		if blobs[i].Key != IndexParamsFile {
+		if blobs[i].Key != IndexParamsKey {
 			continue
 		}
 		file = blobs[i]

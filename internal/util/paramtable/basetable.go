@@ -12,6 +12,7 @@
 package paramtable
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"runtime"
@@ -29,6 +30,7 @@ import (
 	"github.com/spf13/viper"
 )
 
+// UniqueID is type alias of typeutil.UniqueID
 type UniqueID = typeutil.UniqueID
 
 type Base interface {
@@ -55,10 +57,9 @@ func (gp *BaseTable) Init() {
 	gp.configDir = gp.initConfPath()
 	log.Debug("config directory", zap.String("configDir", gp.configDir))
 
-	gp.loadFromMilvusYaml()
-
-	// TODO remove once we change helm deployment
 	gp.loadFromCommonYaml()
+
+	gp.loadFromMilvusYaml()
 
 	gp.tryloadFromEnv()
 
@@ -258,13 +259,61 @@ func (gp *BaseTable) tryloadFromEnv() {
 	if err != nil {
 		panic(err)
 	}
+
+	minioAccessKey := os.Getenv("MINIO_ACCESS_KEY")
+	if minioAccessKey == "" {
+		minioAccessKey, err = gp.Load("minio.accessKeyID")
+		if err != nil {
+			panic(err)
+		}
+	}
+	err = gp.Save("_MinioAccessKeyID", minioAccessKey)
+	if err != nil {
+		panic(err)
+	}
+
+	minioSecretKey := os.Getenv("MINIO_SECRET_KEY")
+	if minioSecretKey == "" {
+		minioSecretKey, err = gp.Load("minio.secretAccessKey")
+		if err != nil {
+			panic(err)
+		}
+	}
+	err = gp.Save("_MinioSecretAccessKey", minioSecretKey)
+	if err != nil {
+		panic(err)
+	}
+
+	minioUseSSL := os.Getenv("MINIO_USE_SSL")
+	if minioUseSSL == "" {
+		minioUseSSL, err = gp.Load("minio.useSSL")
+		if err != nil {
+			panic(err)
+		}
+	}
+	err = gp.Save("_MinioUseSSL", minioUseSSL)
+	if err != nil {
+		panic(err)
+	}
+
+	minioBucketName := os.Getenv("MINIO_BUCKET_NAME")
+	if minioBucketName == "" {
+		minioBucketName, err = gp.Load("minio.bucketName")
+		if err != nil {
+			panic(err)
+		}
+	}
+	err = gp.Save("_MinioBucketName", minioBucketName)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (gp *BaseTable) Load(key string) (string, error) {
 	return gp.params.Load(strings.ToLower(key))
 }
 
-func (gp *BaseTable) LoadWithDefault(key string, defaultValue string) (string, error) {
+func (gp *BaseTable) LoadWithDefault(key, defaultValue string) string {
 	return gp.params.LoadWithDefault(strings.ToLower(key), defaultValue)
 }
 
@@ -296,7 +345,7 @@ func (gp *BaseTable) LoadYaml(fileName string) error {
 					if err != nil {
 						panic(err)
 					}
-					if len(str) == 0 {
+					if str == "" {
 						str = ss
 					} else {
 						str = str + "," + ss
@@ -326,10 +375,7 @@ func (gp *BaseTable) Save(key, value string) error {
 }
 
 func (gp *BaseTable) ParseBool(key string, defaultValue bool) bool {
-	valueStr, err := gp.LoadWithDefault(key, strconv.FormatBool(defaultValue))
-	if err != nil {
-		panic(err)
-	}
+	valueStr := gp.LoadWithDefault(key, strconv.FormatBool(defaultValue))
 	value, err := strconv.ParseBool(valueStr)
 	if err != nil {
 		panic(err)
@@ -349,11 +395,29 @@ func (gp *BaseTable) ParseFloat(key string) float64 {
 	return value
 }
 
+func (gp *BaseTable) ParseFloatWithDefault(key string, defaultValue float64) float64 {
+	valueStr := gp.LoadWithDefault(key, fmt.Sprintf("%f", defaultValue))
+	value, err := strconv.ParseFloat(valueStr, 64)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
 func (gp *BaseTable) ParseInt64(key string) int64 {
 	valueStr, err := gp.Load(key)
 	if err != nil {
 		panic(err)
 	}
+	value, err := strconv.ParseInt(valueStr, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func (gp *BaseTable) ParseInt64WithDefault(key string, defaultValue int64) int64 {
+	valueStr := gp.LoadWithDefault(key, strconv.FormatInt(defaultValue, 10))
 	value, err := strconv.ParseInt(valueStr, 10, 64)
 	if err != nil {
 		panic(err)
@@ -373,11 +437,29 @@ func (gp *BaseTable) ParseInt32(key string) int32 {
 	return int32(value)
 }
 
+func (gp *BaseTable) ParseInt32WithDefault(key string, defaultValue int32) int32 {
+	valueStr := gp.LoadWithDefault(key, strconv.FormatInt(int64(defaultValue), 10))
+	value, err := strconv.ParseInt(valueStr, 10, 32)
+	if err != nil {
+		panic(err)
+	}
+	return int32(value)
+}
+
 func (gp *BaseTable) ParseInt(key string) int {
 	valueStr, err := gp.Load(key)
 	if err != nil {
 		panic(err)
 	}
+	value, err := strconv.Atoi(valueStr)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func (gp *BaseTable) ParseIntWithDefault(key string, defaultValue int) int {
+	valueStr := gp.LoadWithDefault(key, strconv.FormatInt(int64(defaultValue), 10))
 	value, err := strconv.Atoi(valueStr)
 	if err != nil {
 		panic(err)
@@ -449,7 +531,7 @@ func (gp *BaseTable) SetLogger(id UniqueID) {
 	if err != nil {
 		panic(err)
 	}
-	if len(rootPath) != 0 {
+	if rootPath != "" {
 		log.Debug("Set logger ", zap.Int64("id", id), zap.String("role", gp.RoleName))
 		if id < 0 {
 			gp.Log.File.Filename = path.Join(rootPath, gp.RoleName+".log")

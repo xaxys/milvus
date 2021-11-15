@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
@@ -25,8 +30,10 @@ import (
 
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/types"
 
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
@@ -54,105 +61,63 @@ func TestMain(t *testing.M) {
 func TestDataNode(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	node := newIDLEDataNodeMock(ctx)
-	node.Init()
-	node.Start()
-	node.Register()
+	err := node.Init()
+	assert.Nil(t, err)
+	err = node.Start()
+	assert.Nil(t, err)
 
-	t.Run("Test WatchDmChannels", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+	t.Run("Test WatchDmChannels ", func(t *testing.T) {
+		emptyNode := &DataNode{}
 
-		node1 := newIDLEDataNodeMock(ctx)
-		node1.Init()
-		node1.Start()
-		node1.Register()
-		defer func() {
-			err := node1.Stop()
-			assert.Nil(t, err)
-		}()
+		status, err := emptyNode.WatchDmChannels(ctx, &datapb.WatchDmChannelsRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
+	})
 
-		cases := []struct {
-			desc       string
-			channels   []string
-			expect     bool
-			failReason string
+	t.Run("Test SetRootCoord", func(t *testing.T) {
+		emptyDN := &DataNode{}
+		tests := []struct {
+			inrc        types.RootCoord
+			isvalid     bool
+			description string
 		}{
-			{"test watch channel normally", []string{"datanode-01-test-WatchDmChannel", "datanode-02-test-WatchDmChannels"}, true, ""},
-			{"test send empty request", []string{}, false, illegalRequestErrStr},
+			{nil, false, "nil input"},
+			{&RootCoordFactory{}, true, "valid input"},
 		}
 
-		for _, testcase := range cases {
-			vchannels := []*datapb.VchannelInfo{}
-			for _, ch := range testcase.channels {
-				vchan := &datapb.VchannelInfo{
-					CollectionID:      1,
-					ChannelName:       ch,
-					UnflushedSegments: []*datapb.SegmentInfo{},
+		for _, test := range tests {
+			t.Run(test.description, func(t *testing.T) {
+				err := emptyDN.SetRootCoord(test.inrc)
+				if test.isvalid {
+					assert.NoError(t, err)
+				} else {
+					assert.Error(t, err)
 				}
-				vchannels = append(vchannels, vchan)
-			}
-			req := &datapb.WatchDmChannelsRequest{
-				Base: &commonpb.MsgBase{
-					MsgType:   0,
-					MsgID:     0,
-					Timestamp: 0,
-					SourceID:  Params.NodeID,
-				},
-				Vchannels: vchannels,
-			}
-
-			resp, err := node1.WatchDmChannels(context.TODO(), req)
-			assert.NoError(t, err)
-			if testcase.expect {
-				assert.Equal(t, commonpb.ErrorCode_Success, resp.ErrorCode)
-				assert.NotNil(t, node1.vchan2FlushChs)
-				assert.NotNil(t, node1.vchan2SyncService)
-				sync, ok := node1.vchan2SyncService[testcase.channels[0]]
-				assert.True(t, ok)
-				assert.NotNil(t, sync)
-				assert.Equal(t, UniqueID(1), sync.collectionID)
-				assert.Equal(t, len(testcase.channels), len(node1.vchan2SyncService))
-				assert.Equal(t, len(node1.vchan2FlushChs), len(node1.vchan2SyncService))
-			} else {
-				assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
-				assert.Equal(t, testcase.failReason, resp.Reason)
-			}
+			})
 		}
 	})
 
-	t.Run("Test WatchDmChannels fails", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		node := newIDLEDataNodeMock(ctx)
-
-		// before healthy
-		status, err := node.WatchDmChannels(ctx, &datapb.WatchDmChannelsRequest{})
-		assert.Nil(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
-
-		node.Init()
-		node.Start()
-		node.Register()
-		defer func() {
-			err := node.Stop()
-			assert.Nil(t, err)
-		}()
-
-		node.msFactory = &FailMessageStreamFactory{
-			Factory: node.msFactory,
+	t.Run("Test SetDataCoord", func(t *testing.T) {
+		emptyDN := &DataNode{}
+		tests := []struct {
+			inrc        types.DataCoord
+			isvalid     bool
+			description string
+		}{
+			{nil, false, "nil input"},
+			{&DataCoordFactory{}, true, "valid input"},
 		}
 
-		status, err = node.WatchDmChannels(ctx, &datapb.WatchDmChannelsRequest{
-			Vchannels: []*datapb.VchannelInfo{
-				{
-					CollectionID: collectionID0,
-					ChannelName:  "test_channel_name",
-				},
-			},
-		})
-		assert.Nil(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+		for _, test := range tests {
+			t.Run(test.description, func(t *testing.T) {
+				err := emptyDN.SetDataCoord(test.inrc)
+				if test.isvalid {
+					assert.NoError(t, err)
+				} else {
+					assert.Error(t, err)
+				}
+			})
+		}
 	})
 
 	t.Run("Test GetComponentStates", func(t *testing.T) {
@@ -165,7 +130,8 @@ func TestDataNode(t *testing.T) {
 		t.Skip()
 		ctx, cancel := context.WithCancel(context.Background())
 		node2 := newIDLEDataNodeMock(ctx)
-		node2.Start()
+		err = node2.Start()
+		assert.Nil(t, err)
 		dmChannelName := "fake-dm-channel-test-NewDataSyncService"
 
 		vchan := &datapb.VchannelInfo{
@@ -189,16 +155,18 @@ func TestDataNode(t *testing.T) {
 
 		cancel()
 		<-node2.ctx.Done()
-		node2.Stop()
+		err = node2.Stop()
+		assert.Nil(t, err)
 	})
 
 	t.Run("Test FlushSegments", func(t *testing.T) {
-		dmChannelName := "fake-dm-channel-test-HEALTHDataNodeMock"
+		dmChannelName := "fake-dm-channel-test-FlushSegments"
 
 		node1 := newIDLEDataNodeMock(context.TODO())
-		node1.Init()
-		node1.Start()
-		node1.Register()
+		err = node1.Init()
+		assert.Nil(t, err)
+		err = node1.Start()
+		assert.Nil(t, err)
 		defer func() {
 			err := node1.Stop()
 			assert.Nil(t, err)
@@ -215,7 +183,8 @@ func TestDataNode(t *testing.T) {
 
 		service, ok := node1.vchan2SyncService[dmChannelName]
 		assert.True(t, ok)
-		service.replica.addNewSegment(0, 1, 1, dmChannelName, &internalpb.MsgPosition{}, &internalpb.MsgPosition{})
+		err = service.replica.addNewSegment(0, 1, 1, dmChannelName, &internalpb.MsgPosition{}, &internalpb.MsgPosition{})
+		assert.Nil(t, err)
 
 		req := &datapb.FlushSegmentsRequest{
 			Base:         &commonpb.MsgBase{},
@@ -278,6 +247,53 @@ func TestDataNode(t *testing.T) {
 		}()
 
 		wg.Wait()
+		// dup call
+		status, err := node1.FlushSegments(node1.ctx, req)
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
+
+		// failure call
+		req = &datapb.FlushSegmentsRequest{
+			Base:         &commonpb.MsgBase{},
+			DbID:         0,
+			CollectionID: 1,
+			SegmentIDs:   []int64{1},
+		}
+
+		status, err = node1.FlushSegments(node1.ctx, req)
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+
+		req = &datapb.FlushSegmentsRequest{
+			Base:           &commonpb.MsgBase{},
+			DbID:           0,
+			CollectionID:   1,
+			SegmentIDs:     []int64{},
+			MarkSegmentIDs: []int64{2},
+		}
+
+		status, err = node1.FlushSegments(node1.ctx, req)
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+
+		// manual inject meta error
+		node1.chanMut.Lock()
+		node1.vchan2FlushChs[dmChannelName+"1"] = node1.vchan2FlushChs[dmChannelName]
+		delete(node1.vchan2FlushChs, dmChannelName)
+		node1.chanMut.Unlock()
+		node1.segmentCache.Remove(0)
+
+		req = &datapb.FlushSegmentsRequest{
+			Base:         &commonpb.MsgBase{},
+			DbID:         0,
+			CollectionID: 1,
+			SegmentIDs:   []int64{0},
+		}
+
+		status, err = node1.FlushSegments(node1.ctx, req)
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+
 	})
 
 	t.Run("Test GetTimeTickChannel", func(t *testing.T) {
@@ -291,9 +307,12 @@ func TestDataNode(t *testing.T) {
 	})
 
 	t.Run("Test getSystemInfoMetrics", func(t *testing.T) {
+		emptyNode := &DataNode{}
+		emptyNode.session = &sessionutil.Session{ServerID: 1}
+
 		req, err := metricsinfo.ConstructRequestByMetricType(metricsinfo.SystemInfoMetrics)
 		assert.NoError(t, err)
-		resp, err := node.getSystemInfoMetrics(node.ctx, req)
+		resp, err := emptyNode.getSystemInfoMetrics(context.TODO(), req)
 		assert.NoError(t, err)
 		log.Info("Test DataNode.getSystemInfoMetrics",
 			zap.String("name", resp.ComponentName),
@@ -301,13 +320,14 @@ func TestDataNode(t *testing.T) {
 	})
 
 	t.Run("Test GetMetrics", func(t *testing.T) {
+		node := &DataNode{}
+		node.session = &sessionutil.Session{ServerID: 1}
 		// server is closed
-		stateSave := node.State.Load().(internalpb.StateCode)
 		node.State.Store(internalpb.StateCode_Abnormal)
 		resp, err := node.GetMetrics(ctx, &milvuspb.GetMetricsRequest{})
 		assert.NoError(t, err)
 		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
-		node.State.Store(stateSave)
+		node.State.Store(internalpb.StateCode_Healthy)
 
 		// failed to parse metric type
 		invalidRequest := "invalid request"
@@ -337,7 +357,6 @@ func TestDataNode(t *testing.T) {
 	})
 
 	t.Run("Test BackGroundGC", func(te *testing.T) {
-		te.Skipf("issue #6574")
 		ctx, cancel := context.WithCancel(context.Background())
 		node := newIDLEDataNodeMock(ctx)
 
@@ -358,7 +377,8 @@ func TestDataNode(t *testing.T) {
 
 		for i, t := range testDataSyncs {
 			if i <= 2 {
-				node.NewDataSyncService(&datapb.VchannelInfo{CollectionID: t.collID, ChannelName: t.dmChannelName})
+				err = node.NewDataSyncService(&datapb.VchannelInfo{CollectionID: t.collID, ChannelName: t.dmChannelName})
+				assert.Nil(te, err)
 			}
 
 			collIDCh <- t.collID
@@ -395,7 +415,6 @@ func TestDataNode(t *testing.T) {
 		s, ok := node.vchan2SyncService[dmChannelName]
 		assert.False(t, ok)
 		assert.Nil(t, s)
-
 	})
 
 	t.Run("Test GetChannelName", func(t *testing.T) {
@@ -413,7 +432,8 @@ func TestDataNode(t *testing.T) {
 				newSegments:  make(map[UniqueID]*Segment),
 			}
 
-			replica.addNewSegment(testSegIDs[i], testCollIDs[i], 0, name, &internalpb.MsgPosition{}, nil)
+			err = replica.addNewSegment(testSegIDs[i], testCollIDs[i], 0, name, &internalpb.MsgPosition{}, nil)
+			assert.Nil(t, err)
 			node.vchan2SyncService[name] = &dataSyncService{collectionID: testCollIDs[i], replica: replica}
 		}
 		node.chanMut.Unlock()
@@ -446,27 +466,35 @@ func TestDataNode(t *testing.T) {
 
 	cancel()
 	<-node.ctx.Done()
-	node.Stop()
+	err = node.Stop()
+	require.Nil(t, err)
 }
 
 func TestWatchChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	node := newIDLEDataNodeMock(ctx)
-	node.Init()
-	node.Start()
-	node.Register()
+	err := node.Init()
+	assert.Nil(t, err)
+	err = node.Start()
+	assert.Nil(t, err)
+	err = node.Register()
+	assert.Nil(t, err)
 
 	defer cancel()
 
 	t.Run("test watch channel", func(t *testing.T) {
-
 		kv, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
 		require.NoError(t, err)
+		oldInvalidCh := "datanode-etcd-test-channel-invalid"
+		path := fmt.Sprintf("%s/%d/%s", Params.ChannelWatchSubPath, node.NodeID, oldInvalidCh)
+		err = kv.Save(path, string([]byte{23}))
+		assert.NoError(t, err)
+
 		ch := fmt.Sprintf("datanode-etcd-test-channel_%d", rand.Int31())
-		path := fmt.Sprintf("channel/%d/%s", node.NodeID, ch)
+		path = fmt.Sprintf("%s/%d/%s", Params.ChannelWatchSubPath, node.NodeID, ch)
 		c := make(chan struct{})
 		go func() {
-			ec := kv.WatchWithPrefix(fmt.Sprintf("channel/%d", node.NodeID))
+			ec := kv.WatchWithPrefix(fmt.Sprintf("%s/%d", Params.ChannelWatchSubPath, node.NodeID))
 			c <- struct{}{}
 			cnt := 0
 			for {
@@ -506,7 +534,8 @@ func TestWatchChannel(t *testing.T) {
 		node.chanMut.RUnlock()
 		assert.True(t, has)
 
-		kv.RemoveWithPrefix(fmt.Sprintf("channel/%d", node.NodeID))
+		err = kv.RemoveWithPrefix(fmt.Sprintf("%s/%d", Params.ChannelWatchSubPath, node.NodeID))
+		assert.Nil(t, err)
 		//TODO there is not way to sync Release done, use sleep for now
 		time.Sleep(100 * time.Millisecond)
 
@@ -516,7 +545,42 @@ func TestWatchChannel(t *testing.T) {
 		assert.False(t, has)
 	})
 
-	t.Run("watch dm channel fails", func(t *testing.T) {
-		node.WatchDmChannels(context.Background(), &datapb.WatchDmChannelsRequest{})
+	t.Run("handle watch info failed", func(t *testing.T) {
+		node.handleWatchInfo("test1", []byte{23})
+
+		node.chanMut.RLock()
+		_, has := node.vchan2SyncService["test1"]
+		assert.False(t, has)
+		node.chanMut.RUnlock()
+
+		info := datapb.ChannelWatchInfo{
+			Vchan: nil,
+			State: datapb.ChannelWatchState_Uncomplete,
+		}
+		bs, err := proto.Marshal(&info)
+		assert.NoError(t, err)
+		node.handleWatchInfo("test2", bs)
+
+		node.chanMut.RLock()
+		_, has = node.vchan2SyncService["test2"]
+		assert.False(t, has)
+		node.chanMut.RUnlock()
+
+		info = datapb.ChannelWatchInfo{
+			Vchan: &datapb.VchannelInfo{},
+			State: datapb.ChannelWatchState_Uncomplete,
+		}
+		bs, err = proto.Marshal(&info)
+		assert.NoError(t, err)
+
+		node.msFactory = &FailMessageStreamFactory{
+			node.msFactory,
+		}
+		node.handleWatchInfo("test3", bs)
+		node.chanMut.RLock()
+		_, has = node.vchan2SyncService["test3"]
+		assert.False(t, has)
+		node.chanMut.RUnlock()
+
 	})
 }
