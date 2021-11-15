@@ -330,7 +330,7 @@ func TestExprRange_Str(t *testing.T) {
 
 	for offset, invalidExprStr := range invalidExprStrs {
 		fmt.Printf("case %d: %s\n", offset, invalidExprStr)
-		planProto, err := CreateQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
+		planProto, err := createQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
 		assert.Error(t, err)
 		dbgStr := proto.MarshalTextString(planProto)
 		println(dbgStr)
@@ -382,7 +382,7 @@ func TestExprCompare_Str(t *testing.T) {
 
 	for offset, invalidExprStr := range invalidExprStrs {
 		fmt.Printf("case %d: %s\n", offset, invalidExprStr)
-		planProto, err := CreateQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
+		planProto, err := createQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
 		assert.Error(t, err)
 		dbgStr := proto.MarshalTextString(planProto)
 		println(dbgStr)
@@ -467,7 +467,7 @@ func TestExprArith_Str(t *testing.T) {
 
 	for offset, exprStr := range exprStrs {
 		fmt.Printf("case %d: %s\n", offset, exprStr)
-		planProto, err := CreateQueryPlan(schema, exprStr, "fakevec", queryInfo)
+		planProto, err := createQueryPlan(schema, exprStr, "fakevec", queryInfo)
 		assert.Nil(t, err)
 		dbgStr := proto.MarshalTextString(planProto)
 		println(dbgStr)
@@ -475,7 +475,7 @@ func TestExprArith_Str(t *testing.T) {
 
 	for offset, invalidExprStr := range invalidExprStrs {
 		fmt.Printf("case %d: %s\n", offset, invalidExprStr)
-		planProto, err := CreateQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
+		planProto, err := createQueryPlan(schema, invalidExprStr, "fakevec", queryInfo)
 		assert.Error(t, err)
 		dbgStr := proto.MarshalTextString(planProto)
 		println(dbgStr)
