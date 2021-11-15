@@ -454,27 +454,6 @@ SegmentGrowingImpl::Insert(int64_t reserved_offset,
 }
 
 std::vector<SegOffset>
-SegmentGrowingImpl::search_ids(const std::shared_ptr<arrow::BooleanArray>& bitset, Timestamp timestamp) const {
-    std::vector<SegOffset> res_offsets;
-
-    for (int i = 0; i < bitset->length(); i++) {
-        if (bitset->Value(i)) {
-            SegOffset the_offset(-1);
-            auto offset = SegOffset(i);
-            if (record_.timestamps_[offset.get()] < timestamp) {
-                the_offset = std::max(the_offset, offset);
-            }
-
-            if (the_offset == SegOffset(-1)) {
-                continue;
-            }
-            res_offsets.push_back(the_offset);
-        }
-    }
-    return res_offsets;
-}
-
-std::vector<SegOffset>
 SegmentGrowingImpl::search_ids(const BitsetView& bitset, Timestamp timestamp) const {
     std::vector<SegOffset> res_offsets;
 

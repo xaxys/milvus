@@ -571,17 +571,6 @@ SegmentSealedImpl::Delete(int64_t reserved_offset,
 }
 
 std::vector<SegOffset>
-SegmentSealedImpl::search_ids(const std::shared_ptr<arrow::BooleanArray>& bitset, Timestamp timestamp) const {
-    std::vector<SegOffset> dst_offset;
-    for (int i = 0; i < bitset->length(); i++) {
-        if (bitset->Value(i)) {
-            dst_offset.emplace_back(SegOffset(i));
-        }
-    }
-    return dst_offset;
-}
-
-std::vector<SegOffset>
 SegmentSealedImpl::search_ids(const BitsetView& bitset, Timestamp timestamp) const {
     std::vector<SegOffset> dst_offset;
     for (int i = 0; i < bitset.size(); i++) {

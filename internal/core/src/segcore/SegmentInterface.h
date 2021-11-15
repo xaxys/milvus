@@ -134,9 +134,6 @@ class SegmentInternalInterface : public SegmentInterface {
     get_active_count(Timestamp ts) const = 0;
 
     virtual std::vector<SegOffset>
-    search_ids(const std::shared_ptr<arrow::BooleanArray>& view, Timestamp timestamp) const = 0;
-
-    virtual std::vector<SegOffset>
     search_ids(const BitsetView& view, Timestamp timestamp) const = 0;
 
  protected:
