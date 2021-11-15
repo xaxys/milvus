@@ -17,7 +17,9 @@
 package datanode
 
 import (
+	"context"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/rootcoord"
 	"github.com/milvus-io/milvus/internal/util/flowgraph"
 	"github.com/milvus-io/milvus/internal/util/trace"
 	"github.com/opentracing/opentracing-go"
@@ -51,11 +54,14 @@ var _ flowgraph.Node = (*ddNode)(nil)
 type ddNode struct {
 	BaseNode
 
-	clearSignal  chan<- UniqueID
 	collectionID UniqueID
 
 	segID2SegInfo   sync.Map // segment ID to *SegmentInfo
 	flushedSegments []*datapb.SegmentInfo
+	vchannelName    string
+
+	deltaMsgStream msgstream.MsgStream
+	dropMode       atomic.Value
 }
 
 // Name returns node name, implementing flowgraph.Node
@@ -85,6 +91,13 @@ func (ddn *ddNode) Operate(in []Msg) []Msg {
 		msg.SetTraceCtx(ctx)
 	}
 
+	if load := ddn.dropMode.Load(); load != nil && load.(bool) {
+		log.Debug("ddNode in dropMode",
+			zap.String("vchannel name", ddn.vchannelName),
+			zap.Int64("collection ID", ddn.collectionID))
+		return []Msg{}
+	}
+
 	var fgMsg = flowGraphMsg{
 		insertMessages: make([]*msgstream.InsertMsg, 0),
 		timeRange: TimeRange{
@@ -93,15 +106,17 @@ func (ddn *ddNode) Operate(in []Msg) []Msg {
 		},
 		startPositions: make([]*internalpb.MsgPosition, 0),
 		endPositions:   make([]*internalpb.MsgPosition, 0),
+		dropCollection: false,
 	}
 
+	forwardMsgs := make([]msgstream.TsMsg, 0)
 	for _, msg := range msMsg.TsMessages() {
 		switch msg.Type() {
 		case commonpb.MsgType_DropCollection:
 			if msg.(*msgstream.DropCollectionMsg).GetCollectionID() == ddn.collectionID {
-				log.Info("Destroying current flowgraph", zap.Any("collectionID", ddn.collectionID))
-				ddn.clearSignal <- ddn.collectionID
-				return []Msg{}
+				log.Info("Receiving DropCollection msg", zap.Any("collectionID", ddn.collectionID))
+				ddn.dropMode.Store(true)
+				fgMsg.dropCollection = true
 			}
 		case commonpb.MsgType_Insert:
 			log.Debug("DDNode receive insert messages")
@@ -125,6 +140,10 @@ func (ddn *ddNode) Operate(in []Msg) []Msg {
 		case commonpb.MsgType_Delete:
 			log.Debug("DDNode receive delete messages")
 			dmsg := msg.(*msgstream.DeleteMsg)
+			for i := 0; i < len(dmsg.PrimaryKeys); i++ {
+				dmsg.HashValues = append(dmsg.HashValues, uint32(0))
+			}
+			forwardMsgs = append(forwardMsgs, dmsg)
 			if dmsg.CollectionID != ddn.collectionID {
 				//log.Debug("filter invalid DeleteMsg, collection mis-match",
 				//	zap.Int64("Get msg collID", dmsg.CollectionID),
@@ -133,6 +152,11 @@ func (ddn *ddNode) Operate(in []Msg) []Msg {
 			}
 			fgMsg.deleteMessages = append(fgMsg.deleteMessages, dmsg)
 		}
+	}
+	err := ddn.forwardDeleteMsg(forwardMsgs, msMsg.TimestampMin(), msMsg.TimestampMax())
+	if err != nil {
+		// TODO: proper deal with error
+		log.Warn("DDNode forward delete msg failed", zap.Error(err))
 	}
 
 	fgMsg.startPositions = append(fgMsg.startPositions, msMsg.StartPositions()...)
@@ -169,7 +193,57 @@ func (ddn *ddNode) isFlushed(segmentID UniqueID) bool {
 	return false
 }
 
-func newDDNode(clearSignal chan<- UniqueID, collID UniqueID, vchanInfo *datapb.VchannelInfo) *ddNode {
+func (ddn *ddNode) forwardDeleteMsg(msgs []msgstream.TsMsg, minTs Timestamp, maxTs Timestamp) error {
+	if len(msgs) != 0 {
+		var msgPack = msgstream.MsgPack{
+			Msgs:    msgs,
+			BeginTs: minTs,
+			EndTs:   maxTs,
+		}
+		if err := ddn.deltaMsgStream.Produce(&msgPack); err != nil {
+			return err
+		}
+	}
+	if err := ddn.sendDeltaTimeTick(maxTs); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (ddn *ddNode) sendDeltaTimeTick(ts Timestamp) error {
+	msgPack := msgstream.MsgPack{}
+	baseMsg := msgstream.BaseMsg{
+		BeginTimestamp: ts,
+		EndTimestamp:   ts,
+		HashValues:     []uint32{0},
+	}
+	timeTickResult := internalpb.TimeTickMsg{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_TimeTick,
+			MsgID:     0,
+			Timestamp: ts,
+			SourceID:  Params.NodeID,
+		},
+	}
+	timeTickMsg := &msgstream.TimeTickMsg{
+		BaseMsg:     baseMsg,
+		TimeTickMsg: timeTickResult,
+	}
+	msgPack.Msgs = append(msgPack.Msgs, timeTickMsg)
+
+	if err := ddn.deltaMsgStream.Produce(&msgPack); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (ddn *ddNode) Close() {
+	if ddn.deltaMsgStream != nil {
+		ddn.deltaMsgStream.Close()
+	}
+}
+
+func newDDNode(ctx context.Context, collID UniqueID, vchanInfo *datapb.VchannelInfo, msFactory msgstream.Factory) *ddNode {
 	baseNode := BaseNode{}
 	baseNode.SetMaxQueueLength(Params.FlowGraphMaxQueueLength)
 	baseNode.SetMaxParallelism(Params.FlowGraphMaxParallelism)
@@ -181,12 +255,33 @@ func newDDNode(clearSignal chan<- UniqueID, collID UniqueID, vchanInfo *datapb.V
 		zap.Int("No. Segment", len(vchanInfo.GetFlushedSegments())),
 	)
 
+	deltaStream, err := msFactory.NewMsgStream(ctx)
+	if err != nil {
+		log.Error(err.Error())
+		return nil
+	}
+	pChannelName := rootcoord.ToPhysicalChannel(vchanInfo.ChannelName)
+	deltaChannelName, err := rootcoord.ConvertChannelName(pChannelName, Params.DmlChannelName, Params.DeltaChannelName)
+	if err != nil {
+		log.Error(err.Error())
+		return nil
+	}
+
+	deltaStream.SetRepackFunc(msgstream.DefaultRepackFunc)
+	deltaStream.AsProducer([]string{deltaChannelName})
+	log.Debug("datanode AsProducer", zap.String("DeltaChannelName", deltaChannelName))
+	var deltaMsgStream msgstream.MsgStream = deltaStream
+	deltaMsgStream.Start()
+
 	dd := &ddNode{
 		BaseNode:        baseNode,
-		clearSignal:     clearSignal,
 		collectionID:    collID,
 		flushedSegments: fs,
+		vchannelName:    vchanInfo.ChannelName,
+		deltaMsgStream:  deltaMsgStream,
 	}
+
+	dd.dropMode.Store(false)
 
 	for _, us := range vchanInfo.GetUnflushedSegments() {
 		dd.segID2SegInfo.Store(us.GetID(), us)

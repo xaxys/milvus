@@ -62,7 +62,7 @@ type queryCollection struct {
 	tSafeUpdate     bool
 	watcherCond     *sync.Cond
 
-	serviceableTimeMutex sync.Mutex // guards serviceableTime
+	serviceableTimeMutex sync.RWMutex // guards serviceableTime
 	serviceableTime      Timestamp
 
 	queryMsgStream       msgstream.MsgStream
@@ -143,21 +143,34 @@ func (q *queryCollection) close() {
 
 // registerCollectionTSafe registers tSafe watcher if vChannels exists
 func (q *queryCollection) registerCollectionTSafe() error {
-	collection, err := q.streaming.replica.getCollectionByID(q.collectionID)
+	streamingCollection, err := q.streaming.replica.getCollectionByID(q.collectionID)
 	if err != nil {
 		return err
 	}
-
-	log.Debug("register tSafe watcher and init watcher select case",
-		zap.Any("collectionID", collection.ID()),
-		zap.Any("dml channels", collection.getVChannels()),
-	)
-	for _, channel := range collection.getVChannels() {
-		err = q.addTSafeWatcher(channel)
+	for _, channel := range streamingCollection.getVChannels() {
+		err := q.addTSafeWatcher(channel)
 		if err != nil {
 			return err
 		}
 	}
+	log.Debug("register tSafe watcher and init watcher select case",
+		zap.Any("collectionID", streamingCollection.ID()),
+		zap.Any("dml channels", streamingCollection.getVChannels()))
+
+	historicalCollection, err := q.historical.replica.getCollectionByID(q.collectionID)
+	if err != nil {
+		return err
+	}
+	for _, channel := range historicalCollection.getVDeltaChannels() {
+		err := q.addTSafeWatcher(channel)
+		if err != nil {
+			return err
+		}
+	}
+	log.Debug("register tSafe watcher and init watcher select case",
+		zap.Any("collectionID", historicalCollection.ID()),
+		zap.Any("delta channels", historicalCollection.getVDeltaChannels()))
+
 	return nil
 }
 
@@ -168,7 +181,8 @@ func (q *queryCollection) addTSafeWatcher(vChannel Channel) error {
 		err := errors.New(fmt.Sprintln("tSafeWatcher of queryCollection has been exists, ",
 			"collectionID = ", q.collectionID, ", ",
 			"channel = ", vChannel))
-		return err
+		log.Warn(err.Error())
+		return nil
 	}
 	q.tSafeWatchers[vChannel] = newTSafeWatcher()
 	err := q.streaming.tSafeReplica.registerTSafeWatcher(vChannel, q.tSafeWatchers[vChannel])
@@ -238,9 +252,14 @@ func (q *queryCollection) waitNewTSafe() (Timestamp, error) {
 }
 
 func (q *queryCollection) getServiceableTime() Timestamp {
-	q.serviceableTimeMutex.Lock()
-	defer q.serviceableTimeMutex.Unlock()
-	return q.serviceableTime
+	gracefulTimeInMilliSecond := Params.GracefulTime
+	gracefulTime := typeutil.ZeroTimestamp
+	if gracefulTimeInMilliSecond > 0 {
+		gracefulTime = tsoutil.ComposeTS(gracefulTimeInMilliSecond, 0)
+	}
+	q.serviceableTimeMutex.RLock()
+	defer q.serviceableTimeMutex.RUnlock()
+	return q.serviceableTime + gracefulTime
 }
 
 func (q *queryCollection) setServiceableTime(t Timestamp) {
@@ -250,14 +269,7 @@ func (q *queryCollection) setServiceableTime(t Timestamp) {
 	if t < q.serviceableTime {
 		return
 	}
-
-	gracefulTimeInMilliSecond := Params.GracefulTime
-	if gracefulTimeInMilliSecond > 0 {
-		gracefulTime := tsoutil.ComposeTS(gracefulTimeInMilliSecond, 0)
-		q.serviceableTime = t + gracefulTime
-	} else {
-		q.serviceableTime = t
-	}
+	q.serviceableTime = t
 }
 
 func (q *queryCollection) consumeQuery() {
@@ -412,7 +424,7 @@ func (q *queryCollection) receiveQueryMsg(msg queryMsg) error {
 	serviceTime := q.getServiceableTime()
 	gt, _ := tsoutil.ParseTS(guaranteeTs)
 	st, _ := tsoutil.ParseTS(serviceTime)
-	if guaranteeTs > serviceTime && len(collection.getVChannels()) > 0 {
+	if guaranteeTs > serviceTime && (len(collection.getVChannels()) > 0 || len(collection.getVDeltaChannels()) > 0) {
 		log.Debug("query node::receiveQueryMsg: add to unsolvedMsg",
 			zap.Any("collectionID", q.collectionID),
 			zap.Any("sm.GuaranteeTimestamp", gt),
@@ -928,22 +940,18 @@ func (q *queryCollection) search(msg queryMsg) error {
 	searchResults := make([]*SearchResult, 0)
 
 	// historical search
-	hisSearchResults, sealedSegmentSearched, err1 := q.historical.search(searchRequests, collection.id, searchMsg.PartitionIDs, plan, travelTimestamp)
-	if err1 != nil {
-		log.Warn(err1.Error())
-		return err1
+	hisSearchResults, sealedSegmentSearched, err := q.historical.search(searchRequests, collection.id, searchMsg.PartitionIDs, plan, travelTimestamp)
+	if err != nil {
+		return err
 	}
 	searchResults = append(searchResults, hisSearchResults...)
 	tr.Record("historical search done")
 
-	// streaming search
-	var err2 error
 	for _, channel := range collection.getVChannels() {
 		var strSearchResults []*SearchResult
-		strSearchResults, err2 = q.streaming.search(searchRequests, collection.id, searchMsg.PartitionIDs, channel, plan, travelTimestamp)
-		if err2 != nil {
-			log.Warn(err2.Error())
-			return err2
+		strSearchResults, err := q.streaming.search(searchRequests, collection.id, searchMsg.PartitionIDs, channel, plan, travelTimestamp)
+		if err != nil {
+			return err
 		}
 		searchResults = append(searchResults, strSearchResults...)
 	}
@@ -1152,20 +1160,19 @@ func (q *queryCollection) retrieve(msg queryMsg) error {
 				Schema: collection.schema,
 			}, q.localCacheEnabled)
 	}
+
 	// historical retrieve
-	hisRetrieveResults, sealedSegmentRetrieved, err1 := q.historical.retrieve(collectionID, retrieveMsg.PartitionIDs, q.vectorChunkManager, plan)
-	if err1 != nil {
-		log.Warn(err1.Error())
-		return err1
+	hisRetrieveResults, sealedSegmentRetrieved, err := q.historical.retrieve(collectionID, retrieveMsg.PartitionIDs, q.vectorChunkManager, plan)
+	if err != nil {
+		return err
 	}
 	mergeList = append(mergeList, hisRetrieveResults...)
 	tr.Record("historical retrieve done")
 
 	// streaming retrieve
-	strRetrieveResults, _, err2 := q.streaming.retrieve(collectionID, retrieveMsg.PartitionIDs, plan)
-	if err2 != nil {
-		log.Warn(err2.Error())
-		return err2
+	strRetrieveResults, _, err := q.streaming.retrieve(collectionID, retrieveMsg.PartitionIDs, plan)
+	if err != nil {
+		return err
 	}
 	mergeList = append(mergeList, strRetrieveResults...)
 	tr.Record("streaming retrieve done")
@@ -1249,9 +1256,7 @@ func mergeRetrieveResults(retrieveResults []*segcorepb.RetrieveResults) (*segcor
 			}
 		}
 	}
-	if skipDupCnt > 0 {
-		log.Debug("skip duplicated query result", zap.Int64("count", skipDupCnt))
-	}
+	log.Debug("skip duplicated query result", zap.Int64("count", skipDupCnt))
 
 	// not found, return default values indicating not result found
 	if ret == nil {

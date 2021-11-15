@@ -17,14 +17,17 @@ import (
 	"encoding/binary"
 	"math"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/common"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -37,12 +40,13 @@ import (
 )
 
 func genSimpleQueryCollection(ctx context.Context, cancel context.CancelFunc) (*queryCollection, error) {
-	historical, err := genSimpleHistorical(ctx)
+	tSafe := newTSafeReplica()
+	historical, err := genSimpleHistorical(ctx, tSafe)
 	if err != nil {
 		return nil, err
 	}
 
-	streaming, err := genSimpleStreaming(ctx)
+	streaming, err := genSimpleStreaming(ctx, tSafe)
 	if err != nil {
 		return nil, err
 	}
@@ -104,11 +108,16 @@ func genSimpleSealedSegmentsChangeInfoMsg() *msgstream.SealedSegmentsChangeInfoM
 func updateTSafe(queryCollection *queryCollection, timestamp Timestamp) {
 	// register
 	queryCollection.tSafeWatchers[defaultVChannel] = newTSafeWatcher()
+	queryCollection.tSafeWatchers[defaultHistoricalVChannel] = newTSafeWatcher()
 	queryCollection.streaming.tSafeReplica.addTSafe(defaultVChannel)
 	queryCollection.streaming.tSafeReplica.registerTSafeWatcher(defaultVChannel, queryCollection.tSafeWatchers[defaultVChannel])
+	queryCollection.historical.tSafeReplica.addTSafe(defaultHistoricalVChannel)
+	queryCollection.historical.tSafeReplica.registerTSafeWatcher(defaultHistoricalVChannel, queryCollection.tSafeWatchers[defaultHistoricalVChannel])
 	queryCollection.addTSafeWatcher(defaultVChannel)
+	queryCollection.addTSafeWatcher(defaultHistoricalVChannel)
 
 	queryCollection.streaming.tSafeReplica.setTSafe(defaultVChannel, defaultCollectionID, timestamp)
+	queryCollection.historical.tSafeReplica.setTSafe(defaultHistoricalVChannel, defaultCollectionID, timestamp)
 }
 
 func TestQueryCollection_withoutVChannel(t *testing.T) {
@@ -124,7 +133,10 @@ func TestQueryCollection_withoutVChannel(t *testing.T) {
 	assert.Nil(t, err)
 
 	schema := genTestCollectionSchema(0, false, 2)
-	historical := newHistorical(context.Background(), nil, nil, factory, etcdKV)
+	historicalReplica := newCollectionReplica(etcdKV)
+	tsReplica := newTSafeReplica()
+	streamingReplica := newCollectionReplica(etcdKV)
+	historical := newHistorical(context.Background(), historicalReplica, etcdKV, tsReplica)
 
 	//add a segment to historical data
 	err = historical.replica.addCollection(0, schema)
@@ -150,7 +162,7 @@ func TestQueryCollection_withoutVChannel(t *testing.T) {
 	assert.Nil(t, err)
 
 	//create a streaming
-	streaming := newStreaming(ctx, factory, etcdKV, historical.replica)
+	streaming := newStreaming(ctx, streamingReplica, factory, etcdKV, tsReplica)
 	err = streaming.replica.addCollection(0, schema)
 	assert.Nil(t, err)
 	err = streaming.replica.addPartition(0, 1)
@@ -278,22 +290,6 @@ func TestQueryCollection_consumeQuery(t *testing.T) {
 	t.Run("consume retrieve", func(t *testing.T) {
 		msg, err := genSimpleRetrieveMsg()
 		assert.NoError(t, err)
-		runConsumeQuery(msg)
-	})
-
-	t.Run("consume load balance", func(t *testing.T) {
-		msg := &msgstream.LoadBalanceSegmentsMsg{
-			BaseMsg: msgstream.BaseMsg{
-				HashValues: []uint32{0},
-			},
-			LoadBalanceSegmentsRequest: internalpb.LoadBalanceSegmentsRequest{
-				Base: &commonpb.MsgBase{
-					MsgType: commonpb.MsgType_LoadBalanceSegments,
-					MsgID:   rand.Int63(), // TODO: random msgID?
-				},
-				SegmentIDs: []UniqueID{defaultSegmentID},
-			},
-		}
 		runConsumeQuery(msg)
 	})
 
@@ -688,7 +684,7 @@ func TestQueryCollection_adjustByChangeInfo(t *testing.T) {
 		simpleInfo.CollectionID = 1000
 		segmentChangeInfos.Infos[0].OnlineSegments = append(segmentChangeInfos.Infos[0].OnlineSegments, simpleInfo)
 		err = qc.adjustByChangeInfo(segmentChangeInfos)
-		assert.Error(t, err)
+		assert.NoError(t, err)
 	})
 
 	t.Run("test no segment when adjustByChangeInfo", func(t *testing.T) {
@@ -703,5 +699,84 @@ func TestQueryCollection_adjustByChangeInfo(t *testing.T) {
 
 		err = qc.adjustByChangeInfo(segmentChangeInfos)
 		assert.Nil(t, err)
+	})
+}
+
+func TestQueryCollection_search_while_release(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Run("test search while release collection", func(t *testing.T) {
+		queryCollection, err := genSimpleQueryCollection(ctx, cancel)
+		assert.NoError(t, err)
+
+		queryChannel := genQueryChannel()
+		queryCollection.queryResultMsgStream.AsProducer([]Channel{queryChannel})
+		queryCollection.queryResultMsgStream.Start()
+
+		msg, err := genSimpleSearchMsg()
+		assert.NoError(t, err)
+
+		// To prevent data race in search trackCtx
+		searchMu := &sync.Mutex{}
+
+		runSearchWhileReleaseCollection := func(wg *sync.WaitGroup) {
+			go func() {
+				_ = queryCollection.streaming.replica.removeCollection(defaultCollectionID)
+				wg.Done()
+			}()
+
+			go func() {
+				searchMu.Lock()
+				_ = queryCollection.search(msg)
+				searchMu.Unlock()
+				wg.Done()
+			}()
+		}
+
+		wg := &sync.WaitGroup{}
+		for i := 0; i < 10; i++ {
+			log.Debug("runSearchWhileReleaseCollection", zap.Any("time", i))
+			wg.Add(2)
+			go runSearchWhileReleaseCollection(wg)
+		}
+		wg.Wait()
+	})
+
+	t.Run("test search while release partition", func(t *testing.T) {
+		queryCollection, err := genSimpleQueryCollection(ctx, cancel)
+		assert.NoError(t, err)
+
+		queryChannel := genQueryChannel()
+		queryCollection.queryResultMsgStream.AsProducer([]Channel{queryChannel})
+		queryCollection.queryResultMsgStream.Start()
+
+		msg, err := genSimpleSearchMsg()
+		assert.NoError(t, err)
+
+		// To prevent data race in search trackCtx
+		searchMu := &sync.Mutex{}
+
+		runSearchWhileReleasePartition := func(wg *sync.WaitGroup) {
+			go func() {
+				_ = queryCollection.streaming.replica.removePartition(defaultPartitionID)
+				wg.Done()
+			}()
+
+			go func() {
+				searchMu.Lock()
+				_ = queryCollection.search(msg)
+				searchMu.Unlock()
+				wg.Done()
+			}()
+		}
+
+		wg := &sync.WaitGroup{}
+		for i := 0; i < 10; i++ {
+			log.Debug("runSearchWhileReleasePartition", zap.Any("time", i))
+			wg.Add(2)
+			go runSearchWhileReleasePartition(wg)
+		}
+		wg.Wait()
 	})
 }

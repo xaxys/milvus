@@ -9,21 +9,16 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
-#include <cstring>
-#include <cstdint>
-
+#include "common/CGoHelper.h"
+#include "common/LoadInfo.h"
+#include "common/Types.h"
+#include "common/type_c.h"
+#include "knowhere/index/vector_index/adapter/VectorAdapter.h"
 #include "log/Log.h"
+#include "segcore/Collection.h"
 #include "segcore/SegmentGrowing.h"
 #include "segcore/SegmentSealed.h"
-#include "segcore/Collection.h"
 #include "segcore/segment_c.h"
-#include "common/LoadInfo.h"
-#include "common/type_c.h"
-#include <knowhere/index/vector_index/VecIndex.h>
-#include <knowhere/index/vector_index/adapter/VectorAdapter.h>
-#include "common/Types.h"
-#include "common/CGoHelper.h"
-#include <iostream>
 
 //////////////////////////////    common interfaces    //////////////////////////////
 CSegmentInterface
@@ -53,14 +48,12 @@ NewSegment(CCollection collection, uint64_t segment_id, SegmentType seg_type) {
 void
 DeleteSegment(CSegmentInterface c_segment) {
     // TODO: use dynamic cast, and return c status
-    LOG_SEGCORE_DEBUG_ << "delete segment " << c_segment;
     auto s = (milvus::segcore::SegmentInterface*)c_segment;
     delete s;
 }
 
 void
 DeleteSearchResult(CSearchResult search_result) {
-    LOG_SEGCORE_DEBUG_ << "delete search result " << search_result;
     auto res = (milvus::SearchResult*)search_result;
     delete res;
 }
@@ -83,6 +76,30 @@ Search(CSegmentInterface c_segment,
             }
         }
         *result = search_result.release();
+        return milvus::SuccessCStatus();
+    } catch (std::exception& e) {
+        return milvus::FailureCStatus(UnexpectedError, e.what());
+    }
+}
+
+void
+DeleteRetrieveResult(CRetrieveResult* retrieve_result) {
+    std::free((void*)(retrieve_result->proto_blob));
+}
+
+CStatus
+Retrieve(CSegmentInterface c_segment, CRetrievePlan c_plan, uint64_t timestamp, CRetrieveResult* result) {
+    try {
+        auto segment = (const milvus::segcore::SegmentInterface*)c_segment;
+        auto plan = (const milvus::query::RetrievePlan*)c_plan;
+        auto retrieve_result = segment->Retrieve(plan, timestamp);
+
+        auto size = retrieve_result->ByteSize();
+        void* buffer = malloc(size);
+        retrieve_result->SerializePartialToArray(buffer, size);
+
+        result->proto_blob = buffer;
+        result->proto_size = size;
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
         return milvus::FailureCStatus(UnexpectedError, e.what());
@@ -237,17 +254,5 @@ DropSealedSegmentIndex(CSegmentInterface c_segment, int64_t field_id) {
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
         return milvus::FailureCStatus(UnexpectedError, e.what());
-    }
-}
-
-CProtoResult
-Retrieve(CSegmentInterface c_segment, CRetrievePlan c_plan, uint64_t timestamp) {
-    try {
-        auto segment = (const milvus::segcore::SegmentInterface*)c_segment;
-        auto plan = (const milvus::query::RetrievePlan*)c_plan;
-        auto result = segment->Retrieve(plan, timestamp);
-        return milvus::AllocCProtoResult(*result);
-    } catch (std::exception& e) {
-        return CProtoResult{milvus::FailureCStatus(UnexpectedError, e.what())};
     }
 }

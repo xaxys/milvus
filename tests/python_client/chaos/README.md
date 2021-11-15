@@ -13,26 +13,16 @@ Chaos tests run in pytest framework, same as e2e tests.
 
 Please refer to [Run E2E Tests](https://github.com/milvus-io/milvus/blob/master/tests/README.md)
 
+## Flow Chart
+
+<img src="../graphs/chaos_test_flow_chart.jpg" alt="Chaos Test Flow Chart" width="350"/>
+
 ## Test Scenarios
 ### Milvus in cluster mode
 #### pod kill
-1. root coordinator pod is killed
-   
-2. proxy pod is killed
 
-3. data coordinator pod is killed
+kill pod every 5s
 
-4. data node pod is killed
-
-5. index coordinator pod is killed
-
-6. index node pod is killed
-
-7. query coordinator pod is killed
-
-8. query node pod is killed
-
-9. minio pod is killed
 #### pod network partition
 
 two direction(to and from) network isolation between a pod and the rest of the pods
@@ -40,6 +30,9 @@ two direction(to and from) network isolation between a pod and the rest of the p
 #### pod failure
 
 Set the pod（querynode, indexnode and datanode）as multiple replicas, make one of them failure, and test milvus's functionality
+
+#### pod memory stress
+
 ### Milvus in standalone mode
 1. standalone pod is killed
 
@@ -90,10 +83,9 @@ Run test scenario automatically:
 still in planning 
 
 ### Todo
-- [x] pod_failure
-- [ ] container_kill
-- [x] network attack
-- [x] memory stress
+- [ ] network attack
+- [ ] clock skew
+- [ ] IO injection
 
 ## How to contribute
 * Get familiar with chaos engineering and [Chaos Mesh](https://chaos-mesh.org)

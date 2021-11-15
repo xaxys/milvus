@@ -12,17 +12,11 @@
 #pragma once
 
 #include <string>
+#include <string.h>
+
 #include "common/type_c.h"
 
 namespace milvus {
-
-inline CProtoResult
-AllocCProtoResult(const google::protobuf::Message& msg) {
-    auto size = msg.ByteSize();
-    void* buffer = malloc(size);
-    msg.SerializePartialToArray(buffer, size);
-    return CProtoResult{CStatus{Success}, CProto{buffer, size}};
-}
 
 inline CStatus
 SuccessCStatus() {

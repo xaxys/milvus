@@ -32,6 +32,8 @@ import (
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/mqclient"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"go.uber.org/zap"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -48,7 +50,10 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
 
-const connEtcdMaxRetryTime = 100000
+const (
+	connEtcdMaxRetryTime = 100000
+	allPartitionID       = 0 // paritionID means no filtering
+)
 
 var (
 	// TODO: sunby put to config
@@ -97,13 +102,19 @@ type Server struct {
 	isServing        ServerState
 	helper           ServerHelper
 
-	kvClient        *etcdkv.EtcdKV
-	meta            *meta
-	segmentManager  Manager
-	allocator       allocator
-	cluster         *Cluster
-	channelManager  *ChannelManager
-	rootCoordClient types.RootCoord
+	kvClient         *etcdkv.EtcdKV
+	meta             *meta
+	segmentManager   Manager
+	allocator        allocator
+	cluster          *Cluster
+	sessionManager   *SessionManager
+	channelManager   *ChannelManager
+	rootCoordClient  types.RootCoord
+	garbageCollector *garbageCollector
+	gcOpt            GcOption
+
+	compactionTrigger trigger
+	compactionHandler compactionPlanContext
 
 	metricsCacheManager *metricsinfo.MetricsCacheManager
 
@@ -159,6 +170,13 @@ func SetDataNodeCreator(creator dataNodeCreatorFunc) Option {
 	}
 }
 
+// SetSegmentManager returns an Option to set SegmentManager
+func SetSegmentManager(manager Manager) Option {
+	return func(svr *Server) {
+		svr.segmentManager = manager
+	}
+}
+
 // CreateServer create `Server` instance
 func CreateServer(ctx context.Context, factory msgstream.Factory, opts ...Option) (*Server, error) {
 	rand.Seed(time.Now().UnixNano())
@@ -193,7 +211,7 @@ func (s *Server) Register() error {
 	if s.session == nil {
 		return errors.New("failed to initialize session")
 	}
-	s.session.Init(typeutil.DataCoordRole, Params.IP, true)
+	s.session.Init(typeutil.DataCoordRole, Params.Address, true)
 	Params.NodeID = s.session.ServerID
 	Params.SetLogger(typeutil.UniqueID(-1))
 	return nil
@@ -235,9 +253,17 @@ func (s *Server) Start() error {
 	}
 
 	s.allocator = newRootCoordAllocator(s.rootCoordClient)
+	if Params.EnableCompaction {
+		s.createCompactionHandler()
+		s.createCompactionTrigger()
+	}
 
 	s.startSegmentManager()
 	if err = s.initServiceDiscovery(); err != nil {
+		return err
+	}
+
+	if err = s.initGarbageCollection(); err != nil {
 		return err
 	}
 
@@ -260,8 +286,62 @@ func (s *Server) initCluster() error {
 	if err != nil {
 		return err
 	}
-	sessionManager := NewSessionManager(withSessionCreator(s.dataNodeCreator))
-	s.cluster = NewCluster(sessionManager, s.channelManager)
+	s.sessionManager = NewSessionManager(withSessionCreator(s.dataNodeCreator))
+	s.cluster = NewCluster(s.sessionManager, s.channelManager)
+	return nil
+}
+
+func (s *Server) createCompactionHandler() {
+	s.compactionHandler = newCompactionPlanHandler(s.sessionManager, s.channelManager, s.meta, s.allocator, s.flushCh)
+	s.compactionHandler.start()
+}
+
+func (s *Server) stopCompactionHandler() {
+	s.compactionHandler.stop()
+}
+
+func (s *Server) createCompactionTrigger() {
+	s.compactionTrigger = newCompactionTrigger(s.meta, s.compactionHandler, s.allocator)
+	s.compactionTrigger.start()
+}
+
+func (s *Server) stopCompactionTrigger() {
+	s.compactionTrigger.stop()
+}
+
+func (s *Server) initGarbageCollection() error {
+	var cli *minio.Client
+	var err error
+	if Params.EnableGarbageCollection {
+		cli, err = minio.New(Params.MinioAddress, &minio.Options{
+			Creds:  credentials.NewStaticV4(Params.MinioAccessKeyID, Params.MinioSecretAccessKey, ""),
+			Secure: Params.MinioUseSSL,
+		})
+		if err != nil {
+			return err
+		}
+		has, err := cli.BucketExists(context.TODO(), Params.MinioBucketName)
+		if err != nil {
+			return err
+		}
+		if !has {
+			err = cli.MakeBucket(context.TODO(), Params.MinioBucketName, minio.MakeBucketOptions{})
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	s.garbageCollector = newGarbageCollector(s.meta, GcOption{
+		cli:        cli,
+		enabled:    Params.EnableGarbageCollection,
+		bucketName: Params.MinioBucketName,
+		rootPath:   Params.MinioRootPath,
+
+		checkInterval:    defaultGcInterval,
+		missingTolerance: defaultMissingTolerance,
+		dropTolerance:    defaultMissingTolerance,
+	})
 	return nil
 }
 
@@ -289,7 +369,9 @@ func (s *Server) initServiceDiscovery() error {
 }
 
 func (s *Server) startSegmentManager() {
-	s.segmentManager = newSegmentManager(s.meta, s.allocator)
+	if s.segmentManager == nil {
+		s.segmentManager = newSegmentManager(s.meta, s.allocator)
+	}
 }
 
 func (s *Server) initMeta() error {
@@ -316,6 +398,7 @@ func (s *Server) startServerLoop() {
 	s.startDataNodeTtLoop(s.serverLoopCtx)
 	s.startWatchService(s.serverLoopCtx)
 	s.startFlushLoop(s.serverLoopCtx)
+	s.garbageCollector.start()
 	go s.session.LivenessCheck(s.serverLoopCtx, func() {
 		log.Error("Data Coord disconnected from etcd, process will exit", zap.Int64("Server Id", s.session.ServerID))
 		if err := s.Stop(); err != nil {
@@ -362,6 +445,8 @@ func (s *Server) startStatsChannel(ctx context.Context) {
 	}()
 }
 
+// startDataNodeTtLoop start a goroutine to recv data node tt msg from msgstream
+// tt msg stands for the currently consumed timestamp for each channel
 func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 	ttMsgStream, err := s.msFactory.NewMsgStream(ctx)
 	if err != nil {
@@ -426,7 +511,8 @@ func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 				}
 
 				staleSegments := s.meta.SelectSegments(func(info *SegmentInfo) bool {
-					return info.GetInsertChannel() == ch &&
+					return isSegmentHealthy(info) &&
+						info.GetInsertChannel() == ch &&
 						!info.lastFlushTime.IsZero() &&
 						time.Since(info.lastFlushTime).Minutes() >= segmentTimedFlushDuration
 				})
@@ -623,7 +709,13 @@ func (s *Server) Stop() error {
 	}
 	log.Debug("dataCoord server shutdown")
 	s.cluster.Close()
+	s.garbageCollector.close()
 	s.stopServerLoop()
+
+	if Params.EnableCompaction {
+		s.stopCompactionTrigger()
+		s.stopCompactionHandler()
+	}
 	return nil
 }
 
@@ -692,12 +784,23 @@ func (s *Server) loadCollectionFromRootCoord(ctx context.Context, collectionID i
 }
 
 // GetVChanPositions get vchannel latest postitions with provided dml channel names
-func (s *Server) GetVChanPositions(channel string, collectionID UniqueID, seekFromStartPosition bool) *datapb.VchannelInfo {
+func (s *Server) GetVChanPositions(channel string, collectionID UniqueID, partitionID UniqueID, seekFromStartPosition bool) *datapb.VchannelInfo {
 	segments := s.meta.GetSegmentsByChannel(channel)
+	log.Debug("GetSegmentsByChannel",
+		zap.Any("collectionID", collectionID),
+		zap.Any("channel", channel),
+		zap.Any("seekFromStartPosition", seekFromStartPosition),
+		zap.Any("numOfSegments", len(segments)),
+	)
 	flushed := make([]*datapb.SegmentInfo, 0)
 	unflushed := make([]*datapb.SegmentInfo, 0)
 	var seekPosition *internalpb.MsgPosition
 	for _, s := range segments {
+		// filter segment with parition id
+		if partitionID > allPartitionID && s.PartitionID != partitionID {
+			continue
+		}
+
 		if s.State == commonpb.SegmentState_Flushing || s.State == commonpb.SegmentState_Flushed {
 			flushed = append(flushed, trimSegmentInfo(s.SegmentInfo))
 			if seekPosition == nil || (s.DmlPosition.Timestamp < seekPosition.Timestamp) {
@@ -710,7 +813,7 @@ func (s *Server) GetVChanPositions(channel string, collectionID UniqueID, seekFr
 			continue
 		}
 
-		unflushed = append(unflushed, trimSegmentInfo(s.SegmentInfo))
+		unflushed = append(unflushed, s.SegmentInfo)
 
 		segmentPosition := s.DmlPosition
 		if seekFromStartPosition {
@@ -725,16 +828,9 @@ func (s *Server) GetVChanPositions(channel string, collectionID UniqueID, seekFr
 	}
 	// use collection start position when segment position is not found
 	if seekPosition == nil {
-		coll := s.meta.GetCollection(collectionID)
-		if coll != nil {
-			for _, sp := range coll.GetStartPositions() {
-				if sp.GetKey() == rootcoord.ToPhysicalChannel(channel) {
-					seekPosition = &internalpb.MsgPosition{
-						ChannelName: channel,
-						MsgID:       sp.GetData(),
-					}
-				}
-			}
+		collection := s.GetCollection(s.ctx, collectionID)
+		if collection != nil {
+			seekPosition = getCollectionStartPosition(channel, collection)
 		}
 	}
 
@@ -745,6 +841,19 @@ func (s *Server) GetVChanPositions(channel string, collectionID UniqueID, seekFr
 		FlushedSegments:   flushed,
 		UnflushedSegments: unflushed,
 	}
+}
+
+func getCollectionStartPosition(channel string, collectionInfo *datapb.CollectionInfo) *internalpb.MsgPosition {
+	for _, sp := range collectionInfo.GetStartPositions() {
+		if sp.GetKey() != rootcoord.ToPhysicalChannel(channel) {
+			continue
+		}
+		return &internalpb.MsgPosition{
+			ChannelName: channel,
+			MsgID:       sp.GetData(),
+		}
+	}
+	return nil
 }
 
 // trimSegmentInfo returns a shallow copy of datapb.SegmentInfo and sets ALL binlog info to nil
@@ -761,4 +870,17 @@ func trimSegmentInfo(info *datapb.SegmentInfo) *datapb.SegmentInfo {
 		StartPosition:  info.StartPosition,
 		DmlPosition:    info.DmlPosition,
 	}
+}
+
+func (s *Server) GetCollection(ctx context.Context, collectionID UniqueID) *datapb.CollectionInfo {
+	coll := s.meta.GetCollection(collectionID)
+	if coll != nil {
+		return coll
+	}
+	err := s.loadCollectionFromRootCoord(ctx, collectionID)
+	if err != nil {
+		log.Warn("failed to load collection from RootCoord", zap.Int64("collectionID", collectionID), zap.Error(err))
+	}
+
+	return s.meta.GetCollection(collectionID)
 }

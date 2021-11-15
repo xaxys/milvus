@@ -1,6 +1,6 @@
 # Milvus Code Review Guide
 
-All PRs are checked in automatically by the sre-robot, with the following condition:
+All PRs are checked in automatically by the sre-robot, with the following conditions:
 
 1. DCO check passed
 2. All test passed and code coverage check passed, with a `ci-passed` label
@@ -31,7 +31,7 @@ all Approvers are listed under OWNERS_ALIASES file.
 
 - Does the code do exactly the same as title and commit message describe?
 
-- Can this function and variable's behavior be inferred by its name
+- Can this function and variable's behavior be inferred by its name?
 
 - Do unit tests cover all the important code branches?
 

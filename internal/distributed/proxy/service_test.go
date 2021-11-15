@@ -297,6 +297,10 @@ func (m *MockQueryCoord) GetSegmentInfo(ctx context.Context, req *querypb.GetSeg
 	return nil, nil
 }
 
+func (m *MockQueryCoord) LoadBalance(ctx context.Context, req *querypb.LoadBalanceRequest) (*commonpb.Status, error) {
+	return nil, nil
+}
+
 func (m *MockQueryCoord) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return nil, nil
 }
@@ -372,6 +376,26 @@ func (m *MockDataCoord) GetFlushedSegments(ctx context.Context, req *datapb.GetF
 }
 
 func (m *MockDataCoord) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
+	return nil, nil
+}
+
+func (m *MockDataCoord) CompleteCompaction(ctx context.Context, req *datapb.CompactionResult) (*commonpb.Status, error) {
+	return nil, nil
+}
+
+func (m *MockDataCoord) ManualCompaction(ctx context.Context, req *milvuspb.ManualCompactionRequest) (*milvuspb.ManualCompactionResponse, error) {
+	return nil, nil
+}
+
+func (m *MockDataCoord) GetCompactionState(ctx context.Context, req *milvuspb.GetCompactionStateRequest) (*milvuspb.GetCompactionStateResponse, error) {
+	return nil, nil
+}
+
+func (m *MockDataCoord) GetCompactionStateWithPlans(ctx context.Context, req *milvuspb.GetCompactionPlansRequest) (*milvuspb.GetCompactionPlansResponse, error) {
+	return nil, nil
+}
+
+func (m *MockDataCoord) WatchChannels(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
 	return nil, nil
 }
 
@@ -537,6 +561,10 @@ func (m *MockProxy) GetMetrics(ctx context.Context, request *milvuspb.GetMetrics
 	return nil, nil
 }
 
+func (m *MockProxy) LoadBalance(ctx context.Context, request *milvuspb.LoadBalanceRequest) (*commonpb.Status, error) {
+	return nil, nil
+}
+
 func (m *MockProxy) CreateAlias(ctx context.Context, request *milvuspb.CreateAliasRequest) (*commonpb.Status, error) {
 	return nil, nil
 }
@@ -567,6 +595,18 @@ func (m *MockProxy) SetQueryCoordClient(queryCoord types.QueryCoord) {
 
 func (m *MockProxy) UpdateStateCode(stateCode internalpb.StateCode) {
 
+}
+
+func (m *MockProxy) GetCompactionState(ctx context.Context, req *milvuspb.GetCompactionStateRequest) (*milvuspb.GetCompactionStateResponse, error) {
+	return nil, nil
+}
+
+func (m *MockProxy) ManualCompaction(ctx context.Context, req *milvuspb.ManualCompactionRequest) (*milvuspb.ManualCompactionResponse, error) {
+	return nil, nil
+}
+
+func (m *MockProxy) GetCompactionStateWithPlans(ctx context.Context, req *milvuspb.GetCompactionPlansRequest) (*milvuspb.GetCompactionPlansResponse, error) {
+	return nil, nil
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -767,6 +807,11 @@ func Test_NewServer(t *testing.T) {
 		assert.Nil(t, err)
 	})
 
+	t.Run("LoadBalance", func(t *testing.T) {
+		_, err := server.LoadBalance(ctx, nil)
+		assert.Nil(t, err)
+	})
+
 	t.Run("CreateAlias", func(t *testing.T) {
 		_, err := server.CreateAlias(ctx, nil)
 		assert.Nil(t, err)
@@ -779,6 +824,21 @@ func Test_NewServer(t *testing.T) {
 
 	t.Run("AlterAlias", func(t *testing.T) {
 		_, err := server.AlterAlias(ctx, nil)
+		assert.Nil(t, err)
+	})
+
+	t.Run("GetCompactionState", func(t *testing.T) {
+		_, err := server.GetCompactionState(ctx, nil)
+		assert.Nil(t, err)
+	})
+
+	t.Run("ManualCompaction", func(t *testing.T) {
+		_, err := server.ManualCompaction(ctx, nil)
+		assert.Nil(t, err)
+	})
+
+	t.Run("GetCompactionStateWithPlans", func(t *testing.T) {
+		_, err := server.GetCompactionStateWithPlans(ctx, nil)
 		assert.Nil(t, err)
 	})
 

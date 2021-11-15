@@ -238,7 +238,7 @@ func TestSegment_retrieve(t *testing.T) {
 	defer plan.delete()
 	assert.NoError(t, err)
 
-	res, err := segment.getEntityByIds(plan)
+	res, err := segment.retrieve(plan)
 	assert.NoError(t, err)
 
 	assert.Equal(t, res.GetFieldsData()[0].GetScalars().Data.(*schemapb.ScalarField_IntData).IntData.Data, []int32{1, 2, 3})
@@ -899,7 +899,8 @@ func TestSegment_indexInfoTest(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		h, err := genSimpleHistorical(ctx)
+		tSafe := newTSafeReplica()
+		h, err := genSimpleHistorical(ctx, tSafe)
 		assert.NoError(t, err)
 
 		seg, err := h.replica.getSegmentByID(defaultSegmentID)
@@ -952,7 +953,8 @@ func TestSegment_indexInfoTest(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		h, err := genSimpleHistorical(ctx)
+		tSafe := newTSafeReplica()
+		h, err := genSimpleHistorical(ctx, tSafe)
 		assert.NoError(t, err)
 
 		seg, err := h.replica.getSegmentByID(defaultSegmentID)

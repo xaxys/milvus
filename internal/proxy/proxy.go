@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package proxy
 
@@ -234,15 +239,14 @@ func (node *Proxy) sendChannelsTimeTickLoop() {
 			case <-node.ctx.Done():
 				return
 			case <-timer.C:
-				ts, err := node.tsoAllocator.AllocOne()
+				stats, ts, err := node.chTicker.getMinTsStatistics()
 				if err != nil {
-					log.Warn("Failed to get timestamp from tso", zap.Error(err))
+					log.Warn("sendChannelsTimeTickLoop.getMinTsStatistics", zap.Error(err))
 					continue
 				}
 
-				stats, err := node.chTicker.getMinTsStatistics()
-				if err != nil {
-					log.Warn("sendChannelsTimeTickLoop.getMinTsStatistics", zap.Error(err))
+				if ts == 0 {
+					log.Warn("sendChannelsTimeTickLoop.getMinTsStatistics default timestamp equal 0")
 					continue
 				}
 
@@ -385,14 +389,17 @@ func (node *Proxy) SetRootCoordClient(cli types.RootCoord) {
 	node.rootCoord = cli
 }
 
+// SetIndexCoordClient set IndexCoord client for proxy.
 func (node *Proxy) SetIndexCoordClient(cli types.IndexCoord) {
 	node.indexCoord = cli
 }
 
+// SetDataCoordClient set DataCoord client for proxy.
 func (node *Proxy) SetDataCoordClient(cli types.DataCoord) {
 	node.dataCoord = cli
 }
 
+// SetQueryCoordClient set QueryCoord client for proxy.
 func (node *Proxy) SetQueryCoordClient(cli types.QueryCoord) {
 	node.queryCoord = cli
 }

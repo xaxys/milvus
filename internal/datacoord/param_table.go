@@ -17,6 +17,7 @@
 package datacoord
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,8 +32,9 @@ type ParamTable struct {
 
 	NodeID int64
 
-	IP   string
-	Port int
+	IP      string
+	Port    int
+	Address string
 
 	// --- ETCD ---
 	EtcdEndpoints           []string
@@ -41,6 +43,14 @@ type ParamTable struct {
 	SegmentBinlogSubPath    string
 	CollectionBinlogSubPath string
 	ChannelWatchSubPath     string
+
+	// --- MinIO ---
+	MinioAddress         string
+	MinioAccessKeyID     string
+	MinioSecretAccessKey string
+	MinioUseSSL          bool
+	MinioBucketName      string
+	MinioRootPath        string
 
 	// --- Pulsar ---
 	PulsarAddress string
@@ -66,6 +76,9 @@ type ParamTable struct {
 
 	CreatedTime time.Time
 	UpdatedTime time.Time
+
+	EnableCompaction        bool
+	EnableGarbageCollection bool
 }
 
 // Params is a package scoped variable of type ParamTable.
@@ -77,10 +90,6 @@ var once sync.Once
 func (p *ParamTable) Init() {
 	// load yaml
 	p.BaseTable.Init()
-
-	if err := p.LoadYaml("advanced/data_coord.yaml"); err != nil {
-		panic(err)
-	}
 
 	// set members
 	p.initEtcdEndpoints()
@@ -108,6 +117,15 @@ func (p *ParamTable) Init() {
 
 	p.initFlushStreamPosSubPath()
 	p.initStatsStreamPosSubPath()
+
+	p.initEnableCompaction()
+
+	p.initMinioAddress()
+	p.initMinioAccessKeyID()
+	p.initMinioSecretAccessKey()
+	p.initMinioUseSSL()
+	p.initMinioBucketName()
+	p.initMinioRootPath()
 }
 
 // InitOnce ensures param table is a singleton
@@ -270,4 +288,61 @@ func (p *ParamTable) initChannelWatchPrefix() {
 	// WARN: this value should not be put to milvus.yaml. It's a default value for channel watch path.
 	// This will be removed after we reconstruct our config module.
 	p.ChannelWatchSubPath = "channelwatch"
+}
+
+func (p *ParamTable) initEnableCompaction() {
+	p.EnableCompaction = p.ParseBool("dataCoord.enableCompaction", false)
+}
+
+func (p *ParamTable) initEnableGarbageCollection() {
+	p.EnableGarbageCollection = p.ParseBool("dataCoord.enableGarbageCollection", false)
+}
+
+// --- MinIO ---
+func (p *ParamTable) initMinioAddress() {
+	endpoint, err := p.Load("_MinioAddress")
+	if err != nil {
+		panic(err)
+	}
+	p.MinioAddress = endpoint
+}
+
+func (p *ParamTable) initMinioAccessKeyID() {
+	keyID, err := p.Load("_MinioAccessKeyID")
+	if err != nil {
+		panic(err)
+	}
+	p.MinioAccessKeyID = keyID
+}
+
+func (p *ParamTable) initMinioSecretAccessKey() {
+	key, err := p.Load("_MinioSecretAccessKey")
+	if err != nil {
+		panic(err)
+	}
+	p.MinioSecretAccessKey = key
+}
+
+func (p *ParamTable) initMinioUseSSL() {
+	usessl, err := p.Load("_MinioUseSSL")
+	if err != nil {
+		panic(err)
+	}
+	p.MinioUseSSL, _ = strconv.ParseBool(usessl)
+}
+
+func (p *ParamTable) initMinioBucketName() {
+	bucketName, err := p.Load("_MinioBucketName")
+	if err != nil {
+		panic(err)
+	}
+	p.MinioBucketName = bucketName
+}
+
+func (p *ParamTable) initMinioRootPath() {
+	rootPath, err := p.Load("minio.rootPath")
+	if err != nil {
+		panic(err)
+	}
+	Params.MinioRootPath = rootPath
 }

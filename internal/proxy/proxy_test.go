@@ -1,3 +1,19 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package proxy
 
 import (
@@ -1333,6 +1349,16 @@ func TestProxy(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
 	})
 
+	wg.Add(1)
+	t.Run("loadBalance", func(t *testing.T) {
+		defer wg.Done()
+		resp, err := proxy.LoadBalance(ctx, &milvuspb.LoadBalanceRequest{
+			Base: nil,
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.ErrorCode)
+	})
+
 	// TODO(dragondriver): dummy
 
 	wg.Add(1)
@@ -1943,6 +1969,14 @@ func TestProxy(t *testing.T) {
 	})
 
 	wg.Add(1)
+	t.Run("LoadBalance fail, unhealthy", func(t *testing.T) {
+		defer wg.Done()
+		resp, err := proxy.LoadBalance(ctx, &milvuspb.LoadBalanceRequest{})
+		assert.NoError(t, err)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+	})
+
+	wg.Add(1)
 	t.Run("RegisterLink fail, unhealthy", func(t *testing.T) {
 		defer wg.Done()
 		resp, err := proxy.RegisterLink(ctx, &milvuspb.RegisterLinkRequest{})
@@ -2387,4 +2421,62 @@ func TestProxy(t *testing.T) {
 
 	wg.Wait()
 	cancel()
+}
+
+func Test_GetCompactionState(t *testing.T) {
+	t.Run("get compaction state", func(t *testing.T) {
+		datacoord := &DataCoordMock{}
+		proxy := &Proxy{dataCoord: datacoord}
+		proxy.stateCode.Store(internalpb.StateCode_Healthy)
+		resp, err := proxy.GetCompactionState(context.TODO(), nil)
+		assert.EqualValues(t, &milvuspb.GetCompactionStateResponse{}, resp)
+		assert.Nil(t, err)
+	})
+
+	t.Run("get compaction state with unhealthy proxy", func(t *testing.T) {
+		datacoord := &DataCoordMock{}
+		proxy := &Proxy{dataCoord: datacoord}
+		proxy.stateCode.Store(internalpb.StateCode_Abnormal)
+		resp, err := proxy.GetCompactionState(context.TODO(), nil)
+		assert.EqualValues(t, unhealthyStatus(), resp.Status)
+		assert.Nil(t, err)
+	})
+}
+
+func Test_ManualCompaction(t *testing.T) {
+	t.Run("test manual compaction", func(t *testing.T) {
+		datacoord := &DataCoordMock{}
+		proxy := &Proxy{dataCoord: datacoord}
+		proxy.stateCode.Store(internalpb.StateCode_Healthy)
+		resp, err := proxy.ManualCompaction(context.TODO(), nil)
+		assert.EqualValues(t, &milvuspb.ManualCompactionResponse{}, resp)
+		assert.Nil(t, err)
+	})
+	t.Run("test manual compaction with unhealthy", func(t *testing.T) {
+		datacoord := &DataCoordMock{}
+		proxy := &Proxy{dataCoord: datacoord}
+		proxy.stateCode.Store(internalpb.StateCode_Abnormal)
+		resp, err := proxy.ManualCompaction(context.TODO(), nil)
+		assert.EqualValues(t, unhealthyStatus(), resp.Status)
+		assert.Nil(t, err)
+	})
+}
+
+func Test_GetCompactionStateWithPlans(t *testing.T) {
+	t.Run("test get compaction state with plans", func(t *testing.T) {
+		datacoord := &DataCoordMock{}
+		proxy := &Proxy{dataCoord: datacoord}
+		proxy.stateCode.Store(internalpb.StateCode_Healthy)
+		resp, err := proxy.GetCompactionStateWithPlans(context.TODO(), nil)
+		assert.EqualValues(t, &milvuspb.GetCompactionPlansResponse{}, resp)
+		assert.Nil(t, err)
+	})
+	t.Run("test get compaction state with plans with unhealthy proxy", func(t *testing.T) {
+		datacoord := &DataCoordMock{}
+		proxy := &Proxy{dataCoord: datacoord}
+		proxy.stateCode.Store(internalpb.StateCode_Abnormal)
+		resp, err := proxy.GetCompactionStateWithPlans(context.TODO(), nil)
+		assert.EqualValues(t, unhealthyStatus(), resp.Status)
+		assert.Nil(t, err)
+	})
 }

@@ -33,8 +33,10 @@ import (
 	"github.com/milvus-io/milvus/internal/common"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 )
 
@@ -61,6 +63,8 @@ type ReplicaInterface interface {
 	getVecFieldIDsByCollectionID(collectionID UniqueID) ([]FieldID, error)
 	// getPKFieldIDsByCollectionID returns vector field ids of collection
 	getPKFieldIDByCollectionID(collectionID UniqueID) (FieldID, error)
+	// getSegmentInfosByColID return segments info by collectionID
+	getSegmentInfosByColID(collectionID UniqueID) ([]*querypb.SegmentInfo, error)
 
 	// partition
 	// addPartition adds a new partition to collection
@@ -85,24 +89,38 @@ type ReplicaInterface interface {
 	setSegment(segment *Segment) error
 	// removeSegment removes a segment from collectionReplica
 	removeSegment(segmentID UniqueID) error
+	// getSegmentByID returns the segment which id is segmentID
 	getSegmentByID(segmentID UniqueID) (*Segment, error)
+	// hasSegment returns true if collectionReplica has the segment, false otherwise
 	hasSegment(segmentID UniqueID) bool
+	// getSegmentNum returns num of segments in collectionReplica
 	getSegmentNum() int
+	//  getSegmentStatistics returns the statistics of segments in collectionReplica
 	getSegmentStatistics() []*internalpb.SegmentStats
 
 	// excluded segments
+	//  removeExcludedSegments will remove excludedSegments from collectionReplica
 	removeExcludedSegments(collectionID UniqueID)
+	// addExcludedSegments will add excludedSegments to collectionReplica
 	addExcludedSegments(collectionID UniqueID, segmentInfos []*datapb.SegmentInfo)
+	// getExcludedSegments returns excludedSegments of collectionReplica
 	getExcludedSegments(collectionID UniqueID) ([]*datapb.SegmentInfo, error)
 
 	// query mu
+	// queryLock guards query and delete operations
 	queryLock()
+	// queryUnlock guards query and delete segment operations
 	queryUnlock()
+	// queryRLock guards query and delete segment operations
 	queryRLock()
+	// queryRUnlock guards query and delete segment operations
 	queryRUnlock()
 
+	// getSegmentsMemSize get the memory size in bytes of all the Segments
 	getSegmentsMemSize() int64
+	// freeAll will free all meta info from collectionReplica
 	freeAll()
+	// printReplica prints the collections, partitions and segments in the collectionReplica
 	printReplica()
 }
 
@@ -120,18 +138,22 @@ type collectionReplica struct {
 	etcdKV *etcdkv.EtcdKV
 }
 
+// queryLock guards query and delete operations
 func (colReplica *collectionReplica) queryLock() {
 	colReplica.queryMu.Lock()
 }
 
+// queryUnlock guards query and delete segment operations
 func (colReplica *collectionReplica) queryUnlock() {
 	colReplica.queryMu.Unlock()
 }
 
+// queryRLock guards query and delete segment operations
 func (colReplica *collectionReplica) queryRLock() {
 	colReplica.queryMu.RLock()
 }
 
+// queryRUnlock guards query and delete segment operations
 func (colReplica *collectionReplica) queryRUnlock() {
 	colReplica.queryMu.RUnlock()
 }
@@ -188,10 +210,10 @@ func (colReplica *collectionReplica) addCollection(collectionID UniqueID, schema
 
 // removeCollection removes the collection from collectionReplica
 func (colReplica *collectionReplica) removeCollection(collectionID UniqueID) error {
-	colReplica.mu.Lock()
 	colReplica.queryMu.Lock()
-	defer colReplica.queryMu.Unlock()
+	colReplica.mu.Lock()
 	defer colReplica.mu.Unlock()
+	defer colReplica.queryMu.Unlock()
 	return colReplica.removeCollectionPrivate(collectionID)
 }
 
@@ -315,6 +337,35 @@ func (colReplica *collectionReplica) getFieldsByCollectionIDPrivate(collectionID
 	return collection.Schema().Fields, nil
 }
 
+func (colReplica *collectionReplica) getSegmentInfosByColID(collectionID UniqueID) ([]*querypb.SegmentInfo, error) {
+	colReplica.mu.RLock()
+	defer colReplica.mu.RUnlock()
+
+	segmentInfos := make([]*querypb.SegmentInfo, 0)
+	collection, ok := colReplica.collections[collectionID]
+	if !ok {
+		// collection not exist, so result segmentInfos is empty
+		return segmentInfos, nil
+	}
+
+	for _, partitionID := range collection.partitionIDs {
+		partition, ok := colReplica.partitions[partitionID]
+		if !ok {
+			return nil, errors.New("the meta of collection and partition are inconsistent in query node")
+		}
+		for _, segmentID := range partition.segmentIDs {
+			segment, ok := colReplica.segments[segmentID]
+			if !ok {
+				return nil, errors.New("the meta of partition and segment are inconsistent in query node")
+			}
+			segmentInfo := getSegmentInfo(segment)
+			segmentInfos = append(segmentInfos, segmentInfo)
+		}
+	}
+
+	return segmentInfos, nil
+}
+
 //----------------------------------------------------------------------------------------------------- partition
 // addPartition adds a new partition to collection
 func (colReplica *collectionReplica) addPartition(collectionID UniqueID, partitionID UniqueID) error {
@@ -338,10 +389,10 @@ func (colReplica *collectionReplica) addPartitionPrivate(collectionID UniqueID, 
 
 // removePartition removes the partition from collectionReplica
 func (colReplica *collectionReplica) removePartition(partitionID UniqueID) error {
-	colReplica.mu.Lock()
 	colReplica.queryMu.Lock()
-	defer colReplica.queryMu.Unlock()
+	colReplica.mu.Lock()
 	defer colReplica.mu.Unlock()
+	defer colReplica.queryMu.Unlock()
 	return colReplica.removePartitionPrivate(partitionID)
 }
 
@@ -642,4 +693,44 @@ func newCollectionReplica(etcdKv *etcdkv.EtcdKV) ReplicaInterface {
 	}
 
 	return replica
+}
+
+// trans segment to queryPb.segmentInfo
+func getSegmentInfo(segment *Segment) *querypb.SegmentInfo {
+	var indexName string
+	var indexID int64
+	// TODO:: segment has multi vec column
+	for fieldID := range segment.indexInfos {
+		indexName = segment.getIndexName(fieldID)
+		indexID = segment.getIndexID(fieldID)
+		break
+	}
+	info := &querypb.SegmentInfo{
+		SegmentID:    segment.ID(),
+		CollectionID: segment.collectionID,
+		PartitionID:  segment.partitionID,
+		NodeID:       Params.QueryNodeID,
+		MemSize:      segment.getMemSize(),
+		NumRows:      segment.getRowCount(),
+		IndexName:    indexName,
+		IndexID:      indexID,
+		ChannelID:    segment.vChannelID,
+		State:        getSegmentStateBySegmentType(segment.segmentType),
+	}
+	return info
+}
+
+// TODO: remove segmentType and use queryPb.SegmentState instead
+func getSegmentStateBySegmentType(segType segmentType) commonpb.SegmentState {
+	switch segType {
+	case segmentTypeGrowing:
+		return commonpb.SegmentState_Growing
+	case segmentTypeSealed:
+		return commonpb.SegmentState_Sealed
+	// TODO: remove segmentTypeIndexing
+	case segmentTypeIndexing:
+		return commonpb.SegmentState_Sealed
+	default:
+		return commonpb.SegmentState_NotExist
+	}
 }

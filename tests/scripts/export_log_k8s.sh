@@ -1,14 +1,16 @@
 #!/bin/bash
+
+# Exit immediately for non zero status
 set -e
 
 ns_name=$1
 prefix_name=$2
+log_dir=${3:-"k8s_logs"}
 array=($(kubectl get pod -n ${ns_name}|grep ${prefix_name}|awk '{print $1}'))
 echo ${array[@]}
-log_dir="k8s_logs"
 if [ ! -d $log_dir  ];
 then
-    mkdir $log_dir
+    mkdir -p $log_dir
 fi
 echo "export logs start"
 for pod in ${array[*]}

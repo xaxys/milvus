@@ -66,10 +66,6 @@ func (p *ParamTable) InitOnce() {
 func (p *ParamTable) Init() {
 	// load yaml
 	p.BaseTable.Init()
-	err := p.LoadYaml("advanced/root_coord.yaml")
-	if err != nil {
-		panic(err)
-	}
 
 	p.initPulsarAddress()
 	p.initEtcdEndpoints()
@@ -202,18 +198,12 @@ func (p *ParamTable) initMinSegmentSizeToEnableIndex() {
 }
 
 func (p *ParamTable) initDefaultPartitionName() {
-	name, err := p.Load("common.defaultPartitionName")
-	if err != nil {
-		panic(err)
-	}
+	name := p.LoadWithDefault("common.defaultPartitionName", "_default")
 	p.DefaultPartitionName = name
 }
 
 func (p *ParamTable) initDefaultIndexName() {
-	name, err := p.Load("common.defaultIndexName")
-	if err != nil {
-		panic(err)
-	}
+	name := p.LoadWithDefault("common.defaultIndexName", "_default_idx")
 	p.DefaultIndexName = name
 }
 

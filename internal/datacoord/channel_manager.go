@@ -182,13 +182,11 @@ func (c *ChannelManager) AddNode(nodeID int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	channels := c.store.GetChannels()
 	c.store.Add(nodeID)
 
 	updates := c.registerPolicy(c.store, nodeID)
 	log.Debug("register node",
 		zap.Int64("registered node", nodeID),
-		zap.Any("channels before registry", channels),
 		zap.Array("updates", updates))
 
 	for _, v := range updates {
@@ -204,12 +202,9 @@ func (c *ChannelManager) DeleteNode(nodeID int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	channels := c.store.GetChannels()
-
 	updates := c.deregisterPolicy(c.store, nodeID)
 	log.Debug("deregister node",
 		zap.Int64("unregistered node", nodeID),
-		zap.Any("channels before deregistery", channels),
 		zap.Array("updates", updates))
 
 	for _, v := range updates {
@@ -229,15 +224,12 @@ func (c *ChannelManager) Watch(ch *channel) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	channels := c.store.GetChannels()
-
 	updates := c.assignPolicy(c.store, []*channel{ch})
 	if len(updates) == 0 {
 		return nil
 	}
 	log.Debug("watch channel",
 		zap.Any("channel", ch),
-		zap.Any("channels before watching", channels),
 		zap.Array("updates", updates))
 
 	for _, v := range updates {
@@ -250,7 +242,7 @@ func (c *ChannelManager) Watch(ch *channel) error {
 
 func (c *ChannelManager) fillChannelPosition(update *ChannelOp) {
 	for _, ch := range update.Channels {
-		vchan := c.posProvider.GetVChanPositions(ch.Name, ch.CollectionID, false)
+		vchan := c.posProvider.GetVChanPositions(ch.Name, ch.CollectionID, allPartitionID, false)
 		info := &datapb.ChannelWatchInfo{
 			Vchan:   vchan,
 			StartTs: time.Now().Unix(),
@@ -292,4 +284,58 @@ func (c *ChannelManager) Match(nodeID int64, channel string) bool {
 		}
 	}
 	return false
+}
+
+// FindWatcher finds the datanode watching the provided channel
+func (c *ChannelManager) FindWatcher(channel string) (int64, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	infos := c.store.GetNodesChannels()
+	for _, info := range infos {
+		for _, channelInfo := range info.Channels {
+			if channelInfo.Name == channel {
+				return info.NodeID, nil
+			}
+		}
+	}
+
+	// channel in buffer
+	bufferInfo := c.store.GetBufferChannelInfo()
+	for _, channelInfo := range bufferInfo.Channels {
+		if channelInfo.Name == channel {
+			return bufferID, errChannelInBuffer
+		}
+	}
+	return 0, errChannelNotWatched
+}
+
+// RemoveChannel removes the channel from channel manager
+func (c *ChannelManager) RemoveChannel(channelName string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	nodeID, ch := c.findChannel(channelName)
+	if ch == nil {
+		return nil
+	}
+
+	var op ChannelOpSet
+	op.Delete(nodeID, []*channel{ch})
+	if err := c.store.Update(op); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *ChannelManager) findChannel(channelName string) (int64, *channel) {
+	infos := c.store.GetNodesChannels()
+	for _, info := range infos {
+		for _, channelInfo := range info.Channels {
+			if channelInfo.Name == channelName {
+				return info.NodeID, channelInfo
+			}
+		}
+	}
+	return 0, nil
 }

@@ -121,6 +121,7 @@ const (
 	MsgType_RemoveQueryChannels     MsgType = 511
 	// DATA SERVICE
 	MsgType_SegmentInfo MsgType = 600
+	MsgType_SystemInfo  MsgType = 601
 	// SYSTEM CONTROL
 	MsgType_TimeTick          MsgType = 1200
 	MsgType_QueryNodeStats    MsgType = 1201
@@ -172,6 +173,7 @@ type RepackFunc func(msgs []TsMsg, hashKeys [][]int32) (map[int32]*MsgPack, erro
 // Interface
 type UnmarshalFunc func(interface{}) (TsMsg, error)
 
+// UnmarshalDispatcher is an interface contains method Unmarshal
 type UnmarshalDispatcher interface {
 	Unmarshal(input interface{}, msgType commonpb.MsgType) (TsMsg, error)
 	AddMsgTemplate(msgType commonpb.MsgType, unmarshalFunc UnmarshalFunc)
@@ -191,7 +193,7 @@ func (mudf *MemUDFactory) NewUnmarshalDispatcher() *UnmarshalDispatcher
 ```
 
 ```go
-// MsgStream
+// MsgStream is an interface that can be used to produce and consume message on message queue
 
 // Interface
 type MsgStream interface {

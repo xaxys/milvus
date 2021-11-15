@@ -78,6 +78,7 @@ func (c *Client) getGrpcClientFunc() (datapb.DataNodeClient, error) {
 	// if we return nil here, then we should check if client is nil outside,
 	err := c.connect(retry.Attempts(20))
 	if err != nil {
+		log.Debug("DatanodeClient try reconnect failed", zap.Error(err))
 		return nil, err
 	}
 
@@ -288,4 +289,19 @@ func (c *Client) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest
 		return nil, err
 	}
 	return ret.(*milvuspb.GetMetricsResponse), err
+}
+
+func (c *Client) Compaction(ctx context.Context, req *datapb.CompactionPlan) (*commonpb.Status, error) {
+	ret, err := c.recall(func() (interface{}, error) {
+		client, err := c.getGrpcClient()
+		if err != nil {
+			return nil, err
+		}
+
+		return client.Compaction(ctx, req)
+	})
+	if err != nil || ret == nil {
+		return nil, err
+	}
+	return ret.(*commonpb.Status), err
 }

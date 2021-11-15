@@ -81,7 +81,7 @@ packs according to write time or event time, and maintains a timeline for users 
 
 To support this watermark mechanism, Proxy should report the timestamp statistics of physical channel to Root
 Coordinator periodically. When Proxy knows all operations of a specific were done before a `ts`, then Proxy will report
-the `ts` and inform Root Coordinator that udpates the timestamp statistics.
+the `ts` and inform Root Coordinator that updates the timestamp statistics.
 
 Proxy holds a cache about meta information of collections. The meta information includes `CollectionID`, `Schema`,
 `PartitionID`, etc. Components in Milvus communicate with each other using `CollectionID` and `PartitionID`, so the
@@ -137,10 +137,10 @@ proxy needs to ask the Query Coordinator for the names of DqRequestChannel and D
 DqRequestChannel and DqResultChannel do not need to be persisted and can be freely allocated by Query Coordinator. In
 the actual implementation, the DqRequestChannel of each collection can be exclusive, and the DqResultChannel can be
 exclusive or shared by all collections on the proxy. When the proxy applies for the DqRequestChannel and DqResultChannel
-information of the collection from the Query Coordinato, it can attach the proxy's own ID: ProxyID.
+information of the collection from the Query Coordinator, it can attach the proxy's own ID: ProxyID.
 
-With DqRequestChannel of the collection, the proxy will create an msgstream object to generate data into
-DqRequestChannel. With the DqResultChannel of the collection, the proxy will create an msgstream object, and Proxy will
+With DqRequestChannel of the collection, the proxy will create a msgstream object to generate data into
+DqRequestChannel. With the DqResultChannel of the collection, the proxy will create a msgstream object, and Proxy will
 consume the data in the DqResultChannel. When these msgstream objects are closed, messages cannot be written to or
 consumed from them.
 
@@ -162,7 +162,7 @@ One consideration for uniformly assigning SegmentIDs by Data Coordinator is that
 coordinating the total number of each segment not to be too large, and the location is near a water level, so that the
 size of the segment is limited to a certain range.
 
-Other interactions between Proxy and Data Coordiantor are mainly reflected in the proxy querying Data Coordinator for
+Other interactions between Proxy and Data Coordinator are mainly reflected in the proxy querying Data Coordinator for
 the status and statistical information of the segment of the collection. LoadCollection is an example. The
 synchronization semantics of the current LoadCollection needs to know the number of rows currently persisted, so the
 Proxy needs to ask the Data Coordinator for the total number of rows currently persisted.
@@ -171,7 +171,7 @@ Proxy needs to ask the Data Coordinator for the total number of rows currently p
 
 For LoadCollection, LoadPartition, ReleaseCollection, ReleasePartition requests, the Proxy directly forwards these
 requests to Query Coordinator for execution after checking and preprocessing these requests. When the Proxy receives
-feedback from Query Coordiantor, it returns the feedback results to the clients.
+feedback from Query Coordinator, it returns the feedback results to the clients.
 
 The semantics of the Load operation is to load Collection or Partition from persistent storage into the memory of Query
 Nodes, or import streaming data into QueryNode so that it can be queried. If the load operation is not performed, the
@@ -187,7 +187,7 @@ ReleaseDqlMessageStream command to Root Coordinator, and Root Coordinator is res
 ReleaseDqlMessageStream command to all Proxies, so that all related stream used to send search request and receive
 search result in Proxy will be closed.
 
-The other interaction between Proxy and Query Coordinator is that Proxy needs to query Query Coordinator for statistics
+The other interaction between Proxy and Query Coordinator is that Proxy needs to query from Query Coordinator for statistics
 about Collection, Partition, and Segment. Taking ShowCollections as an example, if the ShowCollections parameter
 specifies that the query is for Collections that have been loaded into memory, the ShowCollection request will be
 forwarded to QueryCoordinator, and QueryCoordinator will return a list of all the recorded Collections loaded into
@@ -206,7 +206,7 @@ all components on multiple nodes. In Milvus Standalone, the interaction between 
 between functions or communication between Grpc. The log system can be either Pulsar or RocksDb. In Milvus Cluster, the
 communication between components is mostly undertaken by grpc, and the message flow is mostly by Pulsar.
 
-Therefore, in the original design, Milvus2.0 decoupled the core function of the component and the communication between
+Therefore, in the original design, Milvus 2.0 decoupled the core function of the component and the communication between
 components. Taking Proxy as an example, the core function of the Proxy component is determined and has nothing to do
 with the deployment form. In the project's internal/proxy directory, it contains the functions of the core components of
 Proxy; and internal/distributed/proxy contains the core functions of Proxy in the deployment of cluster distributed
@@ -283,7 +283,7 @@ The taskID is globally unique and is used to identify the task. OnEnqueue will a
 for the task. It can be seen that the timestamp of entering the queue must be greater than the timestamp that already
 exists in the queue, and it will also be greater than the timestamp of the task that exists in activateTask. At the end
 of the task's OnEnqueue, call the taskQueue's addUnissuedTask to add the task to the unissuedTasks. When OnEnqueue is
-executed, the external caller of taskSchdeuler calls WaitToFinish of the task to synchronously block and wait for the
+executed, the external caller of taskScheduler calls WaitToFinish of the task to synchronously block and wait for the
 execution of task to be done.
 
 When taskScheduler's background scheduling coroutine decides to schedule a task, it will call the taskQueue's
@@ -302,14 +302,14 @@ the queue can be scheduled.
 
 ![task_scheduler_1](./graphs/task_scheduler_1.png)
 
-The following figure is a schematic diagram of taskScheduer's scheduling of DmQueue.
+The following figure is a schematic diagram of taskScheduler's scheduling of DmQueue.
 
 The tasks in DmQueue can be scheduled in parallel. In a scheduling process, taskScheduler will execute several tasks
 from each task concurrently.
 
 ![task_scheduler_2](./graphs/task_scheduler_2.png)
 
-The following figure is a schematic diagram of taskScheduer's scheduling of DqQueue.
+The following figure is a schematic diagram of taskScheduler's scheduling of DqQueue.
 
 ![task_scheduler_1](./graphs/task_scheduler_2.png)
 
@@ -317,7 +317,7 @@ The tasks in DqQueue can be scheduled in parallel. In a scheduling process, task
 concurrently.
 
 In order to facilitate the channelsTimeTicker component to obtain the synchronization point information corresponding to all
-DmChannels, the taskScheduer needs to maintain a copy of the time statistics of the physical channels of all currently
+DmChannels, the taskScheduler needs to maintain a copy of the time statistics of the physical channels of all currently
 unexecuted and executing tasks in the DmQueue. The member pChanSatisticsInfos is a map containing the mapping from pChan
 to pChanStatInfo pointers. Among them, pChan is an alias of string, and pChanStatInfo is a custom structure, defined as
 follows:
@@ -441,7 +441,7 @@ type channelsTimeTicker interface {
 
 - getLastTick
 
-  getLastTick returns the minimum timestamp which has already beed synchronized of physical channel;
+  getLastTick returns the minimum timestamp which has already been synchronized of physical channel;
 
 channelsTimeTicker will maintain the map minTsStatistics that can be synchronized and the map currents that will be
 synchronized. They are all mappings from pChan to Timestamp. The channelsTimeTicker itself has a background coroutine,
@@ -506,4 +506,4 @@ type Cache interface {
 
 - RemovePartition
 
-  RemovePartition removes the meta information of paritition;
+  RemovePartition removes the meta information of partition;

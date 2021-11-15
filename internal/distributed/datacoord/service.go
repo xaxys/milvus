@@ -84,6 +84,7 @@ func (s *Server) init() error {
 	datacoord.Params.InitOnce()
 	datacoord.Params.IP = Params.IP
 	datacoord.Params.Port = Params.Port
+	datacoord.Params.Address = Params.Address
 
 	err := s.dataCoord.Register()
 	if err != nil {
@@ -261,4 +262,24 @@ func (s *Server) GetFlushedSegments(ctx context.Context, req *datapb.GetFlushedS
 // GetMetrics gets metrics of data coordinator and datanodes
 func (s *Server) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return s.dataCoord.GetMetrics(ctx, req)
+}
+
+func (s *Server) CompleteCompaction(ctx context.Context, req *datapb.CompactionResult) (*commonpb.Status, error) {
+	return s.dataCoord.CompleteCompaction(ctx, req)
+}
+
+func (s *Server) ManualCompaction(ctx context.Context, req *milvuspb.ManualCompactionRequest) (*milvuspb.ManualCompactionResponse, error) {
+	return s.dataCoord.ManualCompaction(ctx, req)
+}
+
+func (s *Server) GetCompactionState(ctx context.Context, req *milvuspb.GetCompactionStateRequest) (*milvuspb.GetCompactionStateResponse, error) {
+	return s.dataCoord.GetCompactionState(ctx, req)
+}
+
+func (s *Server) GetCompactionStateWithPlans(ctx context.Context, req *milvuspb.GetCompactionPlansRequest) (*milvuspb.GetCompactionPlansResponse, error) {
+	return s.dataCoord.GetCompactionStateWithPlans(ctx, req)
+}
+
+func (s *Server) WatchChannels(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
+	return s.dataCoord.WatchChannels(ctx, req)
 }

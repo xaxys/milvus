@@ -734,53 +734,74 @@ func TestChannel(t *testing.T) {
 	})
 }
 
+type spySegmentManager struct {
+	spyCh chan struct{}
+}
+
+// AllocSegment allocates rows and record the allocation.
+func (s *spySegmentManager) AllocSegment(ctx context.Context, collectionID UniqueID, partitionID UniqueID, channelName string, requestRows int64) ([]*Allocation, error) {
+	panic("not implemented") // TODO: Implement
+}
+
+// DropSegment drops the segment from manager.
+func (s *spySegmentManager) DropSegment(ctx context.Context, segmentID UniqueID) {
+}
+
+// SealAllSegments seals all segments of collection with collectionID and return sealed segments
+func (s *spySegmentManager) SealAllSegments(ctx context.Context, collectionID UniqueID) ([]UniqueID, error) {
+	panic("not implemented") // TODO: Implement
+}
+
+// GetFlushableSegments returns flushable segment ids
+func (s *spySegmentManager) GetFlushableSegments(ctx context.Context, channel string, ts Timestamp) ([]UniqueID, error) {
+	panic("not implemented") // TODO: Implement
+}
+
+// ExpireAllocations notifies segment status to expire old allocations
+func (s *spySegmentManager) ExpireAllocations(channel string, ts Timestamp) error {
+	panic("not implemented") // TODO: Implement
+}
+
+// DropSegmentsOfChannel drops all segments in a channel
+func (s *spySegmentManager) DropSegmentsOfChannel(ctx context.Context, channel string) {
+	s.spyCh <- struct{}{}
+}
+
 func TestSaveBinlogPaths(t *testing.T) {
 	t.Run("Normal SaveRequest", func(t *testing.T) {
 		svr := newTestServer(t, nil)
 		defer closeTestServer(t, svr)
 
-		collections := []struct {
-			ID         UniqueID
-			Partitions []int64
-		}{
-			{0, []int64{0, 1}},
-			{1, []int64{0, 1}},
-		}
-
-		for _, collection := range collections {
-			svr.meta.AddCollection(&datapb.CollectionInfo{
-				ID:         collection.ID,
-				Schema:     nil,
-				Partitions: collection.Partitions,
-			})
-		}
+		svr.meta.AddCollection(&datapb.CollectionInfo{ID: 0})
 
 		segments := []struct {
 			id           UniqueID
 			collectionID UniqueID
-			partitionID  UniqueID
 		}{
-			{0, 0, 0},
-			{1, 0, 0},
-			{2, 0, 1},
-			{3, 1, 1},
+			{0, 0},
+			{1, 0},
 		}
 		for _, segment := range segments {
 			s := &datapb.SegmentInfo{
-				ID:           segment.id,
-				CollectionID: segment.collectionID,
-				PartitionID:  segment.partitionID,
+				ID:            segment.id,
+				CollectionID:  segment.collectionID,
+				InsertChannel: "ch1",
 			}
 			err := svr.meta.AddSegment(NewSegmentInfo(s))
 			assert.Nil(t, err)
 		}
+
+		err := svr.channelManager.AddNode(0)
+		assert.Nil(t, err)
+		err = svr.channelManager.Watch(&channel{"ch1", 0})
+		assert.Nil(t, err)
 
 		ctx := context.Background()
 		resp, err := svr.SaveBinlogPaths(ctx, &datapb.SaveBinlogPathsRequest{
 			Base: &commonpb.MsgBase{
 				Timestamp: uint64(time.Now().Unix()),
 			},
-			SegmentID:    2,
+			SegmentID:    1,
 			CollectionID: 0,
 			Field2BinlogPaths: []*datapb.FieldBinlog{
 				{
@@ -808,7 +829,7 @@ func TestSaveBinlogPaths(t *testing.T) {
 		assert.Nil(t, err)
 		assert.EqualValues(t, resp.ErrorCode, commonpb.ErrorCode_Success)
 
-		segment := svr.meta.GetSegment(2)
+		segment := svr.meta.GetSegment(1)
 		assert.NotNil(t, segment)
 		binlogs := segment.GetBinlogs()
 		assert.EqualValues(t, 1, len(binlogs))
@@ -833,6 +854,34 @@ func TestSaveBinlogPaths(t *testing.T) {
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetErrorCode())
 		assert.Equal(t, serverNotServingErrMsg, resp.GetReason())
+	})
+
+	t.Run("test save dropped segment and remove channel", func(t *testing.T) {
+		spyCh := make(chan struct{}, 1)
+		svr := newTestServer(t, nil, SetSegmentManager(&spySegmentManager{spyCh: spyCh}))
+		defer closeTestServer(t, svr)
+
+		svr.meta.AddCollection(&datapb.CollectionInfo{ID: 1})
+		err := svr.meta.AddSegment(&SegmentInfo{
+			SegmentInfo: &datapb.SegmentInfo{
+				ID:            1,
+				CollectionID:  1,
+				InsertChannel: "ch1",
+			},
+		})
+		assert.Nil(t, err)
+
+		err = svr.channelManager.AddNode(0)
+		assert.Nil(t, err)
+		err = svr.channelManager.Watch(&channel{"ch1", 1})
+		assert.Nil(t, err)
+
+		_, err = svr.SaveBinlogPaths(context.TODO(), &datapb.SaveBinlogPathsRequest{
+			SegmentID: 1,
+			Dropped:   true,
+		})
+		assert.Nil(t, err)
+		<-spyCh
 	})
 }
 
@@ -1082,6 +1131,12 @@ func TestGetVChannelPos(t *testing.T) {
 		PartitionID:   0,
 		InsertChannel: "ch1",
 		State:         commonpb.SegmentState_Flushed,
+		DmlPosition: &internalpb.MsgPosition{
+			ChannelName: "ch1",
+			MsgID:       []byte{1, 2, 3},
+			MsgGroup:    "",
+			Timestamp:   0,
+		},
 	}
 	err := svr.meta.AddSegment(NewSegmentInfo(s1))
 	assert.Nil(t, err)
@@ -1091,6 +1146,11 @@ func TestGetVChannelPos(t *testing.T) {
 		PartitionID:   0,
 		InsertChannel: "ch1",
 		State:         commonpb.SegmentState_Growing,
+		StartPosition: &internalpb.MsgPosition{
+			ChannelName: "ch1",
+			MsgID:       []byte{8, 9, 10},
+			MsgGroup:    "",
+		},
 		DmlPosition: &internalpb.MsgPosition{
 			ChannelName: "ch1",
 			MsgID:       []byte{1, 2, 3},
@@ -1103,33 +1163,52 @@ func TestGetVChannelPos(t *testing.T) {
 	s3 := &datapb.SegmentInfo{
 		ID:            3,
 		CollectionID:  0,
-		PartitionID:   0,
+		PartitionID:   1,
 		InsertChannel: "ch1",
 		State:         commonpb.SegmentState_Growing,
+		StartPosition: &internalpb.MsgPosition{
+			ChannelName: "ch1",
+			MsgID:       []byte{8, 9, 10},
+			MsgGroup:    "",
+		},
+		DmlPosition: &internalpb.MsgPosition{
+			ChannelName: "ch1",
+			MsgID:       []byte{11, 12, 13},
+			MsgGroup:    "",
+			Timestamp:   0,
+		},
 	}
 	err = svr.meta.AddSegment(NewSegmentInfo(s3))
 	assert.Nil(t, err)
 
 	t.Run("get unexisted channel", func(t *testing.T) {
-		vchan := svr.GetVChanPositions("chx1", 0, true)
+		vchan := svr.GetVChanPositions("chx1", 0, allPartitionID, true)
 		assert.Empty(t, vchan.UnflushedSegments)
 		assert.Empty(t, vchan.FlushedSegments)
 	})
 
 	t.Run("get existed channel", func(t *testing.T) {
-		vchan := svr.GetVChanPositions("ch1", 0, true)
+		vchan := svr.GetVChanPositions("ch1", 0, allPartitionID, true)
 		assert.EqualValues(t, 1, len(vchan.FlushedSegments))
 		assert.EqualValues(t, 1, vchan.FlushedSegments[0].ID)
-		assert.EqualValues(t, 1, len(vchan.UnflushedSegments))
+		assert.EqualValues(t, 2, len(vchan.UnflushedSegments))
 		assert.EqualValues(t, 2, vchan.UnflushedSegments[0].ID)
 		assert.EqualValues(t, []byte{1, 2, 3}, vchan.UnflushedSegments[0].DmlPosition.MsgID)
 	})
 
 	t.Run("empty collection", func(t *testing.T) {
-		infos := svr.GetVChanPositions("ch0_suffix", 1, true)
+		infos := svr.GetVChanPositions("ch0_suffix", 1, allPartitionID, true)
 		assert.EqualValues(t, 1, infos.CollectionID)
 		assert.EqualValues(t, 0, len(infos.FlushedSegments))
 		assert.EqualValues(t, 0, len(infos.UnflushedSegments))
+		assert.EqualValues(t, []byte{8, 9, 10}, infos.SeekPosition.MsgID)
+	})
+
+	t.Run("filter partition", func(t *testing.T) {
+		infos := svr.GetVChanPositions("ch1", 0, 1, true)
+		assert.EqualValues(t, 0, infos.CollectionID)
+		assert.EqualValues(t, 0, len(infos.FlushedSegments))
+		assert.EqualValues(t, 1, len(infos.UnflushedSegments))
 		assert.EqualValues(t, []byte{8, 9, 10}, infos.SeekPosition.MsgID)
 	})
 }
@@ -1232,7 +1311,7 @@ func TestGetRecoveryInfo(t *testing.T) {
 		assert.EqualValues(t, 0, len(resp.GetBinlogs()))
 		assert.EqualValues(t, 1, len(resp.GetChannels()))
 		assert.NotNil(t, resp.GetChannels()[0].SeekPosition)
-		assert.EqualValues(t, 0, resp.GetChannels()[0].GetSeekPosition().GetTimestamp())
+		assert.NotEqual(t, 0, resp.GetChannels()[0].GetSeekPosition().GetTimestamp())
 	})
 
 	t.Run("test get binlogs", func(t *testing.T) {
@@ -1276,6 +1355,12 @@ func TestGetRecoveryInfo(t *testing.T) {
 		segment := createSegment(0, 0, 0, 100, 10, "ch1", commonpb.SegmentState_Flushed)
 		err := svr.meta.AddSegment(NewSegmentInfo(segment))
 		assert.Nil(t, err)
+
+		err = svr.channelManager.AddNode(0)
+		assert.Nil(t, err)
+		err = svr.channelManager.Watch(&channel{"ch1", 0})
+		assert.Nil(t, err)
+
 		sResp, err := svr.SaveBinlogPaths(context.TODO(), binlogReq)
 		assert.Nil(t, err)
 		assert.EqualValues(t, commonpb.ErrorCode_Success, sResp.ErrorCode)
@@ -1301,6 +1386,221 @@ func TestGetRecoveryInfo(t *testing.T) {
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
 		assert.Equal(t, serverNotServingErrMsg, resp.GetStatus().GetReason())
+	})
+}
+
+func TestGetCompactionState(t *testing.T) {
+	Params.EnableCompaction = true
+	t.Run("test get compaction state with new compactionhandler", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateHealthy
+
+		svr.compactionHandler = &mockCompactionHandler{
+			methods: map[string]interface{}{
+				"getCompactionTasksBySignalID": func(signalID int64) []*compactionTask {
+					return []*compactionTask{
+						{state: completed},
+					}
+				},
+			},
+		}
+
+		resp, err := svr.GetCompactionState(context.Background(), &milvuspb.GetCompactionStateRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+		assert.Equal(t, commonpb.CompactionState_Completed, resp.GetState())
+	})
+	t.Run("test get compaction state in running", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateHealthy
+
+		svr.compactionHandler = &mockCompactionHandler{
+			methods: map[string]interface{}{
+				"getCompactionTasksBySignalID": func(signalID int64) []*compactionTask {
+					return []*compactionTask{
+						{state: executing},
+						{state: executing},
+						{state: executing},
+						{state: completed},
+						{state: completed},
+						{state: timeout},
+					}
+				},
+			},
+		}
+
+		resp, err := svr.GetCompactionState(context.Background(), &milvuspb.GetCompactionStateRequest{CompactionID: 1})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+		assert.Equal(t, commonpb.CompactionState_Executing, resp.GetState())
+		assert.EqualValues(t, 3, resp.GetExecutingPlanNo())
+		assert.EqualValues(t, 2, resp.GetCompletedPlanNo())
+		assert.EqualValues(t, 1, resp.GetTimeoutPlanNo())
+	})
+
+	t.Run("with closed server", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateStopped
+
+		resp, err := svr.GetCompactionState(context.Background(), &milvuspb.GetCompactionStateRequest{})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
+		assert.Equal(t, msgDataCoordIsUnhealthy(Params.NodeID), resp.GetStatus().GetReason())
+	})
+}
+
+func TestCompleteCompaction(t *testing.T) {
+	Params.EnableCompaction = true
+	t.Run("test complete compaction successfully", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateHealthy
+
+		svr.compactionHandler = &mockCompactionHandler{
+			methods: map[string]interface{}{
+				"completeCompaction": func(result *datapb.CompactionResult) error {
+					return nil
+				},
+			},
+		}
+		status, err := svr.CompleteCompaction(context.TODO(), &datapb.CompactionResult{})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
+	})
+
+	t.Run("test complete compaction failure", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateHealthy
+		svr.compactionHandler = &mockCompactionHandler{
+			methods: map[string]interface{}{
+				"completeCompaction": func(result *datapb.CompactionResult) error {
+					return errors.New("mock error")
+				},
+			},
+		}
+		status, err := svr.CompleteCompaction(context.TODO(), &datapb.CompactionResult{})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+	})
+
+	t.Run("with closed server", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateStopped
+
+		resp, err := svr.CompleteCompaction(context.Background(), &datapb.CompactionResult{})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetErrorCode())
+		assert.Equal(t, msgDataCoordIsUnhealthy(Params.NodeID), resp.GetReason())
+	})
+}
+
+func TestManualCompaction(t *testing.T) {
+	Params.EnableCompaction = true
+	t.Run("test manual compaction successfully", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateHealthy
+		svr.compactionTrigger = &mockCompactionTrigger{
+			methods: map[string]interface{}{
+				"forceTriggerCompaction": func(collectionID int64, tt *timetravel) (UniqueID, error) {
+					return 1, nil
+				},
+			},
+		}
+
+		resp, err := svr.ManualCompaction(context.TODO(), &milvuspb.ManualCompactionRequest{
+			CollectionID: 1,
+			Timetravel:   1,
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+	})
+
+	t.Run("test manual compaction failure", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateHealthy
+		svr.compactionTrigger = &mockCompactionTrigger{
+			methods: map[string]interface{}{
+				"forceTriggerCompaction": func(collectionID int64, tt *timetravel) (UniqueID, error) {
+					return 0, errors.New("mock error")
+				},
+			},
+		}
+
+		resp, err := svr.ManualCompaction(context.TODO(), &milvuspb.ManualCompactionRequest{
+			CollectionID: 1,
+			Timetravel:   1,
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.Status.ErrorCode)
+	})
+
+	t.Run("test manual compaction with closed server", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateStopped
+		svr.compactionTrigger = &mockCompactionTrigger{
+			methods: map[string]interface{}{
+				"forceTriggerCompaction": func(collectionID int64, tt *timetravel) (UniqueID, error) {
+					return 1, nil
+				},
+			},
+		}
+
+		resp, err := svr.ManualCompaction(context.TODO(), &milvuspb.ManualCompactionRequest{
+			CollectionID: 1,
+			Timetravel:   1,
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.Status.ErrorCode)
+		assert.Equal(t, msgDataCoordIsUnhealthy(Params.NodeID), resp.Status.Reason)
+	})
+}
+
+func TestGetCompactionStateWithPlans(t *testing.T) {
+	t.Run("test get compaction state successfully", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateHealthy
+		svr.compactionHandler = &mockCompactionHandler{
+			methods: map[string]interface{}{
+				"getCompactionTasksBySignalID": func(signalID int64) []*compactionTask {
+					return []*compactionTask{
+						{
+							triggerInfo: &compactionSignal{id: 1},
+							state:       executing,
+						},
+					}
+				},
+			},
+		}
+
+		resp, err := svr.GetCompactionStateWithPlans(context.TODO(), &milvuspb.GetCompactionPlansRequest{
+			CompactionID: 1,
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.CompactionState_Executing, resp.State)
+	})
+
+	t.Run("test get compaction state with closed server", func(t *testing.T) {
+		svr := &Server{}
+		svr.isServing = ServerStateStopped
+		svr.compactionHandler = &mockCompactionHandler{
+			methods: map[string]interface{}{
+				"getCompactionTasksBySignalID": func(signalID int64) []*compactionTask {
+					return []*compactionTask{
+						{
+							triggerInfo: &compactionSignal{id: 1},
+							state:       executing,
+						},
+					}
+				},
+			},
+		}
+
+		resp, err := svr.GetCompactionStateWithPlans(context.TODO(), &milvuspb.GetCompactionPlansRequest{
+			CompactionID: 1,
+		})
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.Status.ErrorCode)
+		assert.Equal(t, msgDataCoordIsUnhealthy(Params.NodeID), resp.Status.Reason)
 	})
 }
 

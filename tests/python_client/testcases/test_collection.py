@@ -225,7 +225,7 @@ class TestCollectionParams(TestcaseBase):
         """
         target: test collection with dup name and invalid schema
         method: 1. default schema 2. invalid schema
-        expected: raise exception and
+        expected: raise exception
         """
         self._connect()
         c_name = cf.gen_unique_str(prefix)
@@ -1841,7 +1841,7 @@ class TestGetCollectionStats:
         """
         target: test collection rows_count is correct or not
         method: create collection, create partitions and add entities in one of the partitions,
-            assert the value returned by count_entities method is equal to length of entities
+                assert the value returned by count_entities method is equal to length of entities
         expected: the count is equal to the length of vectors
         """
         new_tag = "new_tag"
@@ -1859,7 +1859,7 @@ class TestGetCollectionStats:
         """
         target: test collection rows_count is correct or not
         method: create collection, create partitions and add entities in one of the partitions,
-            assert the value returned by count_entities method is equal to length of entities
+                assert the value returned by count_entities method is equal to length of entities
         expected: the collection count is equal to the length of entities
         """
         new_tag = "new_tag"
@@ -1937,7 +1937,7 @@ class TestGetCollectionStats:
         """
         target: test collection rows_count is correct or not with multiple collections of L2
         method: create collection and add entities in it,
-            assert the value returned by count_entities method is equal to length of entities
+                assert the value returned by count_entities method is equal to length of entities
         expected: row count in segments
         """
         collection_list = []
@@ -2365,7 +2365,7 @@ class TestDropCollection:
         """
         target: test delete collection created with correct params
         method: create collection and then delete,
-            assert the value returned by delete method
+                assert the value returned by delete method
         expected: status ok, and no collection in collections
         """
         connect.drop_collection(collection)
@@ -2964,8 +2964,8 @@ class TestReleaseAdvanced:
         connect.load_partitions(collection, [default_tag])
         res = connect.search(collection, **query, _async=True)
         connect.release_partitions(collection, [default_tag])
-        with pytest.raises(Exception) as e:
-            res = connect.search(collection, **default_single_query)
+        res = connect.search(collection, **default_single_query)
+        assert len(res[0]) == 0
 
     @pytest.mark.tags(CaseLabel.L0)
     def test_release_collection_during_searching_A(self, connect, collection):
@@ -3027,7 +3027,7 @@ class TestReleaseAdvanced:
         """
         target: test release collection during inserting
         method: load collection, do release collection during inserting
-        expected:
+        expected: raise exception
         """
         connect.insert(collection, cons.default_entities)
         connect.flush([collection])

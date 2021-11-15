@@ -143,7 +143,9 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 
 		for _, test := range invalidInTests {
 			te.Run(test.description, func(t0 *testing.T) {
-				ibn := &insertBufferNode{}
+				ibn := &insertBufferNode{
+					ttMerger: newMergedTimeTickerSender(func(Timestamp) error { return nil }),
+				}
 				rt := ibn.Operate(test.in)
 				assert.Empty(t0, rt)
 			})
@@ -195,6 +197,9 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 	iBNode, err := newInsertBufferNode(ctx, flushChan, fm, newCache(), c)
 	require.NoError(t, err)
 
+	// trigger log ts
+	iBNode.ttLogger.counter.Store(999)
+
 	flushChan <- flushMsg{
 		msgID:        1,
 		timestamp:    2000,
@@ -202,7 +207,7 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 		collectionID: UniqueID(1),
 	}
 
-	inMsg := GenFlowGraphInsertMsg(insertChannelName)
+	inMsg := genFlowGraphInsertMsg(insertChannelName)
 	var fgMsg flowgraph.Msg = &inMsg
 	iBNode.Operate([]flowgraph.Msg{fgMsg})
 }
@@ -390,6 +395,9 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 		fpMut.Unlock()
 		colRep.listNewSegmentsStartPositions()
 		colRep.listSegmentsCheckPoints()
+		if pack.flushed || pack.dropped {
+			colRep.segmentFlushed(pack.segmentID)
+		}
 		wg.Done()
 		return nil
 	})
@@ -406,7 +414,7 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 
 	// Auto flush number of rows set to 2
 
-	inMsg := GenFlowGraphInsertMsg("datanode-03-test-autoflush")
+	inMsg := genFlowGraphInsertMsg("datanode-03-test-autoflush")
 	inMsg.insertMessages = dataFactory.GetMsgStreamInsertMsgs(2)
 	var iMsg flowgraph.Msg = &inMsg
 
@@ -523,7 +531,7 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 		flushPacks = flushPacks[:0]
 		fpMut.Unlock()
 
-		inMsg := GenFlowGraphInsertMsg("datanode-03-test-autoflush")
+		inMsg := genFlowGraphInsertMsg("datanode-03-test-autoflush")
 		inMsg.insertMessages = dataFactory.GetMsgStreamInsertMsgs(2)
 
 		for i := range inMsg.insertMessages {
@@ -617,67 +625,6 @@ func (m *CompactedRootCoord) DescribeCollection(ctx context.Context, in *milvusp
 	return m.RootCoord.DescribeCollection(ctx, in)
 }
 
-func TestInsertBufferNode_getCollMetaBySegID(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	insertChannelName := "datanode-01-test-flowgraphinsertbuffernode-operate"
-
-	testPath := "/test/datanode/root/meta"
-	err := clearEtcd(testPath)
-	require.NoError(t, err)
-	Params.MetaRootPath = testPath
-
-	Factory := &MetaFactory{}
-	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1")
-
-	rcf := &RootCoordFactory{}
-	mockRootCoord := &CompactedRootCoord{
-		RootCoord: rcf,
-		compactTs: 100,
-	}
-
-	replica, err := newReplica(ctx, mockRootCoord, collMeta.ID)
-	assert.Nil(t, err)
-
-	err = replica.addNewSegment(1, collMeta.ID, 0, insertChannelName, &internalpb.MsgPosition{}, &internalpb.MsgPosition{})
-	require.NoError(t, err)
-
-	msFactory := msgstream.NewPmsFactory()
-	m := map[string]interface{}{
-		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarAddress,
-		"pulsarBufSize":  1024}
-	err = msFactory.SetParams(m)
-	assert.Nil(t, err)
-
-	memkv := memkv.NewMemoryKV()
-
-	fm := NewRendezvousFlushManager(&allocator{}, memkv, replica, func(*segmentFlushPack) error {
-		return nil
-	})
-
-	flushChan := make(chan flushMsg, 100)
-	c := &nodeConfig{
-		replica:      replica,
-		msFactory:    msFactory,
-		allocator:    NewAllocatorFactory(),
-		vChannelName: "string",
-	}
-	iBNode, err := newInsertBufferNode(ctx, flushChan, fm, newCache(), c)
-	require.NoError(t, err)
-
-	meta, err := iBNode.getCollMetabySegID(1, 101)
-	assert.Nil(t, err)
-	assert.Equal(t, collMeta.ID, meta.ID)
-
-	_, err = iBNode.getCollMetabySegID(2, 101)
-	assert.NotNil(t, err)
-
-	meta, err = iBNode.getCollMetabySegID(1, 99)
-	assert.NotNil(t, err)
-}
-
 func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -728,17 +675,11 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 	iBNode, err := newInsertBufferNode(ctx, flushChan, fm, newCache(), c)
 	require.NoError(t, err)
 
-	inMsg := GenFlowGraphInsertMsg(insertChannelName)
+	inMsg := genFlowGraphInsertMsg(insertChannelName)
 	for _, msg := range inMsg.insertMessages {
 		msg.EndTimestamp = 101 // ts valid
 		err = iBNode.bufferInsertMsg(msg, &internalpb.MsgPosition{})
 		assert.Nil(t, err)
-	}
-
-	for _, msg := range inMsg.insertMessages {
-		msg.EndTimestamp = 99 // ts invalid
-		err = iBNode.bufferInsertMsg(msg, &internalpb.MsgPosition{})
-		assert.NotNil(t, err)
 	}
 
 	for _, msg := range inMsg.insertMessages {

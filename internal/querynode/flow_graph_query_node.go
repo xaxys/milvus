@@ -39,7 +39,6 @@ func newQueryNodeFlowGraph(ctx context.Context,
 	collectionID UniqueID,
 	partitionID UniqueID,
 	streamingReplica ReplicaInterface,
-	historicalReplica ReplicaInterface,
 	tSafeReplica TSafeReplicaInterface,
 	channel Channel,
 	factory msgstream.Factory) *queryNodeFlowGraph {
@@ -57,7 +56,7 @@ func newQueryNodeFlowGraph(ctx context.Context,
 
 	var dmStreamNode node = q.newDmInputNode(ctx1, factory)
 	var filterDmNode node = newFilteredDmNode(streamingReplica, loadType, collectionID, partitionID)
-	var insertNode node = newInsertNode(streamingReplica, historicalReplica)
+	var insertNode node = newInsertNode(streamingReplica)
 	var serviceTimeNode node = newServiceTimeNode(ctx1, tSafeReplica, loadType, collectionID, partitionID, channel, factory)
 
 	q.flowGraph.AddNode(dmStreamNode)
@@ -95,6 +94,75 @@ func newQueryNodeFlowGraph(ctx context.Context,
 	// serviceTimeNode
 	err = q.flowGraph.SetEdges(serviceTimeNode.Name(),
 		[]string{insertNode.Name()},
+		[]string{},
+	)
+	if err != nil {
+		log.Error("set edges failed in node:", zap.String("node name", serviceTimeNode.Name()))
+	}
+
+	return q
+}
+
+func newQueryNodeDeltaFlowGraph(ctx context.Context,
+	loadType loadType,
+	collectionID UniqueID,
+	partitionID UniqueID,
+	historicalReplica ReplicaInterface,
+	tSafeReplica TSafeReplicaInterface,
+	channel Channel,
+	factory msgstream.Factory) *queryNodeFlowGraph {
+
+	ctx1, cancel := context.WithCancel(ctx)
+
+	q := &queryNodeFlowGraph{
+		ctx:          ctx1,
+		cancel:       cancel,
+		collectionID: collectionID,
+		partitionID:  partitionID,
+		channel:      channel,
+		flowGraph:    flowgraph.NewTimeTickedFlowGraph(ctx1),
+	}
+
+	var dmStreamNode node = q.newDmInputNode(ctx1, factory)
+	var filterDeleteNode node = newFilteredDeleteNode(historicalReplica, collectionID, partitionID)
+	var deleteNode node = newDeleteNode(historicalReplica)
+	var serviceTimeNode node = newServiceTimeNode(ctx1, tSafeReplica, loadTypeCollection, collectionID, partitionID, channel, factory)
+
+	q.flowGraph.AddNode(dmStreamNode)
+	q.flowGraph.AddNode(filterDeleteNode)
+	q.flowGraph.AddNode(deleteNode)
+	q.flowGraph.AddNode(serviceTimeNode)
+
+	// dmStreamNode
+	var err = q.flowGraph.SetEdges(dmStreamNode.Name(),
+		[]string{},
+		[]string{filterDeleteNode.Name()},
+	)
+	if err != nil {
+		log.Error("set edges failed in node:", zap.String("node name", dmStreamNode.Name()))
+	}
+
+	// filterDmNode
+	err = q.flowGraph.SetEdges(filterDeleteNode.Name(),
+		[]string{dmStreamNode.Name()},
+		[]string{deleteNode.Name()},
+	)
+	if err != nil {
+		log.Error("set edges failed in node:", zap.String("node name", filterDeleteNode.Name()))
+	}
+
+	// insertNode
+	err = q.flowGraph.SetEdges(deleteNode.Name(),
+		[]string{filterDeleteNode.Name()},
+		[]string{serviceTimeNode.Name()},
+	)
+	if err != nil {
+		log.Error("set edges failed in node:", zap.String("node name", deleteNode.Name()))
+	}
+
+	// serviceTimeNode
+	err = q.flowGraph.SetEdges(serviceTimeNode.Name(),
+		[]string{deleteNode.Name()},
 		[]string{},
 	)
 	if err != nil {

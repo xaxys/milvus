@@ -37,6 +37,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
 )
 
 // ---------- unittest util functions ----------
@@ -57,8 +58,9 @@ const (
 	defaultNProb          = 10
 	defaultMetricType     = "JACCARD"
 
-	defaultKVRootPath = "query-node-unittest"
-	defaultVChannel   = "query-node-unittest-channel-0"
+	defaultKVRootPath         = "query-node-unittest"
+	defaultVChannel           = "query-node-unittest-channel-0"
+	defaultHistoricalVChannel = "query-node-unittest-historical-channel-0"
 	//defaultQueryChannel       = "query-node-unittest-query-channel-0"
 	//defaultQueryResultChannel = "query-node-unittest-query-result-channel-0"
 	defaultSubName = "query-node-unittest-sub-name-0"
@@ -880,16 +882,24 @@ func genSimpleReplica() (ReplicaInterface, error) {
 	return r, err
 }
 
-func genSimpleHistorical(ctx context.Context) (*historical, error) {
-	fac, err := genFactory()
-	if err != nil {
-		return nil, err
-	}
+func genSimpleSegmentLoader(ctx context.Context, historicalReplica ReplicaInterface, streamingReplica ReplicaInterface) (*segmentLoader, error) {
 	kv, err := genEtcdKV()
 	if err != nil {
 		return nil, err
 	}
-	h := newHistorical(ctx, newMockRootCoord(), newMockIndexCoord(), fac, kv)
+	return newSegmentLoader(ctx, newMockRootCoord(), newMockIndexCoord(), historicalReplica, streamingReplica, kv), nil
+}
+
+func genSimpleHistorical(ctx context.Context, tSafeReplica TSafeReplicaInterface) (*historical, error) {
+	kv, err := genEtcdKV()
+	if err != nil {
+		return nil, err
+	}
+	replica, err := genSimpleReplica()
+	if err != nil {
+		return nil, err
+	}
+	h := newHistorical(ctx, replica, kv, tSafeReplica)
 	r, err := genSimpleReplica()
 	if err != nil {
 		return nil, err
@@ -903,18 +913,18 @@ func genSimpleHistorical(ctx context.Context) (*historical, error) {
 		return nil, err
 	}
 	h.replica = r
-	h.loader.historicalReplica = r
 	col, err := h.replica.getCollectionByID(defaultCollectionID)
 	if err != nil {
 		return nil, err
 	}
 	col.addVChannels([]Channel{
-		defaultVChannel,
+		defaultHistoricalVChannel,
 	})
+	h.tSafeReplica.addTSafe(defaultHistoricalVChannel)
 	return h, nil
 }
 
-func genSimpleStreaming(ctx context.Context) (*streaming, error) {
+func genSimpleStreaming(ctx context.Context, tSafeReplica TSafeReplicaInterface) (*streaming, error) {
 	kv, err := genEtcdKV()
 	if err != nil {
 		return nil, err
@@ -923,11 +933,11 @@ func genSimpleStreaming(ctx context.Context) (*streaming, error) {
 	if err != nil {
 		return nil, err
 	}
-	historicalReplica, err := genSimpleReplica()
+	replica, err := genSimpleReplica()
 	if err != nil {
 		return nil, err
 	}
-	s := newStreaming(ctx, fac, kv, historicalReplica)
+	s := newStreaming(ctx, replica, fac, kv, tSafeReplica)
 	r, err := genSimpleReplica()
 	if err != nil {
 		return nil, err
@@ -1318,6 +1328,10 @@ func genSimpleQueryNode(ctx context.Context) (*QueryNode, error) {
 		return nil, err
 	}
 	node := NewQueryNode(ctx, fac)
+	session := &sessionutil.Session{
+		ServerID: 1,
+	}
+	node.session = session
 
 	etcdKV, err := genEtcdKV()
 	if err != nil {
@@ -1326,18 +1340,27 @@ func genSimpleQueryNode(ctx context.Context) (*QueryNode, error) {
 
 	node.etcdKV = etcdKV
 
-	streaming, err := genSimpleStreaming(ctx)
+	node.tSafeReplica = newTSafeReplica()
+
+	streaming, err := genSimpleStreaming(ctx, node.tSafeReplica)
 	if err != nil {
 		return nil, err
 	}
 
-	historical, err := genSimpleHistorical(ctx)
+	historical, err := genSimpleHistorical(ctx, node.tSafeReplica)
 	if err != nil {
 		return nil, err
 	}
+	node.dataSyncService = newDataSyncService(node.queryNodeLoopCtx, streaming.replica, historical.replica, node.tSafeReplica, node.msFactory)
 
 	node.streaming = streaming
 	node.historical = historical
+
+	loader, err := genSimpleSegmentLoader(node.queryNodeLoopCtx, historical.replica, streaming.replica)
+	if err != nil {
+		return nil, err
+	}
+	node.loader = loader
 
 	// start task scheduler
 	go node.scheduler.Start()

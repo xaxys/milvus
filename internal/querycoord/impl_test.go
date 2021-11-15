@@ -283,6 +283,16 @@ func TestGrpcTask(t *testing.T) {
 		assert.Nil(t, err)
 	})
 
+	t.Run("Test LoadBalance", func(t *testing.T) {
+		res, err := queryCoord.LoadBalance(ctx, &querypb.LoadBalanceRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_LoadBalanceSegments,
+			},
+		})
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, res.ErrorCode)
+		assert.NotNil(t, err)
+	})
+
 	t.Run("Test GetMetrics", func(t *testing.T) {
 		metricReq := make(map[string]string)
 		metricReq[metricsinfo.MetricTypeKey] = "system_info"
@@ -405,6 +415,16 @@ func TestGrpcTaskEnqueueFail(t *testing.T) {
 		})
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
 		assert.NotNil(t, err)
+	})
+
+	t.Run("Test LoadBalance", func(t *testing.T) {
+		status, err := queryCoord.LoadBalance(ctx, &querypb.LoadBalanceRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_ReleaseCollection,
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
 	})
 
 	queryCoord.Stop()
@@ -579,6 +599,16 @@ func TestGrpcTaskBeforeHealthy(t *testing.T) {
 		})
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, res.Status.ErrorCode)
 		assert.NotNil(t, err)
+	})
+
+	t.Run("Test LoadBalance", func(t *testing.T) {
+		res, err := unHealthyCoord.LoadBalance(ctx, &querypb.LoadBalanceRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_LoadBalanceSegments,
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, res.ErrorCode)
 	})
 
 	t.Run("Test ReleasePartition", func(t *testing.T) {

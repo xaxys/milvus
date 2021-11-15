@@ -95,6 +95,9 @@ func (b Blob) GetValue() []byte {
 type FieldData interface {
 	Length() int
 	Get(i int) interface{}
+	GetMemorySize() int
+	RowNum() int
+	GetRow(i int) interface{}
 }
 
 type BoolFieldData struct {
@@ -161,6 +164,32 @@ func (data *DoubleFieldData) Get(i int) interface{}       { return data.Data[i] 
 func (data *StringFieldData) Get(i int) interface{}       { return data.Data[i] }
 func (data *BinaryVectorFieldData) Get(i int) interface{} { return data.Data[i] }
 func (data *FloatVectorFieldData) Get(i int) interface{}  { return data.Data[i] }
+
+func (data *BoolFieldData) RowNum() int         { return len(data.Data) }
+func (data *Int8FieldData) RowNum() int         { return len(data.Data) }
+func (data *Int16FieldData) RowNum() int        { return len(data.Data) }
+func (data *Int32FieldData) RowNum() int        { return len(data.Data) }
+func (data *Int64FieldData) RowNum() int        { return len(data.Data) }
+func (data *FloatFieldData) RowNum() int        { return len(data.Data) }
+func (data *DoubleFieldData) RowNum() int       { return len(data.Data) }
+func (data *StringFieldData) RowNum() int       { return len(data.Data) }
+func (data *BinaryVectorFieldData) RowNum() int { return len(data.Data) * 8 / data.Dim }
+func (data *FloatVectorFieldData) RowNum() int  { return len(data.Data) / data.Dim }
+
+func (data *BoolFieldData) GetRow(i int) interface{}   { return data.Data[i] }
+func (data *Int8FieldData) GetRow(i int) interface{}   { return data.Data[i] }
+func (data *Int16FieldData) GetRow(i int) interface{}  { return data.Data[i] }
+func (data *Int32FieldData) GetRow(i int) interface{}  { return data.Data[i] }
+func (data *Int64FieldData) GetRow(i int) interface{}  { return data.Data[i] }
+func (data *FloatFieldData) GetRow(i int) interface{}  { return data.Data[i] }
+func (data *DoubleFieldData) GetRow(i int) interface{} { return data.Data[i] }
+func (data *StringFieldData) GetRow(i int) interface{} { return data.Data[i] }
+func (data *BinaryVectorFieldData) GetRow(i int) interface{} {
+	return data.Data[i*data.Dim/8 : (i+1)*data.Dim/8]
+}
+func (data *FloatVectorFieldData) GetRow(i int) interface{} {
+	return data.Data[i*data.Dim : (i+1)*data.Dim]
+}
 
 // why not binary.Size(data) directly? binary.Size(data) return -1
 // binary.Size returns how many bytes Write would generate to encode the value v, which
@@ -605,7 +634,16 @@ func (insertCodec *InsertCodec) Close() error {
 // DeleteData saves each entity delete message represented as <primarykey,timestamp> map.
 // timestamp represents the time when this instance was deleted
 type DeleteData struct {
-	Data map[int64]int64 // primary key to timestamp
+	Pks      []int64     // primary keys
+	Tss      []Timestamp // timestamps
+	RowCount int64
+}
+
+// Append append 1 pk&ts pair to DeleteData
+func (data *DeleteData) Append(pk UniqueID, ts Timestamp) {
+	data.Pks = append(data.Pks, pk)
+	data.Tss = append(data.Tss, ts)
+	data.RowCount++
 }
 
 // DeleteCodec serializes and deserializes the delete data
@@ -626,24 +664,31 @@ func (deleteCodec *DeleteCodec) Serialize(collectionID UniqueID, partitionID Uni
 	if err != nil {
 		return nil, err
 	}
+	if len(data.Pks) != len(data.Tss) {
+		return nil, fmt.Errorf("The length of pks, and TimeStamps is not equal")
+	}
+	length := len(data.Pks)
 	sizeTotal := 0
-	startTs, endTs := math.MaxInt64, math.MinInt64
-	for key, value := range data.Data {
-		if value < int64(startTs) {
-			startTs = int(value)
+	var startTs, endTs Timestamp
+	startTs, endTs = math.MaxUint64, 0
+	for i := 0; i < length; i++ {
+		pk := data.Pks[i]
+		ts := data.Tss[i]
+		if ts < startTs {
+			startTs = ts
 		}
-		if value > int64(endTs) {
-			endTs = int(value)
+		if ts > endTs {
+			endTs = ts
 		}
-		err := eventWriter.AddOneStringToPayload(fmt.Sprintf("%d,%d", key, value))
+		err := eventWriter.AddOneStringToPayload(fmt.Sprintf("%d,%d", pk, ts))
 		if err != nil {
 			return nil, err
 		}
-		sizeTotal += binary.Size(key)
-		sizeTotal += binary.Size(value)
+		sizeTotal += binary.Size(pk)
+		sizeTotal += binary.Size(ts)
 	}
-	eventWriter.SetEventTimestamp(uint64(startTs), uint64(endTs))
-	binlogWriter.SetEventTimeStamp(uint64(startTs), uint64(endTs))
+	eventWriter.SetEventTimestamp(startTs, endTs)
+	binlogWriter.SetEventTimeStamp(startTs, endTs)
 
 	// https://github.com/milvus-io/milvus/issues/9620
 	// It's a little complicated to count the memory size of a map.
@@ -676,7 +721,7 @@ func (deleteCodec *DeleteCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 	}
 
 	var pid, sid UniqueID
-	result := &DeleteData{Data: make(map[int64]int64)}
+	result := &DeleteData{}
 	for _, blob := range blobs {
 		binlogReader, err := NewBinlogReader(blob.Value)
 		if err != nil {
@@ -710,17 +755,19 @@ func (deleteCodec *DeleteCodec) Deserialize(blobs []*Blob) (partitionID UniqueID
 				return InvalidUniqueID, InvalidUniqueID, nil, err
 			}
 
-			ts, err := strconv.ParseInt(splits[1], 10, 64)
+			ts, err := strconv.ParseUint(splits[1], 10, 64)
 			if err != nil {
 				return InvalidUniqueID, InvalidUniqueID, nil, err
 			}
 
-			result.Data[pk] = ts
+			result.Pks = append(result.Pks, pk)
+			result.Tss = append(result.Tss, ts)
 		}
 
 		deleteCodec.readerCloseFunc = append(deleteCodec.readerCloseFunc, readerClose(binlogReader))
 
 	}
+	result.RowCount = int64(len(result.Pks))
 
 	return pid, sid, result, nil
 }

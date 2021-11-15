@@ -21,24 +21,24 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"strconv"
 	"sync"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/opentracing/opentracing-go"
+	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/trace"
+	"github.com/milvus-io/milvus/internal/util/tsoutil"
 
 	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
-	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 )
@@ -65,6 +65,32 @@ type insertBufferNode struct {
 
 	timeTickStream          msgstream.MsgStream
 	segmentStatisticsStream msgstream.MsgStream
+	ttLogger                timeTickLogger
+	ttMerger                *mergedTimeTickerSender
+}
+
+type timeTickLogger struct {
+	start   atomic.Uint64
+	counter atomic.Int32
+}
+
+func (l *timeTickLogger) LogTs(ts Timestamp) {
+	if l.counter.Load() == 0 {
+		l.start.Store(ts)
+	}
+	l.counter.Inc()
+	if l.counter.Load() == 1000 {
+		min := l.start.Load()
+		l.start.Store(ts)
+		l.counter.Store(0)
+		go l.printLogs(min, ts)
+	}
+}
+
+func (l *timeTickLogger) printLogs(start, end Timestamp) {
+	t1, _ := tsoutil.ParseTS(start)
+	t2, _ := tsoutil.ParseTS(end)
+	log.Debug("IBN timetick log", zap.Time("from", t1), zap.Time("to", t2), zap.Duration("elapsed", t2.Sub(t1)), zap.Uint64("start", start), zap.Uint64("end", end))
 }
 
 type segmentCheckPoint struct {
@@ -127,6 +153,8 @@ func (ibNode *insertBufferNode) Name() string {
 }
 
 func (ibNode *insertBufferNode) Close() {
+	ibNode.ttMerger.close()
+
 	if ibNode.timeTickStream != nil {
 		ibNode.timeTickStream.Close()
 	}
@@ -217,72 +245,102 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 			zap.Int64("buffer limit", bd.(*BufferData).limit))
 	}
 
-	segmentsToFlush := make([]UniqueID, 0, len(seg2Upload)+1) //auto flush number + possible manual flush
-
+	// Flush
 	type flushTask struct {
 		buffer    *BufferData
 		segmentID UniqueID
 		flushed   bool
-	}
-	flushTaskList := make([]flushTask, 0, len(seg2Upload)+1)
-
-	// Auto Flush
-	for _, segToFlush := range seg2Upload {
-		// If full, auto flush
-		if bd, ok := ibNode.insertBuffer.Load(segToFlush); ok && bd.(*BufferData).effectiveCap() <= 0 {
-			log.Warn("Auto flush", zap.Int64("segment id", segToFlush))
-			ibuffer := bd.(*BufferData)
-
-			flushTaskList = append(flushTaskList, flushTask{
-				buffer:    ibuffer,
-				segmentID: segToFlush,
-				flushed:   false,
-			})
-		}
+		dropped   bool
 	}
 
-	// Manual Flush
-	select {
-	case fmsg := <-ibNode.flushChan:
-		log.Debug(". Receiving flush message",
-			zap.Int64("segmentID", fmsg.segmentID),
-			zap.Int64("collectionID", fmsg.collectionID),
-		)
-		// merging auto&manual flush segment same segment id
-		dup := false
-		for i, task := range flushTaskList {
-			if task.segmentID == fmsg.segmentID {
-				flushTaskList[i].flushed = fmsg.flushed
-				dup = true
-				break
-			}
-		}
-		// if merged, skip load buffer and create task
-		if !dup {
-			currentSegID := fmsg.segmentID
-			bd, ok := ibNode.insertBuffer.Load(currentSegID)
+	var (
+		flushTaskList   []flushTask
+		segmentsToFlush []UniqueID
+	)
+
+	if fgMsg.dropCollection {
+		segmentsToFlush := ibNode.replica.listAllSegmentIDs()
+		log.Debug("Recive drop collection req and flushing all segments",
+			zap.Any("segments", segmentsToFlush))
+		flushTaskList = make([]flushTask, 0, len(segmentsToFlush))
+
+		for _, seg2Flush := range segmentsToFlush {
 			var buf *BufferData
-			if ok {
+			bd, ok := ibNode.insertBuffer.Load(seg2Flush)
+			if !ok {
+				buf = nil
+			} else {
 				buf = bd.(*BufferData)
 			}
 			flushTaskList = append(flushTaskList, flushTask{
 				buffer:    buf,
-				segmentID: currentSegID,
-				flushed:   fmsg.flushed,
+				segmentID: seg2Flush,
+				flushed:   false,
+				dropped:   true,
 			})
 		}
-	default:
+	} else {
+		segmentsToFlush = make([]UniqueID, 0, len(seg2Upload)+1) //auto flush number + possible manual flush
+		flushTaskList = make([]flushTask, 0, len(seg2Upload)+1)
+
+		// Auto Flush
+		for _, segToFlush := range seg2Upload {
+			// If full, auto flush
+			if bd, ok := ibNode.insertBuffer.Load(segToFlush); ok && bd.(*BufferData).effectiveCap() <= 0 {
+				log.Warn("Auto flush", zap.Int64("segment id", segToFlush))
+				ibuffer := bd.(*BufferData)
+
+				flushTaskList = append(flushTaskList, flushTask{
+					buffer:    ibuffer,
+					segmentID: segToFlush,
+					flushed:   false,
+					dropped:   false,
+				})
+			}
+		}
+
+		// Manual Flush
+		select {
+		case fmsg := <-ibNode.flushChan:
+
+			log.Debug(". Receiving flush message",
+				zap.Int64("segmentID", fmsg.segmentID),
+				zap.Int64("collectionID", fmsg.collectionID),
+			)
+			// merging auto&manual flush segment same segment id
+			dup := false
+			for i, task := range flushTaskList {
+				if task.segmentID == fmsg.segmentID {
+					flushTaskList[i].flushed = fmsg.flushed
+					dup = true
+					break
+				}
+			}
+			// if merged, skip load buffer and create task
+			if !dup {
+				currentSegID := fmsg.segmentID
+				bd, ok := ibNode.insertBuffer.Load(currentSegID)
+				var buf *BufferData
+				if ok {
+					buf = bd.(*BufferData)
+				}
+				flushTaskList = append(flushTaskList, flushTask{
+					buffer:    buf,
+					segmentID: currentSegID,
+					flushed:   fmsg.flushed,
+					dropped:   false,
+				})
+			}
+		default:
+		}
 	}
 
 	for _, task := range flushTaskList {
-		err := ibNode.flushManager.flushBufferData(task.buffer, task.segmentID, task.flushed, endPositions[0])
+		err := ibNode.flushManager.flushBufferData(task.buffer, task.segmentID, task.flushed, task.dropped, endPositions[0])
 		if err != nil {
 			log.Warn("failed to invoke flushBufferData", zap.Error(err))
 		} else {
 			segmentsToFlush = append(segmentsToFlush, task.segmentID)
-			if task.flushed {
-				ibNode.replica.segmentFlushed(task.segmentID)
-			}
 			ibNode.insertBuffer.Delete(task.segmentID)
 		}
 	}
@@ -297,6 +355,7 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 		startPositions:  fgMsg.startPositions,
 		endPositions:    fgMsg.endPositions,
 		segmentsToFlush: segmentsToFlush,
+		dropCollection:  fgMsg.dropCollection,
 	}
 
 	for _, sp := range spans {
@@ -639,25 +698,9 @@ func readBinary(reader io.Reader, receiver interface{}, dataType schemapb.DataTy
 
 // writeHardTimeTick writes timetick once insertBufferNode operates.
 func (ibNode *insertBufferNode) writeHardTimeTick(ts Timestamp) error {
-	msgPack := msgstream.MsgPack{}
-	timeTickMsg := msgstream.DataNodeTtMsg{
-		BaseMsg: msgstream.BaseMsg{
-			BeginTimestamp: ts,
-			EndTimestamp:   ts,
-			HashValues:     []uint32{0},
-		},
-		DataNodeTtMsg: datapb.DataNodeTtMsg{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_DataNodeTt,
-				MsgID:     0,
-				Timestamp: ts,
-			},
-			ChannelName: ibNode.channelName,
-			Timestamp:   ts,
-		},
-	}
-	msgPack.Msgs = append(msgPack.Msgs, &timeTickMsg)
-	return ibNode.timeTickStream.Produce(&msgPack)
+	ibNode.ttLogger.LogTs(ts)
+	ibNode.ttMerger.bufferTs(ts)
+	return nil
 }
 
 // uploadMemStates2Coord uploads latest changed segments statistics in DataNode memory to DataCoord
@@ -705,24 +748,6 @@ func (ibNode *insertBufferNode) uploadMemStates2Coord(segIDs []UniqueID) error {
 	return ibNode.segmentStatisticsStream.Produce(&msgPack)
 }
 
-func (ibNode *insertBufferNode) getCollMetabySegID(segmentID UniqueID, ts Timestamp) (meta *etcdpb.CollectionMeta, err error) {
-	if !ibNode.replica.hasSegment(segmentID, true) {
-		return nil, fmt.Errorf("No such segment %d in the replica", segmentID)
-	}
-
-	collID := ibNode.replica.getCollectionID()
-	sch, err := ibNode.replica.getCollectionSchema(collID, ts)
-	if err != nil {
-		return nil, err
-	}
-
-	meta = &etcdpb.CollectionMeta{
-		ID:     collID,
-		Schema: sch,
-	}
-	return
-}
-
 func (ibNode *insertBufferNode) getCollectionandPartitionIDbySegID(segmentID UniqueID) (collID, partitionID UniqueID, err error) {
 	return ibNode.replica.getCollectionAndPartitionID(segmentID)
 }
@@ -754,6 +779,28 @@ func newInsertBufferNode(ctx context.Context, flushCh <-chan flushMsg, fm flushM
 	var segStatisticsMsgStream msgstream.MsgStream = segS
 	segStatisticsMsgStream.Start()
 
+	mt := newMergedTimeTickerSender(func(ts Timestamp) error {
+		msgPack := msgstream.MsgPack{}
+		timeTickMsg := msgstream.DataNodeTtMsg{
+			BaseMsg: msgstream.BaseMsg{
+				BeginTimestamp: ts,
+				EndTimestamp:   ts,
+				HashValues:     []uint32{0},
+			},
+			DataNodeTtMsg: datapb.DataNodeTtMsg{
+				Base: &commonpb.MsgBase{
+					MsgType:   commonpb.MsgType_DataNodeTt,
+					MsgID:     0,
+					Timestamp: ts,
+				},
+				ChannelName: config.vChannelName,
+				Timestamp:   ts,
+			},
+		}
+		msgPack.Msgs = append(msgPack.Msgs, &timeTickMsg)
+		return wTtMsgStream.Produce(&msgPack)
+	})
+
 	return &insertBufferNode{
 		BaseNode:     baseNode,
 		insertBuffer: sync.Map{},
@@ -769,5 +816,6 @@ func newInsertBufferNode(ctx context.Context, flushCh <-chan flushMsg, fm flushM
 		replica:     config.replica,
 		idAllocator: config.allocator,
 		channelName: config.vChannelName,
+		ttMerger:    mt,
 	}, nil
 }

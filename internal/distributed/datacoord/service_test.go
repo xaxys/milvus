@@ -30,24 +30,28 @@ import (
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 type MockDataCoord struct {
-	states       *internalpb.ComponentStates
-	status       *commonpb.Status
-	err          error
-	initErr      error
-	startErr     error
-	stopErr      error
-	regErr       error
-	strResp      *milvuspb.StringResponse
-	infoResp     *datapb.GetSegmentInfoResponse
-	flushResp    *datapb.FlushResponse
-	assignResp   *datapb.AssignSegmentIDResponse
-	segStateResp *datapb.GetSegmentStatesResponse
-	binResp      *datapb.GetInsertBinlogPathsResponse
-	colStatResp  *datapb.GetCollectionStatisticsResponse
-	partStatResp *datapb.GetPartitionStatisticsResponse
-	recoverResp  *datapb.GetRecoveryInfoResponse
-	flushSegResp *datapb.GetFlushedSegmentsResponse
-	metricResp   *milvuspb.GetMetricsResponse
+	states               *internalpb.ComponentStates
+	status               *commonpb.Status
+	err                  error
+	initErr              error
+	startErr             error
+	stopErr              error
+	regErr               error
+	strResp              *milvuspb.StringResponse
+	infoResp             *datapb.GetSegmentInfoResponse
+	flushResp            *datapb.FlushResponse
+	assignResp           *datapb.AssignSegmentIDResponse
+	segStateResp         *datapb.GetSegmentStatesResponse
+	binResp              *datapb.GetInsertBinlogPathsResponse
+	colStatResp          *datapb.GetCollectionStatisticsResponse
+	partStatResp         *datapb.GetPartitionStatisticsResponse
+	recoverResp          *datapb.GetRecoveryInfoResponse
+	flushSegResp         *datapb.GetFlushedSegmentsResponse
+	metricResp           *milvuspb.GetMetricsResponse
+	compactionStateResp  *milvuspb.GetCompactionStateResponse
+	manualCompactionResp *milvuspb.ManualCompactionResponse
+	compactionPlansResp  *milvuspb.GetCompactionPlansResponse
+	watchChannelsResp    *datapb.WatchChannelsResponse
 }
 
 func (m *MockDataCoord) Init() error {
@@ -124,6 +128,26 @@ func (m *MockDataCoord) GetFlushedSegments(ctx context.Context, req *datapb.GetF
 
 func (m *MockDataCoord) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return m.metricResp, m.err
+}
+
+func (m *MockDataCoord) CompleteCompaction(ctx context.Context, req *datapb.CompactionResult) (*commonpb.Status, error) {
+	return m.status, m.err
+}
+
+func (m *MockDataCoord) ManualCompaction(ctx context.Context, req *milvuspb.ManualCompactionRequest) (*milvuspb.ManualCompactionResponse, error) {
+	return m.manualCompactionResp, m.err
+}
+
+func (m *MockDataCoord) GetCompactionState(ctx context.Context, req *milvuspb.GetCompactionStateRequest) (*milvuspb.GetCompactionStateResponse, error) {
+	return m.compactionStateResp, m.err
+}
+
+func (m *MockDataCoord) GetCompactionStateWithPlans(ctx context.Context, req *milvuspb.GetCompactionPlansRequest) (*milvuspb.GetCompactionPlansResponse, error) {
+	return m.compactionPlansResp, m.err
+}
+
+func (m *MockDataCoord) WatchChannels(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
+	return m.watchChannelsResp, m.err
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -270,6 +294,15 @@ func Test_NewServer(t *testing.T) {
 			metricResp: &milvuspb.GetMetricsResponse{},
 		}
 		resp, err := server.GetMetrics(ctx, nil)
+		assert.Nil(t, err)
+		assert.NotNil(t, resp)
+	})
+
+	t.Run("WatchChannels", func(t *testing.T) {
+		server.dataCoord = &MockDataCoord{
+			watchChannelsResp: &datapb.WatchChannelsResponse{},
+		}
+		resp, err := server.WatchChannels(ctx, nil)
 		assert.Nil(t, err)
 		assert.NotNil(t, resp)
 	})

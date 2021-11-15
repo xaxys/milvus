@@ -40,9 +40,9 @@ type ParamTable struct {
 	NodeID int64
 	Alias  string
 
-	EtcdEndpoints []string
-	MetaRootPath  string
-	IndexRootPath string
+	EtcdEndpoints        []string
+	MetaRootPath         string
+	IndexStorageRootPath string
 
 	MinIOAddress         string
 	MinIOAccessKeyID     string
@@ -68,11 +68,6 @@ func (pt *ParamTable) InitAlias(alias string) {
 // Init is used to initialize configuration items.
 func (pt *ParamTable) Init() {
 	pt.BaseTable.Init()
-	// TODO, load index_node.yaml
-	/*err := pt.LoadYaml("advanced/index_node.yaml")
-	if err != nil {
-		panic(err)
-	}*/
 	pt.initParams()
 }
 
@@ -91,7 +86,7 @@ func (pt *ParamTable) initParams() {
 	pt.initMinioBucketName()
 	pt.initEtcdEndpoints()
 	pt.initMetaRootPath()
-	pt.initIndexRootPath()
+	pt.initIndexStorageRootPath()
 	pt.initRoleName()
 	pt.initKnowhereSimdType()
 }
@@ -151,12 +146,12 @@ func (pt *ParamTable) initMetaRootPath() {
 	pt.MetaRootPath = path.Join(rootPath, subPath)
 }
 
-func (pt *ParamTable) initIndexRootPath() {
+func (pt *ParamTable) initIndexStorageRootPath() {
 	rootPath, err := pt.Load("minio.rootPath")
 	if err != nil {
 		panic(err)
 	}
-	pt.IndexRootPath = path.Join(rootPath, "index_files")
+	pt.IndexStorageRootPath = path.Join(rootPath, "index_files")
 }
 
 func (pt *ParamTable) initMinioBucketName() {

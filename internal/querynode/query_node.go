@@ -79,8 +79,18 @@ type QueryNode struct {
 	historical *historical
 	streaming  *streaming
 
+	// tSafeReplica
+	tSafeReplica TSafeReplicaInterface
+
+	// dataSyncService
+	dataSyncService *dataSyncService
+
 	// internal services
 	queryService *queryService
+	statsService *statsService
+
+	// segment loader
+	loader *segmentLoader
 
 	// clients
 	rootCoord  types.RootCoord
@@ -136,6 +146,7 @@ func (node *QueryNode) Register() error {
 	return nil
 }
 
+// InitSegcore set init params of segCore, such as chunckRows, SIMD type...
 func (node *QueryNode) InitSegcore() {
 	C.SegcoreInit()
 
@@ -178,23 +189,50 @@ func (node *QueryNode) Init() error {
 			zap.Any("EtcdEndpoints", Params.EtcdEndpoints),
 			zap.Any("MetaRootPath", Params.MetaRootPath),
 		)
+		node.tSafeReplica = newTSafeReplica()
+
+		streamingReplica := newCollectionReplica(node.etcdKV)
+		historicalReplica := newCollectionReplica(node.etcdKV)
 
 		node.historical = newHistorical(node.queryNodeLoopCtx,
+			historicalReplica,
+			node.etcdKV,
+			node.tSafeReplica,
+		)
+		node.streaming = newStreaming(node.queryNodeLoopCtx,
+			streamingReplica,
+			node.msFactory,
+			node.etcdKV,
+			node.tSafeReplica,
+		)
+
+		node.loader = newSegmentLoader(node.queryNodeLoopCtx,
 			node.rootCoord,
 			node.indexCoord,
-			node.msFactory,
+			node.historical.replica,
+			node.streaming.replica,
 			node.etcdKV)
-		node.streaming = newStreaming(node.queryNodeLoopCtx, node.msFactory, node.etcdKV, node.historical.replica)
+
+		node.statsService = newStatsService(node.queryNodeLoopCtx, node.historical.replica, node.loader.indexLoader.fieldStatsChan, node.msFactory)
+		node.dataSyncService = newDataSyncService(node.queryNodeLoopCtx, streamingReplica, historicalReplica, node.tSafeReplica, node.msFactory)
 
 		node.InitSegcore()
 
 		if node.rootCoord == nil {
-			log.Error("null root coordinator detected")
+			initError = errors.New("null root coordinator detected when queryNode init")
+			return
 		}
 
 		if node.indexCoord == nil {
-			log.Error("null index coordinator detected")
+			initError = errors.New("null index coordinator detected when queryNode init")
+			return
 		}
+
+		log.Debug("query node init successfully",
+			zap.Any("queryNodeID", Params.QueryNodeID),
+			zap.Any("IP", Params.QueryNodeIP),
+			zap.Any("Port", Params.QueryNodePort),
+		)
 	})
 
 	return initError
@@ -225,11 +263,17 @@ func (node *QueryNode) Start() error {
 	// start services
 	go node.historical.start()
 	go node.watchChangeInfo()
+	go node.statsService.start()
 
 	Params.CreatedTime = time.Now()
 	Params.UpdatedTime = time.Now()
 
 	node.UpdateStateCode(internalpb.StateCode_Healthy)
+	log.Debug("query node start successfully",
+		zap.Any("queryNodeID", Params.QueryNodeID),
+		zap.Any("IP", Params.QueryNodeIP),
+		zap.Any("Port", Params.QueryNodePort),
+	)
 	return nil
 }
 
@@ -239,6 +283,9 @@ func (node *QueryNode) Stop() error {
 	node.queryNodeLoopCancel()
 
 	// close services
+	if node.dataSyncService != nil {
+		node.dataSyncService.close()
+	}
 	if node.historical != nil {
 		node.historical.close()
 	}
@@ -247,6 +294,9 @@ func (node *QueryNode) Stop() error {
 	}
 	if node.queryService != nil {
 		node.queryService.close()
+	}
+	if node.statsService != nil {
+		node.statsService.close()
 	}
 	return nil
 }

@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package proxy
 
@@ -69,6 +74,7 @@ func (node *Proxy) GetComponentStates(ctx context.Context) (*internalpb.Componen
 	return stats, nil
 }
 
+// GetStatisticsChannel get statistics channel of Proxy.
 func (node *Proxy) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
 	return &milvuspb.StringResponse{
 		Status: &commonpb.Status{
@@ -79,6 +85,7 @@ func (node *Proxy) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringRe
 	}, nil
 }
 
+// InvalidateCollectionMetaCache invalidate the meta cache of specific collection.
 func (node *Proxy) InvalidateCollectionMetaCache(ctx context.Context, request *proxypb.InvalidateCollMetaCacheRequest) (*commonpb.Status, error) {
 	log.Debug("InvalidateCollectionMetaCache",
 		zap.String("role", Params.RoleName),
@@ -100,6 +107,7 @@ func (node *Proxy) InvalidateCollectionMetaCache(ctx context.Context, request *p
 	}, nil
 }
 
+// ReleaseDQLMessageStream release the query message stream of specific collection.
 func (node *Proxy) ReleaseDQLMessageStream(ctx context.Context, request *proxypb.ReleaseDQLMessageStreamRequest) (*commonpb.Status, error) {
 	log.Debug("ReleaseDQLMessageStream",
 		zap.Any("role", Params.RoleName),
@@ -123,6 +131,7 @@ func (node *Proxy) ReleaseDQLMessageStream(ctx context.Context, request *proxypb
 	}, nil
 }
 
+// CreateCollection create a collection by the schema.
 func (node *Proxy) CreateCollection(ctx context.Context, request *milvuspb.CreateCollectionRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -175,6 +184,7 @@ func (node *Proxy) CreateCollection(ctx context.Context, request *milvuspb.Creat
 	return cct.result, nil
 }
 
+// DropCollection drop a collection.
 func (node *Proxy) DropCollection(ctx context.Context, request *milvuspb.DropCollectionRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -227,6 +237,7 @@ func (node *Proxy) DropCollection(ctx context.Context, request *milvuspb.DropCol
 	return dct.result, nil
 }
 
+// HasCollection check if the specific collection exists in Milvus.
 func (node *Proxy) HasCollection(ctx context.Context, request *milvuspb.HasCollectionRequest) (*milvuspb.BoolResponse, error) {
 	if !node.checkHealthy() {
 		return &milvuspb.BoolResponse{
@@ -283,6 +294,7 @@ func (node *Proxy) HasCollection(ctx context.Context, request *milvuspb.HasColle
 	return hct.result, nil
 }
 
+// LoadCollection load a collection into query nodes.
 func (node *Proxy) LoadCollection(ctx context.Context, request *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -333,6 +345,7 @@ func (node *Proxy) LoadCollection(ctx context.Context, request *milvuspb.LoadCol
 	return lct.result, nil
 }
 
+// ReleaseCollection remove the loaded collection from query nodes.
 func (node *Proxy) ReleaseCollection(ctx context.Context, request *milvuspb.ReleaseCollectionRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -384,6 +397,7 @@ func (node *Proxy) ReleaseCollection(ctx context.Context, request *milvuspb.Rele
 	return rct.result, nil
 }
 
+// DescribeCollection get the meta information of specific collection, such as schema, created timestamp and etc.
 func (node *Proxy) DescribeCollection(ctx context.Context, request *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
 	if !node.checkHealthy() {
 		return &milvuspb.DescribeCollectionResponse{
@@ -440,6 +454,7 @@ func (node *Proxy) DescribeCollection(ctx context.Context, request *milvuspb.Des
 	return dct.result, nil
 }
 
+// GetCollectionStatistics get the collection statistics, such as `num_rows`.
 func (node *Proxy) GetCollectionStatistics(ctx context.Context, request *milvuspb.GetCollectionStatisticsRequest) (*milvuspb.GetCollectionStatisticsResponse, error) {
 	if !node.checkHealthy() {
 		return &milvuspb.GetCollectionStatisticsResponse{
@@ -496,6 +511,7 @@ func (node *Proxy) GetCollectionStatistics(ctx context.Context, request *milvusp
 	return g.result, nil
 }
 
+// ShowCollections list all collections in Milvus.
 func (node *Proxy) ShowCollections(ctx context.Context, request *milvuspb.ShowCollectionsRequest) (*milvuspb.ShowCollectionsResponse, error) {
 	if !node.checkHealthy() {
 		return &milvuspb.ShowCollectionsResponse{
@@ -549,6 +565,7 @@ func (node *Proxy) ShowCollections(ctx context.Context, request *milvuspb.ShowCo
 	return sct.result, nil
 }
 
+// CreatePartition create a partition in specific collection.
 func (node *Proxy) CreatePartition(ctx context.Context, request *milvuspb.CreatePartitionRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -602,6 +619,7 @@ func (node *Proxy) CreatePartition(ctx context.Context, request *milvuspb.Create
 	return cpt.result, nil
 }
 
+// DropPartition drop a partition in specific collection.
 func (node *Proxy) DropPartition(ctx context.Context, request *milvuspb.DropPartitionRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -655,6 +673,7 @@ func (node *Proxy) DropPartition(ctx context.Context, request *milvuspb.DropPart
 	return dpt.result, nil
 }
 
+// HasPartition check if partition exist.
 func (node *Proxy) HasPartition(ctx context.Context, request *milvuspb.HasPartitionRequest) (*milvuspb.BoolResponse, error) {
 	if !node.checkHealthy() {
 		return &milvuspb.BoolResponse{
@@ -716,6 +735,7 @@ func (node *Proxy) HasPartition(ctx context.Context, request *milvuspb.HasPartit
 	return hpt.result, nil
 }
 
+// LoadPartitions load specific partitions into query nodes.
 func (node *Proxy) LoadPartitions(ctx context.Context, request *milvuspb.LoadPartitionsRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -769,6 +789,7 @@ func (node *Proxy) LoadPartitions(ctx context.Context, request *milvuspb.LoadPar
 	return lpt.result, nil
 }
 
+// ReleasePartitions release specific partitions from query nodes.
 func (node *Proxy) ReleasePartitions(ctx context.Context, request *milvuspb.ReleasePartitionsRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -822,6 +843,7 @@ func (node *Proxy) ReleasePartitions(ctx context.Context, request *milvuspb.Rele
 	return rpt.result, nil
 }
 
+// GetPartitionStatistics get the statistics of partition, such as num_rows.
 func (node *Proxy) GetPartitionStatistics(ctx context.Context, request *milvuspb.GetPartitionStatisticsRequest) (*milvuspb.GetPartitionStatisticsResponse, error) {
 	if !node.checkHealthy() {
 		return &milvuspb.GetPartitionStatisticsResponse{
@@ -881,6 +903,7 @@ func (node *Proxy) GetPartitionStatistics(ctx context.Context, request *milvuspb
 	return g.result, nil
 }
 
+// ShowPartitions list all partitions in the specific collection.
 func (node *Proxy) ShowPartitions(ctx context.Context, request *milvuspb.ShowPartitionsRequest) (*milvuspb.ShowPartitionsResponse, error) {
 	if !node.checkHealthy() {
 		return &milvuspb.ShowPartitionsResponse{
@@ -934,6 +957,7 @@ func (node *Proxy) ShowPartitions(ctx context.Context, request *milvuspb.ShowPar
 	return spt.result, nil
 }
 
+// CreateIndex create index for collection.
 func (node *Proxy) CreateIndex(ctx context.Context, request *milvuspb.CreateIndexRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -990,6 +1014,7 @@ func (node *Proxy) CreateIndex(ctx context.Context, request *milvuspb.CreateInde
 	return cit.result, nil
 }
 
+// DescribeIndex get the meta information of index, such as index state, index id and etc.
 func (node *Proxy) DescribeIndex(ctx context.Context, request *milvuspb.DescribeIndexRequest) (*milvuspb.DescribeIndexResponse, error) {
 	if !node.checkHealthy() {
 		return &milvuspb.DescribeIndexResponse{
@@ -1056,6 +1081,7 @@ func (node *Proxy) DescribeIndex(ctx context.Context, request *milvuspb.Describe
 	return dit.result, nil
 }
 
+// DropIndex drop the index of collection.
 func (node *Proxy) DropIndex(ctx context.Context, request *milvuspb.DropIndexRequest) (*commonpb.Status, error) {
 	if !node.checkHealthy() {
 		return unhealthyStatus(), nil
@@ -1358,8 +1384,8 @@ func (node *Proxy) Delete(ctx context.Context, request *milvuspb.DeleteRequest) 
 	sp, ctx := trace.StartSpanFromContextWithOperationName(ctx, "Proxy-Delete")
 	defer sp.Finish()
 	traceID, _, _ := trace.InfoFromSpan(sp)
-	log.Info("Delete request begin", zap.String("traceID", traceID))
-	defer log.Info("Delete request end", zap.String("traceID", traceID))
+	log.Info("Start processing delete request in Proxy", zap.String("traceID", traceID))
+	defer log.Info("Finish processing delete request in Proxy", zap.String("traceID", traceID))
 
 	if !node.checkHealthy() {
 		return &milvuspb.MutationResult{
@@ -1379,7 +1405,9 @@ func (node *Proxy) Delete(ctx context.Context, request *milvuspb.DeleteRequest) 
 		Condition: NewTaskCondition(ctx),
 		req:       deleteReq,
 		BaseDeleteTask: BaseDeleteTask{
-			BaseMsg: msgstream.BaseMsg{},
+			BaseMsg: msgstream.BaseMsg{
+				HashValues: request.HashKeys,
+			},
 			DeleteRequest: internalpb.DeleteRequest{
 				Base: &commonpb.MsgBase{
 					MsgType: commonpb.MsgType_Delete,
@@ -1394,7 +1422,7 @@ func (node *Proxy) Delete(ctx context.Context, request *milvuspb.DeleteRequest) 
 		chTicker: node.chTicker,
 	}
 
-	log.Debug("Delete request enqueue",
+	log.Debug("Enqueue delete request in Proxy",
 		zap.String("role", Params.RoleName),
 		zap.String("db", request.DbName),
 		zap.String("collection", request.CollectionName),
@@ -1412,14 +1440,15 @@ func (node *Proxy) Delete(ctx context.Context, request *milvuspb.DeleteRequest) 
 		}, nil
 	}
 
-	log.Debug("Delete request detail",
+	log.Debug("Detail of delete request in Proxy",
 		zap.String("role", Params.RoleName),
 		zap.Int64("msgID", dt.Base.MsgID),
 		zap.Uint64("timestamp", dt.Base.Timestamp),
 		zap.String("db", request.DbName),
 		zap.String("collection", request.CollectionName),
 		zap.String("partition", request.PartitionName),
-		zap.String("expr", request.Expr))
+		zap.String("expr", request.Expr),
+		zap.String("traceID", traceID))
 
 	if err := dt.WaitToFinish(); err != nil {
 		log.Error("Failed to execute delete task in task scheduler: "+err.Error(), zap.String("traceID", traceID))
@@ -2407,6 +2436,86 @@ func (node *Proxy) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsReque
 		},
 		Response: "",
 	}, nil
+}
+
+// LoadBalance would do a load balancing operation between query nodes
+func (node *Proxy) LoadBalance(ctx context.Context, req *milvuspb.LoadBalanceRequest) (*commonpb.Status, error) {
+	log.Debug("Proxy.LoadBalance",
+		zap.Int64("proxy_id", Params.ProxyID),
+		zap.Any("req", req))
+
+	if !node.checkHealthy() {
+		return unhealthyStatus(), nil
+	}
+
+	status := &commonpb.Status{
+		ErrorCode: commonpb.ErrorCode_UnexpectedError,
+	}
+	infoResp, err := node.queryCoord.LoadBalance(ctx, &querypb.LoadBalanceRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_LoadBalanceSegments,
+			MsgID:     0,
+			Timestamp: 0,
+			SourceID:  Params.ProxyID,
+		},
+		SourceNodeIDs:    []int64{req.SrcNodeID},
+		DstNodeIDs:       req.DstNodeIDs,
+		BalanceReason:    querypb.TriggerCondition_grpcRequest,
+		SealedSegmentIDs: req.SealedSegmentIDs,
+	})
+	if err != nil {
+		log.Error("Failed to LoadBalance from Query Coordinator",
+			zap.Any("req", req), zap.Error(err))
+		status.Reason = err.Error()
+		return status, nil
+	}
+	if infoResp.ErrorCode != commonpb.ErrorCode_Success {
+		log.Error("Failed to LoadBalance from Query Coordinator", zap.String("errMsg", infoResp.Reason))
+		status.Reason = infoResp.Reason
+		return status, nil
+	}
+	log.Debug("LoadBalance Done", zap.Any("req", req), zap.Any("status", infoResp))
+	status.ErrorCode = commonpb.ErrorCode_Success
+	return status, nil
+}
+
+func (node *Proxy) GetCompactionState(ctx context.Context, req *milvuspb.GetCompactionStateRequest) (*milvuspb.GetCompactionStateResponse, error) {
+	log.Info("received GetCompactionState request", zap.Int64("compactionID", req.GetCompactionID()))
+	resp := &milvuspb.GetCompactionStateResponse{}
+	if !node.checkHealthy() {
+		resp.Status = unhealthyStatus()
+		return resp, nil
+	}
+
+	resp, err := node.dataCoord.GetCompactionState(ctx, req)
+	log.Info("received GetCompactionState response", zap.Int64("compactionID", req.GetCompactionID()), zap.Any("resp", resp), zap.Error(err))
+	return resp, err
+}
+
+func (node *Proxy) ManualCompaction(ctx context.Context, req *milvuspb.ManualCompactionRequest) (*milvuspb.ManualCompactionResponse, error) {
+	log.Info("received ManualCompaction request", zap.Int64("collectionID", req.GetCollectionID()))
+	resp := &milvuspb.ManualCompactionResponse{}
+	if !node.checkHealthy() {
+		resp.Status = unhealthyStatus()
+		return resp, nil
+	}
+
+	resp, err := node.dataCoord.ManualCompaction(ctx, req)
+	log.Info("received ManualCompaction response", zap.Int64("collectionID", req.GetCollectionID()), zap.Any("resp", resp), zap.Error(err))
+	return resp, err
+}
+
+func (node *Proxy) GetCompactionStateWithPlans(ctx context.Context, req *milvuspb.GetCompactionPlansRequest) (*milvuspb.GetCompactionPlansResponse, error) {
+	log.Info("received GetCompactionStateWithPlans request", zap.Int64("compactionID", req.GetCompactionID()))
+	resp := &milvuspb.GetCompactionPlansResponse{}
+	if !node.checkHealthy() {
+		resp.Status = unhealthyStatus()
+		return resp, nil
+	}
+
+	resp, err := node.dataCoord.GetCompactionStateWithPlans(ctx, req)
+	log.Info("received GetCompactionStateWithPlans response", zap.Int64("compactionID", req.GetCompactionID()), zap.Any("resp", resp), zap.Error(err))
+	return resp, err
 }
 
 // checkHealthy checks proxy state is Healthy

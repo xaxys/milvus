@@ -1,26 +1,29 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package proxy
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/util/typeutil"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
-	"go.uber.org/zap"
 )
 
 // ticker can update ts only when the minTs greater than the ts of ticker, we can use maxTs to update current later
@@ -30,10 +33,8 @@ type getPChanStatisticsFuncType func() (map[pChan]*pChanStatistics, error)
 type channelsTimeTicker interface {
 	start() error
 	close() error
-	addPChan(pchan pChan) error
-	removePChan(pchan pChan) error
 	getLastTick(pchan pChan) (Timestamp, error)
-	getMinTsStatistics() (map[pChan]Timestamp, error)
+	getMinTsStatistics() (map[pChan]Timestamp, Timestamp, error)
 	getMinTick() Timestamp
 }
 
@@ -44,13 +45,14 @@ type channelsTimeTickerImpl struct {
 	getStatisticsFunc getPChanStatisticsFuncType
 	tso               tsoAllocator
 	currents          map[pChan]Timestamp
-	currentsMtx       sync.RWMutex
 	wg                sync.WaitGroup
 	ctx               context.Context
 	cancel            context.CancelFunc
+	defaultTimestamp  Timestamp
+	minTimestamp      Timestamp
 }
 
-func (ticker *channelsTimeTickerImpl) getMinTsStatistics() (map[pChan]Timestamp, error) {
+func (ticker *channelsTimeTickerImpl) getMinTsStatistics() (map[pChan]Timestamp, Timestamp, error) {
 	ticker.statisticsMtx.RLock()
 	defer ticker.statisticsMtx.RUnlock()
 
@@ -60,7 +62,7 @@ func (ticker *channelsTimeTickerImpl) getMinTsStatistics() (map[pChan]Timestamp,
 			ret[k] = v
 		}
 	}
-	return ret, nil
+	return ret, ticker.defaultTimestamp, nil
 }
 
 func (ticker *channelsTimeTickerImpl) initStatistics() {
@@ -73,9 +75,6 @@ func (ticker *channelsTimeTickerImpl) initStatistics() {
 }
 
 func (ticker *channelsTimeTickerImpl) initCurrents(current Timestamp) {
-	ticker.currentsMtx.Lock()
-	defer ticker.currentsMtx.Unlock()
-
 	for pchan := range ticker.currents {
 		ticker.currents[pchan] = current
 	}
@@ -97,16 +96,16 @@ func (ticker *channelsTimeTickerImpl) tick() error {
 	ticker.statisticsMtx.Lock()
 	defer ticker.statisticsMtx.Unlock()
 
-	ticker.currentsMtx.Lock()
-	defer ticker.currentsMtx.Unlock()
+	ticker.defaultTimestamp = now
+	minTs := now
 
 	for pchan := range ticker.currents {
 		current := ticker.currents[pchan]
 		stat, ok := stats[pchan]
 
 		if !ok {
-			ticker.minTsStatistics[pchan] = current
-			ticker.currents[pchan] = now
+			delete(ticker.minTsStatistics, pchan)
+			delete(ticker.currents, pchan)
 		} else {
 			if stat.minTs > current {
 				ticker.minTsStatistics[pchan] = stat.minTs - 1
@@ -116,8 +115,24 @@ func (ticker *channelsTimeTickerImpl) tick() error {
 				}
 				ticker.currents[pchan] = next
 			}
+			lastMin := ticker.minTsStatistics[pchan]
+			if minTs > lastMin {
+				minTs = lastMin
+			}
 		}
 	}
+
+	for pchan, value := range stats {
+		_, ok := ticker.currents[pchan]
+		if !ok {
+			ticker.minTsStatistics[pchan] = value.minTs - 1
+			ticker.currents[pchan] = now
+		}
+		if minTs > value.minTs-1 {
+			minTs = value.minTs - 1
+		}
+	}
+	ticker.minTimestamp = minTs
 
 	return nil
 }
@@ -162,53 +177,13 @@ func (ticker *channelsTimeTickerImpl) close() error {
 	return nil
 }
 
-func (ticker *channelsTimeTickerImpl) addPChan(pchan pChan) error {
-	ticker.statisticsMtx.Lock()
-	if _, ok := ticker.minTsStatistics[pchan]; ok {
-		ticker.statisticsMtx.Unlock()
-		return fmt.Errorf("pChan %v already exist in minTsStatistics", pchan)
-	}
-	ticker.minTsStatistics[pchan] = 0
-	ticker.statisticsMtx.Unlock()
-
-	ticker.currentsMtx.Lock()
-	defer ticker.currentsMtx.Unlock()
-	if _, ok := ticker.currents[pchan]; ok {
-		return fmt.Errorf("pChan %v already exist in currents", pchan)
-	}
-	ticker.currents[pchan] = 0
-
-	return nil
-}
-
-func (ticker *channelsTimeTickerImpl) removePChan(pchan pChan) error {
-	ticker.statisticsMtx.Lock()
-
-	if _, ok := ticker.minTsStatistics[pchan]; !ok {
-		ticker.statisticsMtx.Unlock()
-		return fmt.Errorf("pChan %v don't exist in minTsStatistics", pchan)
-	}
-	delete(ticker.minTsStatistics, pchan)
-	ticker.statisticsMtx.Unlock()
-
-	ticker.currentsMtx.Lock()
-	defer ticker.currentsMtx.Unlock()
-
-	if _, ok := ticker.currents[pchan]; !ok {
-		return fmt.Errorf("pChan %v don't exist in currents", pchan)
-	}
-	delete(ticker.currents, pchan)
-
-	return nil
-}
-
 func (ticker *channelsTimeTickerImpl) getLastTick(pchan pChan) (Timestamp, error) {
 	ticker.statisticsMtx.RLock()
 	defer ticker.statisticsMtx.RUnlock()
 
 	ts, ok := ticker.minTsStatistics[pchan]
 	if !ok {
-		return 0, fmt.Errorf("pChan %v not found", pchan)
+		return ticker.defaultTimestamp, nil
 	}
 
 	return ts, nil
@@ -217,16 +192,8 @@ func (ticker *channelsTimeTickerImpl) getLastTick(pchan pChan) (Timestamp, error
 func (ticker *channelsTimeTickerImpl) getMinTick() Timestamp {
 	ticker.statisticsMtx.RLock()
 	defer ticker.statisticsMtx.RUnlock()
-
-	minTs := typeutil.ZeroTimestamp
-
-	for _, ts := range ticker.minTsStatistics {
-		if ts < minTs {
-			minTs = ts
-		}
-	}
-
-	return minTs
+	// may be zero
+	return ticker.minTimestamp
 }
 
 func newChannelsTimeTicker(

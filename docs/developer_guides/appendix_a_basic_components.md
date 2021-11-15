@@ -320,7 +320,7 @@ B. or the logical part overflows.
 
 In either case, the physical part will be updated, and the logical part will be set to 0.
 
-Keeping the physical part close to local wall time may face non-monotonic problems such as updates to POSIX time that could turn time backward. HLC avoids such problems, since if 'local wall time < HLC's physical part' holds, only case B is satisfied, thus monotonicity is guaranteed.
+Keeping the physical part close to local wall time may face nonmonotonic problems such as updates to POSIX time that could turn time backward. HLC avoids such problems, since if 'local wall time < HLC's physical part' holds, only case B is satisfied, thus monotonicity is guaranteed.
 
 Milvus does not support transaction, but it should guarantee the deterministic execution of the multi-way WAL. The timestamp attached to each request should
 
@@ -421,6 +421,7 @@ type TxnKV interface {
 ###### A.7.3 MetaKv
 
 ```go
+// MetaKv is TxnKV for meta data. It should save data with lease.
 type MetaKv interface {
 	TxnKV
 	GetPath(key string) string
@@ -442,6 +443,7 @@ type MetaKv interface {
 ###### A.7.4 MetaKv
 
 ```go
+// SnapShotKV is TxnKV for snapshot data. It must save timestamp.
 type SnapShotKV interface {
 	Save(key string, value string, ts typeutil.Timestamp) error
 	Load(key string, ts typeutil.Timestamp) (string, error)

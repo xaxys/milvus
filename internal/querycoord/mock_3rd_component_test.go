@@ -38,11 +38,12 @@ import (
 )
 
 const (
-	defaultCollectionID = UniqueID(2021)
-	defaultPartitionID  = UniqueID(2021)
-	defaultSegmentID    = UniqueID(2021)
-	defaultQueryNodeID  = int64(100)
-	defaultChannelNum   = 2
+	defaultCollectionID     = UniqueID(2021)
+	defaultPartitionID      = UniqueID(2021)
+	defaultSegmentID        = UniqueID(2021)
+	defaultQueryNodeID      = int64(100)
+	defaultChannelNum       = 2
+	defaultNumRowPerSegment = 10000
 )
 
 func genCollectionSchema(collectionID UniqueID, isBinary bool) *schemapb.CollectionSchema {
@@ -278,7 +279,11 @@ func (rc *rootCoordMock) ReleaseDQLMessageStream(ctx context.Context, in *proxyp
 }
 
 func (rc *rootCoordMock) DescribeSegment(ctx context.Context, req *milvuspb.DescribeSegmentRequest) (*milvuspb.DescribeSegmentResponse, error) {
-	return nil, errors.New("describeSegment fail")
+	return &milvuspb.DescribeSegmentResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		},
+	}, nil
 }
 
 type dataCoordMock struct {
@@ -347,6 +352,7 @@ func (data *dataCoordMock) GetRecoveryInfo(ctx context.Context, req *datapb.GetR
 				segmentBinlog := &datapb.SegmentBinlogs{
 					SegmentID:    segmentID,
 					FieldBinlogs: fieldBinlogs,
+					NumOfRows:    defaultNumRowPerSegment,
 				}
 				data.Segment2Binlog[segmentID] = segmentBinlog
 			}
@@ -361,7 +367,7 @@ func (data *dataCoordMock) GetRecoveryInfo(ctx context.Context, req *datapb.GetR
 		data.collections = append(data.collections, collectionID)
 		collectionName := funcutil.RandomString(8)
 		for i := int32(0); i < common.DefaultShardsNum; i++ {
-			vChannel := fmt.Sprintf("%s_%d_%d_v", collectionName, collectionID, i)
+			vChannel := fmt.Sprintf("Dml_%s_%d_%d_v", collectionName, collectionID, i)
 			channelInfo := &datapb.VchannelInfo{
 				CollectionID: collectionID,
 				ChannelName:  vChannel,
@@ -398,5 +404,9 @@ func newIndexCoordMock() *indexCoordMock {
 }
 
 func (c *indexCoordMock) GetIndexFilePaths(ctx context.Context, req *indexpb.GetIndexFilePathsRequest) (*indexpb.GetIndexFilePathsResponse, error) {
-	return nil, errors.New("get index file path fail")
+	return &indexpb.GetIndexFilePathsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		},
+	}, nil
 }

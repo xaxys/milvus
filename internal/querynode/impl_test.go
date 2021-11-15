@@ -136,6 +136,8 @@ func TestImpl_AddQueryChannel(t *testing.T) {
 
 		err = node.streaming.replica.removeCollection(defaultCollectionID)
 		assert.NoError(t, err)
+		err = node.historical.replica.removeCollection(defaultCollectionID)
+		assert.NoError(t, err)
 
 		req := &queryPb.AddQueryChannelRequest{
 			Base:             genCommonMsgBase(commonpb.MsgType_WatchQueryChannels),
@@ -172,7 +174,7 @@ func TestImpl_AddQueryChannel(t *testing.T) {
 		assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
 	})
 
-	t.Run("test init global sealed segments failed", func(t *testing.T) {
+	t.Run("test not init global sealed segments", func(t *testing.T) {
 		node, err := genSimpleQueryNode(ctx)
 		assert.NoError(t, err)
 
@@ -190,8 +192,8 @@ func TestImpl_AddQueryChannel(t *testing.T) {
 		}
 
 		status, err := node.AddQueryChannel(ctx, req)
-		assert.Error(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, status.ErrorCode)
+		assert.NoError(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, status.ErrorCode)
 	})
 
 	t.Run("test seek error", func(t *testing.T) {
@@ -241,7 +243,7 @@ func TestImpl_WatchDmChannels(t *testing.T) {
 
 	req := &queryPb.WatchDmChannelsRequest{
 		Base: &commonpb.MsgBase{
-			MsgType: commonpb.MsgType_WatchQueryChannels,
+			MsgType: commonpb.MsgType_WatchDmChannels,
 			MsgID:   rand.Int63(),
 		},
 		NodeID:       0,
@@ -383,8 +385,8 @@ func TestImpl_GetSegmentInfo(t *testing.T) {
 		}
 
 		rsp, err := node.GetSegmentInfo(ctx, req)
-		assert.Error(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, rsp.Status.ErrorCode)
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
 	})
 
 	t.Run("test no collection in streaming", func(t *testing.T) {
@@ -404,8 +406,8 @@ func TestImpl_GetSegmentInfo(t *testing.T) {
 		}
 
 		rsp, err := node.GetSegmentInfo(ctx, req)
-		assert.Error(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, rsp.Status.ErrorCode)
+		assert.Nil(t, err)
+		assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
 	})
 
 	t.Run("test different segment type", func(t *testing.T) {

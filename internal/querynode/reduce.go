@@ -22,16 +22,22 @@ package querynode
 import "C"
 import (
 	"errors"
-	"strconv"
 	"unsafe"
 )
 
+// SearchResult contains a pointer to the search result in C++ memory
 type SearchResult struct {
 	cSearchResult C.CSearchResult
 }
 
+// MarshaledHits contains a pointer to the marshaled hits in C++ memory
 type MarshaledHits struct {
 	cMarshaledHits C.CMarshaledHits
+}
+
+// RetrieveResult contains a pointer to the retrieve result in C++ memory
+type RetrieveResult struct {
+	cRetrieveResult C.CRetrieveResult
 }
 
 func reduceSearchResultsAndFillData(plan *SearchPlan, searchResults []*SearchResult, numSegments int64) error {
@@ -47,12 +53,8 @@ func reduceSearchResultsAndFillData(plan *SearchPlan, searchResults []*SearchRes
 	cNumSegments := C.long(numSegments)
 
 	status := C.ReduceSearchResultsAndFillData(plan.cSearchPlan, cSearchResultPtr, cNumSegments)
-	errorCode := status.error_code
-
-	if errorCode != 0 {
-		errorMsg := C.GoString(status.error_msg)
-		defer C.free(unsafe.Pointer(status.error_msg))
-		return errors.New("reduceSearchResults failed, C runtime error detected, error code = " + strconv.Itoa(int(errorCode)) + ", error msg = " + errorMsg)
+	if err := HandleCStatus(&status, "ReduceSearchResultsAndFillData failed"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -68,12 +70,8 @@ func reorganizeSearchResults(searchResults []*SearchResult, numSegments int64) (
 	var cMarshaledHits C.CMarshaledHits
 
 	status := C.ReorganizeSearchResults(&cMarshaledHits, cSearchResultPtr, cNumSegments)
-	errorCode := status.error_code
-
-	if errorCode != 0 {
-		errorMsg := C.GoString(status.error_msg)
-		defer C.free(unsafe.Pointer(status.error_msg))
-		return nil, errors.New("reorganizeSearchResults failed, C runtime error detected, error code = " + strconv.Itoa(int(errorCode)) + ", error msg = " + errorMsg)
+	if err := HandleCStatus(&status, "ReorganizeSearchResults failed"); err != nil {
+		return nil, err
 	}
 	return &MarshaledHits{cMarshaledHits: cMarshaledHits}, nil
 }

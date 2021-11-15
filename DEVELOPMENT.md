@@ -1,6 +1,6 @@
 # Development
 
-This document will help to setup your development environment and run tests. If you encounter a problem, please file an issue.
+This document will help to set up your development environment and run tests. If you encounter a problem, please file an issue.
 
 Table of contents
 =================
@@ -253,7 +253,7 @@ $ ./scripts/start_cluster.sh
 start the cluster on your host machine
 ```shell
 $ ./build/builder.sh make install // build milvus
-$ ./build/build_image.sh // build milvus lastest docker
+$ ./build/build_image.sh // build milvus lastest docker image
 $ docker images // check if milvus latest image is ready
 REPOSITORY                 TAG                                 IMAGE ID       CREATED          SIZE
 milvusdb/milvus            latest                              63c62ff7c1b7   52 minutes ago   570MB

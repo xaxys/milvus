@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package proxy
 
@@ -194,17 +199,6 @@ func (it *insertTask) getChannels() ([]pChan, error) {
 			return nil, err
 		}
 		channels, err = it.chMgr.getChannels(collID)
-		if err == nil {
-			for _, pchan := range channels {
-				err := it.chTicker.addPChan(pchan)
-				if err != nil {
-					log.Warn("failed to add pchan to channels time ticker",
-						zap.Error(err),
-						zap.Int64("collection id", collID),
-						zap.String("pchan", pchan))
-				}
-			}
-		}
 	}
 	return channels, err
 }
@@ -694,17 +688,9 @@ func (it *insertTask) checkFieldAutoIDAndHashPK() error {
 			},
 		}
 
-		it.HashValues = make([]uint32, 0, len(it.BaseInsertTask.RowIDs))
-		for _, rowID := range it.BaseInsertTask.RowIDs {
-			hash, _ := typeutil.Hash32Int64(rowID)
-			it.HashValues = append(it.HashValues, hash)
-		}
+		it.HashPK(it.BaseInsertTask.RowIDs)
 	} else {
-		it.HashValues = make([]uint32, 0, len(primaryData))
-		for _, pk := range primaryData {
-			hash, _ := typeutil.Hash32Int64(pk)
-			it.HashValues = append(it.HashValues, hash)
-		}
+		it.HashPK(it.BaseInsertTask.RowIDs)
 	}
 
 	sliceIndex := make([]uint32, rowNums)
@@ -714,6 +700,17 @@ func (it *insertTask) checkFieldAutoIDAndHashPK() error {
 	it.result.SuccIndex = sliceIndex
 
 	return nil
+}
+
+func (it *insertTask) HashPK(pks []int64) {
+	if len(it.HashValues) != 0 {
+		log.Warn("the hashvalues passed through client is not supported now, and will be overwritten")
+	}
+	it.HashValues = make([]uint32, 0, len(pks))
+	for _, pk := range pks {
+		hash, _ := typeutil.Hash32Int64(pk)
+		it.HashValues = append(it.HashValues, hash)
+	}
 }
 
 func (it *insertTask) PreExecute(ctx context.Context) error {
@@ -729,7 +726,7 @@ func (it *insertTask) PreExecute(ctx context.Context) error {
 		IDs: &schemapb.IDs{
 			IdField: nil,
 		},
-		Timestamp: it.BeginTs(),
+		Timestamp: it.EndTs(),
 	}
 
 	collectionName := it.BaseInsertTask.CollectionName
@@ -1025,17 +1022,6 @@ func (it *insertTask) Execute(ctx context.Context) error {
 			it.result.Status.Reason = err.Error()
 			return err
 		}
-		channels, err := it.chMgr.getChannels(collID)
-		if err == nil {
-			for _, pchan := range channels {
-				err := it.chTicker.addPChan(pchan)
-				if err != nil {
-					log.Warn("failed to add pchan to channels time ticker",
-						zap.Error(err),
-						zap.String("pchan", pchan))
-				}
-			}
-		}
 		stream, err = it.chMgr.getDMLStream(collID)
 		if err != nil {
 			it.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
@@ -1266,11 +1252,6 @@ func (dct *dropCollectionTask) Execute(ctx context.Context) error {
 	dct.result, err = dct.rootCoord.DropCollection(ctx, dct.DropCollectionRequest)
 	if err != nil {
 		return err
-	}
-
-	pchans, _ := dct.chMgr.getChannels(collID)
-	for _, pchan := range pchans {
-		_ = dct.chTicker.removePChan(pchan)
 	}
 
 	_ = dct.chMgr.removeDMLStream(collID)
@@ -1848,9 +1829,7 @@ func reduceSearchResultData(searchResultData []*schemapb.SearchResultData, nq in
 		realTopK = j
 		ret.Results.Topks = append(ret.Results.Topks, realTopK)
 	}
-	if skipDupCnt > 0 {
-		log.Debug("skip duplicated search result", zap.Int64("count", skipDupCnt))
-	}
+	log.Debug("skip duplicated search result", zap.Int64("count", skipDupCnt))
 	ret.Results.TopK = realTopK
 
 	if metricType != "IP" {
@@ -2291,7 +2270,7 @@ func mergeRetrieveResults(retrieveResults []*internalpb.RetrieveResults) (*milvu
 	// merge results and remove duplicates
 	for _, rr := range retrieveResults {
 		// skip empty result, it will break merge result
-		if rr == nil || rr.Ids == nil {
+		if rr == nil || rr.Ids == nil || rr.Ids.GetIntId() == nil || len(rr.Ids.GetIntId().Data) == 0 {
 			continue
 		}
 
@@ -2302,7 +2281,7 @@ func mergeRetrieveResults(retrieveResults []*internalpb.RetrieveResults) (*milvu
 		}
 
 		if len(ret.FieldsData) != len(rr.FieldsData) {
-			return nil, fmt.Errorf("mismatch FieldData in RetrieveResults")
+			return nil, fmt.Errorf("mismatch FieldData in proxy RetrieveResults, expect %d get %d", len(ret.FieldsData), len(rr.FieldsData))
 		}
 
 		for i, id := range rr.Ids.GetIntId().GetData() {
@@ -2315,8 +2294,12 @@ func mergeRetrieveResults(retrieveResults []*internalpb.RetrieveResults) (*milvu
 			}
 		}
 	}
-	if skipDupCnt > 0 {
-		log.Debug("skip duplicated query result", zap.Int64("count", skipDupCnt))
+	log.Debug("skip duplicated query result", zap.Int64("count", skipDupCnt))
+
+	if ret == nil {
+		ret = &milvuspb.QueryResults{
+			FieldsData: []*schemapb.FieldData{},
+		}
 	}
 
 	return ret, nil
@@ -4637,17 +4620,6 @@ func (dt *deleteTask) Execute(ctx context.Context) (err error) {
 			dt.result.Status.Reason = err.Error()
 			return err
 		}
-		channels, err := dt.chMgr.getChannels(collID)
-		if err == nil {
-			for _, pchan := range channels {
-				err := dt.chTicker.addPChan(pchan)
-				if err != nil {
-					log.Warn("failed to add pchan to channels time ticker",
-						zap.Error(err),
-						zap.String("pchan", pchan))
-				}
-			}
-		}
 		stream, err = dt.chMgr.getDMLStream(collID)
 		if err != nil {
 			dt.result.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
@@ -4726,6 +4698,9 @@ func (dt *deleteTask) PostExecute(ctx context.Context) error {
 }
 
 func (dt *deleteTask) HashPK(pks []int64) {
+	if len(dt.HashValues) != 0 {
+		log.Warn("the hashvalues passed through client is not supported now, and will be overwritten")
+	}
 	dt.HashValues = make([]uint32, 0, len(pks))
 	for _, pk := range pks {
 		hash, _ := typeutil.Hash32Int64(pk)

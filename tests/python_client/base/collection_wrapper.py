@@ -103,13 +103,13 @@ class ApiCollectionWrapper:
         return res, check_result
 
     def search(self, data, anns_field, param, limit, expr=None,
-               partition_names=None, output_fields=None, timeout=None,
+               partition_names=None, output_fields=None, timeout=None, round_decimal=-1,
                check_task=None, check_items=None, **kwargs):
         timeout = TIMEOUT if timeout is None else timeout
 
         func_name = sys._getframe().f_code.co_name
         res, check = api_request([self.collection.search, data, anns_field, param, limit,
-                                  expr, partition_names, output_fields, timeout], **kwargs)
+                                  expr, partition_names, output_fields, timeout, round_decimal], **kwargs)
         check_result = ResponseChecker(res, func_name, check_task, check_items, check,
                                        data=data, anns_field=anns_field, param=param, limit=limit,
                                        expr=expr, partition_names=partition_names,
@@ -230,5 +230,24 @@ class ApiCollectionWrapper:
         timeout = TIMEOUT if timeout is None else timeout
         func_name = sys._getframe().f_code.co_name
         res, check = api_request([self.collection.delete, expr, partition_name, timeout], **kwargs)
+        check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
+        return res, check_result
+
+    def compact(self, timeout=None, check_task=None, check_items=None, **kwargs):
+        timeout = TIMEOUT if timeout is None else timeout
+        func_name = sys._getframe().f_code.co_name
+        res, check = api_request([self.collection.compact, timeout], **kwargs)
+        check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
+        return res, check_result
+
+    def get_compaction_state(self, timeout=None, **kwargs):
+        timeout = TIMEOUT if timeout is None else timeout
+        res = self.collection.get_compaction_state(timeout, **kwargs)
+        return res
+
+    def get_compaction_plans(self, timeout=None, check_task=None, check_items=None, **kwargs):
+        timeout = TIMEOUT if timeout is None else timeout
+        func_name = sys._getframe().f_code.co_name
+        res, check = api_request([self.collection.get_compaction_plans, timeout], **kwargs)
         check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
         return res, check_result

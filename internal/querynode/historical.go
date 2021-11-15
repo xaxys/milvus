@@ -25,11 +25,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
-	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
 	"github.com/milvus-io/milvus/internal/storage"
-	"github.com/milvus-io/milvus/internal/types"
 )
 
 const (
@@ -41,8 +39,7 @@ type historical struct {
 	ctx context.Context
 
 	replica      ReplicaInterface
-	loader       *segmentLoader
-	statsService *statsService
+	tSafeReplica TSafeReplicaInterface
 
 	mu                   sync.Mutex // guards globalSealedSegments
 	globalSealedSegments map[UniqueID]*querypb.SegmentInfo
@@ -52,32 +49,24 @@ type historical struct {
 
 // newHistorical returns a new historical
 func newHistorical(ctx context.Context,
-	rootCoord types.RootCoord,
-	indexCoord types.IndexCoord,
-	factory msgstream.Factory,
-	etcdKV *etcdkv.EtcdKV) *historical {
-	replica := newCollectionReplica(etcdKV)
-	loader := newSegmentLoader(ctx, rootCoord, indexCoord, replica, etcdKV)
-	ss := newStatsService(ctx, replica, loader.indexLoader.fieldStatsChan, factory)
+	replica ReplicaInterface,
+	etcdKV *etcdkv.EtcdKV,
+	tSafeReplica TSafeReplicaInterface) *historical {
 
 	return &historical{
 		ctx:                  ctx,
 		replica:              replica,
-		loader:               loader,
-		statsService:         ss,
 		globalSealedSegments: make(map[UniqueID]*querypb.SegmentInfo),
 		etcdKV:               etcdKV,
+		tSafeReplica:         tSafeReplica,
 	}
 }
 
 func (h *historical) start() {
-	go h.statsService.start()
 	go h.watchGlobalSegmentMeta()
 }
 
 func (h *historical) close() {
-	h.statsService.close()
-
 	// free collectionReplica
 	h.replica.freeAll()
 }
@@ -214,7 +203,7 @@ func (h *historical) retrieve(collID UniqueID, partIDs []UniqueID, vcm storage.C
 			if err != nil {
 				return retrieveResults, retrieveSegmentIDs, err
 			}
-			result, err := seg.getEntityByIds(plan)
+			result, err := seg.retrieve(plan)
 			if err != nil {
 				return retrieveResults, retrieveSegmentIDs, err
 			}

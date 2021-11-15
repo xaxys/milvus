@@ -84,6 +84,12 @@ type ParamTable struct {
 
 	CreatedTime time.Time
 	UpdatedTime time.Time
+
+	// recovery
+	skipQueryChannelRecovery bool
+
+	// memory limit
+	OverloadedMemoryThresholdPercentage float64
 }
 
 // Params is a package scoped variable of type ParamTable.
@@ -105,9 +111,6 @@ func (p *ParamTable) InitOnce() {
 // Init is used to initialize configuration items.
 func (p *ParamTable) Init() {
 	p.BaseTable.Init()
-	if err := p.LoadYaml("advanced/query_node.yaml"); err != nil {
-		panic(err)
-	}
 
 	p.initCacheSize()
 	p.initInContainer()
@@ -144,6 +147,9 @@ func (p *ParamTable) Init() {
 	p.initKnowhereSimdType()
 
 	p.initRoleName()
+
+	p.initSkipQueryChannelRecovery()
+	p.initOverloadedMemoryThresholdPercentage()
 }
 
 func (p *ParamTable) initCacheSize() {
@@ -240,29 +246,29 @@ func (p *ParamTable) initRocksmqPath() {
 // advanced params
 // stats
 func (p *ParamTable) initStatsPublishInterval() {
-	p.StatsPublishInterval = p.ParseInt("queryNode.stats.publishInterval")
+	p.StatsPublishInterval = p.ParseIntWithDefault("queryNode.stats.publishInterval", 1000)
 }
 
 // dataSync:
 func (p *ParamTable) initFlowGraphMaxQueueLength() {
-	p.FlowGraphMaxQueueLength = p.ParseInt32("queryNode.dataSync.flowGraph.maxQueueLength")
+	p.FlowGraphMaxQueueLength = p.ParseInt32WithDefault("queryNode.dataSync.flowGraph.maxQueueLength", 1024)
 }
 
 func (p *ParamTable) initFlowGraphMaxParallelism() {
-	p.FlowGraphMaxParallelism = p.ParseInt32("queryNode.dataSync.flowGraph.maxParallelism")
+	p.FlowGraphMaxParallelism = p.ParseInt32WithDefault("queryNode.dataSync.flowGraph.maxParallelism", 1024)
 }
 
 // msgStream
 func (p *ParamTable) initSearchReceiveBufSize() {
-	p.SearchReceiveBufSize = p.ParseInt64("queryNode.msgStream.search.recvBufSize")
+	p.SearchReceiveBufSize = p.ParseInt64WithDefault("queryNode.msgStream.search.recvBufSize", 512)
 }
 
 func (p *ParamTable) initSearchPulsarBufSize() {
-	p.SearchPulsarBufSize = p.ParseInt64("queryNode.msgStream.search.pulsarBufSize")
+	p.SearchPulsarBufSize = p.ParseInt64WithDefault("queryNode.msgStream.search.pulsarBufSize", 512)
 }
 
 func (p *ParamTable) initSearchResultReceiveBufSize() {
-	p.SearchResultReceiveBufSize = p.ParseInt64("queryNode.msgStream.searchResult.recvBufSize")
+	p.SearchResultReceiveBufSize = p.ParseInt64WithDefault("queryNode.msgStream.searchResult.recvBufSize", 64)
 }
 
 // ------------------------  channel names
@@ -328,7 +334,7 @@ func (p *ParamTable) initGracefulTime() {
 }
 
 func (p *ParamTable) initSegcoreChunkRows() {
-	p.ChunkRows = p.ParseInt64("queryNode.segcore.chunkRows")
+	p.ChunkRows = p.ParseInt64WithDefault("queryNode.segcore.chunkRows", 32768)
 }
 
 func (p *ParamTable) initKnowhereSimdType() {
@@ -339,4 +345,17 @@ func (p *ParamTable) initKnowhereSimdType() {
 
 func (p *ParamTable) initRoleName() {
 	p.RoleName = "querynode"
+}
+
+func (p *ParamTable) initSkipQueryChannelRecovery() {
+	p.skipQueryChannelRecovery = p.ParseBool("msgChannel.skipQueryChannelRecovery", false)
+}
+
+func (p *ParamTable) initOverloadedMemoryThresholdPercentage() {
+	overloadedMemoryThresholdPercentage := p.LoadWithDefault("queryCoord.overloadedMemoryThresholdPercentage", "90")
+	thresholdPercentage, err := strconv.ParseInt(overloadedMemoryThresholdPercentage, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	p.OverloadedMemoryThresholdPercentage = float64(thresholdPercentage) / 100
 }

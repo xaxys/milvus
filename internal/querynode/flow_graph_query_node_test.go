@@ -24,10 +24,9 @@ func TestQueryNodeFlowGraph_consumerFlowGraph(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	streaming, err := genSimpleStreaming(ctx)
-	assert.NoError(t, err)
+	tSafe := newTSafeReplica()
 
-	historicalReplica, err := genSimpleReplica()
+	streamingReplica, err := genSimpleReplica()
 	assert.NoError(t, err)
 
 	fac, err := genFactory()
@@ -37,9 +36,8 @@ func TestQueryNodeFlowGraph_consumerFlowGraph(t *testing.T) {
 		loadTypeCollection,
 		defaultCollectionID,
 		defaultPartitionID,
-		streaming.replica,
-		historicalReplica,
-		streaming.tSafeReplica,
+		streamingReplica,
+		tSafe,
 		defaultVChannel,
 		fac)
 
@@ -51,22 +49,20 @@ func TestQueryNodeFlowGraph_seekQueryNodeFlowGraph(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	streaming, err := genSimpleStreaming(ctx)
-	assert.NoError(t, err)
-
-	historicalReplica, err := genSimpleReplica()
+	streamingReplica, err := genSimpleReplica()
 	assert.NoError(t, err)
 
 	fac, err := genFactory()
 	assert.NoError(t, err)
 
+	tSafe := newTSafeReplica()
+
 	fg := newQueryNodeFlowGraph(ctx,
 		loadTypeCollection,
 		defaultCollectionID,
 		defaultPartitionID,
-		streaming.replica,
-		historicalReplica,
-		streaming.tSafeReplica,
+		streamingReplica,
+		tSafe,
 		defaultVChannel,
 		fac)
 

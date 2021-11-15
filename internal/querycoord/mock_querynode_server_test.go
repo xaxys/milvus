@@ -25,10 +25,17 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
+
+const (
+	defaultTotalmemPerNode = 6000000
+)
+
+var GlobalSegmentInfos = make(map[UniqueID]*querypb.SegmentInfo)
 
 type queryNodeServerMock struct {
 	querypb.QueryNodeServer
@@ -45,10 +52,17 @@ type queryNodeServerMock struct {
 	addQueryChannels    func() (*commonpb.Status, error)
 	removeQueryChannels func() (*commonpb.Status, error)
 	watchDmChannels     func() (*commonpb.Status, error)
+	watchDeltaChannels  func() (*commonpb.Status, error)
 	loadSegment         func() (*commonpb.Status, error)
 	releaseCollection   func() (*commonpb.Status, error)
 	releasePartition    func() (*commonpb.Status, error)
 	releaseSegments     func() (*commonpb.Status, error)
+	getSegmentInfos     func() (*querypb.GetSegmentInfoResponse, error)
+	getMetrics          func() (*milvuspb.GetMetricsResponse, error)
+
+	segmentInfos map[UniqueID]*querypb.SegmentInfo
+
+	totalMem uint64
 }
 
 func newQueryNodeServerMock(ctx context.Context) *queryNodeServerMock {
@@ -61,10 +75,17 @@ func newQueryNodeServerMock(ctx context.Context) *queryNodeServerMock {
 		addQueryChannels:    returnSuccessResult,
 		removeQueryChannels: returnSuccessResult,
 		watchDmChannels:     returnSuccessResult,
+		watchDeltaChannels:  returnSuccessResult,
 		loadSegment:         returnSuccessResult,
 		releaseCollection:   returnSuccessResult,
 		releasePartition:    returnSuccessResult,
 		releaseSegments:     returnSuccessResult,
+		getSegmentInfos:     returnSuccessGetSegmentInfoResult,
+		getMetrics:          returnSuccessGetMetricsResult,
+
+		segmentInfos: GlobalSegmentInfos,
+
+		totalMem: defaultTotalmemPerNode,
 	}
 }
 
@@ -166,7 +187,28 @@ func (qs *queryNodeServerMock) WatchDmChannels(ctx context.Context, req *querypb
 	return qs.watchDmChannels()
 }
 
+func (qs *queryNodeServerMock) WatchDeltaChannels(ctx context.Context, req *querypb.WatchDeltaChannelsRequest) (*commonpb.Status, error) {
+	return qs.watchDeltaChannels()
+}
+
 func (qs *queryNodeServerMock) LoadSegments(ctx context.Context, req *querypb.LoadSegmentsRequest) (*commonpb.Status, error) {
+	sizePerRecord, err := typeutil.EstimateSizePerRecord(req.Schema)
+	if err != nil {
+		return returnFailedResult()
+	}
+	for _, info := range req.Infos {
+		segmentInfo := &querypb.SegmentInfo{
+			SegmentID:    info.SegmentID,
+			PartitionID:  info.PartitionID,
+			CollectionID: info.CollectionID,
+			NodeID:       qs.queryNodeID,
+			SegmentState: querypb.SegmentState_sealed,
+			MemSize:      info.NumOfRows * int64(sizePerRecord),
+			NumRows:      info.NumOfRows,
+		}
+		qs.segmentInfos[info.SegmentID] = segmentInfo
+	}
+
 	return qs.loadSegment()
 }
 
@@ -182,20 +224,56 @@ func (qs *queryNodeServerMock) ReleaseSegments(ctx context.Context, req *querypb
 	return qs.releaseSegments()
 }
 
-func (qs *queryNodeServerMock) GetSegmentInfo(context.Context, *querypb.GetSegmentInfoRequest) (*querypb.GetSegmentInfoResponse, error) {
-	return &querypb.GetSegmentInfoResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
-	}, nil
+func (qs *queryNodeServerMock) GetSegmentInfo(ctx context.Context, req *querypb.GetSegmentInfoRequest) (*querypb.GetSegmentInfoResponse, error) {
+	segmentInfos := make([]*querypb.SegmentInfo, 0)
+	for _, info := range qs.segmentInfos {
+		if info.CollectionID == req.CollectionID && info.NodeID == qs.queryNodeID {
+			segmentInfos = append(segmentInfos, info)
+		}
+	}
+
+	res, err := qs.getSegmentInfos()
+	if err == nil {
+		res.Infos = segmentInfos
+	}
+	return res, err
 }
 
 func (qs *queryNodeServerMock) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
-	return &milvuspb.GetMetricsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
+	response, err := qs.getMetrics()
+	if err != nil {
+		return nil, err
+	}
+	if response.Status.ErrorCode != commonpb.ErrorCode_Success {
+		return nil, errors.New("query node do task failed")
+	}
+
+	totalMemUsage := uint64(0)
+	for _, info := range qs.segmentInfos {
+		if info.NodeID == qs.queryNodeID {
+			totalMemUsage += uint64(info.MemSize)
+		}
+	}
+	nodeInfos := metricsinfo.QueryNodeInfos{
+		BaseComponentInfos: metricsinfo.BaseComponentInfos{
+			Name: metricsinfo.ConstructComponentName(typeutil.QueryNodeRole, qs.queryNodeID),
+			HardwareInfos: metricsinfo.HardwareMetrics{
+				IP:          qs.queryNodeIP,
+				Memory:      qs.totalMem,
+				MemoryUsage: totalMemUsage,
+			},
+			Type: typeutil.QueryNodeRole,
+			ID:   qs.queryNodeID,
 		},
-	}, nil
+	}
+	resp, err := metricsinfo.MarshalComponentInfos(nodeInfos)
+	if err != nil {
+		response.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+		response.Status.Reason = err.Error()
+		return response, err
+	}
+	response.Response = resp
+	return response, nil
 }
 
 func startQueryNodeServer(ctx context.Context) (*queryNodeServerMock, error) {
@@ -217,5 +295,37 @@ func returnSuccessResult() (*commonpb.Status, error) {
 func returnFailedResult() (*commonpb.Status, error) {
 	return &commonpb.Status{
 		ErrorCode: commonpb.ErrorCode_UnexpectedError,
+	}, errors.New("query node do task failed")
+}
+
+func returnSuccessGetSegmentInfoResult() (*querypb.GetSegmentInfoResponse, error) {
+	return &querypb.GetSegmentInfoResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		},
+	}, nil
+}
+
+func returnFailedGetSegmentInfoResult() (*querypb.GetSegmentInfoResponse, error) {
+	return &querypb.GetSegmentInfoResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+		},
+	}, errors.New("query node do task failed")
+}
+
+func returnSuccessGetMetricsResult() (*milvuspb.GetMetricsResponse, error) {
+	return &milvuspb.GetMetricsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		},
+	}, nil
+}
+
+func returnFailedGetMetricsResult() (*milvuspb.GetMetricsResponse, error) {
+	return &milvuspb.GetMetricsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+		},
 	}, errors.New("query node do task failed")
 }

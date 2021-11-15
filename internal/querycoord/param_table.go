@@ -62,11 +62,20 @@ type ParamTable struct {
 	CreatedTime time.Time
 	UpdatedTime time.Time
 
+	DmlChannelPrefix   string
+	DeltaChannelPrefix string
+
 	// --- Pulsar ---
 	PulsarAddress string
 
 	//---- Handoff ---
 	AutoHandoff bool
+
+	//---- Balance ---
+	AutoBalance                         bool
+	OverloadedMemoryThresholdPercentage float64
+	BalanceIntervalSeconds              int64
+	MemoryUsageMaxDifferencePercentage  float64
 }
 
 // Params are variables of the ParamTable type
@@ -83,17 +92,7 @@ func (p *ParamTable) InitOnce() {
 //Init is used to initialize params
 func (p *ParamTable) Init() {
 	p.BaseTable.Init()
-	err := p.LoadYaml("advanced/query_node.yaml")
-	if err != nil {
-		panic(err)
-	}
 
-	err = p.LoadYaml("milvus.yaml")
-	if err != nil {
-		panic(err)
-	}
-
-	p.initQueryCoordAddress()
 	p.initRoleName()
 
 	// --- Channels ---
@@ -120,14 +119,15 @@ func (p *ParamTable) Init() {
 
 	//---- Handoff ---
 	p.initAutoHandoff()
-}
 
-func (p *ParamTable) initQueryCoordAddress() {
-	url, err := p.Load("_QueryCoordAddress")
-	if err != nil {
-		panic(err)
-	}
-	p.Address = url
+	p.initDmlChannelName()
+	p.initDeltaChannelName()
+
+	//---- Balance ---
+	p.initAutoBalance()
+	p.initOverloadedMemoryThresholdPercentage()
+	p.initBalanceIntervalSeconds()
+	p.initMemoryUsageMaxDifferencePercentage()
 }
 
 func (p *ParamTable) initClusterMsgChannelPrefix() {
@@ -272,4 +272,58 @@ func (p *ParamTable) initAutoHandoff() {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func (p *ParamTable) initAutoBalance() {
+	balanceStr := p.LoadWithDefault("queryCoord.autoBalance", "false")
+	autoBalance, err := strconv.ParseBool(balanceStr)
+	if err != nil {
+		panic(err)
+	}
+	p.AutoBalance = autoBalance
+}
+
+func (p *ParamTable) initOverloadedMemoryThresholdPercentage() {
+	overloadedMemoryThresholdPercentage := p.LoadWithDefault("queryCoord.overloadedMemoryThresholdPercentage", "90")
+	thresholdPercentage, err := strconv.ParseInt(overloadedMemoryThresholdPercentage, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	p.OverloadedMemoryThresholdPercentage = float64(thresholdPercentage) / 100
+}
+
+func (p *ParamTable) initBalanceIntervalSeconds() {
+	balanceInterval := p.LoadWithDefault("queryCoord.balanceIntervalSeconds", "60")
+	interval, err := strconv.ParseInt(balanceInterval, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	p.BalanceIntervalSeconds = interval
+}
+
+func (p *ParamTable) initMemoryUsageMaxDifferencePercentage() {
+	maxDiff := p.LoadWithDefault("queryCoord.memoryUsageMaxDifferencePercentage", "30")
+	diffPercentage, err := strconv.ParseInt(maxDiff, 10, 64)
+	if err != nil {
+		panic(err)
+	}
+	p.MemoryUsageMaxDifferencePercentage = float64(diffPercentage) / 100
+}
+
+func (p *ParamTable) initDmlChannelName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.rootCoordDml")
+	if err != nil {
+		config = "rootcoord-dml"
+	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.DmlChannelPrefix = strings.Join(s, "-")
+}
+
+func (p *ParamTable) initDeltaChannelName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.rootCoordDelta")
+	if err != nil {
+		config = "rootcoord-delta"
+	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.DeltaChannelPrefix = strings.Join(s, "-")
 }

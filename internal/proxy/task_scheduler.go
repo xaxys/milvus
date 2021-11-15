@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package proxy
 
@@ -27,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/util/mqclient"
 	"github.com/milvus-io/milvus/internal/util/trace"
 	"github.com/opentracing/opentracing-go"
 	oplog "github.com/opentracing/opentracing-go/log"
@@ -226,9 +232,8 @@ type dmTaskQueue struct {
 }
 
 func (queue *dmTaskQueue) Enqueue(t task) error {
-	queue.lock.Lock()
-	defer queue.lock.Unlock()
-
+	queue.statsLock.Lock()
+	defer queue.statsLock.Unlock()
 	err := queue.baseTaskQueue.Enqueue(t)
 	if err != nil {
 		return err
@@ -243,6 +248,9 @@ func (queue *dmTaskQueue) PopActiveTask(tID UniqueID) task {
 	defer queue.atLock.Unlock()
 	t, ok := queue.activeTasks[tID]
 	if ok {
+		queue.statsLock.Lock()
+		defer queue.statsLock.Unlock()
+
 		delete(queue.activeTasks, tID)
 		log.Debug("Proxy dmTaskQueue popPChanStats", zap.Any("tID", t.ID()))
 		queue.popPChanStats(t)
@@ -260,7 +268,6 @@ func (queue *dmTaskQueue) addPChanStats(t task) error {
 				zap.Any("stats", stats), zap.Error(err))
 			return err
 		}
-		queue.statsLock.Lock()
 		for cName, stat := range stats {
 			info, ok := queue.pChanStatisticsInfos[cName]
 			if !ok {
@@ -281,7 +288,6 @@ func (queue *dmTaskQueue) addPChanStats(t task) error {
 				queue.pChanStatisticsInfos[cName].tsSet[info.minTs] = struct{}{}
 			}
 		}
-		queue.statsLock.Unlock()
 	} else {
 		return fmt.Errorf("proxy addUnissuedTask reflect to dmlTask failed, tID:%v", t.ID())
 	}
@@ -294,7 +300,6 @@ func (queue *dmTaskQueue) popPChanStats(t task) error {
 		if err != nil {
 			return err
 		}
-		queue.statsLock.Lock()
 		for _, cName := range channels {
 			info, ok := queue.pChanStatisticsInfos[cName]
 			if ok {
@@ -312,7 +317,6 @@ func (queue *dmTaskQueue) popPChanStats(t task) error {
 				}
 			}
 		}
-		queue.statsLock.Unlock()
 	} else {
 		return fmt.Errorf("Proxy dmTaskQueue popPChanStats reflect to dmlTask failed, tID:%v", t.ID())
 	}
@@ -640,7 +644,8 @@ func (sched *taskScheduler) collectResultLoop() {
 	defer sched.wg.Done()
 
 	queryResultMsgStream, _ := sched.msFactory.NewQueryMsgStream(sched.ctx)
-	queryResultMsgStream.AsConsumer(Params.SearchResultChannelNames, Params.ProxySubName)
+	// proxy didn't need to walk through all the search results in channel, because it no longer has client connections.
+	queryResultMsgStream.AsConsumerWithPosition(Params.SearchResultChannelNames, Params.ProxySubName, mqclient.SubscriptionPositionLatest)
 	log.Debug("Proxy", zap.Strings("SearchResultChannelNames", Params.SearchResultChannelNames),
 		zap.Any("ProxySubName", Params.ProxySubName))
 
@@ -648,7 +653,7 @@ func (sched *taskScheduler) collectResultLoop() {
 	defer queryResultMsgStream.Close()
 
 	searchResultBufs := make(map[UniqueID]*searchResultBuf)
-	searchResultBufFlags := make(map[UniqueID]bool) // if value is true, we can ignore queryResult
+	searchResultBufFlags := make(map[UniqueID]bool) // if value is true, we can ignore searchResult
 	queryResultBufs := make(map[UniqueID]*queryResultBuf)
 	queryResultBufFlags := make(map[UniqueID]bool) // if value is true, we can ignore queryResult
 

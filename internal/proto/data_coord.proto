@@ -33,6 +33,12 @@ service DataCoord {
 
   // https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
   rpc GetMetrics(milvus.GetMetricsRequest) returns (milvus.GetMetricsResponse) {}
+  rpc CompleteCompaction(CompactionResult) returns (common.Status) {}
+  rpc ManualCompaction(milvus.ManualCompactionRequest) returns (milvus.ManualCompactionResponse) {}
+  rpc GetCompactionState(milvus.GetCompactionStateRequest) returns (milvus.GetCompactionStateResponse) {}
+  rpc GetCompactionStateWithPlans(milvus.GetCompactionPlansRequest) returns (milvus.GetCompactionPlansResponse) {}
+
+  rpc WatchChannels(WatchChannelsRequest) returns (WatchChannelsResponse) {}
 }
 
 service DataNode {
@@ -44,6 +50,7 @@ service DataNode {
 
   // https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
   rpc GetMetrics(milvus.GetMetricsRequest) returns (milvus.GetMetricsResponse) {}
+  rpc Compaction(CompactionPlan) returns (common.Status) {}
 }
 
 message FlushRequest {
@@ -201,6 +208,9 @@ message SegmentInfo {
   repeated FieldBinlog binlogs = 11;
   repeated FieldBinlog statslogs = 12;
   repeated DeltaLogInfo deltalogs = 13;
+  
+  bool createdByCompaction = 14;
+  repeated int64 compactionFrom = 15;
 }
 
 message SegmentStartPosition {
@@ -218,6 +228,7 @@ message SaveBinlogPathsRequest {
   bool flushed = 7;
   repeated FieldBinlog field2StatslogPaths = 8;
   repeated DeltaLogInfo deltalogs = 9;
+  bool dropped = 10;
 }
 
 message CheckPoint {
@@ -317,17 +328,14 @@ message CompactionSegmentBinlogs {
   repeated DeltaLogInfo deltalogs = 4;
 }
 
-message CompactionMergeGroup {
-  repeated CompactionSegmentBinlogs segmentBinlogs = 1;
-}
-
 message CompactionPlan {
   int64 planID = 1;
-  repeated CompactionMergeGroup mergeGroup = 2;
+  repeated CompactionSegmentBinlogs segmentBinlogs = 2;
   uint64 start_time = 3;
   int32 timeout_in_seconds = 4;
   CompactionType type = 5;
   uint64 timetravel = 6;
+  string channel = 7;
 }
 
 message CompactionResult {
@@ -343,4 +351,13 @@ message CompactionResult {
 message SegmentFieldBinlogMeta {
   int64  fieldID = 1;
   string binlog_path = 2;
+}
+
+message WatchChannelsRequest {
+  int64 collectionID = 1;
+  repeated string channelNames = 2;
+}
+
+message WatchChannelsResponse {
+  common.Status status = 1;
 }
