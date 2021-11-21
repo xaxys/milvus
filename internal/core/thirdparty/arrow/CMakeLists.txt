@@ -30,7 +30,7 @@ macro( build_arrow )
         "-DARROW_PARQUET=ON"
         "-DARROW_COMPUTE=ON"
         "-DARROW_BUILD_STATIC=ON"
-        "-DARROW_BUILD_SHARED=OFF"
+        "-DARROW_BUILD_SHARED=ON"
         "-DARROW_BUILD_TESTS=OFF"
         "-DARROW_TEST_MEMCHECK=OFF"
         "-DARROW_BUILD_BENCHMARKS=OFF"
@@ -57,24 +57,15 @@ macro( build_arrow )
         file( MAKE_DIRECTORY "${INSTALL_DIR}/include" )
     endif()
 
-    add_library( arrow_dependencies STATIC IMPORTED )
-    set_target_properties( arrow_dependencies
-            PROPERTIES
-                IMPORTED_GLOBAL                 TRUE
-                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow_bundled_dependencies.a
-                INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
-    add_dependencies( arrow_dependencies arrow_ep )
-
-    add_library( arrow STATIC IMPORTED )
+    add_library( arrow SHARED IMPORTED )
     set_target_properties( arrow
             PROPERTIES
                 IMPORTED_GLOBAL                 TRUE
-                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.a
+                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.so
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
-    add_dependencies( arrow arrow_ep arrow_dependencies )
-    target_link_libraries( arrow INTERFACE arrow_dependencies )
+    add_dependencies( arrow arrow_ep )
 
-    get_target_property( ARROW_STATIC_LIB arrow IMPORTED_LOCATION )
+    get_target_property( ARROW_SHARED_LIB arrow IMPORTED_LOCATION )
     get_target_property( ARROW_INCLUDE_DIR arrow INTERFACE_INCLUDE_DIRECTORIES )
     message( STATUS ${ARROW_INCLUDE_DIR} )
     set_directory_properties( PROPERTY INCLUDE_DIRECTORIES ${ARROW_INCLUDE_DIR} )
@@ -86,5 +77,5 @@ find_package( Arrow PATHS ${ARROW_OUTPUT} )
 if ( NOT DEFINED ARROW_FOUND )
     build_arrow()
 else ()
-    add_library( arrow ALIAS arrow_static )
+    add_library( arrow ALIAS arrow_shared )
 endif ()

@@ -36,7 +36,7 @@ macro( build_arrow )
         "-DARROW_PARQUET=ON"
         "-DARROW_COMPUTE=ON"
         "-DARROW_BUILD_STATIC=ON"
-        "-DARROW_BUILD_SHARED=OFF"
+        "-DARROW_BUILD_SHARED=ON"
         "-DARROW_BUILD_TESTS=OFF"
         "-DARROW_TEST_MEMCHECK=OFF"
         "-DARROW_BUILD_BENCHMARKS=OFF"
