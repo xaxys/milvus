@@ -43,6 +43,7 @@ type dmlChannels struct {
 	capacity   int64
 	idx        *atomic.Int64
 	pool       sync.Map
+	inited     map[string]bool
 }
 
 func newDmlChannels(ctx context.Context, factory msgstream.Factory, chanNamePrefix string, chanNum int64) *dmlChannels {
@@ -53,6 +54,7 @@ func newDmlChannels(ctx context.Context, factory msgstream.Factory, chanNamePref
 		capacity:   chanNum,
 		idx:        atomic.NewInt64(0),
 		pool:       sync.Map{},
+		inited:     make(map[string]bool),
 	}
 
 	for i := int64(0); i < chanNum; i++ {
@@ -62,7 +64,6 @@ func newDmlChannels(ctx context.Context, factory msgstream.Factory, chanNamePref
 			log.Error("Failed to add msgstream", zap.String("name", name), zap.Error(err))
 			panic("Failed to add msgstream")
 		}
-		ms.AsProducer([]string{name})
 		d.pool.Store(name, &dmlMsgStream{
 			ms:     ms,
 			mutex:  sync.RWMutex{},
@@ -160,6 +161,10 @@ func (d *dmlChannels) addChannels(names ...string) {
 			panic("invalid channel name: " + name)
 		}
 		dms := v.(*dmlMsgStream)
+		if dms.refcnt == 0 && !d.inited[name] {
+			dms.ms.AsProducer([]string{name})
+			d.inited[name] = true
+		}
 
 		dms.mutex.Lock()
 		dms.refcnt++
