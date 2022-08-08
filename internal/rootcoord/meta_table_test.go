@@ -236,7 +236,8 @@ func TestMetaTable(t *testing.T) {
 		assert.Equal(t, partIDDefault, collMeta.Partitions[0].PartitionID)
 		assert.Equal(t, 1, len(collMeta.Partitions))
 
-		assert.False(t, mt.HasCollection(collInfo.CollectionID, 0))
+		_, err = mt.GetCollectionIDByName(collName)
+		assert.Error(t, err)
 		err = mt.EnableCollection(collInfo.CollectionID)
 		assert.Nil(t, err)
 		assert.True(t, mt.HasCollection(collInfo.CollectionID, 0))
@@ -554,8 +555,7 @@ func TestMetaTable(t *testing.T) {
 		mt.collID2Meta = make(map[int64]model.Collection)
 		_, err = mt.GetCollectionByName(collInfo.Name, 0)
 		assert.NotNil(t, err)
-		assert.EqualError(t, err, fmt.Sprintf("can't find collection %s with id %d", collInfo.Name, collInfo.CollectionID))
-
+		assert.EqualError(t, err, fmt.Sprintf("can't find collection: %s", collInfo.Name))
 	})
 
 	wg.Add(1)

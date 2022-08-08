@@ -119,12 +119,10 @@ func (mt *MetaTable) AddCollection(coll *model.Collection) error {
 	curCollID, ok := mt.collName2ID[coll.Name]
 	if ok {
 		curColl := mt.collID2Meta[curCollID]
-		if curColl.Available {
-			if curColl.Equal(coll) {
-				return nil
-			}
-			return fmt.Errorf("collection %s with different params exist", coll.Name)
+		if curColl.Equal(coll) {
+			return nil
 		}
+		return fmt.Errorf("collection %s with different params exist", coll.Name)
 	}
 
 	if err := mt.catalog.CreateCollection(mt.ctx, coll, ts); err != nil {
@@ -132,7 +130,7 @@ func (mt *MetaTable) AddCollection(coll *model.Collection) error {
 	}
 
 	mt.collID2Meta[coll.CollectionID] = *coll
-	mt.collName2ID[coll.Name] = coll.CollectionID
+	//mt.collName2ID[coll.Name] = coll.CollectionID
 	return nil
 }
 
@@ -141,7 +139,7 @@ func (mt *MetaTable) DeleteCollection(collID typeutil.UniqueID, ts typeutil.Time
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
-	col, ok := mt.collID2Meta[collID]
+	_, ok := mt.collID2Meta[collID]
 	if !ok {
 		return nil
 	}
@@ -169,7 +167,7 @@ func (mt *MetaTable) DeleteCollection(collID typeutil.UniqueID, ts typeutil.Time
 	}
 
 	delete(mt.collID2Meta, collID)
-	delete(mt.collName2ID, col.Name)
+	//delete(mt.collName2ID, col.Name)
 
 	return nil
 }
@@ -182,8 +180,7 @@ func (mt *MetaTable) EnableCollection(collID typeutil.UniqueID) error {
 	if !ok {
 		return fmt.Errorf("can't find collection. id = %d", collID)
 	}
-	coll.Available = true
-	mt.collID2Meta[collID] = coll
+	mt.collName2ID[coll.Name] = collID
 	return nil
 }
 
@@ -195,8 +192,7 @@ func (mt *MetaTable) DisableCollection(collID typeutil.UniqueID) error {
 	if !ok {
 		return fmt.Errorf("can't find collection. id = %d", collID)
 	}
-	coll.Available = false
-	mt.collID2Meta[collID] = coll
+	delete(mt.collName2ID, coll.Name)
 	return nil
 }
 
@@ -241,10 +237,8 @@ func (mt *MetaTable) HasCollection(collID typeutil.UniqueID, ts typeutil.Timesta
 	mt.ddLock.RLock()
 	defer mt.ddLock.RUnlock()
 	if ts == 0 {
-		coll, ok := mt.collID2Meta[collID]
-		if ok {
-			return coll.Available
-		}
+		_, ok := mt.collID2Meta[collID]
+		return ok
 	}
 
 	return mt.catalog.CollectionExists(mt.ctx, collID, ts)
@@ -258,10 +252,6 @@ func (mt *MetaTable) GetCollectionIDByName(cName string) (typeutil.UniqueID, err
 	var cID UniqueID
 	var ok bool
 	if cID, ok = mt.collName2ID[cName]; !ok {
-		return 0, fmt.Errorf("collection ID not found for collection name %s", cName)
-	}
-	coll := mt.collID2Meta[cID]
-	if !coll.Available {
 		return 0, fmt.Errorf("collection ID not found for collection name %s", cName)
 	}
 	return cID, nil
@@ -286,7 +276,7 @@ func (mt *MetaTable) GetCollectionByID(collectionID typeutil.UniqueID, ts typeut
 
 	if ts == 0 {
 		col, ok := mt.collID2Meta[collectionID]
-		if !ok || !col.Available {
+		if !ok {
 			return nil, fmt.Errorf("can't find collection id : %d", collectionID)
 		}
 		clone := col.Clone()
@@ -312,7 +302,7 @@ func (mt *MetaTable) GetCollectionByName(collectionName string, ts typeutil.Time
 			}
 		}
 		col, ok := mt.collID2Meta[vid]
-		if !ok || !col.Available {
+		if !ok {
 			return nil, fmt.Errorf("can't find collection %s with id %d", collectionName, vid)
 		}
 		clone := col.Clone()
@@ -334,9 +324,7 @@ func (mt *MetaTable) ListCollections(ts typeutil.Timestamp) (map[string]*model.C
 	if ts == 0 {
 		for collName, collID := range mt.collName2ID {
 			col := mt.collID2Meta[collID]
-			if col.Available {
-				cols[collName] = col.Clone()
-			}
+			cols[collName] = col.Clone()
 		}
 		return cols, nil
 	}
@@ -386,7 +374,7 @@ func (mt *MetaTable) AddPartition(collID typeutil.UniqueID, partitionName string
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 	coll, ok := mt.collID2Meta[collID]
-	if !ok || !coll.Available {
+	if !ok {
 		return fmt.Errorf("can't find collection. id = %d", collID)
 	}
 

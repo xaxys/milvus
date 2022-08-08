@@ -557,7 +557,6 @@ func createCollectionInMeta(dbName, collName string, core *Core, shardsNum int32
 				Available:                 true,
 			},
 		},
-		Available:  true,
 		CreateTime: ts,
 	}
 
@@ -568,6 +567,10 @@ func createCollectionInMeta(dbName, collName string, core *Core, shardsNum int32
 	err = core.MetaTable.AddCollection(&collInfo)
 	if err != nil {
 		return fmt.Errorf("meta table add collection failed,error = %w", err)
+	}
+	err = core.MetaTable.EnableCollection(collID)
+	if err != nil {
+		return fmt.Errorf("meta table enable collection failed,error = %w", err)
 	}
 	return nil
 }
@@ -1531,7 +1534,6 @@ func TestRootCoord_Base(t *testing.T) {
 					Available:     true,
 				},
 			},
-			Available: true,
 		}
 		req := &milvuspb.ImportRequest{
 			CollectionName: "new" + collName,

@@ -22,7 +22,6 @@ type Collection struct {
 	CreateTime           uint64
 	ConsistencyLevel     commonpb.ConsistencyLevel
 	Aliases              []string
-	Available            bool
 	Extra                map[string]string // extra kvs
 }
 
@@ -42,7 +41,6 @@ func (c Collection) Clone() *Collection {
 		CreateTime:           c.CreateTime,
 		StartPositions:       c.StartPositions,
 		Aliases:              c.Aliases,
-		Available:            c.Available,
 		Extra:                c.Extra,
 	}
 }
@@ -139,7 +137,6 @@ func UnmarshalCollectionModel(coll *pb.CollectionInfo) *Collection {
 		ConsistencyLevel:     coll.ConsistencyLevel,
 		CreateTime:           coll.CreateTime,
 		StartPositions:       coll.StartPositions,
-		Available:            true,
 	}
 }
 
