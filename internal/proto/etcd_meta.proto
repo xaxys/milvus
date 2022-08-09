@@ -28,6 +28,7 @@ message CollectionInfo {
   repeated int64 partitionIDs = 4;
   // deprecate
   repeated string partitionNames = 5;
+  // deprecate
   repeated FieldIndexInfo field_indexes = 6;
   repeated string virtual_channel_names = 7;
   repeated string physical_channel_names = 8;
@@ -43,6 +44,11 @@ message PartitionInfo {
   int64 partitionID = 1;
   string partitionName = 2;
   uint64 partition_created_timestamp = 3;
+}
+
+message AliasInfo {
+  string alias_name = 1;
+  int64 collection_id = 2;
 }
 
 message SegmentIndexInfo {
@@ -61,6 +67,7 @@ message CollectionMeta {
   int64 ID=1;
   schema.CollectionSchema schema=2;
   uint64 create_time=3;
+  // deprecate
   repeated int64 segmentIDs=4;
   repeated string partition_tags=5;
   repeated int64 partitionIDs=6;

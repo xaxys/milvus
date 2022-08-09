@@ -1,8 +1,10 @@
 package model
 
 import (
+	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
 )
 
 type Field struct {
@@ -14,6 +16,31 @@ type Field struct {
 	TypeParams   []*commonpb.KeyValuePair
 	IndexParams  []*commonpb.KeyValuePair
 	AutoID       bool
+}
+
+func (f *Field) Equal(other *Field) bool {
+	if f == other {
+		return true
+	}
+	if other == nil {
+		return false
+	}
+	if !funcutil.SliceSetEqualCmp(f.TypeParams, other.TypeParams, func(a, b *commonpb.KeyValuePair) bool {
+		return proto.Equal(a, b)
+	}) {
+		return false
+	}
+	if !funcutil.SliceSetEqualCmp(f.IndexParams, other.IndexParams, func(a, b *commonpb.KeyValuePair) bool {
+		return proto.Equal(a, b)
+	}) {
+		return false
+	}
+	return f.FieldID == other.FieldID &&
+		f.Name == other.Name &&
+		f.IsPrimaryKey == other.IsPrimaryKey &&
+		f.Description == other.Description &&
+		f.DataType == other.DataType &&
+		f.AutoID == other.AutoID
 }
 
 func MarshalFieldModel(field *Field) *schemapb.FieldSchema {

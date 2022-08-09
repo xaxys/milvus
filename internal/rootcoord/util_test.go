@@ -19,8 +19,6 @@ package rootcoord
 import (
 	"testing"
 
-	"github.com/milvus-io/milvus/internal/common"
-
 	"github.com/milvus-io/milvus/internal/metastore/model"
 
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
@@ -75,25 +73,25 @@ func Test_GetFieldSchemaByID(t *testing.T) {
 	assert.NotNil(t, err)
 }
 
-func Test_GetFieldSchemaByIndexID(t *testing.T) {
-	coll := &model.Collection{
-		Fields: []*model.Field{
-			{
-				FieldID: 1,
-			},
-		},
-		FieldIDToIndexID: []common.Int64Tuple{
-			{
-				Key:   1,
-				Value: 2,
-			},
-		},
-	}
-	_, err := GetFieldSchemaByIndexID(coll, 2)
-	assert.Nil(t, err)
-	_, err = GetFieldSchemaByIndexID(coll, 3)
-	assert.NotNil(t, err)
-}
+//func Test_GetFieldSchemaByIndexID(t *testing.T) {
+//	coll := &model.Collection{
+//		Fields: []*model.Field{
+//			{
+//				FieldID: 1,
+//			},
+//		},
+//		FieldIDToIndexID: []common.Int64Tuple{
+//			{
+//				Key:   1,
+//				Value: 2,
+//			},
+//		},
+//	}
+//	_, err := GetFieldSchemaByIndexID(coll, 2)
+//	assert.Nil(t, err)
+//	_, err = GetFieldSchemaByIndexID(coll, 3)
+//	assert.NotNil(t, err)
+//}
 
 func Test_EncodeMsgPositions(t *testing.T) {
 	mp := &msgstream.MsgPosition{

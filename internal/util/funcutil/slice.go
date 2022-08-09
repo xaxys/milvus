@@ -75,3 +75,49 @@ func SortedSliceEqual(s1, s2 interface{}) bool {
 	}
 	return true
 }
+
+// SliceContainCmp returns true if slice s contains item with compare function
+func SliceContainCmp[T comparable](s []T, item T, cmp func(T, T) bool) bool {
+	for _, v := range s {
+		if cmp(v, item) {
+			return true
+		}
+	}
+	return false
+}
+
+// SliceSetEqualCmp is used to compare two Slice with compare function
+func SliceSetEqualCmp[T comparable](s1, s2 []T, cmp func(T, T) bool) bool {
+	if len(s1) != len(s2) {
+		return false
+	}
+	for _, v := range s1 {
+		if !SliceContainCmp(s2, v, cmp) {
+			return false
+		}
+	}
+	return true
+}
+
+// SortedSliceEqualCmp is used to compare two Sorted Slice with compare function
+func SortedSliceEqualCmp[T comparable](s1, s2 []T, cmp func(T, T) bool) bool {
+	if len(s1) != len(s2) {
+		return false
+	}
+	for i, v := range s1 {
+		if !cmp(v, s2[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// SliceFilter is used to filter a slice with a function
+func SliceFilter[T any](s []T, fn func(T) bool) (ret []T) {
+	for _, v := range s {
+		if fn(v) {
+			ret = append(ret, v)
+		}
+	}
+	return ret
+}

@@ -26,14 +26,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/metastore/model"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
-
 	"github.com/golang/protobuf/proto"
-	"github.com/stretchr/testify/assert"
-
 	rcc "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
+	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -48,6 +43,8 @@ import (
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
+	"github.com/stretchr/testify/assert"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 type proxyMock struct {
@@ -595,170 +592,170 @@ func TestGrpcService(t *testing.T) {
 		assert.Equal(t, 1, len(rsp.SegmentIDs))
 	})
 
-	t.Run("create index", func(t *testing.T) {
-		req := &milvuspb.CreateIndexRequest{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_CreateIndex,
-				MsgID:     180,
-				Timestamp: 180,
-				SourceID:  180,
-			},
-			DbName:         dbName,
-			CollectionName: collName,
-			FieldName:      fieldName,
-			ExtraParams: []*commonpb.KeyValuePair{
-				{
-					Key:   "ik1",
-					Value: "iv1",
-				},
-			},
-		}
-		collMeta, err := core.MetaTable.GetCollectionByName(collName, 0)
-		assert.Nil(t, err)
-		assert.Zero(t, len(collMeta.FieldIDToIndexID))
-		rsp, err := cli.CreateIndex(ctx, req)
-		assert.Nil(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
-		collMeta, err = core.MetaTable.GetCollectionByName(collName, 0)
-		assert.Nil(t, err)
-		assert.Equal(t, 1, len(collMeta.FieldIDToIndexID))
-
-		binlogLock.Lock()
-		defer binlogLock.Unlock()
-		assert.Equal(t, 3, len(binlogPathArray))
-		assert.ElementsMatch(t, binlogPathArray, []string{"file1", "file2", "file3"})
-
-		req.FieldName = "no field"
-		rsp, err = cli.CreateIndex(ctx, req)
-		assert.Nil(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
-	})
-
-	t.Run("describe segment", func(t *testing.T) {
-		coll, err := core.MetaTable.GetCollectionByName(collName, 0)
-		assert.Nil(t, err)
-
-		segLock.Lock()
-		segs = []typeutil.UniqueID{segID}
-		segLock.Unlock()
-
-		req := &milvuspb.DescribeSegmentRequest{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_DescribeSegment,
-				MsgID:     190,
-				Timestamp: 190,
-				SourceID:  190,
-			},
-			CollectionID: coll.CollectionID,
-			SegmentID:    segID,
-		}
-		rsp, err := cli.DescribeSegment(ctx, req)
-		assert.Nil(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
-		t.Logf("index id = %d", rsp.IndexID)
-	})
-
-	t.Run("describe index", func(t *testing.T) {
-		req := &milvuspb.DescribeIndexRequest{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_DescribeIndex,
-				MsgID:     200,
-				Timestamp: 200,
-				SourceID:  200,
-			},
-			DbName:         dbName,
-			CollectionName: collName,
-			FieldName:      fieldName,
-			IndexName:      "",
-		}
-		rsp, err := cli.DescribeIndex(ctx, req)
-		assert.Nil(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
-		assert.Equal(t, 1, len(rsp.IndexDescriptions))
-		assert.Equal(t, rootcoord.Params.CommonCfg.DefaultIndexName, rsp.IndexDescriptions[0].IndexName)
-	})
-
-	t.Run("flush segment", func(t *testing.T) {
-		coll, err := core.MetaTable.GetCollectionByName(collName, 0)
-		assert.Nil(t, err)
-		partID := coll.Partitions[1].PartitionID
-		_, err = core.MetaTable.GetPartitionNameByID(coll.CollectionID, partID, 0)
-		assert.Nil(t, err)
-
-		segLock.Lock()
-		segs = append(segs, segID)
-		segLock.Unlock()
-
-		flushReq := &datapb.SegmentFlushCompletedMsg{
-			Base: &commonpb.MsgBase{
-				MsgType: commonpb.MsgType_SegmentFlushDone,
-			},
-			Segment: &datapb.SegmentInfo{
-				ID:           segID,
-				CollectionID: coll.CollectionID,
-				PartitionID:  partID,
-			},
-		}
-		flushRsp, err := cli.SegmentFlushCompleted(ctx, flushReq)
-		assert.Nil(t, err)
-		assert.Equal(t, flushRsp.ErrorCode, commonpb.ErrorCode_Success)
-
-		flushRsp, err = cli.SegmentFlushCompleted(ctx, flushReq)
-		assert.Nil(t, err)
-		assert.Equal(t, flushRsp.ErrorCode, commonpb.ErrorCode_Success)
-
-		req := &milvuspb.DescribeIndexRequest{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_DescribeIndex,
-				MsgID:     210,
-				Timestamp: 210,
-				SourceID:  210,
-			},
-			DbName:         dbName,
-			CollectionName: collName,
-			FieldName:      fieldName,
-			IndexName:      "",
-		}
-		rsp, err := cli.DescribeIndex(ctx, req)
-		assert.Nil(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
-		assert.Equal(t, 1, len(rsp.IndexDescriptions))
-		assert.Equal(t, rootcoord.Params.CommonCfg.DefaultIndexName, rsp.IndexDescriptions[0].IndexName)
-
-	})
-
-	t.Run("drop index", func(t *testing.T) {
-		req := &milvuspb.DropIndexRequest{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_DropIndex,
-				MsgID:     215,
-				Timestamp: 215,
-				SourceID:  215,
-			},
-			DbName:         dbName,
-			CollectionName: collName,
-			FieldName:      fieldName,
-			IndexName:      rootcoord.Params.CommonCfg.DefaultIndexName,
-		}
-		_, idx, err := core.MetaTable.GetIndexByName(collName, rootcoord.Params.CommonCfg.DefaultIndexName)
-		assert.Nil(t, err)
-		assert.Equal(t, len(idx), 1)
-		rsp, err := cli.DropIndex(ctx, req)
-		assert.Nil(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
-
-		for {
-			dropIDLock.Lock()
-			if len(dropID) == 1 {
-				assert.Equal(t, idx[0].IndexID, dropID[0])
-				dropIDLock.Unlock()
-				break
-			}
-			dropIDLock.Unlock()
-			time.Sleep(time.Second)
-		}
-
-	})
+	//t.Run("create index", func(t *testing.T) {
+	//	req := &milvuspb.CreateIndexRequest{
+	//		Base: &commonpb.MsgBase{
+	//			MsgType:   commonpb.MsgType_CreateIndex,
+	//			MsgID:     180,
+	//			Timestamp: 180,
+	//			SourceID:  180,
+	//		},
+	//		DbName:         dbName,
+	//		CollectionName: collName,
+	//		FieldName:      fieldName,
+	//		ExtraParams: []*commonpb.KeyValuePair{
+	//			{
+	//				Key:   "ik1",
+	//				Value: "iv1",
+	//			},
+	//		},
+	//	}
+	//	collMeta, err := core.MetaTable.GetCollectionByName(collName, 0)
+	//	assert.Nil(t, err)
+	//	assert.Zero(t, len(collMeta.FieldIDToIndexID))
+	//	rsp, err := cli.CreateIndex(ctx, req)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
+	//	collMeta, err = core.MetaTable.GetCollectionByName(collName, 0)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, 1, len(collMeta.FieldIDToIndexID))
+	//
+	//	binlogLock.Lock()
+	//	defer binlogLock.Unlock()
+	//	assert.Equal(t, 3, len(binlogPathArray))
+	//	assert.ElementsMatch(t, binlogPathArray, []string{"file1", "file2", "file3"})
+	//
+	//	req.FieldName = "no field"
+	//	rsp, err = cli.CreateIndex(ctx, req)
+	//	assert.Nil(t, err)
+	//	assert.NotEqual(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
+	//})
+	//
+	//t.Run("describe segment", func(t *testing.T) {
+	//	coll, err := core.MetaTable.GetCollectionByName(collName, 0)
+	//	assert.Nil(t, err)
+	//
+	//	segLock.Lock()
+	//	segs = []typeutil.UniqueID{segID}
+	//	segLock.Unlock()
+	//
+	//	req := &milvuspb.DescribeSegmentRequest{
+	//		Base: &commonpb.MsgBase{
+	//			MsgType:   commonpb.MsgType_DescribeSegment,
+	//			MsgID:     190,
+	//			Timestamp: 190,
+	//			SourceID:  190,
+	//		},
+	//		CollectionID: coll.CollectionID,
+	//		SegmentID:    segID,
+	//	}
+	//	rsp, err := cli.DescribeSegment(ctx, req)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
+	//	t.Logf("index id = %d", rsp.IndexID)
+	//})
+	//
+	//t.Run("describe index", func(t *testing.T) {
+	//	req := &milvuspb.DescribeIndexRequest{
+	//		Base: &commonpb.MsgBase{
+	//			MsgType:   commonpb.MsgType_DescribeIndex,
+	//			MsgID:     200,
+	//			Timestamp: 200,
+	//			SourceID:  200,
+	//		},
+	//		DbName:         dbName,
+	//		CollectionName: collName,
+	//		FieldName:      fieldName,
+	//		IndexName:      "",
+	//	}
+	//	rsp, err := cli.DescribeIndex(ctx, req)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
+	//	assert.Equal(t, 1, len(rsp.IndexDescriptions))
+	//	assert.Equal(t, rootcoord.Params.CommonCfg.DefaultIndexName, rsp.IndexDescriptions[0].IndexName)
+	//})
+	//
+	//t.Run("flush segment", func(t *testing.T) {
+	//	coll, err := core.MetaTable.GetCollectionByName(collName, 0)
+	//	assert.Nil(t, err)
+	//	partID := coll.Partitions[1].PartitionID
+	//	_, err = core.MetaTable.GetPartitionNameByID(coll.CollectionID, partID, 0)
+	//	assert.Nil(t, err)
+	//
+	//	segLock.Lock()
+	//	segs = append(segs, segID)
+	//	segLock.Unlock()
+	//
+	//	flushReq := &datapb.SegmentFlushCompletedMsg{
+	//		Base: &commonpb.MsgBase{
+	//			MsgType: commonpb.MsgType_SegmentFlushDone,
+	//		},
+	//		Segment: &datapb.SegmentInfo{
+	//			ID:           segID,
+	//			CollectionID: coll.CollectionID,
+	//			PartitionID:  partID,
+	//		},
+	//	}
+	//	flushRsp, err := cli.SegmentFlushCompleted(ctx, flushReq)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, flushRsp.ErrorCode, commonpb.ErrorCode_Success)
+	//
+	//	flushRsp, err = cli.SegmentFlushCompleted(ctx, flushReq)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, flushRsp.ErrorCode, commonpb.ErrorCode_Success)
+	//
+	//	req := &milvuspb.DescribeIndexRequest{
+	//		Base: &commonpb.MsgBase{
+	//			MsgType:   commonpb.MsgType_DescribeIndex,
+	//			MsgID:     210,
+	//			Timestamp: 210,
+	//			SourceID:  210,
+	//		},
+	//		DbName:         dbName,
+	//		CollectionName: collName,
+	//		FieldName:      fieldName,
+	//		IndexName:      "",
+	//	}
+	//	rsp, err := cli.DescribeIndex(ctx, req)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
+	//	assert.Equal(t, 1, len(rsp.IndexDescriptions))
+	//	assert.Equal(t, rootcoord.Params.CommonCfg.DefaultIndexName, rsp.IndexDescriptions[0].IndexName)
+	//
+	//})
+	//
+	//t.Run("drop index", func(t *testing.T) {
+	//	req := &milvuspb.DropIndexRequest{
+	//		Base: &commonpb.MsgBase{
+	//			MsgType:   commonpb.MsgType_DropIndex,
+	//			MsgID:     215,
+	//			Timestamp: 215,
+	//			SourceID:  215,
+	//		},
+	//		DbName:         dbName,
+	//		CollectionName: collName,
+	//		FieldName:      fieldName,
+	//		IndexName:      rootcoord.Params.CommonCfg.DefaultIndexName,
+	//	}
+	//	_, idx, err := core.MetaTable.GetIndexByName(collName, rootcoord.Params.CommonCfg.DefaultIndexName)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, len(idx), 1)
+	//	rsp, err := cli.DropIndex(ctx, req)
+	//	assert.Nil(t, err)
+	//	assert.Equal(t, commonpb.ErrorCode_Success, rsp.ErrorCode)
+	//
+	//	for {
+	//		dropIDLock.Lock()
+	//		if len(dropID) == 1 {
+	//			assert.Equal(t, idx[0].IndexID, dropID[0])
+	//			dropIDLock.Unlock()
+	//			break
+	//		}
+	//		dropIDLock.Unlock()
+	//		time.Sleep(time.Second)
+	//	}
+	//
+	//})
 
 	t.Run("drop partition", func(t *testing.T) {
 		req := &milvuspb.DropPartitionRequest{

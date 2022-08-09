@@ -382,6 +382,7 @@ type rootCoordConfig struct {
 	DmlChannelNum                   int64
 	MaxPartitionNum                 int64
 	MinSegmentSizeToEnableIndex     int64
+	MaxTaskChanSize                 int64
 	ImportTaskExpiration            float64
 	ImportTaskRetention             float64
 	ImportSegmentStateCheckInterval float64
@@ -401,6 +402,7 @@ func (p *rootCoordConfig) init(base *BaseTable) {
 	p.DmlChannelNum = p.Base.ParseInt64WithDefault("rootCoord.dmlChannelNum", 256)
 	p.MaxPartitionNum = p.Base.ParseInt64WithDefault("rootCoord.maxPartitionNum", 4096)
 	p.MinSegmentSizeToEnableIndex = p.Base.ParseInt64WithDefault("rootCoord.minSegmentSizeToEnableIndex", 1024)
+	p.MaxTaskChanSize = p.Base.ParseInt64WithDefault("rootCoord.maxTaskChanSize", 1024*10)
 	p.ImportTaskExpiration = p.Base.ParseFloatWithDefault("rootCoord.importTaskExpiration", 15*60)
 	p.ImportTaskRetention = p.Base.ParseFloatWithDefault("rootCoord.importTaskRetention", 24*60*60)
 	p.ImportSegmentStateCheckInterval = p.Base.ParseFloatWithDefault("rootCoord.importSegmentStateCheckInterval", 10)

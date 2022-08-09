@@ -1,10 +1,10 @@
 package model
 
 import (
-	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
 )
 
 type Collection struct {
@@ -15,7 +15,6 @@ type Collection struct {
 	Description          string
 	AutoID               bool
 	Fields               []*Field
-	FieldIDToIndexID     []common.Int64Tuple
 	VirtualChannelNames  []string
 	PhysicalChannelNames []string
 	ShardsNum            int32
@@ -23,6 +22,7 @@ type Collection struct {
 	CreateTime           uint64
 	ConsistencyLevel     commonpb.ConsistencyLevel
 	Aliases              []string
+	Available            bool
 	Extra                map[string]string // extra kvs
 }
 
@@ -35,7 +35,6 @@ func (c Collection) Clone() *Collection {
 		AutoID:               c.AutoID,
 		Fields:               c.Fields,
 		Partitions:           c.Partitions,
-		FieldIDToIndexID:     c.FieldIDToIndexID,
 		VirtualChannelNames:  c.VirtualChannelNames,
 		PhysicalChannelNames: c.PhysicalChannelNames,
 		ShardsNum:            c.ShardsNum,
@@ -43,8 +42,51 @@ func (c Collection) Clone() *Collection {
 		CreateTime:           c.CreateTime,
 		StartPositions:       c.StartPositions,
 		Aliases:              c.Aliases,
+		Available:            c.Available,
 		Extra:                c.Extra,
 	}
+}
+
+func (c *Collection) Equal(other *Collection) bool {
+	if c == other {
+		return true
+	}
+	if other == nil {
+		return false
+	}
+	if !funcutil.SliceSetEqualCmp(c.Fields, other.Fields, func(a, b *Field) bool {
+		return a.Equal(b)
+	}) {
+		return false
+	}
+	filterFn := func(part *Partition) bool {
+		return part.Available
+	}
+	parts := funcutil.SliceFilter(c.Partitions, filterFn)
+	otherParts := funcutil.SliceFilter(other.Partitions, filterFn)
+	if !funcutil.SliceSetEqualCmp(parts, otherParts, func(a, b *Partition) bool {
+		return a.Equal(b)
+	}) {
+		return false
+	}
+	//if !funcutil.SliceSetEqual(c.VirtualChannelNames, other.VirtualChannelNames) {
+	//	return false
+	//}
+	//if !funcutil.SliceSetEqual(c.PhysicalChannelNames, other.PhysicalChannelNames) {
+	//	return false
+	//}
+	//if !funcutil.SliceSetEqual(c.Aliases, other.Aliases) {
+	//	return false
+	//}
+	return c.TenantID == other.TenantID &&
+		//c.CollectionID == other.CollectionID &&
+		c.Name == other.Name &&
+		c.Description == other.Description &&
+		c.AutoID == other.AutoID &&
+		c.ShardsNum == other.ShardsNum &&
+		c.ConsistencyLevel == other.ConsistencyLevel
+	//c.CreateTime == other.CreateTime &&
+	//c.StartPositions == other.StartPositions &&
 }
 
 func UnmarshalCollectionModel(coll *pb.CollectionInfo) *Collection {
@@ -61,6 +103,7 @@ func UnmarshalCollectionModel(coll *pb.CollectionInfo) *Collection {
 				PartitionID:               partition.GetPartitionID(),
 				PartitionName:             partition.GetPartitionName(),
 				PartitionCreatedTimestamp: partition.GetPartitionCreatedTimestamp(),
+				Available:                 true,
 			}
 		}
 	} else {
@@ -70,17 +113,18 @@ func UnmarshalCollectionModel(coll *pb.CollectionInfo) *Collection {
 				PartitionID:               coll.PartitionIDs[idx],
 				PartitionName:             coll.PartitionNames[idx],
 				PartitionCreatedTimestamp: coll.PartitionCreatedTimestamps[idx],
+				Available:                 true,
 			}
 		}
 	}
 
-	filedIDToIndexIDs := make([]common.Int64Tuple, len(coll.FieldIndexes))
-	for idx, fieldIndexInfo := range coll.FieldIndexes {
-		filedIDToIndexIDs[idx] = common.Int64Tuple{
-			Key:   fieldIndexInfo.FiledID,
-			Value: fieldIndexInfo.IndexID,
-		}
-	}
+	//filedIDToIndexIDs := make([]common.Int64Tuple, len(coll.FieldIndexes))
+	//for idx, fieldIndexInfo := range coll.FieldIndexes {
+	//	filedIDToIndexIDs[idx] = common.Int64Tuple{
+	//		Key:   fieldIndexInfo.FiledID,
+	//		Value: fieldIndexInfo.IndexID,
+	//	}
+	//}
 
 	return &Collection{
 		CollectionID:         coll.ID,
@@ -89,13 +133,13 @@ func UnmarshalCollectionModel(coll *pb.CollectionInfo) *Collection {
 		AutoID:               coll.Schema.AutoID,
 		Fields:               UnmarshalFieldModels(coll.Schema.Fields),
 		Partitions:           partitions,
-		FieldIDToIndexID:     filedIDToIndexIDs,
 		VirtualChannelNames:  coll.VirtualChannelNames,
 		PhysicalChannelNames: coll.PhysicalChannelNames,
 		ShardsNum:            coll.ShardsNum,
 		ConsistencyLevel:     coll.ConsistencyLevel,
 		CreateTime:           coll.CreateTime,
 		StartPositions:       coll.StartPositions,
+		Available:            true,
 	}
 }
 
@@ -133,18 +177,10 @@ func MarshalCollectionModel(coll *Collection) *pb.CollectionInfo {
 		}
 	}
 
-	fieldIndexes := make([]*pb.FieldIndexInfo, len(coll.FieldIDToIndexID))
-	for idx, tuple := range coll.FieldIDToIndexID {
-		fieldIndexes[idx] = &pb.FieldIndexInfo{
-			FiledID: tuple.Key,
-			IndexID: tuple.Value,
-		}
-	}
 	return &pb.CollectionInfo{
 		ID:                   coll.CollectionID,
 		Schema:               collSchema,
 		Partitions:           partitions,
-		FieldIndexes:         fieldIndexes,
 		CreateTime:           coll.CreateTime,
 		VirtualChannelNames:  coll.VirtualChannelNames,
 		PhysicalChannelNames: coll.PhysicalChannelNames,

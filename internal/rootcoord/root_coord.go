@@ -18,7 +18,6 @@ package rootcoord
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -59,7 +58,6 @@ import (
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
-	"github.com/milvus-io/milvus/internal/util/trace"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -104,9 +102,7 @@ type Core struct {
 	etcdCli   *clientv3.Client
 	kvBase    kv.TxnKV //*etcdkv.EtcdKV
 	impTaskKv kv.MetaKv
-
-	//DDL lock
-	ddlLock sync.Mutex
+	scheduler *taskScheduler
 
 	kvBaseCreate func(root string) (kv.TxnKV, error)
 
@@ -192,6 +188,41 @@ type Core struct {
 	importManager *importManager
 }
 
+func (c *Core) CreateIndex(ctx context.Context, req *milvuspb.CreateIndexRequest) (*commonpb.Status, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (c *Core) DescribeIndex(ctx context.Context, req *milvuspb.DescribeIndexRequest) (*milvuspb.DescribeIndexResponse, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (c *Core) GetIndexState(ctx context.Context, req *milvuspb.GetIndexStateRequest) (*indexpb.GetIndexStatesResponse, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (c *Core) DropIndex(ctx context.Context, req *milvuspb.DropIndexRequest) (*commonpb.Status, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (c *Core) DescribeSegment(ctx context.Context, req *milvuspb.DescribeSegmentRequest) (*milvuspb.DescribeSegmentResponse, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (c *Core) ShowSegments(ctx context.Context, req *milvuspb.ShowSegmentsRequest) (*milvuspb.ShowSegmentsResponse, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (c *Core) DescribeSegments(ctx context.Context, in *rootcoordpb.DescribeSegmentsRequest) (*rootcoordpb.DescribeSegmentsResponse, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
 // --------------------- function --------------------------
 
 // NewCore creates a new rootcoord core
@@ -201,7 +232,6 @@ func NewCore(c context.Context, factory dependency.Factory) (*Core, error) {
 	core := &Core{
 		ctx:     ctx,
 		cancel:  cancel,
-		ddlLock: sync.Mutex{},
 		factory: factory,
 	}
 	core.UpdateStateCode(internalpb.StateCode_Abnormal)
@@ -319,14 +349,12 @@ func (c *Core) startTimeTickLoop() {
 			log.Debug("rootcoord context closed", zap.Error(c.ctx.Err()))
 			return
 		case <-ticker.C:
-			c.ddlLock.Lock()
 			if ts, err := c.TSOAllocator(1); err == nil {
 				err := c.SendTimeTick(ts, "timetick loop")
 				if err != nil {
 					log.Warn("Failed to send timetick", zap.Error(err))
 				}
 			}
-			c.ddlLock.Unlock()
 		}
 	}
 }
@@ -358,204 +386,204 @@ func (c *Core) tsLoop() {
 	}
 }
 
-func (c *Core) checkFlushedSegmentsLoop() {
-	defer c.wg.Done()
-	ticker := time.NewTicker(10 * time.Minute)
-	for {
-		select {
-		case <-c.ctx.Done():
-			log.Debug("RootCoord context done, exit check FlushedSegmentsLoop")
-			return
-		case <-ticker.C:
-			log.Debug("check flushed segments")
-			c.checkFlushedSegments(c.ctx)
-		}
-	}
-}
-
-func (c *Core) recycleDroppedIndex() {
-	defer c.wg.Done()
-	ticker := time.NewTicker(3 * time.Second)
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-ticker.C:
-			droppedIndex := c.MetaTable.GetDroppedIndex()
-			for collID, idxIDs := range droppedIndex {
-				for _, indexID := range idxIDs {
-					if err := c.CallDropIndexService(c.ctx, indexID); err != nil {
-						log.Warn("Notify IndexCoord to drop index failed, wait to retry",
-							zap.Int64("collID", collID),
-							zap.Int64("indexID", indexID))
-					}
-				}
-			}
-			err := c.MetaTable.RecycleDroppedIndex()
-			if err != nil {
-				log.Warn("Remove index meta failed, wait to retry", zap.Error(err))
-			}
-		}
-	}
-}
-
-func (c *Core) createIndexForSegment(ctx context.Context, collID, partID, segID UniqueID, numRows int64, binlogs []*datapb.FieldBinlog) error {
-	collID2Meta, _, indexID2Meta := c.MetaTable.dupMeta()
-	collMeta, ok := collID2Meta[collID]
-	if !ok {
-		log.Error("collection meta is not exist", zap.Int64("collID", collID))
-		return fmt.Errorf("collection meta is not exist with ID = %d", collID)
-	}
-	if len(collMeta.FieldIDToIndexID) == 0 {
-		log.Info("collection has no index, no need to build index on segment", zap.Int64("collID", collID),
-			zap.Int64("segID", segID))
-		return nil
-	}
-	for _, t := range collMeta.FieldIDToIndexID {
-		fieldID := t.Key
-		indexID := t.Value
-		indexMeta, ok := indexID2Meta[indexID]
-		if !ok {
-			log.Warn("index has no meta", zap.Int64("collID", collID), zap.Int64("indexID", indexID))
-			return fmt.Errorf("index has no meta with ID = %d in collection %d", indexID, collID)
-		}
-		if indexMeta.IsDeleted {
-			log.Info("index has been deleted, no need to build index on segment")
-			continue
-		}
-
-		field, err := GetFieldSchemaByID(&collMeta, fieldID)
-		if err != nil {
-			log.Error("GetFieldSchemaByID failed",
-				zap.Int64("collectionID", collID),
-				zap.Int64("fieldID", fieldID))
-			return err
-		}
-		if c.MetaTable.IsSegmentIndexed(segID, field, indexMeta.IndexParams) {
-			continue
-		}
-		createTS, err := c.TSOAllocator(1)
-		if err != nil {
-			log.Error("RootCoord alloc timestamp failed", zap.Int64("collectionID", collID), zap.Error(err))
-			return err
-		}
-
-		indexInfo := model.Index{
-			CollectionID: collMeta.CollectionID,
-			FieldID:      fieldID,
-			IndexID:      indexID,
-			SegmentIndexes: map[int64]model.SegmentIndex{
-				segID: {
-					Segment: model.Segment{
-						PartitionID: partID,
-						SegmentID:   segID,
-					},
-					EnableIndex: false,
-					CreateTime:  createTS,
-				},
-			},
-		}
-
-		segIndexInfo := indexInfo.SegmentIndexes[segID]
-		buildID, err := c.BuildIndex(ctx, segID, numRows, binlogs, field, &indexMeta, false)
-		if err != nil {
-			log.Debug("build index failed",
-				zap.Int64("segmentID", segID),
-				zap.Int64("fieldID", field.FieldID),
-				zap.Int64("indexID", indexMeta.IndexID))
-			return err
-		}
-		// if buildID == 0, means it's no need to build index.
-		if buildID != 0 {
-			segIndexInfo.BuildID = buildID
-			segIndexInfo.EnableIndex = true
-		}
-
-		if err := c.MetaTable.AlterIndex(&indexInfo); err != nil {
-			log.Error("alter index into meta table failed, need remove index with buildID",
-				zap.Int64("collectionID", collID), zap.Int64("indexID", indexID),
-				zap.Int64("buildID", buildID), zap.Error(err))
-			if err = retry.Do(ctx, func() error {
-				return c.CallRemoveIndexService(ctx, []UniqueID{buildID})
-			}); err != nil {
-				log.Error("remove index failed, need to be resolved manually", zap.Int64("collectionID", collID),
-					zap.Int64("indexID", indexID), zap.Int64("buildID", buildID), zap.Error(err))
-				return err
-			}
-			return err
-		}
-	}
-	return nil
-}
-
-func (c *Core) checkFlushedSegments(ctx context.Context) {
-	collID2Meta := c.MetaTable.dupCollectionMeta()
-	for collID, collMeta := range collID2Meta {
-		if len(collMeta.FieldIDToIndexID) == 0 {
-			continue
-		}
-		for _, part := range collMeta.Partitions {
-			segBinlogs, err := c.CallGetRecoveryInfoService(ctx, collMeta.CollectionID, part.PartitionID)
-			if err != nil {
-				log.Debug("failed to get flushed segments from dataCoord",
-					zap.Int64("collection ID", collMeta.CollectionID),
-					zap.Int64("partition ID", part.PartitionID),
-					zap.Error(err))
-				continue
-			}
-			segIDs := make(map[UniqueID]struct{})
-			for _, segBinlog := range segBinlogs {
-				segIDs[segBinlog.GetSegmentID()] = struct{}{}
-				err = c.createIndexForSegment(ctx, collID, part.PartitionID, segBinlog.GetSegmentID(), segBinlog.GetNumOfRows(), segBinlog.GetFieldBinlogs())
-				if err != nil {
-					log.Error("createIndexForSegment failed, wait to retry", zap.Int64("collID", collID),
-						zap.Int64("partID", part.PartitionID), zap.Int64("segID", segBinlog.GetSegmentID()), zap.Error(err))
-					continue
-				}
-			}
-			recycledSegIDs, recycledBuildIDs := c.MetaTable.AlignSegmentsMeta(collID, part.PartitionID, segIDs)
-			log.Info("there buildIDs should be remove index", zap.Int64s("buildIDs", recycledBuildIDs))
-			if len(recycledBuildIDs) > 0 {
-				if err := c.CallRemoveIndexService(ctx, recycledBuildIDs); err != nil {
-					log.Error("CallRemoveIndexService remove indexes on segments failed",
-						zap.Int64s("need dropped buildIDs", recycledBuildIDs), zap.Error(err))
-					continue
-				}
-			}
-			if err := c.MetaTable.RemoveSegments(collID, part.PartitionID, recycledSegIDs); err != nil {
-				log.Warn("remove segments failed, wait to retry", zap.Int64("collID", collID), zap.Int64("partID", part.PartitionID),
-					zap.Int64s("segIDs", recycledSegIDs), zap.Error(err))
-				continue
-			}
-		}
-	}
-}
-
-func (c *Core) getSegments(ctx context.Context, collID typeutil.UniqueID) (map[UniqueID]UniqueID, map[UniqueID]*datapb.SegmentBinlogs, error) {
-	collMeta, err := c.MetaTable.GetCollectionByID(collID, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	segID2PartID := make(map[UniqueID]UniqueID)
-	segID2Binlog := make(map[UniqueID]*datapb.SegmentBinlogs)
-	for _, part := range collMeta.Partitions {
-		if segs, err := c.CallGetRecoveryInfoService(ctx, collID, part.PartitionID); err == nil {
-			for _, s := range segs {
-				segID2PartID[s.SegmentID] = part.PartitionID
-				segID2Binlog[s.SegmentID] = s
-			}
-		} else {
-			log.Error("failed to get flushed segments info from dataCoord",
-				zap.Int64("collection ID", collID),
-				zap.Int64("partition ID", part.PartitionID),
-				zap.Error(err))
-			return nil, nil, err
-		}
-	}
-
-	return segID2PartID, segID2Binlog, nil
-}
+//func (c *Core) checkFlushedSegmentsLoop() {
+//	defer c.wg.Done()
+//	ticker := time.NewTicker(10 * time.Minute)
+//	for {
+//		select {
+//		case <-c.ctx.Done():
+//			log.Debug("RootCoord context done, exit check FlushedSegmentsLoop")
+//			return
+//		case <-ticker.C:
+//			log.Debug("check flushed segments")
+//			c.checkFlushedSegments(c.ctx)
+//		}
+//	}
+//}
+//
+//func (c *Core) recycleDroppedIndex() {
+//	defer c.wg.Done()
+//	ticker := time.NewTicker(3 * time.Second)
+//
+//	for {
+//		select {
+//		case <-c.ctx.Done():
+//			return
+//		case <-ticker.C:
+//			droppedIndex := c.MetaTable.GetDroppedIndex()
+//			for collID, idxIDs := range droppedIndex {
+//				for _, indexID := range idxIDs {
+//					if err := c.CallDropIndexService(c.ctx, indexID); err != nil {
+//						log.Warn("Notify IndexCoord to drop index failed, wait to retry",
+//							zap.Int64("collID", collID),
+//							zap.Int64("indexID", indexID))
+//					}
+//				}
+//			}
+//			err := c.MetaTable.RecycleDroppedIndex()
+//			if err != nil {
+//				log.Warn("Remove index meta failed, wait to retry", zap.Error(err))
+//			}
+//		}
+//	}
+//}
+//
+//func (c *Core) createIndexForSegment(ctx context.Context, collID, partID, segID UniqueID, numRows int64, binlogs []*datapb.FieldBinlog) error {
+//	collID2Meta, _, indexID2Meta := c.MetaTable.dupMeta()
+//	collMeta, ok := collID2Meta[collID]
+//	if !ok {
+//		log.Error("collection meta is not exist", zap.Int64("collID", collID))
+//		return fmt.Errorf("collection meta is not exist with ID = %d", collID)
+//	}
+//	if len(collMeta.FieldIDToIndexID) == 0 {
+//		log.Info("collection has no index, no need to build index on segment", zap.Int64("collID", collID),
+//			zap.Int64("segID", segID))
+//		return nil
+//	}
+//	for _, t := range collMeta.FieldIDToIndexID {
+//		fieldID := t.Key
+//		indexID := t.Value
+//		indexMeta, ok := indexID2Meta[indexID]
+//		if !ok {
+//			log.Warn("index has no meta", zap.Int64("collID", collID), zap.Int64("indexID", indexID))
+//			return fmt.Errorf("index has no meta with ID = %d in collection %d", indexID, collID)
+//		}
+//		if indexMeta.IsDeleted {
+//			log.Info("index has been deleted, no need to build index on segment")
+//			continue
+//		}
+//
+//		field, err := GetFieldSchemaByID(&collMeta, fieldID)
+//		if err != nil {
+//			log.Error("GetFieldSchemaByID failed",
+//				zap.Int64("collectionID", collID),
+//				zap.Int64("fieldID", fieldID))
+//			return err
+//		}
+//		if c.MetaTable.IsSegmentIndexed(segID, field, indexMeta.IndexParams) {
+//			continue
+//		}
+//		createTS, err := c.TSOAllocator(1)
+//		if err != nil {
+//			log.Error("RootCoord alloc timestamp failed", zap.Int64("collectionID", collID), zap.Error(err))
+//			return err
+//		}
+//
+//		indexInfo := model.Index{
+//			CollectionID: collMeta.CollectionID,
+//			FieldID:      fieldID,
+//			IndexID:      indexID,
+//			SegmentIndexes: map[int64]model.SegmentIndex{
+//				segID: {
+//					Segment: model.Segment{
+//						PartitionID: partID,
+//						SegmentID:   segID,
+//					},
+//					EnableIndex: false,
+//					CreateTime:  createTS,
+//				},
+//			},
+//		}
+//
+//		segIndexInfo := indexInfo.SegmentIndexes[segID]
+//		buildID, err := c.BuildIndex(ctx, segID, numRows, binlogs, field, &indexMeta, false)
+//		if err != nil {
+//			log.Debug("build index failed",
+//				zap.Int64("segmentID", segID),
+//				zap.Int64("fieldID", field.FieldID),
+//				zap.Int64("indexID", indexMeta.IndexID))
+//			return err
+//		}
+//		// if buildID == 0, means it's no need to build index.
+//		if buildID != 0 {
+//			segIndexInfo.BuildID = buildID
+//			segIndexInfo.EnableIndex = true
+//		}
+//
+//		if err := c.MetaTable.AlterIndex(&indexInfo); err != nil {
+//			log.Error("alter index into meta table failed, need remove index with buildID",
+//				zap.Int64("collectionID", collID), zap.Int64("indexID", indexID),
+//				zap.Int64("buildID", buildID), zap.Error(err))
+//			if err = retry.Do(ctx, func() error {
+//				return c.CallRemoveIndexService(ctx, []UniqueID{buildID})
+//			}); err != nil {
+//				log.Error("remove index failed, need to be resolved manually", zap.Int64("collectionID", collID),
+//					zap.Int64("indexID", indexID), zap.Int64("buildID", buildID), zap.Error(err))
+//				return err
+//			}
+//			return err
+//		}
+//	}
+//	return nil
+//}
+//
+//func (c *Core) checkFlushedSegments(ctx context.Context) {
+//	collID2Meta := c.MetaTable.dupCollectionMeta()
+//	for collID, collMeta := range collID2Meta {
+//		if len(collMeta.FieldIDToIndexID) == 0 {
+//			continue
+//		}
+//		for _, part := range collMeta.Partitions {
+//			segBinlogs, err := c.CallGetRecoveryInfoService(ctx, collMeta.CollectionID, part.PartitionID)
+//			if err != nil {
+//				log.Debug("failed to get flushed segments from dataCoord",
+//					zap.Int64("collection ID", collMeta.CollectionID),
+//					zap.Int64("partition ID", part.PartitionID),
+//					zap.Error(err))
+//				continue
+//			}
+//			segIDs := make(map[UniqueID]struct{})
+//			for _, segBinlog := range segBinlogs {
+//				segIDs[segBinlog.GetSegmentID()] = struct{}{}
+//				err = c.createIndexForSegment(ctx, collID, part.PartitionID, segBinlog.GetSegmentID(), segBinlog.GetNumOfRows(), segBinlog.GetFieldBinlogs())
+//				if err != nil {
+//					log.Error("createIndexForSegment failed, wait to retry", zap.Int64("collID", collID),
+//						zap.Int64("partID", part.PartitionID), zap.Int64("segID", segBinlog.GetSegmentID()), zap.Error(err))
+//					continue
+//				}
+//			}
+//			recycledSegIDs, recycledBuildIDs := c.MetaTable.AlignSegmentsMeta(collID, part.PartitionID, segIDs)
+//			log.Info("there buildIDs should be remove index", zap.Int64s("buildIDs", recycledBuildIDs))
+//			if len(recycledBuildIDs) > 0 {
+//				if err := c.CallRemoveIndexService(ctx, recycledBuildIDs); err != nil {
+//					log.Error("CallRemoveIndexService remove indexes on segments failed",
+//						zap.Int64s("need dropped buildIDs", recycledBuildIDs), zap.Error(err))
+//					continue
+//				}
+//			}
+//			if err := c.MetaTable.RemoveSegments(collID, part.PartitionID, recycledSegIDs); err != nil {
+//				log.Warn("remove segments failed, wait to retry", zap.Int64("collID", collID), zap.Int64("partID", part.PartitionID),
+//					zap.Int64s("segIDs", recycledSegIDs), zap.Error(err))
+//				continue
+//			}
+//		}
+//	}
+//}
+//
+//func (c *Core) getSegments(ctx context.Context, collID typeutil.UniqueID) (map[UniqueID]UniqueID, map[UniqueID]*datapb.SegmentBinlogs, error) {
+//	collMeta, err := c.MetaTable.GetCollectionByID(collID, 0)
+//	if err != nil {
+//		return nil, nil, err
+//	}
+//	segID2PartID := make(map[UniqueID]UniqueID)
+//	segID2Binlog := make(map[UniqueID]*datapb.SegmentBinlogs)
+//	for _, part := range collMeta.Partitions {
+//		if segs, err := c.CallGetRecoveryInfoService(ctx, collID, part.PartitionID); err == nil {
+//			for _, s := range segs {
+//				segID2PartID[s.SegmentID] = part.PartitionID
+//				segID2Binlog[s.SegmentID] = s
+//			}
+//		} else {
+//			log.Error("failed to get flushed segments info from dataCoord",
+//				zap.Int64("collection ID", collID),
+//				zap.Int64("partition ID", part.PartitionID),
+//				zap.Error(err))
+//			return nil, nil, err
+//		}
+//	}
+//
+//	return segID2PartID, segID2Binlog, nil
+//}
 
 func (c *Core) setMsgStreams() error {
 	if Params.CommonCfg.RootCoordSubName == "" {
@@ -1026,36 +1054,37 @@ func (c *Core) SetQueryCoord(s types.QueryCoord) error {
 	return nil
 }
 
-// BuildIndex will check row num and call build index service
-func (c *Core) BuildIndex(ctx context.Context, segID UniqueID, numRows int64, binlogs []*datapb.FieldBinlog, field *model.Field, idxInfo *model.Index, isFlush bool) (typeutil.UniqueID, error) {
-	log.Debug("start build index", zap.String("index name", idxInfo.IndexName),
-		zap.String("field name", field.Name), zap.Int64("segment id", segID))
-	sp, ctx := trace.StartSpanFromContext(ctx)
-	defer sp.Finish()
-	if c.MetaTable.IsSegmentIndexed(segID, field, idxInfo.IndexParams) {
-		info, err := c.MetaTable.GetSegmentIndexInfoByID(segID, field.FieldID, idxInfo.IndexName)
-		return info.SegmentIndexes[segID].BuildID, err
-	}
-	var bldID UniqueID
-	var err error
-	if numRows < Params.RootCoordCfg.MinSegmentSizeToEnableIndex {
-		log.Debug("num of rows is less than MinSegmentSizeToEnableIndex", zap.Int64("num rows", numRows))
-	} else {
-		binLogs := make([]string, 0)
-		for _, fieldBinLog := range binlogs {
-			if fieldBinLog.GetFieldID() == field.FieldID {
-				for _, binLog := range fieldBinLog.GetBinlogs() {
-					binLogs = append(binLogs, binLog.LogPath)
-				}
-				break
-			}
-		}
-		bldID, err = c.CallBuildIndexService(ctx, segID, binLogs, field, idxInfo, numRows)
-	}
-
-	return bldID, err
-}
-
+// ExpireMetaCache
+//// BuildIndex will check row num and call build index service
+//func (c *Core) BuildIndex(ctx context.Context, segID UniqueID, numRows int64, binlogs []*datapb.FieldBinlog, field *model.Field, idxInfo *model.Index, isFlush bool) (typeutil.UniqueID, error) {
+//	log.Debug("start build index", zap.String("index name", idxInfo.IndexName),
+//		zap.String("field name", field.Name), zap.Int64("segment id", segID))
+//	sp, ctx := trace.StartSpanFromContext(ctx)
+//	defer sp.Finish()
+//	if c.MetaTable.IsSegmentIndexed(segID, field, idxInfo.IndexParams) {
+//		info, err := c.MetaTable.GetSegmentIndexInfoByID(segID, field.FieldID, idxInfo.IndexName)
+//		return info.SegmentIndexes[segID].BuildID, err
+//	}
+//	var bldID UniqueID
+//	var err error
+//	if numRows < Params.RootCoordCfg.MinSegmentSizeToEnableIndex {
+//		log.Debug("num of rows is less than MinSegmentSizeToEnableIndex", zap.Int64("num rows", numRows))
+//	} else {
+//		binLogs := make([]string, 0)
+//		for _, fieldBinLog := range binlogs {
+//			if fieldBinLog.GetFieldID() == field.FieldID {
+//				for _, binLog := range fieldBinLog.GetBinlogs() {
+//					binLogs = append(binLogs, binLog.LogPath)
+//				}
+//				break
+//			}
+//		}
+//		bldID, err = c.CallBuildIndexService(ctx, segID, binLogs, field, idxInfo, numRows)
+//	}
+//
+//	return bldID, err
+//}
+//
 // ExpireMetaCache will call invalidate collection meta cache
 func (c *Core) ExpireMetaCache(ctx context.Context, collNames []string, collectionID UniqueID, ts typeutil.Timestamp) error {
 	// if collectionID is specified, invalidate all the collection meta cache with the specified collectionID and return
@@ -1240,6 +1269,8 @@ func (c *Core) Init() error {
 		)
 		c.importManager.init(c.ctx)
 
+		c.scheduler = newTaskScheduler(c.ctx)
+
 		// init data
 		initError = c.initData()
 		if initError != nil {
@@ -1264,130 +1295,39 @@ func (c *Core) initData() error {
 	return nil
 }
 
-func (c *Core) reSendDdMsg(ctx context.Context, force bool) error {
-	if !force {
-		flag, err := c.MetaTable.txn.Load(DDMsgSendPrefix)
-		if err != nil {
-			// TODO, this is super ugly hack but our kv interface does not support loadWithExist
-			// leave it for later
-			if strings.Contains(err.Error(), "there is no value on key") {
-				log.Debug("skip reSendDdMsg with no dd-msg-send key")
-				return nil
-			}
-			return err
-		}
-		value, err := strconv.ParseBool(flag)
-		if err != nil {
-			return err
-		}
-		if value {
-			log.Debug("skip reSendDdMsg with dd-msg-send set to true")
+func (c *Core) restore(ctx context.Context) error {
+	paths, tasks, err := c.MetaTable.txn.LoadWithPrefix(DDLLogPrefix)
+	if err != nil {
+		// TODO, this is super ugly hack but our kv interface does not support loadWithExist
+		// leave it for later
+		if strings.Contains(err.Error(), "there is no value on key") {
+			log.Debug("skip restore with no ddl-log key")
 			return nil
 		}
-	}
-
-	ddOpStr, err := c.MetaTable.txn.Load(DDOperationPrefix)
-	if err != nil {
-		log.Debug("DdOperation key does not exist")
-		return nil
-	}
-	var ddOp DdOperation
-	if err = json.Unmarshal([]byte(ddOpStr), &ddOp); err != nil {
 		return err
 	}
-
-	invalidateCache := false
-	var ts typeutil.Timestamp
-	var collName string
-	var collectionID UniqueID
-
-	switch ddOp.Type {
-	// TODO remove create collection resend
-	// since create collection needs a start position to succeed
-	case CreateCollectionDDType:
-		var ddReq = internalpb.CreateCollectionRequest{}
-		if err = proto.Unmarshal(ddOp.Body, &ddReq); err != nil {
-			return err
-		}
-		if _, err := c.MetaTable.GetCollectionByName(ddReq.CollectionName, 0); err != nil {
-			if _, err = c.SendDdCreateCollectionReq(ctx, &ddReq, ddReq.PhysicalChannelNames); err != nil {
-				return err
-			}
-		} else {
-			log.Debug("collection has been created, skip re-send CreateCollection",
-				zap.String("collection name", collName))
-		}
-	case DropCollectionDDType:
-		var ddReq = internalpb.DropCollectionRequest{}
-		if err = proto.Unmarshal(ddOp.Body, &ddReq); err != nil {
-			return err
-		}
-		ts = ddReq.Base.Timestamp
-		collName = ddReq.CollectionName
-		if collInfo, err := c.MetaTable.GetCollectionByName(ddReq.CollectionName, 0); err == nil {
-			if err = c.SendDdDropCollectionReq(ctx, &ddReq, collInfo.PhysicalChannelNames); err != nil {
-				return err
-			}
-			invalidateCache = true
-			collectionID = ddReq.CollectionID
-		} else {
-			log.Debug("collection has been removed, skip re-send DropCollection",
-				zap.String("collection name", collName))
-		}
-	case CreatePartitionDDType:
-		var ddReq = internalpb.CreatePartitionRequest{}
-		if err = proto.Unmarshal(ddOp.Body, &ddReq); err != nil {
-			return err
-		}
-		ts = ddReq.Base.Timestamp
-		collName = ddReq.CollectionName
-		collInfo, err := c.MetaTable.GetCollectionByName(ddReq.CollectionName, 0)
+	for i, task := range tasks {
+		info := &rootcoordpb.TaskInfo{}
+		err := proto.Unmarshal([]byte(task), info)
 		if err != nil {
-			return err
+			log.Error("unmarshal task recover info failed", zap.Error(err))
+			continue
 		}
-		if _, err = c.MetaTable.GetPartitionByName(collInfo.CollectionID, ddReq.PartitionName, 0); err != nil {
-			if err = c.SendDdCreatePartitionReq(ctx, &ddReq, collInfo.PhysicalChannelNames); err != nil {
-				return err
-			}
-			invalidateCache = true
-			collectionID = ddReq.CollectionID
-		} else {
-			log.Debug("partition has been created, skip re-send CreatePartition",
-				zap.String("collection name", collName), zap.String("partition name", ddReq.PartitionName))
-		}
-	case DropPartitionDDType:
-		var ddReq = internalpb.DropPartitionRequest{}
-		if err = proto.Unmarshal(ddOp.Body, &ddReq); err != nil {
-			return err
-		}
-		ts = ddReq.Base.Timestamp
-		collName = ddReq.CollectionName
-		collInfo, err := c.MetaTable.GetCollectionByName(ddReq.CollectionName, 0)
+		log.Info("restore task", zap.Int64("msgID", info.RequestId), zap.String("type", info.Type.String()))
+		logs, err := UnmarshalTaskInfo(info, c)
 		if err != nil {
-			return err
+			log.Error("extract task recover info failed", zap.Int64("msgID", info.RequestId), zap.Error(err))
+			continue
 		}
-		if _, err = c.MetaTable.GetPartitionByName(collInfo.CollectionID, ddReq.PartitionName, 0); err == nil {
-			if err = c.SendDdDropPartitionReq(ctx, &ddReq, collInfo.PhysicalChannelNames); err != nil {
-				return err
+		logs.writeFunc = func(data []byte) error {
+			if len(data) == 0 {
+				c.MetaTable.txn.Remove(paths[i])
 			}
-			invalidateCache = true
-			collectionID = ddReq.CollectionID
-		} else {
-			log.Debug("partition has been removed, skip re-send DropPartition",
-				zap.String("collection name", collName), zap.String("partition name", ddReq.PartitionName))
+			return c.MetaTable.txn.Save(paths[i], string(data))
 		}
-	default:
-		return fmt.Errorf("invalid DdOperation %s", ddOp.Type)
+		logs.Rollback(ctx)
 	}
-
-	if invalidateCache {
-		if err = c.ExpireMetaCache(ctx, nil, collectionID, ts); err != nil {
-			return err
-		}
-	}
-
-	// Update DDOperation in etcd
-	return c.MetaTable.txn.Save(DDMsgSendPrefix, strconv.FormatBool(true))
+	return nil
 }
 
 func (c *Core) getCollectionName(collID, partitionID typeutil.UniqueID) (string, string, error) {
@@ -1423,18 +1363,17 @@ func (c *Core) Start() error {
 			// you can not just stuck here,
 			panic(err)
 		}
-		if err := c.reSendDdMsg(c.ctx, false); err != nil {
-			log.Fatal("RootCoord Start reSendDdMsg failed", zap.Error(err))
+		if err := c.restore(c.ctx); err != nil {
+			log.Fatal("RootCoord Start restore failed", zap.Error(err))
 			panic(err)
 		}
-		c.wg.Add(7)
+		c.wg.Add(5)
 		go c.startTimeTickLoop()
 		go c.tsLoop()
 		go c.chanTimeTick.startWatch(&c.wg)
-		go c.checkFlushedSegmentsLoop()
 		go c.importManager.expireOldTasksLoop(&c.wg, c.CallReleaseSegRefLock)
 		go c.importManager.sendOutTasksLoop(&c.wg)
-		go c.recycleDroppedIndex()
+		c.scheduler.Start()
 		Params.RootCoordCfg.CreatedTime = time.Now()
 		Params.RootCoordCfg.UpdatedTime = time.Now()
 	})
@@ -1520,13 +1459,26 @@ func (c *Core) CreateCollection(ctx context.Context, in *milvuspb.CreateCollecti
 	log.Debug("CreateCollection", zap.String("role", typeutil.RootCoordRole),
 		zap.String("collection name", in.CollectionName), zap.Int64("msgID", in.Base.MsgID))
 	t := &CreateCollectionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
+		baseUndoTask: baseUndoTask{
+			baseReqTask: baseReqTask{
+				ctx:  ctx,
+				core: c,
+				done: make(chan error, 1),
+			},
+			logs: stepLogger{
+				writeFunc: func(data []byte) error {
+					prefix := fmt.Sprintf("%s/%d", DDLLogPrefix, in.Base.MsgID)
+					if len(data) == 0 {
+						return c.MetaTable.txn.Remove(prefix)
+					}
+					return c.MetaTable.txn.Save(prefix, string(data))
+				},
+			},
 		},
 		Req: in,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("CreateCollection failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
@@ -1552,13 +1504,26 @@ func (c *Core) DropCollection(ctx context.Context, in *milvuspb.DropCollectionRe
 	log.Debug("DropCollection", zap.String("role", typeutil.RootCoordRole),
 		zap.String("collection name", in.CollectionName), zap.Int64("msgID", in.Base.MsgID))
 	t := &DropCollectionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
+		baseRedoTask: baseRedoTask{
+			baseReqTask: baseReqTask{
+				ctx:  ctx,
+				core: c,
+				done: make(chan error, 1),
+			},
+			logs: stepLogger{
+				writeFunc: func(data []byte) error {
+					prefix := fmt.Sprintf("%s/%d", DDLLogPrefix, in.Base.MsgID)
+					if len(data) == 0 {
+						return c.MetaTable.txn.Remove(prefix)
+					}
+					return c.MetaTable.txn.Save(prefix, string(data))
+				},
+			},
 		},
 		Req: in,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("DropCollection failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
@@ -1588,14 +1553,12 @@ func (c *Core) HasCollection(ctx context.Context, in *milvuspb.HasCollectionRequ
 	log.Debug("HasCollection", zap.String("role", typeutil.RootCoordRole),
 		zap.String("collection name", in.CollectionName), zap.Int64("msgID", in.Base.MsgID))
 	t := &HasCollectionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
+		baseReqTask:   newBaseReqTask(ctx, c),
 		Req:           in,
 		HasCollection: false,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("HasCollection failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
@@ -1629,14 +1592,12 @@ func (c *Core) DescribeCollection(ctx context.Context, in *milvuspb.DescribeColl
 	log.Debug("DescribeCollection", zap.String("role", typeutil.RootCoordRole),
 		zap.String("collection name", in.CollectionName), zap.Int64("id", in.CollectionID), zap.Int64("msgID", in.Base.MsgID))
 	t := &DescribeCollectionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-		Rsp: &milvuspb.DescribeCollectionResponse{},
+		baseReqTask: newBaseReqTask(ctx, c),
+		Req:         in,
+		Rsp:         &milvuspb.DescribeCollectionResponse{},
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("DescribeCollection failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.Int64("id", in.CollectionID), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
@@ -1667,14 +1628,12 @@ func (c *Core) ShowCollections(ctx context.Context, in *milvuspb.ShowCollections
 	log.Debug("ShowCollections", zap.String("role", typeutil.RootCoordRole),
 		zap.String("dbname", in.DbName), zap.Int64("msgID", in.Base.MsgID))
 	t := &ShowCollectionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-		Rsp: &milvuspb.ShowCollectionsResponse{},
+		baseReqTask: newBaseReqTask(ctx, c),
+		Req:         in,
+		Rsp:         &milvuspb.ShowCollectionsResponse{},
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("ShowCollections failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("dbname", in.DbName), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
@@ -1704,13 +1663,26 @@ func (c *Core) CreatePartition(ctx context.Context, in *milvuspb.CreatePartition
 		zap.String("collection name", in.CollectionName), zap.String("partition name", in.PartitionName),
 		zap.Int64("msgID", in.Base.MsgID))
 	t := &CreatePartitionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
+		baseUndoTask: baseUndoTask{
+			baseReqTask: baseReqTask{
+				ctx:  ctx,
+				core: c,
+				done: make(chan error, 1),
+			},
+			logs: stepLogger{
+				writeFunc: func(data []byte) error {
+					prefix := fmt.Sprintf("%s/%d", DDLLogPrefix, in.Base.MsgID)
+					if len(data) == 0 {
+						return c.MetaTable.txn.Remove(prefix)
+					}
+					return c.MetaTable.txn.Save(prefix, string(data))
+				},
+			},
 		},
 		Req: in,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("CreatePartition failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.String("partition name", in.PartitionName),
@@ -1739,13 +1711,26 @@ func (c *Core) DropPartition(ctx context.Context, in *milvuspb.DropPartitionRequ
 		zap.String("collection name", in.CollectionName), zap.String("partition name", in.PartitionName),
 		zap.Int64("msgID", in.Base.MsgID))
 	t := &DropPartitionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
+		baseRedoTask: baseRedoTask{
+			baseReqTask: baseReqTask{
+				ctx:  ctx,
+				core: c,
+				done: make(chan error, 1),
+			},
+			logs: stepLogger{
+				writeFunc: func(data []byte) error {
+					prefix := fmt.Sprintf("%s/%d", DDLLogPrefix, in.Base.MsgID)
+					if len(data) == 0 {
+						return c.MetaTable.txn.Remove(prefix)
+					}
+					return c.MetaTable.txn.Save(prefix, string(data))
+				},
+			},
 		},
 		Req: in,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("DropPartition failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.String("partition name", in.PartitionName),
@@ -1778,14 +1763,12 @@ func (c *Core) HasPartition(ctx context.Context, in *milvuspb.HasPartitionReques
 		zap.String("collection name", in.CollectionName), zap.String("partition name", in.PartitionName),
 		zap.Int64("msgID", in.Base.MsgID))
 	t := &HasPartitionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
+		baseReqTask:  newBaseReqTask(ctx, c),
 		Req:          in,
 		HasPartition: false,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("HasPartition failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.String("partition name", in.PartitionName),
@@ -1821,14 +1804,12 @@ func (c *Core) ShowPartitions(ctx context.Context, in *milvuspb.ShowPartitionsRe
 	log.Debug("ShowPartitions", zap.String("role", typeutil.RootCoordRole),
 		zap.String("collection name", in.CollectionName), zap.Int64("msgID", in.Base.MsgID))
 	t := &ShowPartitionReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-		Rsp: &milvuspb.ShowPartitionsResponse{},
+		baseReqTask: newBaseReqTask(ctx, c),
+		Req:         in,
+		Rsp:         &milvuspb.ShowPartitionsResponse{},
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("ShowPartitions failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
@@ -1847,305 +1828,321 @@ func (c *Core) ShowPartitions(ctx context.Context, in *milvuspb.ShowPartitionsRe
 	return t.Rsp, nil
 }
 
-// CreateIndex create index
-func (c *Core) CreateIndex(ctx context.Context, in *milvuspb.CreateIndexRequest) (*commonpb.Status, error) {
-	metrics.RootCoordDDLReqCounter.WithLabelValues("CreateIndex", metrics.TotalLabel).Inc()
-	if code, ok := c.checkHealthy(); !ok {
-		return failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]), nil
-	}
-	tr := timerecord.NewTimeRecorder("CreateIndex")
-	log.Debug("CreateIndex", zap.String("role", typeutil.RootCoordRole),
-		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-		zap.Int64("msgID", in.Base.MsgID))
-	t := &CreateIndexReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-	}
-	err := executeTask(t)
-	if err != nil {
-		log.Error("CreateIndex failed", zap.String("role", typeutil.RootCoordRole),
-			zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-			zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
-		metrics.RootCoordDDLReqCounter.WithLabelValues("CreateIndex", metrics.FailLabel).Inc()
-		return failStatus(commonpb.ErrorCode_UnexpectedError, "CreateIndex failed: "+err.Error()), nil
-	}
-	log.Debug("CreateIndex success", zap.String("role", typeutil.RootCoordRole),
-		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-		zap.Int64("msgID", in.Base.MsgID))
-
-	metrics.RootCoordDDLReqCounter.WithLabelValues("CreateIndex", metrics.SuccessLabel).Inc()
-	metrics.RootCoordDDLReqLatency.WithLabelValues("CreateIndex").Observe(float64(tr.ElapseSpan().Milliseconds()))
-	return succStatus(), nil
-}
-
-// DescribeIndex return index info
-func (c *Core) DescribeIndex(ctx context.Context, in *milvuspb.DescribeIndexRequest) (*milvuspb.DescribeIndexResponse, error) {
-	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeIndex", metrics.TotalLabel).Inc()
-	if code, ok := c.checkHealthy(); !ok {
-		return &milvuspb.DescribeIndexResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
-		}, nil
-	}
-	tr := timerecord.NewTimeRecorder("DescribeIndex")
-	log.Debug("DescribeIndex", zap.String("role", typeutil.RootCoordRole),
-		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-		zap.Int64("msgID", in.Base.MsgID))
-	t := &DescribeIndexReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-		Rsp: &milvuspb.DescribeIndexResponse{},
-	}
-	err := executeTask(t)
-	if err != nil {
-		log.Error("DescribeIndex failed", zap.String("role", typeutil.RootCoordRole),
-			zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-			zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
-		metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeIndex", metrics.FailLabel).Inc()
-		return &milvuspb.DescribeIndexResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "DescribeIndex failed: "+err.Error()),
-		}, nil
-	}
-	idxNames := make([]string, 0, len(t.Rsp.IndexDescriptions))
-	for _, i := range t.Rsp.IndexDescriptions {
-		idxNames = append(idxNames, i.IndexName)
-	}
-	log.Debug("DescribeIndex success", zap.String("role", typeutil.RootCoordRole),
-		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-		zap.Strings("index names", idxNames), zap.Int64("msgID", in.Base.MsgID))
-
-	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeIndex", metrics.SuccessLabel).Inc()
-	if len(t.Rsp.IndexDescriptions) == 0 {
-		t.Rsp.Status = failStatus(commonpb.ErrorCode_IndexNotExist, "index not exist")
-	} else {
-		t.Rsp.Status = succStatus()
-	}
-	metrics.RootCoordDDLReqLatency.WithLabelValues("DescribeIndex").Observe(float64(tr.ElapseSpan().Milliseconds()))
-	return t.Rsp, nil
-}
-
-func (c *Core) GetIndexState(ctx context.Context, in *milvuspb.GetIndexStateRequest) (*indexpb.GetIndexStatesResponse, error) {
-	if code, ok := c.checkHealthy(); !ok {
-		log.Error("RootCoord GetIndexState failed, RootCoord is not healthy")
-		return &indexpb.GetIndexStatesResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
-		}, nil
-	}
-	log.Info("RootCoord GetIndexState", zap.String("collName", in.GetCollectionName()),
-		zap.String("fieldName", in.GetFieldName()), zap.String("indexName", in.GetIndexName()))
-
-	// initBuildIDs are the buildIDs generated when CreateIndex is called.
-	initBuildIDs, err := c.MetaTable.GetInitBuildIDs(in.GetCollectionName(), in.GetIndexName())
-	if err != nil {
-		log.Error("RootCoord GetIndexState failed", zap.String("collName", in.GetCollectionName()),
-			zap.String("fieldName", in.GetFieldName()), zap.String("indexName", in.GetIndexName()), zap.Error(err))
-		return &indexpb.GetIndexStatesResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()),
-		}, nil
-	}
-
-	ret := &indexpb.GetIndexStatesResponse{
-		Status: succStatus(),
-	}
-	if len(initBuildIDs) == 0 {
-		log.Warn("RootCoord GetIndexState successful, all segments generated when CreateIndex is called have been compacted")
-		return ret, nil
-	}
-
-	states, err := c.CallGetIndexStatesService(ctx, initBuildIDs)
-	if err != nil {
-		log.Error("RootCoord GetIndexState CallGetIndexStatesService failed", zap.String("collName", in.GetCollectionName()),
-			zap.String("fieldName", in.GetFieldName()), zap.String("indexName", in.GetIndexName()), zap.Error(err))
-		ret.Status = failStatus(commonpb.ErrorCode_UnexpectedError, err.Error())
-		return ret, err
-	}
-
-	log.Info("RootCoord GetIndexState successful", zap.String("collName", in.GetCollectionName()),
-		zap.String("fieldName", in.GetFieldName()), zap.String("indexName", in.GetIndexName()))
-	return &indexpb.GetIndexStatesResponse{
-		Status: succStatus(),
-		States: states,
-	}, nil
-}
-
-// DropIndex drop index
-func (c *Core) DropIndex(ctx context.Context, in *milvuspb.DropIndexRequest) (*commonpb.Status, error) {
-	metrics.RootCoordDDLReqCounter.WithLabelValues("DropIndex", metrics.TotalLabel).Inc()
-	if code, ok := c.checkHealthy(); !ok {
-		return failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]), nil
-	}
-	tr := timerecord.NewTimeRecorder("DropIndex")
-	log.Debug("DropIndex", zap.String("role", typeutil.RootCoordRole),
-		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-		zap.String("index name", in.IndexName), zap.Int64("msgID", in.Base.MsgID))
-	t := &DropIndexReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-	}
-	err := executeTask(t)
-	if err != nil {
-		log.Error("DropIndex failed", zap.String("role", typeutil.RootCoordRole),
-			zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-			zap.String("index name", in.IndexName), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
-		metrics.RootCoordDDLReqCounter.WithLabelValues("DropIndex", metrics.FailLabel).Inc()
-		return failStatus(commonpb.ErrorCode_UnexpectedError, "DropIndex failed: "+err.Error()), nil
-	}
-	log.Debug("DropIndex success", zap.String("role", typeutil.RootCoordRole),
-		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
-		zap.String("index name", in.IndexName), zap.Int64("msgID", in.Base.MsgID))
-
-	metrics.RootCoordDDLReqCounter.WithLabelValues("DropIndex", metrics.SuccessLabel).Inc()
-	metrics.RootCoordDDLReqLatency.WithLabelValues("DropIndex").Observe(float64(tr.ElapseSpan().Milliseconds()))
-	return succStatus(), nil
-}
-
-// DescribeSegment return segment info
-func (c *Core) DescribeSegment(ctx context.Context, in *milvuspb.DescribeSegmentRequest) (*milvuspb.DescribeSegmentResponse, error) {
-	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegment", metrics.TotalLabel).Inc()
-	if code, ok := c.checkHealthy(); !ok {
-		return &milvuspb.DescribeSegmentResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
-		}, nil
-	}
-	tr := timerecord.NewTimeRecorder("DescribeSegment")
-	log.Debug("DescribeSegment", zap.String("role", typeutil.RootCoordRole),
-		zap.Int64("collection id", in.CollectionID), zap.Int64("segment id", in.SegmentID),
-		zap.Int64("msgID", in.Base.MsgID))
-	t := &DescribeSegmentReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-		Rsp: &milvuspb.DescribeSegmentResponse{},
-	}
-	err := executeTask(t)
-	if err != nil {
-		log.Error("DescribeSegment failed", zap.String("role", typeutil.RootCoordRole),
-			zap.Int64("collection id", in.CollectionID), zap.Int64("segment id", in.SegmentID),
-			zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
-		metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegment", metrics.FailLabel).Inc()
-		return &milvuspb.DescribeSegmentResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "DescribeSegment failed: "+err.Error()),
-		}, nil
-	}
-	log.Debug("DescribeSegment success", zap.String("role", typeutil.RootCoordRole),
-		zap.Int64("collection id", in.CollectionID), zap.Int64("segment id", in.SegmentID),
-		zap.Int64("msgID", in.Base.MsgID))
-
-	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegment", metrics.SuccessLabel).Inc()
-	metrics.RootCoordDDLReqLatency.WithLabelValues("DescribeSegment").Observe(float64(tr.ElapseSpan().Milliseconds()))
-	t.Rsp.Status = succStatus()
-	return t.Rsp, nil
-}
-
-func (c *Core) DescribeSegments(ctx context.Context, in *rootcoordpb.DescribeSegmentsRequest) (*rootcoordpb.DescribeSegmentsResponse, error) {
-	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegments", metrics.TotalLabel).Inc()
-	if code, ok := c.checkHealthy(); !ok {
-		log.Error("failed to describe segments, rootcoord not healthy",
-			zap.String("role", typeutil.RootCoordRole),
-			zap.Int64("msgID", in.GetBase().GetMsgID()),
-			zap.Int64("collection", in.GetCollectionID()),
-			zap.Int64s("segments", in.GetSegmentIDs()))
-
-		return &rootcoordpb.DescribeSegmentsResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
-		}, nil
-	}
-
-	tr := timerecord.NewTimeRecorder("DescribeSegments")
-
-	log.Debug("received request to describe segments",
-		zap.String("role", typeutil.RootCoordRole),
-		zap.Int64("msgID", in.GetBase().GetMsgID()),
-		zap.Int64("collection", in.GetCollectionID()),
-		zap.Int64s("segments", in.GetSegmentIDs()))
-
-	t := &DescribeSegmentsReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-		Rsp: &rootcoordpb.DescribeSegmentsResponse{},
-	}
-
-	if err := executeTask(t); err != nil {
-		log.Error("failed to describe segments",
-			zap.Error(err),
-			zap.String("role", typeutil.RootCoordRole),
-			zap.Int64("msgID", in.GetBase().GetMsgID()),
-			zap.Int64("collection", in.GetCollectionID()),
-			zap.Int64s("segments", in.GetSegmentIDs()))
-
-		metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegments", metrics.FailLabel).Inc()
-		return &rootcoordpb.DescribeSegmentsResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "DescribeSegments failed: "+err.Error()),
-		}, nil
-	}
-
-	log.Debug("succeed to describe segments",
-		zap.String("role", typeutil.RootCoordRole),
-		zap.Int64("msgID", in.GetBase().GetMsgID()),
-		zap.Int64("collection", in.GetCollectionID()),
-		zap.Int64s("segments", in.GetSegmentIDs()))
-
-	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegments", metrics.SuccessLabel).Inc()
-	metrics.RootCoordDDLReqLatency.WithLabelValues("DescribeSegments").Observe(float64(tr.ElapseSpan().Milliseconds()))
-
-	t.Rsp.Status = succStatus()
-	return t.Rsp, nil
-}
-
-// ShowSegments list all segments
-func (c *Core) ShowSegments(ctx context.Context, in *milvuspb.ShowSegmentsRequest) (*milvuspb.ShowSegmentsResponse, error) {
-	metrics.RootCoordDDLReqCounter.WithLabelValues("ShowSegments", metrics.TotalLabel).Inc()
-	if code, ok := c.checkHealthy(); !ok {
-		return &milvuspb.ShowSegmentsResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
-		}, nil
-	}
-	tr := timerecord.NewTimeRecorder("ShowSegments")
-
-	log.Debug("ShowSegments", zap.String("role", typeutil.RootCoordRole),
-		zap.Int64("collection id", in.CollectionID), zap.Int64("partition id", in.PartitionID),
-		zap.Int64("msgID", in.Base.MsgID))
-	t := &ShowSegmentReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
-		Rsp: &milvuspb.ShowSegmentsResponse{},
-	}
-	err := executeTask(t)
-	if err != nil {
-		log.Debug("ShowSegments failed", zap.String("role", typeutil.RootCoordRole),
-			zap.Int64("collection id", in.CollectionID), zap.Int64("partition id", in.PartitionID),
-			zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
-		metrics.RootCoordDDLReqCounter.WithLabelValues("ShowSegments", metrics.FailLabel).Inc()
-		return &milvuspb.ShowSegmentsResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "ShowSegments failed: "+err.Error()),
-		}, nil
-	}
-	log.Debug("ShowSegments success", zap.String("role", typeutil.RootCoordRole),
-		zap.Int64("collection id", in.CollectionID), zap.Int64("partition id", in.PartitionID),
-		zap.Int64s("segments ids", t.Rsp.SegmentIDs),
-		zap.Int64("msgID", in.Base.MsgID))
-
-	metrics.RootCoordDDLReqCounter.WithLabelValues("ShowSegments", metrics.SuccessLabel).Inc()
-	metrics.RootCoordDDLReqLatency.WithLabelValues("ShowSegments").Observe(float64(tr.ElapseSpan().Milliseconds()))
-	t.Rsp.Status = succStatus()
-	return t.Rsp, nil
-}
+//// CreateIndex create index
+//func (c *Core) CreateIndex(ctx context.Context, in *milvuspb.CreateIndexRequest) (*commonpb.Status, error) {
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("CreateIndex", metrics.TotalLabel).Inc()
+//	if code, ok := c.checkHealthy(); !ok {
+//		return failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]), nil
+//	}
+//	tr := timerecord.NewTimeRecorder("CreateIndex")
+//	log.Debug("CreateIndex", zap.String("role", typeutil.RootCoordRole),
+//		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//		zap.Int64("msgID", in.Base.MsgID))
+//	t := &CreateIndexReqTask{
+//		baseUndoTask: baseUndoTask{
+//			baseReqTask: baseReqTask{
+//				ctx:  ctx,
+//				core: c,
+//				done: make(chan error, 1),
+//			},
+//			logs: stepLogger{
+//				writeFunc: func(data []byte) error {
+//					prefix := fmt.Sprintf("%s/%d", DDLLogPrefix, in.Base.MsgID)
+//					return c.MetaTable.txn.Save(prefix, string(data))
+//				},
+//			},
+//		},
+//		Req: in,
+//	}
+//	c.scheduler.AddTask(t)
+//	err := t.WaitToFinish()
+//	if err != nil {
+//		log.Error("CreateIndex failed", zap.String("role", typeutil.RootCoordRole),
+//			zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//			zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
+//		metrics.RootCoordDDLReqCounter.WithLabelValues("CreateIndex", metrics.FailLabel).Inc()
+//		return failStatus(commonpb.ErrorCode_UnexpectedError, "CreateIndex failed: "+err.Error()), nil
+//	}
+//	log.Debug("CreateIndex success", zap.String("role", typeutil.RootCoordRole),
+//		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//		zap.Int64("msgID", in.Base.MsgID))
+//
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("CreateIndex", metrics.SuccessLabel).Inc()
+//	metrics.RootCoordDDLReqLatency.WithLabelValues("CreateIndex").Observe(float64(tr.ElapseSpan().Milliseconds()))
+//	return succStatus(), nil
+//}
+//
+//// DescribeIndex return index info
+//func (c *Core) DescribeIndex(ctx context.Context, in *milvuspb.DescribeIndexRequest) (*milvuspb.DescribeIndexResponse, error) {
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeIndex", metrics.TotalLabel).Inc()
+//	if code, ok := c.checkHealthy(); !ok {
+//		return &milvuspb.DescribeIndexResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
+//		}, nil
+//	}
+//	tr := timerecord.NewTimeRecorder("DescribeIndex")
+//	log.Debug("DescribeIndex", zap.String("role", typeutil.RootCoordRole),
+//		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//		zap.Int64("msgID", in.Base.MsgID))
+//	t := &DescribeIndexReqTask{
+//		baseReqTask: baseReqTask{
+//			ctx:  ctx,
+//			core: c,
+//		},
+//		Req: in,
+//		Rsp: &milvuspb.DescribeIndexResponse{},
+//	}
+//	c.scheduler.AddTask(t)
+//	err := t.WaitToFinish()
+//	if err != nil {
+//		log.Error("DescribeIndex failed", zap.String("role", typeutil.RootCoordRole),
+//			zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//			zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
+//		metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeIndex", metrics.FailLabel).Inc()
+//		return &milvuspb.DescribeIndexResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "DescribeIndex failed: "+err.Error()),
+//		}, nil
+//	}
+//	idxNames := make([]string, 0, len(t.Rsp.IndexDescriptions))
+//	for _, i := range t.Rsp.IndexDescriptions {
+//		idxNames = append(idxNames, i.IndexName)
+//	}
+//	log.Debug("DescribeIndex success", zap.String("role", typeutil.RootCoordRole),
+//		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//		zap.Strings("index names", idxNames), zap.Int64("msgID", in.Base.MsgID))
+//
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeIndex", metrics.SuccessLabel).Inc()
+//	if len(t.Rsp.IndexDescriptions) == 0 {
+//		t.Rsp.Status = failStatus(commonpb.ErrorCode_IndexNotExist, "index not exist")
+//	} else {
+//		t.Rsp.Status = succStatus()
+//	}
+//	metrics.RootCoordDDLReqLatency.WithLabelValues("DescribeIndex").Observe(float64(tr.ElapseSpan().Milliseconds()))
+//	return t.Rsp, nil
+//}
+//
+//func (c *Core) GetIndexState(ctx context.Context, in *milvuspb.GetIndexStateRequest) (*indexpb.GetIndexStatesResponse, error) {
+//	if code, ok := c.checkHealthy(); !ok {
+//		log.Error("RootCoord GetIndexState failed, RootCoord is not healthy")
+//		return &indexpb.GetIndexStatesResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
+//		}, nil
+//	}
+//	log.Info("RootCoord GetIndexState", zap.String("collName", in.GetCollectionName()),
+//		zap.String("fieldName", in.GetFieldName()), zap.String("indexName", in.GetIndexName()))
+//
+//	// initBuildIDs are the buildIDs generated when CreateIndex is called.
+//	initBuildIDs, err := c.MetaTable.GetInitBuildIDs(in.GetCollectionName(), in.GetIndexName())
+//	if err != nil {
+//		log.Error("RootCoord GetIndexState failed", zap.String("collName", in.GetCollectionName()),
+//			zap.String("fieldName", in.GetFieldName()), zap.String("indexName", in.GetIndexName()), zap.Error(err))
+//		return &indexpb.GetIndexStatesResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()),
+//		}, nil
+//	}
+//
+//	ret := &indexpb.GetIndexStatesResponse{
+//		Status: succStatus(),
+//	}
+//	if len(initBuildIDs) == 0 {
+//		log.Warn("RootCoord GetIndexState successful, all segments generated when CreateIndex is called have been compacted")
+//		return ret, nil
+//	}
+//
+//	states, err := c.CallGetIndexStatesService(ctx, initBuildIDs)
+//	if err != nil {
+//		log.Error("RootCoord GetIndexState CallGetIndexStatesService failed", zap.String("collName", in.GetCollectionName()),
+//			zap.String("fieldName", in.GetFieldName()), zap.String("indexName", in.GetIndexName()), zap.Error(err))
+//		ret.Status = failStatus(commonpb.ErrorCode_UnexpectedError, err.Error())
+//		return ret, err
+//	}
+//
+//	log.Info("RootCoord GetIndexState successful", zap.String("collName", in.GetCollectionName()),
+//		zap.String("fieldName", in.GetFieldName()), zap.String("indexName", in.GetIndexName()))
+//	return &indexpb.GetIndexStatesResponse{
+//		Status: succStatus(),
+//		States: states,
+//	}, nil
+//}
+//
+//// DropIndex drop index
+//func (c *Core) DropIndex(ctx context.Context, in *milvuspb.DropIndexRequest) (*commonpb.Status, error) {
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("DropIndex", metrics.TotalLabel).Inc()
+//	if code, ok := c.checkHealthy(); !ok {
+//		return failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]), nil
+//	}
+//	tr := timerecord.NewTimeRecorder("DropIndex")
+//	log.Debug("DropIndex", zap.String("role", typeutil.RootCoordRole),
+//		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//		zap.String("index name", in.IndexName), zap.Int64("msgID", in.Base.MsgID))
+//	t := &DropIndexReqTask{
+//		baseReqTask: baseReqTask{
+//			ctx:  ctx,
+//			core: c,
+//		},
+//		Req: in,
+//	}
+//	c.scheduler.AddTask(t)
+//	err := t.WaitToFinish()
+//	if err != nil {
+//		log.Error("DropIndex failed", zap.String("role", typeutil.RootCoordRole),
+//			zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//			zap.String("index name", in.IndexName), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
+//		metrics.RootCoordDDLReqCounter.WithLabelValues("DropIndex", metrics.FailLabel).Inc()
+//		return failStatus(commonpb.ErrorCode_UnexpectedError, "DropIndex failed: "+err.Error()), nil
+//	}
+//	log.Debug("DropIndex success", zap.String("role", typeutil.RootCoordRole),
+//		zap.String("collection name", in.CollectionName), zap.String("field name", in.FieldName),
+//		zap.String("index name", in.IndexName), zap.Int64("msgID", in.Base.MsgID))
+//
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("DropIndex", metrics.SuccessLabel).Inc()
+//	metrics.RootCoordDDLReqLatency.WithLabelValues("DropIndex").Observe(float64(tr.ElapseSpan().Milliseconds()))
+//	return succStatus(), nil
+//}
+//
+//// DescribeSegment return segment info
+//func (c *Core) DescribeSegment(ctx context.Context, in *milvuspb.DescribeSegmentRequest) (*milvuspb.DescribeSegmentResponse, error) {
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegment", metrics.TotalLabel).Inc()
+//	if code, ok := c.checkHealthy(); !ok {
+//		return &milvuspb.DescribeSegmentResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
+//		}, nil
+//	}
+//	tr := timerecord.NewTimeRecorder("DescribeSegment")
+//	log.Debug("DescribeSegment", zap.String("role", typeutil.RootCoordRole),
+//		zap.Int64("collection id", in.CollectionID), zap.Int64("segment id", in.SegmentID),
+//		zap.Int64("msgID", in.Base.MsgID))
+//	t := &DescribeSegmentReqTask{
+//		baseReqTask: baseReqTask{
+//			ctx:  ctx,
+//			core: c,
+//		},
+//		Req: in,
+//		Rsp: &milvuspb.DescribeSegmentResponse{},
+//	}
+//	c.scheduler.AddTask(t)
+//	err := t.WaitToFinish()
+//	if err != nil {
+//		log.Error("DescribeSegment failed", zap.String("role", typeutil.RootCoordRole),
+//			zap.Int64("collection id", in.CollectionID), zap.Int64("segment id", in.SegmentID),
+//			zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
+//		metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegment", metrics.FailLabel).Inc()
+//		return &milvuspb.DescribeSegmentResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "DescribeSegment failed: "+err.Error()),
+//		}, nil
+//	}
+//	log.Debug("DescribeSegment success", zap.String("role", typeutil.RootCoordRole),
+//		zap.Int64("collection id", in.CollectionID), zap.Int64("segment id", in.SegmentID),
+//		zap.Int64("msgID", in.Base.MsgID))
+//
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegment", metrics.SuccessLabel).Inc()
+//	metrics.RootCoordDDLReqLatency.WithLabelValues("DescribeSegment").Observe(float64(tr.ElapseSpan().Milliseconds()))
+//	t.Rsp.Status = succStatus()
+//	return t.Rsp, nil
+//}
+//
+//func (c *Core) DescribeSegments(ctx context.Context, in *rootcoordpb.DescribeSegmentsRequest) (*rootcoordpb.DescribeSegmentsResponse, error) {
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegments", metrics.TotalLabel).Inc()
+//	if code, ok := c.checkHealthy(); !ok {
+//		log.Error("failed to describe segments, rootcoord not healthy",
+//			zap.String("role", typeutil.RootCoordRole),
+//			zap.Int64("msgID", in.GetBase().GetMsgID()),
+//			zap.Int64("collection", in.GetCollectionID()),
+//			zap.Int64s("segments", in.GetSegmentIDs()))
+//
+//		return &rootcoordpb.DescribeSegmentsResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
+//		}, nil
+//	}
+//
+//	tr := timerecord.NewTimeRecorder("DescribeSegments")
+//
+//	log.Debug("received request to describe segments",
+//		zap.String("role", typeutil.RootCoordRole),
+//		zap.Int64("msgID", in.GetBase().GetMsgID()),
+//		zap.Int64("collection", in.GetCollectionID()),
+//		zap.Int64s("segments", in.GetSegmentIDs()))
+//
+//	t := &DescribeSegmentsReqTask{
+//		baseReqTask: baseReqTask{
+//			ctx:  ctx,
+//			core: c,
+//		},
+//		Req: in,
+//		Rsp: &rootcoordpb.DescribeSegmentsResponse{},
+//	}
+//
+//	if c.scheduler.AddTask(t)
+//	err := t.WaitToFinish(); err != nil {
+//		log.Error("failed to describe segments",
+//			zap.Error(err),
+//			zap.String("role", typeutil.RootCoordRole),
+//			zap.Int64("msgID", in.GetBase().GetMsgID()),
+//			zap.Int64("collection", in.GetCollectionID()),
+//			zap.Int64s("segments", in.GetSegmentIDs()))
+//
+//		metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegments", metrics.FailLabel).Inc()
+//		return &rootcoordpb.DescribeSegmentsResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "DescribeSegments failed: "+err.Error()),
+//		}, nil
+//	}
+//
+//	log.Debug("succeed to describe segments",
+//		zap.String("role", typeutil.RootCoordRole),
+//		zap.Int64("msgID", in.GetBase().GetMsgID()),
+//		zap.Int64("collection", in.GetCollectionID()),
+//		zap.Int64s("segments", in.GetSegmentIDs()))
+//
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeSegments", metrics.SuccessLabel).Inc()
+//	metrics.RootCoordDDLReqLatency.WithLabelValues("DescribeSegments").Observe(float64(tr.ElapseSpan().Milliseconds()))
+//
+//	t.Rsp.Status = succStatus()
+//	return t.Rsp, nil
+//}
+//
+//// ShowSegments list all segments
+//func (c *Core) ShowSegments(ctx context.Context, in *milvuspb.ShowSegmentsRequest) (*milvuspb.ShowSegmentsResponse, error) {
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("ShowSegments", metrics.TotalLabel).Inc()
+//	if code, ok := c.checkHealthy(); !ok {
+//		return &milvuspb.ShowSegmentsResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]),
+//		}, nil
+//	}
+//	tr := timerecord.NewTimeRecorder("ShowSegments")
+//
+//	log.Debug("ShowSegments", zap.String("role", typeutil.RootCoordRole),
+//		zap.Int64("collection id", in.CollectionID), zap.Int64("partition id", in.PartitionID),
+//		zap.Int64("msgID", in.Base.MsgID))
+//	t := &ShowSegmentReqTask{
+//		baseReqTask: baseReqTask{
+//			ctx:  ctx,
+//			core: c,
+//			done: make(chan error, 1),
+//		},
+//		Req: in,
+//		Rsp: &milvuspb.ShowSegmentsResponse{},
+//	}
+//	c.scheduler.AddTask(t)
+//	err := t.WaitToFinish()
+//	if err != nil {
+//		log.Debug("ShowSegments failed", zap.String("role", typeutil.RootCoordRole),
+//			zap.Int64("collection id", in.CollectionID), zap.Int64("partition id", in.PartitionID),
+//			zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
+//		metrics.RootCoordDDLReqCounter.WithLabelValues("ShowSegments", metrics.FailLabel).Inc()
+//		return &milvuspb.ShowSegmentsResponse{
+//			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "ShowSegments failed: "+err.Error()),
+//		}, nil
+//	}
+//	log.Debug("ShowSegments success", zap.String("role", typeutil.RootCoordRole),
+//		zap.Int64("collection id", in.CollectionID), zap.Int64("partition id", in.PartitionID),
+//		zap.Int64s("segments ids", t.Rsp.SegmentIDs),
+//		zap.Int64("msgID", in.Base.MsgID))
+//
+//	metrics.RootCoordDDLReqCounter.WithLabelValues("ShowSegments", metrics.SuccessLabel).Inc()
+//	metrics.RootCoordDDLReqLatency.WithLabelValues("ShowSegments").Observe(float64(tr.ElapseSpan().Milliseconds()))
+//	t.Rsp.Status = succStatus()
+//	return t.Rsp, nil
+//}
 
 // AllocTimestamp alloc timestamp
 func (c *Core) AllocTimestamp(ctx context.Context, in *rootcoordpb.AllocTimestampRequest) (*rootcoordpb.AllocTimestampResponse, error) {
@@ -2243,43 +2240,43 @@ func (c *Core) InvalidateCollectionMetaCache(ctx context.Context, in *proxypb.In
 
 // SegmentFlushCompleted check whether segment flush has completed
 func (c *Core) SegmentFlushCompleted(ctx context.Context, in *datapb.SegmentFlushCompletedMsg) (status *commonpb.Status, err error) {
-	if code, ok := c.checkHealthy(); !ok {
-		return failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]), nil
-	}
-	if in.Base.MsgType != commonpb.MsgType_SegmentFlushDone {
-		return failStatus(commonpb.ErrorCode_UnexpectedError, "invalid msg type "+commonpb.MsgType_name[int32(in.Base.MsgType)]), nil
-	}
-
-	log.Info("SegmentFlushCompleted received", zap.Int64("msgID", in.Base.MsgID), zap.Int64("collID", in.Segment.CollectionID),
-		zap.Int64("partID", in.Segment.PartitionID), zap.Int64("segID", in.Segment.ID), zap.Int64s("compactFrom", in.Segment.CompactionFrom))
-
-	err = c.createIndexForSegment(ctx, in.Segment.CollectionID, in.Segment.PartitionID, in.Segment.ID, in.Segment.NumOfRows, in.Segment.Binlogs)
-	if err != nil {
-		log.Error("createIndexForSegment", zap.Int64("msgID", in.Base.MsgID), zap.Int64("collID", in.Segment.CollectionID),
-			zap.Int64("partID", in.Segment.PartitionID), zap.Int64("segID", in.Segment.ID), zap.Error(err))
-		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
-	}
-
-	buildIDs := c.MetaTable.GetBuildIDsBySegIDs(in.Segment.CompactionFrom)
-	if len(buildIDs) != 0 {
-		if err = c.CallRemoveIndexService(ctx, buildIDs); err != nil {
-			log.Error("CallRemoveIndexService failed", zap.Int64("msgID", in.Base.MsgID), zap.Int64("collID", in.Segment.CollectionID),
-				zap.Int64("partID", in.Segment.PartitionID), zap.Int64("segID", in.Segment.ID),
-				zap.Int64s("compactFrom", in.Segment.CompactionFrom), zap.Int64s("buildIDs", buildIDs), zap.Error(err))
-			return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
-		}
-	}
-
-	if err = c.MetaTable.RemoveSegments(in.Segment.CollectionID, in.Segment.PartitionID, in.Segment.CompactionFrom); err != nil {
-		log.Error("RemoveSegments failed", zap.Int64("msgID", in.Base.MsgID), zap.Int64("collID", in.Segment.CollectionID),
-			zap.Int64("partID", in.Segment.PartitionID), zap.Int64("segID", in.Segment.ID),
-			zap.Int64s("compactFrom", in.Segment.CompactionFrom), zap.Error(err))
-		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
-	}
-
-	log.Debug("SegmentFlushCompleted success", zap.String("role", typeutil.RootCoordRole),
-		zap.Int64("collection id", in.Segment.CollectionID), zap.Int64("partition id", in.Segment.PartitionID),
-		zap.Int64("segment id", in.Segment.ID), zap.Int64("msgID", in.Base.MsgID))
+	//if code, ok := c.checkHealthy(); !ok {
+	//	return failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]), nil
+	//}
+	//if in.Base.MsgType != commonpb.MsgType_SegmentFlushDone {
+	//	return failStatus(commonpb.ErrorCode_UnexpectedError, "invalid msg type "+commonpb.MsgType_name[int32(in.Base.MsgType)]), nil
+	//}
+	//
+	//log.Info("SegmentFlushCompleted received", zap.Int64("msgID", in.Base.MsgID), zap.Int64("collID", in.Segment.CollectionID),
+	//	zap.Int64("partID", in.Segment.PartitionID), zap.Int64("segID", in.Segment.ID), zap.Int64s("compactFrom", in.Segment.CompactionFrom))
+	//
+	//err = c.createIndexForSegment(ctx, in.Segment.CollectionID, in.Segment.PartitionID, in.Segment.ID, in.Segment.NumOfRows, in.Segment.Binlogs)
+	//if err != nil {
+	//	log.Error("createIndexForSegment", zap.Int64("msgID", in.Base.MsgID), zap.Int64("collID", in.Segment.CollectionID),
+	//		zap.Int64("partID", in.Segment.PartitionID), zap.Int64("segID", in.Segment.ID), zap.Error(err))
+	//	return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	//}
+	//
+	//buildIDs := c.MetaTable.GetBuildIDsBySegIDs(in.Segment.CompactionFrom)
+	//if len(buildIDs) != 0 {
+	//	if err = c.CallRemoveIndexService(ctx, buildIDs); err != nil {
+	//		log.Error("CallRemoveIndexService failed", zap.Int64("msgID", in.Base.MsgID), zap.Int64("collID", in.Segment.CollectionID),
+	//			zap.Int64("partID", in.Segment.PartitionID), zap.Int64("segID", in.Segment.ID),
+	//			zap.Int64s("compactFrom", in.Segment.CompactionFrom), zap.Int64s("buildIDs", buildIDs), zap.Error(err))
+	//		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	//	}
+	//}
+	//
+	//if err = c.MetaTable.RemoveSegments(in.Segment.CollectionID, in.Segment.PartitionID, in.Segment.CompactionFrom); err != nil {
+	//	log.Error("RemoveSegments failed", zap.Int64("msgID", in.Base.MsgID), zap.Int64("collID", in.Segment.CollectionID),
+	//		zap.Int64("partID", in.Segment.PartitionID), zap.Int64("segID", in.Segment.ID),
+	//		zap.Int64s("compactFrom", in.Segment.CompactionFrom), zap.Error(err))
+	//	return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	//}
+	//
+	//log.Debug("SegmentFlushCompleted success", zap.String("role", typeutil.RootCoordRole),
+	//	zap.Int64("collection id", in.Segment.CollectionID), zap.Int64("partition id", in.Segment.PartitionID),
+	//	zap.Int64("segment id", in.Segment.ID), zap.Int64("msgID", in.Base.MsgID))
 	return succStatus(), nil
 }
 
@@ -2348,13 +2345,11 @@ func (c *Core) CreateAlias(ctx context.Context, in *milvuspb.CreateAliasRequest)
 		zap.String("alias", in.Alias), zap.String("collection name", in.CollectionName),
 		zap.Int64("msgID", in.Base.MsgID))
 	t := &CreateAliasReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
+		baseReqTask: newBaseReqTask(ctx, c),
+		Req:         in,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("CreateAlias failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("alias", in.Alias), zap.String("collection name", in.CollectionName),
@@ -2381,13 +2376,11 @@ func (c *Core) DropAlias(ctx context.Context, in *milvuspb.DropAliasRequest) (*c
 	log.Debug("DropAlias", zap.String("role", typeutil.RootCoordRole),
 		zap.String("alias", in.Alias), zap.Int64("msgID", in.Base.MsgID))
 	t := &DropAliasReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
+		baseReqTask: newBaseReqTask(ctx, c),
+		Req:         in,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("DropAlias failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("alias", in.Alias), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
@@ -2413,13 +2406,11 @@ func (c *Core) AlterAlias(ctx context.Context, in *milvuspb.AlterAliasRequest) (
 		zap.String("alias", in.Alias), zap.String("collection name", in.CollectionName),
 		zap.Int64("msgID", in.Base.MsgID))
 	t := &AlterAliasReqTask{
-		baseReqTask: baseReqTask{
-			ctx:  ctx,
-			core: c,
-		},
-		Req: in,
+		baseReqTask: newBaseReqTask(ctx, c),
+		Req:         in,
 	}
-	err := executeTask(t)
+	c.scheduler.AddTask(t)
+	err := t.WaitToFinish()
 	if err != nil {
 		log.Error("AlterAlias failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("alias", in.Alias), zap.String("collection name", in.CollectionName),
@@ -2608,105 +2599,106 @@ func (c *Core) ReportImport(ctx context.Context, ir *rootcoordpb.ImportResult) (
 // is needed).
 func (c *Core) CountCompleteIndex(ctx context.Context, collectionName string, collectionID UniqueID,
 	allSegmentIDs []UniqueID) (bool, error) {
-	// Note: Index name is always Params.CommonCfg.DefaultIndexName in current Milvus designs as of today.
-	indexName := Params.CommonCfg.DefaultIndexName
-
-	// Retrieve index status and detailed index information.
-	describeIndexReq := &milvuspb.DescribeIndexRequest{
-		Base: &commonpb.MsgBase{
-			MsgType: commonpb.MsgType_DescribeIndex,
-		},
-		CollectionName: collectionName,
-		IndexName:      indexName,
-	}
-	indexDescriptionResp, err := c.DescribeIndex(ctx, describeIndexReq)
-	if err != nil {
-		return false, err
-	}
-	if len(indexDescriptionResp.GetIndexDescriptions()) == 0 {
-		log.Info("no index needed for collection, consider indexing done",
-			zap.Int64("collection ID", collectionID))
-		return true, nil
-	}
-	log.Debug("got index description",
-		zap.Any("index description", indexDescriptionResp))
-
-	// Check if the target index name exists.
-	matchIndexID := int64(-1)
-	foundIndexID := false
-	for _, desc := range indexDescriptionResp.GetIndexDescriptions() {
-		if desc.GetIndexName() == indexName {
-			matchIndexID = desc.GetIndexID()
-			foundIndexID = true
-			break
-		}
-	}
-	if !foundIndexID {
-		return false, fmt.Errorf("no index is created")
-	}
-	log.Debug("found match index ID",
-		zap.Int64("match index ID", matchIndexID))
-
-	getIndexStatesRequest := &indexpb.GetIndexStatesRequest{
-		IndexBuildIDs: make([]UniqueID, 0),
-	}
-
-	// Fetch index build IDs from segments.
-	var seg2Check []UniqueID
-	for _, segmentID := range allSegmentIDs {
-		describeSegmentRequest := &milvuspb.DescribeSegmentRequest{
-			Base: &commonpb.MsgBase{
-				MsgType: commonpb.MsgType_DescribeSegment,
-			},
-			CollectionID: collectionID,
-			SegmentID:    segmentID,
-		}
-		segmentDesc, _ := c.DescribeSegment(ctx, describeSegmentRequest)
-		if segmentDesc.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-			// Describe failed, since the segment could get compacted, simply log and ignore the error.
-			log.Error("failed to describe segment",
-				zap.Int64("collection ID", collectionID),
-				zap.Int64("segment ID", segmentID),
-				zap.String("error", segmentDesc.GetStatus().GetReason()))
-		}
-		if segmentDesc.GetIndexID() == matchIndexID {
-			if segmentDesc.GetEnableIndex() {
-				seg2Check = append(seg2Check, segmentID)
-				getIndexStatesRequest.IndexBuildIDs = append(getIndexStatesRequest.GetIndexBuildIDs(), segmentDesc.GetBuildID())
-			}
-		}
-	}
-	if len(getIndexStatesRequest.GetIndexBuildIDs()) == 0 {
-		log.Info("none index build IDs returned, perhaps no index is needed",
-			zap.String("collection name", collectionName),
-			zap.Int64("collection ID", collectionID))
-		return true, nil
-	}
-
-	log.Debug("working on GetIndexState",
-		zap.Int("# of IndexBuildIDs", len(getIndexStatesRequest.GetIndexBuildIDs())))
-
-	states, err := c.CallGetIndexStatesService(ctx, getIndexStatesRequest.GetIndexBuildIDs())
-	if err != nil {
-		log.Error("failed to get index state in checkSegmentIndexStates", zap.Error(err))
-		return false, err
-	}
-
-	// Count the # of segments with finished index.
-	ct := 0
-	for _, s := range states {
-		if s.State == commonpb.IndexState_Finished {
-			ct++
-		}
-	}
-	log.Info("segment indexing state checked",
-		zap.Int64s("segments checked", seg2Check),
-		zap.Int("# of checked segment", len(seg2Check)),
-		zap.Int("# of segments with complete index", ct),
-		zap.String("collection name", collectionName),
-		zap.Int64("collection ID", collectionID),
-	)
-	return len(seg2Check) == ct, nil
+	//// Note: Index name is always Params.CommonCfg.DefaultIndexName in current Milvus designs as of today.
+	//indexName := Params.CommonCfg.DefaultIndexName
+	//
+	//// Retrieve index status and detailed index information.
+	//describeIndexReq := &milvuspb.DescribeIndexRequest{
+	//	Base: &commonpb.MsgBase{
+	//		MsgType: commonpb.MsgType_DescribeIndex,
+	//	},
+	//	CollectionName: collectionName,
+	//	IndexName:      indexName,
+	//}
+	//indexDescriptionResp, err := c.DescribeIndex(ctx, describeIndexReq)
+	//if err != nil {
+	//	return false, err
+	//}
+	//if len(indexDescriptionResp.GetIndexDescriptions()) == 0 {
+	//	log.Info("no index needed for collection, consider indexing done",
+	//		zap.Int64("collection ID", collectionID))
+	//	return true, nil
+	//}
+	//log.Debug("got index description",
+	//	zap.Any("index description", indexDescriptionResp))
+	//
+	//// Check if the target index name exists.
+	//matchIndexID := int64(-1)
+	//foundIndexID := false
+	//for _, desc := range indexDescriptionResp.GetIndexDescriptions() {
+	//	if desc.GetIndexName() == indexName {
+	//		matchIndexID = desc.GetIndexID()
+	//		foundIndexID = true
+	//		break
+	//	}
+	//}
+	//if !foundIndexID {
+	//	return false, fmt.Errorf("no index is created")
+	//}
+	//log.Debug("found match index ID",
+	//	zap.Int64("match index ID", matchIndexID))
+	//
+	//getIndexStatesRequest := &indexpb.GetIndexStatesRequest{
+	//	IndexBuildIDs: make([]UniqueID, 0),
+	//}
+	//
+	//// Fetch index build IDs from segments.
+	//var seg2Check []UniqueID
+	//for _, segmentID := range allSegmentIDs {
+	//	describeSegmentRequest := &milvuspb.DescribeSegmentRequest{
+	//		Base: &commonpb.MsgBase{
+	//			MsgType: commonpb.MsgType_DescribeSegment,
+	//		},
+	//		CollectionID: collectionID,
+	//		SegmentID:    segmentID,
+	//	}
+	//	segmentDesc, _ := c.DescribeSegment(ctx, describeSegmentRequest)
+	//	if segmentDesc.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+	//		// Describe failed, since the segment could get compacted, simply log and ignore the error.
+	//		log.Error("failed to describe segment",
+	//			zap.Int64("collection ID", collectionID),
+	//			zap.Int64("segment ID", segmentID),
+	//			zap.String("error", segmentDesc.GetStatus().GetReason()))
+	//	}
+	//	if segmentDesc.GetIndexID() == matchIndexID {
+	//		if segmentDesc.GetEnableIndex() {
+	//			seg2Check = append(seg2Check, segmentID)
+	//			getIndexStatesRequest.IndexBuildIDs = append(getIndexStatesRequest.GetIndexBuildIDs(), segmentDesc.GetBuildID())
+	//		}
+	//	}
+	//}
+	//if len(getIndexStatesRequest.GetIndexBuildIDs()) == 0 {
+	//	log.Info("none index build IDs returned, perhaps no index is needed",
+	//		zap.String("collection name", collectionName),
+	//		zap.Int64("collection ID", collectionID))
+	//	return true, nil
+	//}
+	//
+	//log.Debug("working on GetIndexState",
+	//	zap.Int("# of IndexBuildIDs", len(getIndexStatesRequest.GetIndexBuildIDs())))
+	//
+	//states, err := c.CallGetIndexStatesService(ctx, getIndexStatesRequest.GetIndexBuildIDs())
+	//if err != nil {
+	//	log.Error("failed to get index state in checkSegmentIndexStates", zap.Error(err))
+	//	return false, err
+	//}
+	//
+	//// Count the # of segments with finished index.
+	//ct := 0
+	//for _, s := range states {
+	//	if s.State == commonpb.IndexState_Finished {
+	//		ct++
+	//	}
+	//}
+	//log.Info("segment indexing state checked",
+	//	zap.Int64s("segments checked", seg2Check),
+	//	zap.Int("# of checked segment", len(seg2Check)),
+	//	zap.Int("# of segments with complete index", ct),
+	//	zap.String("collection name", collectionName),
+	//	zap.Int64("collection ID", collectionID),
+	//)
+	//return len(seg2Check) == ct, nil
+	return true, nil
 }
 
 func (c *Core) postImportPersistLoop(ctx context.Context, taskID int64, colID int64, colName string, segIDs []UniqueID) {
@@ -2714,12 +2706,12 @@ func (c *Core) postImportPersistLoop(ctx context.Context, taskID int64, colID in
 	c.wg.Add(1)
 	go c.checkSegmentLoadedLoop(ctx, taskID, colID, segIDs)
 	// Check if collection has any indexed fields. If so, start a loop to check segments' index states.
-	if colMeta, err := c.MetaTable.GetCollectionByID(colID, 0); err != nil {
+	if _, err := c.MetaTable.GetCollectionByID(colID, 0); err != nil {
 		log.Error("failed to find meta for collection",
 			zap.Int64("collection ID", colID),
 			zap.Error(err))
-	} else if len(colMeta.FieldIDToIndexID) == 0 {
-		log.Info("no index field found for collection", zap.Int64("collection ID", colID))
+		//} else if len(colMeta.FieldIDToIndexID) == 0 {
+		//	log.Info("no index field found for collection", zap.Int64("collection ID", colID))
 	} else {
 		log.Info("start checking index state", zap.Int64("collection ID", colID))
 		c.wg.Add(1)
