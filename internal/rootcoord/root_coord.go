@@ -72,6 +72,9 @@ import (
 // UniqueID is an alias of typeutil.UniqueID.
 type UniqueID = typeutil.UniqueID
 
+// Timestamp is an alias of typeutil.Timestamp
+type Timestamp = typeutil.Timestamp
+
 const InvalidCollectionID = UniqueID(0)
 
 // ------------------ struct -----------------------
