@@ -9,7 +9,6 @@ import (
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
-	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"go.uber.org/zap"
 )
 
@@ -20,7 +19,7 @@ type stepLogger struct {
 	writeFunc func(data []byte) error
 }
 
-func UnmarshalTaskInfo(info *rootcoordpb.TaskInfo, c *Core) (*stepLogger, error) {
+func UnmarshalTaskInfo(info *rootcoordpb.TaskInfo, c *RootCoord) (*stepLogger, error) {
 	logs := &stepLogger{
 		info: *info,
 	}
@@ -100,7 +99,7 @@ type Step interface {
 }
 
 type baseStep struct {
-	core *Core
+	core *RootCoord
 }
 
 func UnmarshalStep(base baseStep, step *rootcoordpb.Step) (Step, error) {
@@ -250,17 +249,6 @@ func (s *RemoveChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *RemoveChannelStep) Execute(ctx context.Context) (err error) {
-	// remove dml channel after send dd msg
-	s.core.chanTimeTick.removeDmlChannels(s.Pchannels...)
-
-	// remove delta channels
-	deltaChanNames := make([]string, len(s.Pchannels))
-	for i, chanName := range s.Pchannels {
-		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
-			return err
-		}
-	}
-	s.core.chanTimeTick.removeDeltaChannels(deltaChanNames...)
 	return nil
 }
 
@@ -295,12 +283,6 @@ func (s *RemoveIndexStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *RemoveIndexStep) Execute(ctx context.Context) error {
-	for _, index := range s.IndexId {
-		if err := s.core.CallDropIndexService(s.core.ctx, index); err != nil {
-			log.Error("DropCollection CallDropIndexService fail", zap.Int64("indexID", index), zap.Error(err))
-			return err
-		}
-	}
 	return nil
 }
 
@@ -318,7 +300,7 @@ func (s *ReleaseCollectionStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *ReleaseCollectionStep) Execute(ctx context.Context) error {
-	return s.core.CallReleaseCollectionService(s.core.ctx, s.Timestamp, s.DbId, s.CollectionId)
+	return nil
 }
 
 type DeleteCollectionDataStep struct {
@@ -335,7 +317,7 @@ func (s *DeleteCollectionDataStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeleteCollectionDataStep) Execute(ctx context.Context) error {
-	return s.core.SendDdDropCollectionReq(ctx, s.Request, s.Pchannels)
+	return nil
 }
 
 type AddCollectionMetaStep struct {
@@ -388,15 +370,6 @@ func (s *CreateChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *CreateChannelStep) Execute(ctx context.Context) (err error) {
-	s.core.chanTimeTick.addDmlChannels(s.Pchannels...)
-
-	deltaChanNames := make([]string, len(s.Pchannels))
-	for i, chanName := range s.Pchannels {
-		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
-			return err
-		}
-	}
-	s.core.chanTimeTick.addDeltaChannels(deltaChanNames...)
 	return nil
 }
 
@@ -414,7 +387,7 @@ func (s *WatchChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *WatchChannelStep) Execute(ctx context.Context) error {
-	return s.core.CallWatchChannels(ctx, s.CollectionId, s.Vchannels)
+	return nil
 }
 
 type DeletePartitionMetaStep struct {
@@ -465,7 +438,7 @@ func (s *ReleasePartitionStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *ReleasePartitionStep) Execute(ctx context.Context) error {
-	return s.core.CallReleasePartitionService(s.core.ctx, s.Timestamp, s.DbId, s.CollectionId, []int64{s.PartitionId})
+	return nil
 }
 
 type DeletePartitionDataStep struct {
@@ -482,7 +455,7 @@ func (s *DeletePartitionDataStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeletePartitionDataStep) Execute(ctx context.Context) error {
-	return s.core.SendDdDropPartitionReq(ctx, s.Request, s.Pchannels)
+	return nil
 }
 
 type AddPartitionMetaStep struct {
@@ -533,7 +506,7 @@ func (s *ExpireCollectionCacheStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *ExpireCollectionCacheStep) Execute(ctx context.Context) error {
-	return s.core.ExpireMetaCache(ctx, s.CollectionNames, s.CollectionId, s.Timestamp)
+	return nil
 }
 
 type NullStep struct {
