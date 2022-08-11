@@ -31,8 +31,10 @@ import (
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 )
 
+type proxyCreator func(sess *sessionutil.Session) (types.Proxy, error)
+
 type proxyClientManager struct {
-	core        *Core
+	creator     proxyCreator
 	lock        sync.RWMutex
 	proxyClient map[int64]types.Proxy
 	helper      proxyClientManagerHelper
@@ -46,9 +48,9 @@ var defaultClientManagerHelper = proxyClientManagerHelper{
 	afterConnect: func() {},
 }
 
-func newProxyClientManager(c *Core) *proxyClientManager {
+func newProxyClientManager(creator proxyCreator) *proxyClientManager {
 	return &proxyClientManager{
-		core:        c,
+		creator:     creator,
 		proxyClient: make(map[int64]types.Proxy),
 		helper:      defaultClientManagerHelper,
 	}
@@ -72,7 +74,7 @@ func (p *proxyClientManager) AddProxyClient(session *sessionutil.Session) {
 }
 
 func (p *proxyClientManager) connect(session *sessionutil.Session) {
-	pc, err := p.core.NewProxyClient(session)
+	pc, err := p.creator(session)
 	if err != nil {
 		log.Warn("failed to create proxy client", zap.String("address", session.Address), zap.Int64("serverID", session.ServerID), zap.Error(err))
 		return

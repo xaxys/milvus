@@ -21,6 +21,8 @@ type IMetaTableV2 interface {
 	AddCollection(ctx context.Context, coll *model.Collection) error
 	GetCollectionByName(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error)
 	DeleteCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error
+	EnableCollection(ctx context.Context, collectionID UniqueID) error
+	DisableCollection(ctx context.Context, collectionID UniqueID) error
 	IsAlias(name string) bool
 }
 
@@ -36,7 +38,26 @@ type MetaTableV2 struct {
 	ddLock sync.RWMutex
 }
 
+func newMetaTableV2(ctx context.Context, txn kv.TxnKV, snapshot kv.SnapShotKV) (*MetaTableV2, error) {
+	return &MetaTableV2{
+		txn:          txn,
+		snapshot:     snapshot,
+		catalog:      &kvmetestore.Catalog{Txn: txn, Snapshot: snapshot},
+		collID2Meta:  make(map[UniqueID]model.Collection),
+		collName2ID:  make(map[string]UniqueID),
+		collAlias2ID: make(map[string]UniqueID),
+	}, nil
+}
+
 func (m *MetaTableV2) AddCollection(ctx context.Context, coll *model.Collection) error {
+	return nil
+}
+
+func (m *MetaTableV2) EnableCollection(ctx context.Context, collectionID UniqueID) error {
+	return nil
+}
+
+func (m *MetaTableV2) DisableCollection(ctx context.Context, collectionID UniqueID) error {
 	return nil
 }
 

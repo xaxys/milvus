@@ -1218,7 +1218,7 @@ func (c *Core) Init() error {
 		chanMap := c.MetaTable.ListCollectionPhysicalChannels()
 		c.chanTimeTick = newTimeTickSync(c.ctx, c.session.ServerID, c.factory, chanMap)
 		c.chanTimeTick.addSession(c.session)
-		c.proxyClientManager = newProxyClientManager(c)
+		c.proxyClientManager = newProxyClientManager(c.NewProxyClient)
 
 		log.Debug("RootCoord, set proxy manager")
 		c.proxyManager = newProxyManager(

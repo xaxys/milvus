@@ -26,6 +26,19 @@ type scheduler struct {
 	wg       sync.WaitGroup
 }
 
+func newScheduler(ctx context.Context, idAllocator allocator.GIDAllocator, tsoAllocator tso.Allocator) *scheduler {
+	ctx1, cancel := context.WithCancel(ctx)
+	// TODO
+	n := 1024 * 10
+	return &scheduler{
+		ctx:          ctx1,
+		cancel:       cancel,
+		idAllocator:  idAllocator,
+		tsoAllocator: tsoAllocator,
+		taskChan:     make(chan taskV2, n),
+	}
+}
+
 func (s *scheduler) Start() {
 	s.wg.Add(1)
 	go s.taskLoop()

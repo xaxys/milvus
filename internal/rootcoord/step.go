@@ -2,8 +2,11 @@ package rootcoord
 
 import (
 	"context"
-	"errors"
 	"fmt"
+
+	"github.com/milvus-io/milvus/internal/util/funcutil"
+
+	"github.com/milvus-io/milvus/internal/util/typeutil"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/log"
@@ -215,7 +218,7 @@ func (s *DeleteCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeleteCollectionMetaStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.meta.DeleteCollection(ctx, s.GetCollectionId(), typeutil.MaxTimestamp)
 }
 
 type DisableCollectionMetaStep struct {
@@ -249,6 +252,17 @@ func (s *RemoveChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *RemoveChannelStep) Execute(ctx context.Context) (err error) {
+	// remove dml channel after send dd msg
+	s.core.chanTimeTick.removeDmlChannels(s.Pchannels...)
+
+	// remove delta channels
+	deltaChanNames := make([]string, len(s.Pchannels))
+	for i, chanName := range s.Pchannels {
+		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
+			return err
+		}
+	}
+	s.core.chanTimeTick.removeDeltaChannels(deltaChanNames...)
 	return nil
 }
 
@@ -266,7 +280,7 @@ func (s *UnwatchChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *UnwatchChannelStep) Execute(ctx context.Context) error {
-	return errors.New("not implemented")
+	return s.core.unwatchChannels(ctx, s.GetCollectionId(), s.GetVchannels())
 }
 
 type RemoveIndexStep struct {
@@ -336,7 +350,7 @@ func (s *AddCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *AddCollectionMetaStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.meta.AddCollection(ctx, s.coll)
 }
 
 type EnableCollectionMetaStep struct {
@@ -353,7 +367,7 @@ func (s *EnableCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *EnableCollectionMetaStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.meta.EnableCollection(ctx, s.GetCollectionId())
 }
 
 type CreateChannelStep struct {
@@ -370,6 +384,15 @@ func (s *CreateChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *CreateChannelStep) Execute(ctx context.Context) (err error) {
+	s.core.chanTimeTick.addDmlChannels(s.Pchannels...)
+
+	deltaChanNames := make([]string, len(s.Pchannels))
+	for i, chanName := range s.Pchannels {
+		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
+			return err
+		}
+	}
+	s.core.chanTimeTick.addDeltaChannels(deltaChanNames...)
 	return nil
 }
 
@@ -387,7 +410,7 @@ func (s *WatchChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *WatchChannelStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.watchChannels(ctx, s.GetCollectionId(), s.GetVchannels())
 }
 
 type DeletePartitionMetaStep struct {
@@ -421,7 +444,7 @@ func (s *DisablePartitionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DisablePartitionMetaStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.meta.DisableCollection(ctx, s.GetCollectionId())
 }
 
 type ReleasePartitionStep struct {

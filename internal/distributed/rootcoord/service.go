@@ -105,7 +105,7 @@ func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error)
 	}
 	s.setClient()
 	var err error
-	s.rootCoord, err = rootcoord.NewCore(s.ctx, factory)
+	s.rootCoord, err = rootcoord.NewRootCoord(s.ctx, factory)
 	if err != nil {
 		return nil, err
 	}
