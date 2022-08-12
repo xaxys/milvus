@@ -239,7 +239,9 @@ message Step {
     AddPartitionMetaStep add_part_meta_step = 17;
     EnablePartitionMetaStep enable_part_meta_step = 18;
     ExpireCollectionCacheStep expire_coll_cache_step = 19;
-    NullStep null_step = 20;
+    AddFieldsMetaStep add_fields_meta_step = 20;
+    RemoveFieldsMetaStep remove_fields_meta_step = 21;
+    NullStep null_step = 100;
   };
 }
 
@@ -252,6 +254,7 @@ message DeleteCollectionMetaStep {
 message DisableCollectionMetaStep {
   int64 db_id = 1;
   int64 collection_id = 2;
+  uint64 timestamp = 3;
 }
 
 message RemoveChannelStep {
@@ -287,6 +290,7 @@ message AddCollectionMetaStep {
 message EnableCollectionMetaStep {
   int64 db_id = 1;
   int64 collection_id = 2;
+  uint64 timestamp = 3;
 }
 
 message CreateChannelStep {
@@ -309,6 +313,7 @@ message DisablePartitionMetaStep {
   int64 db_id = 1;
   int64 collection_id = 2;
   int64 partition_id = 3;
+  uint64 timestamp = 4;
 }
 
 message ReleasePartitionStep {
@@ -337,12 +342,27 @@ message EnablePartitionMetaStep {
   int64 db_id = 1;
   int64 collection_id = 2;
   int64 partition_id = 3;
+  uint64 timestamp = 4;
 }
 
 message ExpireCollectionCacheStep {
   int64 db_id = 1;
   int64 collection_id = 2;
   repeated string collection_names = 3;
+  uint64 timestamp = 4;
+}
+
+message AddFieldsMetaStep {
+  int64 db_id = 1;
+  int64 collection_id = 2;
+  repeated int64 field_ids = 3;
+  uint64 timestamp = 4;
+}
+
+message RemoveFieldsMetaStep {
+  int64 db_id = 1;
+  int64 collection_id = 2;
+  repeated int64 field_ids = 3;
   uint64 timestamp = 4;
 }
 

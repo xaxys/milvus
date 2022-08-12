@@ -9,6 +9,7 @@ import (
 	"path"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 
@@ -171,13 +172,18 @@ func partitionExistByName(collMeta *pb.CollectionInfo, partitionName string) boo
 	return funcutil.SliceContain(collMeta.GetPartitionNames(), partitionName)
 }
 
+func errIsKeyNotExist(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "there is no value on key")
+}
+
 func (kc *Catalog) CreatePartition(ctx context.Context, partition *model.Partition, ts typeutil.Timestamp) error {
 	collMeta, err := kc.loadCollection(ctx, partition.CollectionID, ts)
-	if err != nil {
+	noThisKey := errIsKeyNotExist(err)
+	if err != nil && !noThisKey {
 		return err
 	}
 
-	if partitionVersionAfter210(collMeta) {
+	if noThisKey || partitionVersionAfter210(collMeta) {
 		// save to newly path.
 		k := buildPartitionKey(partition.CollectionID, partition.PartitionID)
 		partitionInfo := model.MarshalPartitionModel(partition)
@@ -477,6 +483,48 @@ func (kc *Catalog) DropCollection(ctx context.Context, collectionInfo *model.Col
 	return nil
 }
 
+func (kc *Catalog) CreateCollectionOnly(ctx context.Context, coll *model.Collection, ts typeutil.Timestamp) error {
+	k1 := buildCollectionKey(coll.CollectionID)
+	collInfo := model.MarshalCollectionModel(coll)
+	v1, err := proto.Marshal(collInfo)
+	if err != nil {
+		log.Error("create collection marshal fail", zap.String("key", k1), zap.Error(err))
+		return err
+	}
+	return kc.Snapshot.Save(k1, string(v1), ts)
+}
+
+func (kc *Catalog) DropCollectionOnly(ctx context.Context, collectionID typeutil.UniqueID, ts typeutil.Timestamp) error {
+	k1 := buildCollectionKey(collectionID)
+	return kc.Snapshot.MultiSaveAndRemoveWithPrefix(nil, []string{k1}, ts)
+}
+
+func (kc *Catalog) AddFields(ctx context.Context, collectionID typeutil.UniqueID, fields []*model.Field, ts typeutil.Timestamp) error {
+	if len(fields) >= 128 {
+		return fmt.Errorf("too many fields: %d", len(fields))
+	}
+	kvs := map[string]string{}
+	for _, field := range fields {
+		k := buildFieldKey(collectionID, field.FieldID)
+		fieldInfo := model.MarshalFieldModel(field)
+		v, err := proto.Marshal(fieldInfo)
+		if err != nil {
+			return err
+		}
+		kvs[k] = string(v)
+	}
+	return kc.Snapshot.MultiSave(kvs, ts)
+}
+
+func (kc *Catalog) RemoveFields(ctx context.Context, collectionID typeutil.UniqueID, fieldIds []typeutil.UniqueID, ts typeutil.Timestamp) error {
+	keys := make([]string, 0, len(fieldIds))
+	for _, fId := range fieldIds {
+		k := buildFieldKey(collectionID, fId)
+		keys = append(keys, k)
+	}
+	return kc.Snapshot.MultiSaveAndRemoveWithPrefix(nil, keys, ts)
+}
+
 func dropPartition(collMeta *pb.CollectionInfo, partitionID typeutil.UniqueID) {
 	if collMeta == nil {
 		return
@@ -506,6 +554,7 @@ func (kc *Catalog) DropPartition(ctx context.Context, collectionID typeutil.Uniq
 
 	if partitionVersionAfter210(collMeta) {
 		k := buildPartitionKey(collectionID, partitionID)
+		fmt.Printf("drop partition after 210, k: %s, collection: %d, partition: %d, ts: %d", k, collectionID, partitionID, ts)
 		return kc.Snapshot.MultiSaveAndRemoveWithPrefix(nil, []string{k}, ts)
 	}
 

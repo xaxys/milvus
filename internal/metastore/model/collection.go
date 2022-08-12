@@ -24,6 +24,11 @@ type Collection struct {
 	ConsistencyLevel     commonpb.ConsistencyLevel
 	Aliases              []string          // TODO: deprecate this.
 	Extra                map[string]string // extra kvs
+	State                pb.CollectionState
+}
+
+func (c Collection) Available() bool {
+	return c.State == pb.CollectionState_CollectionCreated
 }
 
 func (c Collection) Clone() *Collection {
@@ -44,6 +49,7 @@ func (c Collection) Clone() *Collection {
 		StartPositions:       c.StartPositions,
 		Aliases:              c.Aliases,
 		Extra:                c.Extra,
+		State:                c.State,
 	}
 }
 
@@ -84,6 +90,7 @@ func UnmarshalCollectionModel(coll *pb.CollectionInfo) *Collection {
 		ConsistencyLevel:     coll.ConsistencyLevel,
 		CreateTime:           coll.CreateTime,
 		StartPositions:       coll.StartPositions,
+		State:                coll.State,
 	}
 }
 
@@ -127,5 +134,6 @@ func MarshalCollectionModel(coll *Collection) *pb.CollectionInfo {
 		ShardsNum:            coll.ShardsNum,
 		ConsistencyLevel:     coll.ConsistencyLevel,
 		StartPositions:       coll.StartPositions,
+		State:                coll.State,
 	}
 }

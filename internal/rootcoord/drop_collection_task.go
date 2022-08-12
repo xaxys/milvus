@@ -45,7 +45,8 @@ func (t *dropCollectionTask) prepareMeta(ctx context.Context) error {
 func (t *dropCollectionTask) prepareStep() error {
 	t.prepareLogger()
 
-	collMeta := t.collMeta
+	collMeta := t.collMeta.Clone()
+	fmt.Println("coll meta: ", collMeta)
 	ts := t.GetTs()
 	ddReq := internalpb.DropCollectionRequest{
 		Base:           t.Req.Base,
@@ -70,6 +71,7 @@ func (t *dropCollectionTask) prepareStep() error {
 		},
 		DisableCollectionMetaStep: rootcoordpb.DisableCollectionMetaStep{
 			CollectionId: collMeta.CollectionID,
+			Timestamp:    ts,
 		},
 	})
 
@@ -111,6 +113,37 @@ func (t *dropCollectionTask) prepareStep() error {
 			Pchannels: collMeta.PhysicalChannelNames,
 		},
 	})
+
+	for _, partition := range collMeta.Partitions {
+		t.AddAsyncStep(&DeletePartitionMetaStep{
+			baseStep: baseStep{
+				core: t.core,
+			},
+			DeletePartitionMetaStep: rootcoordpb.DeletePartitionMetaStep{
+				CollectionId: collMeta.CollectionID,
+				PartitionId:  partition.PartitionID,
+				Timestamp:    ts,
+			},
+		})
+	}
+
+	for i := 0; i < len(collMeta.Fields); i = i + maxTxnNum {
+		end := min(i+maxTxnNum, len(collMeta.Fields))
+		fieldIds := make([]UniqueID, 0, end-i)
+		for j := i; j < end; j++ {
+			fieldIds = append(fieldIds, collMeta.Fields[j].FieldID)
+		}
+		t.AddAsyncStep(&RemoveFieldsMetaStep{
+			baseStep: baseStep{
+				core: t.core,
+			},
+			RemoveFieldsMetaStep: rootcoordpb.RemoveFieldsMetaStep{
+				CollectionId: collMeta.CollectionID,
+				FieldIds:     fieldIds,
+				Timestamp:    ts,
+			},
+		})
+	}
 
 	t.AddAsyncStep(&DeleteCollectionMetaStep{
 		baseStep: baseStep{

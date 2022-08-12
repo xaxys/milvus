@@ -15,33 +15,11 @@ import (
 
 type mockMetaTable struct {
 	IMetaTableV2
-	AddCollectionF    func(ctx context.Context, coll *model.Collection) error
-	EnableCollectionF func(ctx context.Context, collectionID UniqueID) error
-	DeleteCollectionF func(ctx context.Context, collectionID UniqueID, ts Timestamp) error
+	AddCreatingCollectionF func(ctx context.Context, coll *model.Collection) error
 }
 
-func (m mockMetaTable) AddCollection(ctx context.Context, coll *model.Collection) error {
-	return m.AddCollectionF(ctx, coll)
-}
-
-func (m mockMetaTable) GetCollectionByName(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-	panic("implement me")
-}
-
-func (m mockMetaTable) DeleteCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
-	return m.DeleteCollectionF(ctx, collectionID, ts)
-}
-
-func (m mockMetaTable) EnableCollection(ctx context.Context, collectionID UniqueID) error {
-	return m.EnableCollectionF(ctx, collectionID)
-}
-
-func (m mockMetaTable) DisableCollection(ctx context.Context, collectionID UniqueID) error {
-	panic("implement me")
-}
-
-func (m mockMetaTable) IsAlias(name string) bool {
-	panic("implement me")
+func (m mockMetaTable) AddCreatingCollection(ctx context.Context, coll *model.Collection) error {
+	return m.AddCreatingCollectionF(ctx, coll)
 }
 
 func newMockMetaTable() *mockMetaTable {
@@ -93,10 +71,7 @@ func newTxnKV() *kv.TxnKVMock {
 
 func newMeta() *mockMetaTable {
 	r := newMockMetaTable()
-	r.AddCollectionF = func(ctx context.Context, coll *model.Collection) error {
-		return nil
-	}
-	r.EnableCollectionF = func(ctx context.Context, collectionID UniqueID) error {
+	r.AddCreatingCollectionF = func(ctx context.Context, coll *model.Collection) error {
 		return nil
 	}
 	return r

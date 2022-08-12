@@ -17,6 +17,13 @@ type Catalog interface {
 	CollectionExists(ctx context.Context, collectionID typeutil.UniqueID, ts typeutil.Timestamp) bool
 	DropCollection(ctx context.Context, collectionInfo *model.Collection, ts typeutil.Timestamp) error
 
+	CreateCollectionOnly(ctx context.Context, collectionInfo *model.Collection, ts typeutil.Timestamp) error
+	DropCollectionOnly(ctx context.Context, collectionID typeutil.UniqueID, ts typeutil.Timestamp) error
+
+	// TODO: should field model contain collection id?
+	AddFields(ctx context.Context, collectionID typeutil.UniqueID, fields []*model.Field, ts typeutil.Timestamp) error
+	RemoveFields(ctx context.Context, collectionID typeutil.UniqueID, fieldIds []typeutil.UniqueID, ts typeutil.Timestamp) error
+
 	CreatePartition(ctx context.Context, partition *model.Partition, ts typeutil.Timestamp) error
 	DropPartition(ctx context.Context, collectionID typeutil.UniqueID, partitionID typeutil.UniqueID, ts typeutil.Timestamp) error
 

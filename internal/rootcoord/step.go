@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/internal/proto/schemapb"
 
-	"github.com/milvus-io/milvus/internal/util/typeutil"
+	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
+
+	"github.com/milvus-io/milvus/internal/util/funcutil"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/log"
@@ -218,7 +220,7 @@ func (s *DeleteCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeleteCollectionMetaStep) Execute(ctx context.Context) error {
-	return s.core.meta.DeleteCollection(ctx, s.GetCollectionId(), typeutil.MaxTimestamp)
+	return s.core.meta.RemoveCollectionOnly(ctx, s.GetCollectionId(), s.GetTimestamp())
 }
 
 type DisableCollectionMetaStep struct {
@@ -235,7 +237,7 @@ func (s *DisableCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DisableCollectionMetaStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.meta.SaveCollectionOnly(ctx, s.GetCollectionId(), pb.CollectionState_CollectionDropped, s.GetTimestamp())
 }
 
 type RemoveChannelStep struct {
@@ -350,7 +352,7 @@ func (s *AddCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *AddCollectionMetaStep) Execute(ctx context.Context) error {
-	return s.core.meta.AddCollection(ctx, s.coll)
+	return s.core.meta.AddCreatingCollection(ctx, s.coll)
 }
 
 type EnableCollectionMetaStep struct {
@@ -367,7 +369,7 @@ func (s *EnableCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *EnableCollectionMetaStep) Execute(ctx context.Context) error {
-	return s.core.meta.EnableCollection(ctx, s.GetCollectionId())
+	return s.core.meta.SaveCollectionOnly(ctx, s.GetCollectionId(), pb.CollectionState_CollectionCreated, s.GetTimestamp())
 }
 
 type CreateChannelStep struct {
@@ -427,7 +429,7 @@ func (s *DeletePartitionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeletePartitionMetaStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.meta.RemovePartition(ctx, s.GetCollectionId(), s.GetPartitionId(), s.GetTimestamp())
 }
 
 type DisablePartitionMetaStep struct {
@@ -444,7 +446,7 @@ func (s *DisablePartitionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DisablePartitionMetaStep) Execute(ctx context.Context) error {
-	return s.core.meta.DisableCollection(ctx, s.GetCollectionId())
+	return s.core.meta.SaveCollectionOnly(ctx, s.GetCollectionId(), pb.CollectionState_CollectionDropped, s.GetTimestamp())
 }
 
 type ReleasePartitionStep struct {
@@ -512,7 +514,7 @@ func (s *EnablePartitionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *EnablePartitionMetaStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.meta.SavePartition(ctx, s.GetCollectionId(), s.GetPartitionId(), pb.PartitionState_PartitionCreated, s.GetTimestamp())
 }
 
 type ExpireCollectionCacheStep struct {
@@ -529,7 +531,41 @@ func (s *ExpireCollectionCacheStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *ExpireCollectionCacheStep) Execute(ctx context.Context) error {
-	return nil
+	return s.core.ExpireMetaCache(ctx, s.GetCollectionNames(), s.GetCollectionId(), s.GetTimestamp())
+}
+
+type AddFieldsMetaStep struct {
+	baseStep
+	rootcoordpb.AddFieldsMetaStep
+}
+
+func (s *AddFieldsMetaStep) Serialize() *rootcoordpb.Step {
+	return &rootcoordpb.Step{
+		Step: &rootcoordpb.Step_AddFieldsMetaStep{
+			AddFieldsMetaStep: &s.AddFieldsMetaStep,
+		},
+	}
+}
+
+func (s *AddFieldsMetaStep) Execute(ctx context.Context) error {
+	return s.core.meta.SaveFields(ctx, s.GetCollectionId(), s.GetFieldIds(), schemapb.FieldState_FieldCreated, s.GetTimestamp())
+}
+
+type RemoveFieldsMetaStep struct {
+	baseStep
+	rootcoordpb.RemoveFieldsMetaStep
+}
+
+func (s *RemoveFieldsMetaStep) Serialize() *rootcoordpb.Step {
+	return &rootcoordpb.Step{
+		Step: &rootcoordpb.Step_RemoveFieldsMetaStep{
+			RemoveFieldsMetaStep: &s.RemoveFieldsMetaStep,
+		},
+	}
+}
+
+func (s *RemoveFieldsMetaStep) Execute(ctx context.Context) error {
+	return s.core.meta.RemoveFields(ctx, s.GetCollectionId(), s.GetFieldIds(), s.GetTimestamp())
 }
 
 type NullStep struct {

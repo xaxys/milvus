@@ -14,6 +14,33 @@ type Field struct {
 	TypeParams   []*commonpb.KeyValuePair
 	IndexParams  []*commonpb.KeyValuePair
 	AutoID       bool
+	State        schemapb.FieldState
+}
+
+func (f Field) Available() bool {
+	return f.State == schemapb.FieldState_FieldCreated
+}
+
+func (f Field) Clone() *Field {
+	tps := make([]*commonpb.KeyValuePair, len(f.TypeParams))
+	ips := make([]*commonpb.KeyValuePair, len(f.IndexParams))
+	for i, tp := range f.TypeParams {
+		tps[i] = &commonpb.KeyValuePair{Key: tp.GetKey(), Value: tp.GetValue()}
+	}
+	for i, ip := range f.IndexParams {
+		ips[i] = &commonpb.KeyValuePair{Key: ip.GetKey(), Value: ip.GetValue()}
+	}
+	return &Field{
+		FieldID:      f.FieldID,
+		Name:         f.Name,
+		IsPrimaryKey: f.IsPrimaryKey,
+		Description:  f.Description,
+		DataType:     f.DataType,
+		TypeParams:   tps,
+		IndexParams:  ips,
+		AutoID:       f.AutoID,
+		State:        f.State,
+	}
 }
 
 func MarshalFieldModel(field *Field) *schemapb.FieldSchema {

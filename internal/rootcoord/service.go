@@ -10,6 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/proto/schemapb"
+
+	"github.com/milvus-io/milvus/internal/metastore/model"
+
+	"github.com/milvus-io/milvus/internal/util/timerecord"
+
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 
 	"github.com/milvus-io/milvus/internal/common"
@@ -500,8 +506,13 @@ func (c *RootCoord) unwatchChannels(ctx context.Context, collectionID UniqueID, 
 
 func (c *RootCoord) CreateCollection(ctx context.Context, in *milvuspb.CreateCollectionRequest) (*commonpb.Status, error) {
 	t := &createCollectionTask{
-		baseUndoTask: baseUndoTask{},
-		Req:          in,
+		baseUndoTask: baseUndoTask{
+			baseTaskV2: baseTaskV2{
+				core: c,
+				done: make(chan error, 1),
+			},
+		},
+		Req: in,
 	}
 	if err := c.scheduler.AddTask(t); err != nil {
 		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
@@ -514,8 +525,13 @@ func (c *RootCoord) CreateCollection(ctx context.Context, in *milvuspb.CreateCol
 
 func (c *RootCoord) DropCollection(ctx context.Context, in *milvuspb.DropCollectionRequest) (*commonpb.Status, error) {
 	t := &dropCollectionTask{
-		baseRedoTask: baseRedoTask{},
-		Req:          in,
+		baseRedoTask: baseRedoTask{
+			baseTaskV2: baseTaskV2{
+				core: c,
+				done: make(chan error, 1),
+			},
+		},
+		Req: in,
 	}
 	if err := c.scheduler.AddTask(t); err != nil {
 		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
@@ -524,6 +540,68 @@ func (c *RootCoord) DropCollection(ctx context.Context, in *milvuspb.DropCollect
 		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
 	}
 	return succStatus(), nil
+}
+
+func (c *RootCoord) describeCollection(ctx context.Context, in *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
+	var collInfo *model.Collection
+	var err error
+	if in.GetCollectionName() != "" {
+		collInfo, err = c.meta.GetCollectionByName(ctx, in.GetCollectionName(), typeutil.MaxTimestamp)
+	} else {
+		collInfo, err = c.meta.GetCollectionByID(ctx, in.GetCollectionID(), typeutil.MaxTimestamp)
+	}
+	if err != nil {
+		return nil, err
+	}
+	ret := &milvuspb.DescribeCollectionResponse{}
+	ret.Schema = &schemapb.CollectionSchema{
+		Name:        collInfo.Name,
+		Description: collInfo.Description,
+		AutoID:      collInfo.AutoID,
+		Fields:      model.MarshalFieldModels(collInfo.Fields),
+	}
+	ret.CollectionID = collInfo.CollectionID
+	ret.VirtualChannelNames = collInfo.VirtualChannelNames
+	ret.PhysicalChannelNames = collInfo.PhysicalChannelNames
+	if collInfo.ShardsNum == 0 {
+		collInfo.ShardsNum = int32(len(collInfo.VirtualChannelNames))
+	}
+	ret.ShardsNum = collInfo.ShardsNum
+	ret.ConsistencyLevel = collInfo.ConsistencyLevel
+
+	ret.CreatedTimestamp = collInfo.CreateTime
+	createdPhysicalTime, _ := tsoutil.ParseHybridTs(collInfo.CreateTime)
+	ret.CreatedUtcTimestamp = uint64(createdPhysicalTime)
+	ret.Aliases = nil // TODO: not sure if this is reasonable.
+	ret.StartPositions = collInfo.StartPositions
+	ret.CollectionName = collInfo.Name
+	return ret, nil
+}
+
+func (c *RootCoord) DescribeCollection(ctx context.Context, in *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
+	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeCollection", metrics.TotalLabel).Inc()
+	if code, ok := c.checkHealthy(); !ok {
+		return &milvuspb.DescribeCollectionResponse{
+			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode"+internalpb.StateCode_name[int32(code)]),
+		}, nil
+	}
+	tr := timerecord.NewTimeRecorder("DescribeCollection")
+
+	rsp := &milvuspb.DescribeCollectionResponse{}
+	rsp, err := c.describeCollection(ctx, in)
+	if err != nil {
+		log.Error("DescribeCollection failed", zap.String("role", typeutil.RootCoordRole),
+			zap.String("collection name", in.CollectionName), zap.Int64("id", in.CollectionID), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
+		metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeCollection", metrics.FailLabel).Inc()
+		return &milvuspb.DescribeCollectionResponse{
+			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "DescribeCollection failed: "+err.Error()),
+		}, nil
+	}
+
+	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeCollection", metrics.SuccessLabel).Inc()
+	metrics.RootCoordDDLReqLatency.WithLabelValues("DescribeCollection").Observe(float64(tr.ElapseSpan().Milliseconds()))
+	rsp.Status = succStatus()
+	return rsp, nil
 }
 
 func (c *RootCoord) HasCollection(ctx context.Context, in *milvuspb.HasCollectionRequest) (*milvuspb.BoolResponse, error) {

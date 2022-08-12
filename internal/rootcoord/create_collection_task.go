@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
+
 	"github.com/milvus-io/milvus/internal/metastore/model"
 
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
@@ -170,8 +172,10 @@ func (t *createCollectionTask) prepareStep() error {
 				PartitionID:               partID,
 				PartitionName:             Params.CommonCfg.DefaultPartitionName,
 				PartitionCreatedTimestamp: ts,
+				State:                     pb.PartitionState_PartitionCreating,
 			},
 		},
+		State: pb.CollectionState_CollectionCreating,
 	}
 
 	t.AddStep(&AddCollectionMetaStep{
@@ -221,12 +225,60 @@ func (t *createCollectionTask) prepareStep() error {
 		},
 	})
 
+	t.AddStep(&EnablePartitionMetaStep{
+		baseStep: baseStep{
+			core: t.core,
+		},
+		EnablePartitionMetaStep: rootcoordpb.EnablePartitionMetaStep{
+			CollectionId: collID,
+			PartitionId:  partID,
+			Timestamp:    ts,
+		},
+	}, &DisablePartitionMetaStep{
+		baseStep: baseStep{
+			core: t.core,
+		},
+		DisablePartitionMetaStep: rootcoordpb.DisablePartitionMetaStep{
+			CollectionId: collID,
+			PartitionId:  partID,
+			Timestamp:    ts,
+		},
+	})
+
+	for i := 0; i < len(collInfo.Fields); i = i + maxTxnNum {
+		end := min(i+maxTxnNum, len(collInfo.Fields))
+		fieldIds := make([]UniqueID, 0, end-i)
+		for j := i; j < end; j++ {
+			fieldIds = append(fieldIds, collInfo.Fields[j].FieldID)
+		}
+		t.AddStep(&AddFieldsMetaStep{
+			baseStep: baseStep{
+				core: t.core,
+			},
+			AddFieldsMetaStep: rootcoordpb.AddFieldsMetaStep{
+				CollectionId: collID,
+				FieldIds:     fieldIds,
+				Timestamp:    ts,
+			},
+		}, &RemoveFieldsMetaStep{
+			baseStep: baseStep{
+				core: t.core,
+			},
+			RemoveFieldsMetaStep: rootcoordpb.RemoveFieldsMetaStep{
+				CollectionId: collID,
+				FieldIds:     fieldIds,
+				Timestamp:    ts,
+			},
+		})
+	}
+
 	t.AddStep(&EnableCollectionMetaStep{
 		baseStep: baseStep{
 			core: t.core,
 		},
 		EnableCollectionMetaStep: rootcoordpb.EnableCollectionMetaStep{
 			CollectionId: collID,
+			Timestamp:    ts,
 		},
 	}, &DisableCollectionMetaStep{
 		baseStep: baseStep{
@@ -234,6 +286,7 @@ func (t *createCollectionTask) prepareStep() error {
 		},
 		DisableCollectionMetaStep: rootcoordpb.DisableCollectionMetaStep{
 			CollectionId: collID,
+			Timestamp:    ts,
 		},
 	})
 
