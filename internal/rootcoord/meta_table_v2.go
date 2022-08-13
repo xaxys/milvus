@@ -47,6 +47,7 @@ type IMetaTableV2 interface {
 }
 
 type MetaTableV2 struct {
+	ctx      context.Context
 	txn      kv.TxnKV      // client of a reliable txnkv service, i.e. etcd client
 	snapshot kv.SnapShotKV // client of a reliable snapshotkv service, i.e. etcd client
 	catalog  metastore.Catalog
@@ -59,14 +60,42 @@ type MetaTableV2 struct {
 }
 
 func newMetaTableV2(ctx context.Context, txn kv.TxnKV, snapshot kv.SnapShotKV) (*MetaTableV2, error) {
-	return &MetaTableV2{
-		txn:          txn,
-		snapshot:     snapshot,
-		catalog:      &kvmetestore.Catalog{Txn: txn, Snapshot: snapshot},
-		collID2Meta:  make(map[UniqueID]*model.Collection),
-		collName2ID:  make(map[string]UniqueID),
-		collAlias2ID: make(map[string]UniqueID),
-	}, nil
+	m := &MetaTableV2{
+		ctx:      ctx,
+		txn:      txn,
+		snapshot: snapshot,
+		catalog:  &kvmetestore.Catalog{Txn: txn, Snapshot: snapshot},
+	}
+	if err := m.reload(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (m *MetaTableV2) reload() error {
+	m.collID2Meta = make(map[UniqueID]*model.Collection)
+	m.collName2ID = make(map[string]UniqueID)
+	m.collAlias2ID = make(map[string]UniqueID)
+
+	// max ts means listing latest resources.
+	collections, err := m.catalog.ListCollections(m.ctx, typeutil.MaxTimestamp)
+	if err != nil {
+		return err
+	}
+	for name, collection := range collections {
+		m.collID2Meta[collection.CollectionID] = collection
+		m.collName2ID[name] = collection.CollectionID
+	}
+
+	aliases, err := m.catalog.ListAliases(m.ctx, typeutil.MaxTimestamp)
+	if err != nil {
+		return err
+	}
+	for _, alias := range aliases {
+		m.collAlias2ID[alias.Name] = alias.CollectionID
+	}
+
+	return nil
 }
 
 func (m *MetaTableV2) AddCreatingCollection(ctx context.Context, coll *model.Collection) error {
@@ -81,7 +110,7 @@ func (m *MetaTableV2) AddCreatingCollection(ctx context.Context, coll *model.Col
 func (m *MetaTableV2) SaveCollectionOnly(ctx context.Context, collectionID UniqueID, state pb.CollectionState, ts Timestamp) error {
 	coll, ok := m.collID2Meta[collectionID]
 	if !ok {
-		return fmt.Errorf("collection not exist: %d", collectionID)
+		return nil
 	}
 	clone := coll.Clone()
 	clone.State = state
@@ -147,7 +176,7 @@ func (m *MetaTableV2) AddCreatingPartition(ctx context.Context, partition *model
 func (m *MetaTableV2) SavePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error {
 	coll, ok := m.collID2Meta[collectionID]
 	if !ok {
-		return fmt.Errorf("collection not exist: %d", collectionID)
+		return nil
 	}
 	for idx, part := range coll.Partitions {
 		if part.PartitionID == partitionID {
@@ -164,14 +193,14 @@ func (m *MetaTableV2) SavePartition(ctx context.Context, collectionID UniqueID, 
 }
 
 func (m *MetaTableV2) RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error {
-	coll, ok := m.collID2Meta[collectionID]
-	if !ok {
-		return fmt.Errorf("collection not exist: %d", collectionID)
-	}
 	if err := m.catalog.DropPartition(ctx, collectionID, partitionID, ts); err != nil {
 		return err
 	}
-	var loc int = -1
+	coll, ok := m.collID2Meta[collectionID]
+	if !ok {
+		return nil
+	}
+	var loc = -1
 	for idx, part := range coll.Partitions {
 		if part.PartitionID == partitionID {
 			loc = idx
@@ -209,18 +238,18 @@ func (m *MetaTableV2) SaveFields(ctx context.Context, collectionID UniqueID, fie
 }
 
 func (m *MetaTableV2) RemoveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, ts Timestamp) error {
+	if err := m.catalog.RemoveFields(ctx, collectionID, fieldIds, ts); err != nil {
+		return err
+	}
 	coll, ok := m.collID2Meta[collectionID]
 	if !ok {
-		return fmt.Errorf("collection not exist: %d", collectionID)
+		return nil
 	}
 	toSavedFieldIndexes := make([]int, 0, len(fieldIds))
 	for idx := len(coll.Fields) - 1; idx >= 0; idx-- {
 		if funcutil.SliceContain(fieldIds, coll.Fields[idx].FieldID) {
 			toSavedFieldIndexes = append(toSavedFieldIndexes, idx)
 		}
-	}
-	if err := m.catalog.RemoveFields(ctx, collectionID, fieldIds, ts); err != nil {
-		return err
 	}
 	for _, fieldIndex := range toSavedFieldIndexes {
 		coll.Fields = append(coll.Fields[:fieldIndex], coll.Fields[fieldIndex+1:]...)

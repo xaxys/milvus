@@ -115,12 +115,7 @@ func Test_createCollectionTask_partial_fail(t *testing.T) {
 	defer cleanTestEnv()
 
 	unwatchChannelCalled := false
-	deleteCollectionCalled := false
 	core := genTestCore()
-	core.meta.(*mockMetaTable).DeleteCollectionF = func(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
-		deleteCollectionCalled = true
-		return nil
-	}
 	core.dataCoord.(*mockDataCoord).WatchChannelsF = func(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
 		return nil, errors.New("mock")
 	}
@@ -152,5 +147,4 @@ func Test_createCollectionTask_partial_fail(t *testing.T) {
 	assert.Error(t, err)
 	// check if undo worked.
 	assert.True(t, unwatchChannelCalled)
-	assert.True(t, deleteCollectionCalled)
 }

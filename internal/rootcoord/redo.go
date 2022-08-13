@@ -43,6 +43,7 @@ func (b *baseRedoTask) Execute(ctx context.Context) error {
 		}
 		b.logs.PopStep()
 	}
+	panic("test")
 	go b.logs.Rollback(ctx)
 	return nil
 }

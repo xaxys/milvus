@@ -108,6 +108,7 @@ type baseStep struct {
 }
 
 func UnmarshalStep(base baseStep, step *rootcoordpb.Step) (Step, error) {
+	log.Debug("unmarshal step", zap.Any("step", step))
 	switch v := step.GetStep().(type) {
 	case *rootcoordpb.Step_DeleteCollMetaStep:
 		return &DeleteCollectionMetaStep{
@@ -199,6 +200,16 @@ func UnmarshalStep(base baseStep, step *rootcoordpb.Step) (Step, error) {
 			baseStep:                  base,
 			ExpireCollectionCacheStep: *v.ExpireCollCacheStep,
 		}, nil
+	case *rootcoordpb.Step_AddFieldsMetaStep:
+		return &AddFieldsMetaStep{
+			baseStep:          base,
+			AddFieldsMetaStep: *v.AddFieldsMetaStep,
+		}, nil
+	case *rootcoordpb.Step_RemoveFieldsMetaStep:
+		return &RemoveFieldsMetaStep{
+			baseStep:             base,
+			RemoveFieldsMetaStep: *v.RemoveFieldsMetaStep,
+		}, nil
 	case *rootcoordpb.Step_NullStep:
 		return &NullStep{}, nil
 	default:
@@ -220,6 +231,7 @@ func (s *DeleteCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeleteCollectionMetaStep) Execute(ctx context.Context) error {
+	log.Info("remove collection meta", zap.Int64("collection", s.GetCollectionId()), zap.Uint64("ts", s.GetTimestamp()))
 	return s.core.meta.RemoveCollectionOnly(ctx, s.GetCollectionId(), s.GetTimestamp())
 }
 
@@ -237,6 +249,8 @@ func (s *DisableCollectionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DisableCollectionMetaStep) Execute(ctx context.Context) error {
+	state := pb.CollectionState_CollectionDropped
+	log.Info("disable collection meta", zap.Int64("collection", s.GetCollectionId()), zap.String("state", state.String()), zap.Uint64("ts", s.GetTimestamp()))
 	return s.core.meta.SaveCollectionOnly(ctx, s.GetCollectionId(), pb.CollectionState_CollectionDropped, s.GetTimestamp())
 }
 
@@ -254,6 +268,7 @@ func (s *RemoveChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *RemoveChannelStep) Execute(ctx context.Context) (err error) {
+	log.Info("remove physical channels", zap.Strings("channels", s.GetPchannels()))
 	// remove dml channel after send dd msg
 	s.core.chanTimeTick.removeDmlChannels(s.Pchannels...)
 
@@ -282,6 +297,7 @@ func (s *UnwatchChannelStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *UnwatchChannelStep) Execute(ctx context.Context) error {
+	log.Info("unwatch channels", zap.Int64("collection", s.GetCollectionId()), zap.Strings("vchannels", s.GetVchannels()))
 	return s.core.unwatchChannels(ctx, s.GetCollectionId(), s.GetVchannels())
 }
 
@@ -299,6 +315,7 @@ func (s *RemoveIndexStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *RemoveIndexStep) Execute(ctx context.Context) error {
+	log.Info("TODO: remove indexes")
 	return nil
 }
 
@@ -316,7 +333,8 @@ func (s *ReleaseCollectionStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *ReleaseCollectionStep) Execute(ctx context.Context) error {
-	return nil
+	log.Info("release collection", zap.Int64("collection", s.GetCollectionId()))
+	return s.core.releaseCollection(ctx, s.GetCollectionId())
 }
 
 type DeleteCollectionDataStep struct {
@@ -333,6 +351,7 @@ func (s *DeleteCollectionDataStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeleteCollectionDataStep) Execute(ctx context.Context) error {
+	log.Info("TODO: delete collection data")
 	return nil
 }
 
@@ -429,6 +448,7 @@ func (s *DeletePartitionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeletePartitionMetaStep) Execute(ctx context.Context) error {
+	log.Info("remove partition", zap.Int64("collection", s.GetCollectionId()), zap.Int64("partition", s.GetPartitionId()), zap.Uint64("ts", s.GetTimestamp()))
 	return s.core.meta.RemovePartition(ctx, s.GetCollectionId(), s.GetPartitionId(), s.GetTimestamp())
 }
 
@@ -446,7 +466,9 @@ func (s *DisablePartitionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DisablePartitionMetaStep) Execute(ctx context.Context) error {
-	return s.core.meta.SaveCollectionOnly(ctx, s.GetCollectionId(), pb.CollectionState_CollectionDropped, s.GetTimestamp())
+	state := pb.PartitionState_PartitionDropped
+	log.Info("disable partition meta", zap.Int64("collection", s.GetCollectionId()), zap.Int64("partition", s.GetPartitionId()), zap.String("state", state.String()), zap.Uint64("ts", s.GetTimestamp()))
+	return s.core.meta.SavePartition(ctx, s.GetCollectionId(), s.GetPartitionId(), state, s.GetTimestamp())
 }
 
 type ReleasePartitionStep struct {
@@ -497,7 +519,19 @@ func (s *AddPartitionMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *AddPartitionMetaStep) Execute(ctx context.Context) error {
-	return nil
+	log.Info("add partition to meta table",
+		zap.Int64("collection", s.GetCollectionId()),
+		zap.Int64("partition", s.GetPartInfo().GetPartitionID()),
+		zap.String("partition", s.GetPartInfo().GetPartitionName()),
+		zap.String("state", s.GetPartInfo().GetState().String()),
+		zap.Uint64("ts", s.GetTimestamp()))
+	return s.core.meta.AddCreatingPartition(ctx, &model.Partition{
+		PartitionID:               s.GetPartInfo().GetPartitionID(),
+		PartitionName:             s.GetPartInfo().GetPartitionName(),
+		PartitionCreatedTimestamp: s.GetPartInfo().GetPartitionCreatedTimestamp(),
+		CollectionID:              s.GetCollectionId(),
+		State:                     s.GetPartInfo().GetState(),
+	})
 }
 
 type EnablePartitionMetaStep struct {
@@ -565,6 +599,7 @@ func (s *RemoveFieldsMetaStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *RemoveFieldsMetaStep) Execute(ctx context.Context) error {
+	log.Info("remove fields", zap.Int64("collection", s.GetCollectionId()), zap.Int64s("field ids", s.GetFieldIds()), zap.Uint64("ts", s.GetTimestamp()))
 	return s.core.meta.RemoveFields(ctx, s.GetCollectionId(), s.GetFieldIds(), s.GetTimestamp())
 }
 

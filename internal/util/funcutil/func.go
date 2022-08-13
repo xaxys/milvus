@@ -64,6 +64,7 @@ func GetLocalIP() string {
 // WaitForComponentStates wait for component's state to be one of the specific states
 func WaitForComponentStates(ctx context.Context, service types.Component, serviceName string, states []internalpb.StateCode, attempts uint, sleep time.Duration) error {
 	checkFunc := func() error {
+		log.Debug("wait for component states", zap.String("service", serviceName), zap.Any("attempts", attempts), zap.Any("sleep", sleep))
 		resp, err := service.GetComponentStates(ctx)
 		if err != nil {
 			return err
@@ -402,4 +403,16 @@ func DecodeUserRoleCache(cache string) (string, string, error) {
 	user := cache[:index]
 	role := cache[index+1:]
 	return user, role, nil
+}
+
+func ErrIsKeyNotExist(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "there is no value on key")
+}
+
+func RemoveRootPath(key, root string) string {
+	if len(key) <= len(root) {
+		return ""
+	}
+	l := len(root)
+	return key[l:]
 }

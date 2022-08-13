@@ -45,7 +45,7 @@ func TestProxyClientManager_GetProxyClients(t *testing.T) {
 		},
 	)
 
-	pcm := newProxyClientManager(core)
+	pcm := newProxyClientManager(core.NewProxyClient)
 
 	session := &sessionutil.Session{
 		ServerID: 100,
@@ -72,7 +72,7 @@ func TestProxyClientManager_AddProxyClient(t *testing.T) {
 		},
 	)
 
-	pcm := newProxyClientManager(core)
+	pcm := newProxyClientManager(core.NewProxyClient)
 
 	session := &sessionutil.Session{
 		ServerID: 100,
@@ -93,7 +93,7 @@ func TestProxyClientManager_InvalidateCollectionMetaCache(t *testing.T) {
 	defer cli.Close()
 	core.etcdCli = cli
 
-	pcm := newProxyClientManager(core)
+	pcm := newProxyClientManager(core.NewProxyClient)
 
 	ch := make(chan struct{})
 	pcm.helper = proxyClientManagerHelper{
@@ -147,7 +147,7 @@ func TestProxyClientManager_ReleaseDQLMessageStream(t *testing.T) {
 	defer cli.Close()
 	core.etcdCli = cli
 
-	pcm := newProxyClientManager(core)
+	pcm := newProxyClientManager(core.NewProxyClient)
 
 	ch := make(chan struct{})
 	pcm.helper = proxyClientManagerHelper{
@@ -199,7 +199,7 @@ func TestProxyClientManager_InvalidateCredentialCache(t *testing.T) {
 	defer cli.Close()
 	core.etcdCli = cli
 
-	pcm := newProxyClientManager(core)
+	pcm := newProxyClientManager(core.NewProxyClient)
 
 	ch := make(chan struct{})
 	pcm.helper = proxyClientManagerHelper{
@@ -251,7 +251,7 @@ func TestProxyClientManager_RefreshPolicyInfoCache(t *testing.T) {
 	defer cli.Close()
 	core.etcdCli = cli
 
-	pcm := newProxyClientManager(core)
+	pcm := newProxyClientManager(core.NewProxyClient)
 
 	ch := make(chan struct{})
 	pcm.helper = proxyClientManagerHelper{

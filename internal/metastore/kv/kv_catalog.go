@@ -9,7 +9,6 @@ import (
 	"path"
 	"reflect"
 	"strconv"
-	"strings"
 
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 
@@ -172,13 +171,9 @@ func partitionExistByName(collMeta *pb.CollectionInfo, partitionName string) boo
 	return funcutil.SliceContain(collMeta.GetPartitionNames(), partitionName)
 }
 
-func errIsKeyNotExist(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "there is no value on key")
-}
-
 func (kc *Catalog) CreatePartition(ctx context.Context, partition *model.Partition, ts typeutil.Timestamp) error {
 	collMeta, err := kc.loadCollection(ctx, partition.CollectionID, ts)
-	noThisKey := errIsKeyNotExist(err)
+	noThisKey := funcutil.ErrIsKeyNotExist(err)
 	if err != nil && !noThisKey {
 		return err
 	}
@@ -548,13 +543,14 @@ func dropPartition(collMeta *pb.CollectionInfo, partitionID typeutil.UniqueID) {
 
 func (kc *Catalog) DropPartition(ctx context.Context, collectionID typeutil.UniqueID, partitionID typeutil.UniqueID, ts typeutil.Timestamp) error {
 	collMeta, err := kc.loadCollection(ctx, collectionID, ts)
-	if err != nil {
+	noThisKey := funcutil.ErrIsKeyNotExist(err)
+	if err != nil && !noThisKey {
 		return err
 	}
 
-	if partitionVersionAfter210(collMeta) {
+	if noThisKey || partitionVersionAfter210(collMeta) {
 		k := buildPartitionKey(collectionID, partitionID)
-		fmt.Printf("drop partition after 210, k: %s, collection: %d, partition: %d, ts: %d", k, collectionID, partitionID, ts)
+		fmt.Printf("drop partition after 210, k: %s, collection: %d, partition: %d, ts: %d\n", k, collectionID, partitionID, ts)
 		return kc.Snapshot.MultiSaveAndRemoveWithPrefix(nil, []string{k}, ts)
 	}
 

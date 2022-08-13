@@ -167,15 +167,7 @@ func (t *createCollectionTask) prepareStep() error {
 		ShardsNum:            t.Req.ShardsNum,
 		ConsistencyLevel:     t.Req.ConsistencyLevel,
 		CreateTime:           ts,
-		Partitions: []*model.Partition{
-			{
-				PartitionID:               partID,
-				PartitionName:             Params.CommonCfg.DefaultPartitionName,
-				PartitionCreatedTimestamp: ts,
-				State:                     pb.PartitionState_PartitionCreating,
-			},
-		},
-		State: pb.CollectionState_CollectionCreating,
+		State:                pb.CollectionState_CollectionCreating,
 	}
 
 	t.AddStep(&AddCollectionMetaStep{
@@ -189,6 +181,32 @@ func (t *createCollectionTask) prepareStep() error {
 		},
 		DeleteCollectionMetaStep: rootcoordpb.DeleteCollectionMetaStep{
 			CollectionId: collID,
+			Timestamp:    ts,
+		},
+	})
+
+	t.AddStep(&AddPartitionMetaStep{
+		baseStep: baseStep{
+			core: t.core,
+		},
+		AddPartitionMetaStep: rootcoordpb.AddPartitionMetaStep{
+			CollectionId: collID,
+			PartInfo: &pb.PartitionInfo{
+				PartitionID:               partID,
+				PartitionName:             Params.CommonCfg.DefaultPartitionName,
+				PartitionCreatedTimestamp: ts,
+				CollectionId:              collID,
+				State:                     pb.PartitionState_PartitionCreating,
+			},
+			Timestamp: ts,
+		},
+	}, &DeletePartitionMetaStep{
+		baseStep: baseStep{
+			core: t.core,
+		},
+		DeletePartitionMetaStep: rootcoordpb.DeletePartitionMetaStep{
+			CollectionId: collID,
+			PartitionId:  partID,
 			Timestamp:    ts,
 		},
 	})

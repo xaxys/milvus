@@ -10,6 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/proto/querypb"
+
+	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
+
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 
 	"github.com/milvus-io/milvus/internal/metastore/model"
@@ -57,12 +62,13 @@ import (
 type RootCoord struct {
 	types.RootCoord // TODO: remove me after everything is ready.
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	etcdCli   *clientv3.Client
-	meta      IMetaTableV2
-	scheduler IScheduler
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	etcdCli    *clientv3.Client
+	meta       IMetaTableV2
+	scheduler  IScheduler
+	logManager *logManager
 
 	txn          kv.TxnKV
 	kvBaseCreate func(root string) (kv.TxnKV, error)
@@ -73,7 +79,7 @@ type RootCoord struct {
 	proxyClientManager  *proxyClientManager
 	metricsCacheManager *metricsinfo.MetricsCacheManager
 
-	chanTimeTick *timetickSync // TODO: make this interface.
+	chanTimeTick *timetickSync
 
 	idAllocator  allocator.GIDAllocator
 	tsoAllocator tso.Allocator
@@ -293,6 +299,8 @@ func (c *RootCoord) Init() error {
 		}
 	}
 	c.initOnce.Do(func() {
+		c.logManager = newLogManager(c.ctx)
+
 		if err := c.initSession(); err != nil {
 			initError = err
 			log.Error("RootCoord init session failed", zap.Error(err))
@@ -393,6 +401,41 @@ func (c *RootCoord) initRbac() (initError error) {
 	return nil
 }
 
+func (c *RootCoord) restore(ctx context.Context) error {
+	paths, tasks, err := c.txn.LoadWithPrefix(DDLLogPrefix)
+	if funcutil.ErrIsKeyNotExist(err) {
+		log.Info("there is no tasks to restore")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for i, task := range tasks {
+		info := &rootcoordpb.TaskInfo{}
+		err := proto.Unmarshal([]byte(task), info)
+		if err != nil {
+			log.Error("unmarshal task recover info failed", zap.Error(err))
+			continue
+		}
+		log.Info("restore task", zap.Int64("msgID", info.RequestId), zap.String("type", info.Type.String()))
+		logs, err := UnmarshalTaskInfo(info, c)
+		if err != nil {
+			log.Error("extract task recover info failed", zap.Int64("msgID", info.RequestId), zap.Error(err))
+			continue
+		}
+		key := funcutil.RemoveRootPath(paths[i], Params.EtcdCfg.KvRootPath)
+		logs.writeFunc = func(data []byte) error {
+			if len(data) == 0 {
+				log.Info("remove ddl log", zap.String("path", paths[i]), zap.String("key", key))
+				return c.txn.Remove(key)
+			}
+			return c.txn.Save(key, string(data))
+		}
+		c.logManager.AddLog(logs)
+	}
+	return nil
+}
+
 // Start starts RootCoord.
 func (c *RootCoord) Start() error {
 	log.Debug("starting service",
@@ -400,9 +443,13 @@ func (c *RootCoord) Start() error {
 		zap.Int64("node id", c.session.ServerID))
 
 	c.startOnce.Do(func() {
+		c.logManager.Start()
 		if err := c.proxyManager.WatchProxy(); err != nil {
 			log.Fatal("RootCoord Start WatchProxy failed", zap.Error(err))
 			// you can not just stuck here,
+			panic(err)
+		}
+		if err := c.restore(c.ctx); err != nil {
 			panic(err)
 		}
 		c.wg.Add(3)
@@ -421,6 +468,7 @@ func (c *RootCoord) Start() error {
 func (c *RootCoord) Stop() error {
 	c.UpdateStateCode(internalpb.StateCode_Abnormal)
 
+	c.logManager.Stop()
 	c.cancel()
 	c.wg.Wait()
 	// wait at most one second to revoke
@@ -484,6 +532,9 @@ func (c *RootCoord) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringR
 }
 
 func (c *RootCoord) watchChannels(ctx context.Context, collectionID UniqueID, vChannels []string) error {
+	if err := funcutil.WaitForComponentHealthy(ctx, c.dataCoord, "DataCoord", 100, time.Millisecond*200); err != nil {
+		return err
+	}
 	resp, err := c.dataCoord.WatchChannels(ctx, &datapb.WatchChannelsRequest{
 		CollectionID: collectionID,
 		ChannelNames: vChannels,
@@ -500,6 +551,24 @@ func (c *RootCoord) watchChannels(ctx context.Context, collectionID UniqueID, vC
 func (c *RootCoord) unwatchChannels(ctx context.Context, collectionID UniqueID, vChannels []string) error {
 	if c.CallUnwatchChannels != nil {
 		return c.CallUnwatchChannels(ctx, collectionID, vChannels)
+	}
+	return nil
+}
+
+func (c *RootCoord) releaseCollection(ctx context.Context, collectionID UniqueID) error {
+	if err := funcutil.WaitForComponentHealthy(ctx, c.queryCoord, "QueryCoord", 100, time.Millisecond*200); err != nil {
+		return err
+	}
+	resp, err := c.queryCoord.ReleaseCollection(ctx, &querypb.ReleaseCollectionRequest{
+		Base:         &commonpb.MsgBase{MsgType: commonpb.MsgType_ReleaseCollection},
+		CollectionID: collectionID,
+		NodeID:       c.session.ServerID,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.GetErrorCode() != commonpb.ErrorCode_Success {
+		return fmt.Errorf("failed to release collection, code: %s, reason: %s", resp.GetErrorCode(), resp.GetReason())
 	}
 	return nil
 }
