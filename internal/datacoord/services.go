@@ -651,7 +651,7 @@ func (s *Server) GetRecoveryInfo(ctx context.Context, req *datapb.GetRecoveryInf
 		CollectionID: collectionID,
 	})
 	if err = VerifyResponse(dresp, err); err != nil {
-		log.Error("get collection info from master failed",
+		log.Error("get collection info from rootcoord failed",
 			zap.Int64("collectionID", collectionID),
 			zap.Error(err))
 
@@ -713,6 +713,27 @@ func (s *Server) GetFlushedSegments(ctx context.Context, req *datapb.GetFlushedS
 	resp.Segments = ret
 	resp.Status.ErrorCode = commonpb.ErrorCode_Success
 	return resp, nil
+}
+
+//ShowConfigurations returns the configurations of DataCoord matching req.Pattern
+func (s *Server) ShowConfigurations(ctx context.Context, req *internalpb.ShowConfigurationsRequest) (*internalpb.ShowConfigurationsResponse, error) {
+	log.Debug("DataCoord.ShowConfigurations", zap.String("pattern", req.Pattern))
+	if s.isClosed() {
+		log.Warn("DataCoord.ShowConfigurations failed",
+			zap.Int64("nodeId", Params.DataCoordCfg.GetNodeID()),
+			zap.String("req", req.Pattern),
+			zap.Error(errDataCoordIsUnhealthy(Params.DataCoordCfg.GetNodeID())))
+
+		return &internalpb.ShowConfigurationsResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    msgDataCoordIsUnhealthy(Params.DataCoordCfg.GetNodeID()),
+			},
+			Configuations: nil,
+		}, nil
+	}
+
+	return getComponentConfigurations(ctx, req), nil
 }
 
 // GetMetrics returns DataCoord metrics info

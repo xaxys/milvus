@@ -10,20 +10,18 @@ import (
 	"reflect"
 	"strconv"
 
-	"github.com/milvus-io/milvus/internal/util/funcutil"
-
-	"github.com/milvus-io/milvus/internal/proto/milvuspb"
-	"github.com/milvus-io/milvus/internal/util"
-
-	"github.com/milvus-io/milvus/internal/metastore"
-
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/util"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"go.uber.org/zap"
 )
@@ -563,7 +561,7 @@ func (kc *Catalog) DropPartition(ctx context.Context, collectionID typeutil.Uniq
 	return kc.Snapshot.Save(k, string(v), ts)
 }
 
-func (kc *Catalog) DropIndex(ctx context.Context, collectionInfo *model.Collection, dropIdxID typeutil.UniqueID, ts typeutil.Timestamp) error {
+func (kc *Catalog) DropIndex(ctx context.Context, collectionInfo *model.Collection, dropIdxID typeutil.UniqueID) error {
 	collMeta := model.MarshalCollectionModel(collectionInfo)
 	k := path.Join(CollectionMetaPrefix, strconv.FormatInt(collectionInfo.CollectionID, 10))
 	v, err := proto.Marshal(collMeta)
@@ -1025,7 +1023,7 @@ func (kc *Catalog) OperatePrivilege(ctx context.Context, tenant string, entity *
 		if funcutil.IsRevoke(operateType) {
 			return err
 		}
-		if !funcutil.IsKeyNotExistError(err) {
+		if !common.IsKeyNotExistError(err) {
 			return err
 		}
 		curGrantPrivilegeEntity.Entities = append(curGrantPrivilegeEntity.Entities, &milvuspb.GrantorEntity{

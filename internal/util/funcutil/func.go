@@ -219,6 +219,14 @@ func KeyValuePair2Map(datas []*commonpb.KeyValuePair) map[string]string {
 	return results
 }
 
+func ConvertToKeyValuePairPointer(datas []commonpb.KeyValuePair) []*commonpb.KeyValuePair {
+	var kvs []*commonpb.KeyValuePair
+	for i := 0; i < len(datas); i++ {
+		kvs = append(kvs, &datas[i])
+	}
+	return kvs
+}
+
 // GenChannelSubName generate subName to watch channel
 func GenChannelSubName(prefix string, collectionID int64, nodeID int64) string {
 	return fmt.Sprintf("%s-%d-%d", prefix, collectionID, nodeID)
@@ -384,11 +392,6 @@ func IsRevoke(operateType milvuspb.OperatePrivilegeType) bool {
 
 func IsGrant(operateType milvuspb.OperatePrivilegeType) bool {
 	return operateType == milvuspb.OperatePrivilegeType_Grant
-}
-
-// IsKeyNotExistError Judging by the error message whether the key does not exist or not for the ectd server
-func IsKeyNotExistError(err error) bool {
-	return strings.Contains(err.Error(), "there is no value on key")
 }
 
 func EncodeUserRoleCache(user string, role string) string {
