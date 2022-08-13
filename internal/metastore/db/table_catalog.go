@@ -20,6 +20,7 @@ import (
 )
 
 type Catalog struct {
+	metastore.Catalog
 	metaDomain dbmodel.IMetaDomain
 	txImpl     dbmodel.ITransaction
 }

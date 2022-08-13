@@ -615,9 +615,9 @@ func (c *RootCoord) describeCollection(ctx context.Context, in *milvuspb.Describ
 	var collInfo *model.Collection
 	var err error
 	if in.GetCollectionName() != "" {
-		collInfo, err = c.meta.GetCollectionByName(ctx, in.GetCollectionName(), typeutil.MaxTimestamp)
+		collInfo, err = c.meta.GetCollectionByName(ctx, in.GetCollectionName(), in.GetTimeStamp())
 	} else {
-		collInfo, err = c.meta.GetCollectionByID(ctx, in.GetCollectionID(), typeutil.MaxTimestamp)
+		collInfo, err = c.meta.GetCollectionByID(ctx, in.GetCollectionID(), in.GetTimeStamp())
 	}
 	if err != nil {
 		return nil, err
@@ -674,7 +674,110 @@ func (c *RootCoord) DescribeCollection(ctx context.Context, in *milvuspb.Describ
 }
 
 func (c *RootCoord) HasCollection(ctx context.Context, in *milvuspb.HasCollectionRequest) (*milvuspb.BoolResponse, error) {
-	return &milvuspb.BoolResponse{Status: succStatus(), Value: false}, nil
+	resp := &milvuspb.BoolResponse{Status: succStatus(), Value: true}
+	_, err := c.meta.GetCollectionByName(ctx, in.GetCollectionName(), in.GetTimeStamp())
+	if err != nil {
+		resp.Value = false
+	}
+	return resp, nil
+}
+
+func (c *RootCoord) ShowCollections(ctx context.Context, in *milvuspb.ShowCollectionsRequest) (*milvuspb.ShowCollectionsResponse, error) {
+	resp := &milvuspb.ShowCollectionsResponse{Status: succStatus()}
+	colls, err := c.meta.ListCollections(ctx, in.GetTimeStamp())
+	if err != nil {
+		resp.Status = failStatus(commonpb.ErrorCode_UnexpectedError, err.Error())
+	}
+	for _, coll := range colls {
+		resp.CollectionNames = append(resp.CollectionNames, coll.Name)
+		resp.CollectionIds = append(resp.CollectionIds, coll.CollectionID)
+		resp.CreatedTimestamps = append(resp.CreatedTimestamps, coll.CreateTime)
+		physical, _ := tsoutil.ParseHybridTs(coll.CreateTime)
+		resp.CreatedUtcTimestamps = append(resp.CreatedUtcTimestamps, uint64(physical))
+	}
+	return resp, nil
+}
+
+func (c *RootCoord) CreatePartition(ctx context.Context, in *milvuspb.CreatePartitionRequest) (*commonpb.Status, error) {
+	t := &createPartitionTask{
+		baseUndoTask: baseUndoTask{
+			baseTaskV2: baseTaskV2{
+				core: c,
+				done: make(chan error, 1),
+			},
+		},
+		Req: in,
+	}
+	if err := c.scheduler.AddTask(t); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	if err := t.WaitToFinish(); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	return succStatus(), nil
+}
+
+func (c *RootCoord) DropPartition(ctx context.Context, in *milvuspb.DropPartitionRequest) (*commonpb.Status, error) {
+	t := &dropPartitionTask{
+		baseRedoTask: baseRedoTask{
+			baseTaskV2: baseTaskV2{
+				core: c,
+				done: make(chan error, 1),
+			},
+		},
+		Req: in,
+	}
+	if err := c.scheduler.AddTask(t); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	if err := t.WaitToFinish(); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	return succStatus(), nil
+}
+
+func (c *RootCoord) HasPartition(ctx context.Context, in *milvuspb.HasPartitionRequest) (*milvuspb.BoolResponse, error) {
+	resp := &milvuspb.BoolResponse{Status: succStatus(), Value: true}
+	coll, err := c.meta.GetCollectionByName(ctx, in.GetCollectionName(), typeutil.MaxTimestamp)
+	if err != nil {
+		resp.Status = failStatus(commonpb.ErrorCode_CollectionNotExists, err.Error())
+		resp.Value = false
+	} else {
+		resp.Value = false
+		for _, partition := range coll.Partitions {
+			if partition.PartitionName == in.GetPartitionName() {
+				resp.Value = true
+				break
+			}
+		}
+	}
+	return resp, nil
+}
+
+func (c *RootCoord) ShowPartitions(ctx context.Context, in *milvuspb.ShowPartitionsRequest) (*milvuspb.ShowPartitionsResponse, error) {
+	resp := &milvuspb.ShowPartitionsResponse{Status: succStatus()}
+	var coll *model.Collection
+	var err error
+	if in.GetCollectionName() != "" {
+		coll, err = c.meta.GetCollectionByName(ctx, in.GetCollectionName(), typeutil.MaxTimestamp)
+	} else {
+		coll, err = c.meta.GetCollectionByID(ctx, in.GetCollectionID(), typeutil.MaxTimestamp)
+	}
+	if err != nil {
+		resp.Status = failStatus(commonpb.ErrorCode_CollectionNotExists, err.Error())
+	} else {
+		for _, partition := range coll.Partitions {
+			if !partition.Available() {
+				continue
+			}
+			resp.PartitionIDs = append(resp.PartitionIDs, partition.PartitionID)
+			resp.PartitionNames = append(resp.PartitionNames, partition.PartitionName)
+			resp.CreatedTimestamps = append(resp.CreatedTimestamps, partition.PartitionCreatedTimestamp)
+			physical, _ := tsoutil.ParseHybridTs(partition.PartitionCreatedTimestamp)
+			resp.CreatedUtcTimestamps = append(resp.CreatedUtcTimestamps, uint64(physical))
+		}
+	}
+	return resp, nil
 }
 
 func (c *RootCoord) AllocTimestamp(ctx context.Context, in *rootcoordpb.AllocTimestampRequest) (*rootcoordpb.AllocTimestampResponse, error) {

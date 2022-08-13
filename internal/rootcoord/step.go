@@ -502,6 +502,7 @@ func (s *DeletePartitionDataStep) Serialize() *rootcoordpb.Step {
 }
 
 func (s *DeletePartitionDataStep) Execute(ctx context.Context) error {
+	log.Info("TODO: delete partition data")
 	return nil
 }
 

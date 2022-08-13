@@ -38,6 +38,7 @@ type IMetaTableV2 interface {
 	RemoveCollectionOnly(ctx context.Context, collectionID UniqueID, ts Timestamp) error
 	GetCollectionByName(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error)
 	GetCollectionByID(ctx context.Context, collectionID UniqueID, ts Timestamp) (*model.Collection, error)
+	ListCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error)
 	AddCreatingPartition(ctx context.Context, partition *model.Partition) error
 	SavePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error
 	RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error
@@ -159,6 +160,20 @@ func (m *MetaTableV2) GetCollectionByID(ctx context.Context, collectionID Unique
 		coll.Partitions = append(coll.Partitions[:loc], coll.Partitions[loc+1:]...)
 	}
 	return clone, nil
+}
+
+func (m *MetaTableV2) ListCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
+	colls, err := m.catalog.ListCollections(ctx, ts)
+	if err != nil {
+		return nil, err
+	}
+	onlineCollections := make([]*model.Collection, 0, len(colls))
+	for _, coll := range colls {
+		if coll.Available() {
+			onlineCollections = append(onlineCollections, coll)
+		}
+	}
+	return onlineCollections, nil
 }
 
 func (m *MetaTableV2) AddCreatingPartition(ctx context.Context, partition *model.Partition) error {
