@@ -44,6 +44,9 @@ type IMetaTableV2 interface {
 	RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error
 	SaveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, state schemapb.FieldState, ts Timestamp) error
 	RemoveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, ts Timestamp) error
+	CreateAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error
+	DropAlias(ctx context.Context, alias string, ts Timestamp) error
+	AlterAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error
 	IsAlias(name string) bool
 }
 
@@ -272,6 +275,49 @@ func (m *MetaTableV2) RemoveFields(ctx context.Context, collectionID UniqueID, f
 	return nil
 }
 
+func (m *MetaTableV2) CreateAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error {
+	collectionID, ok := m.collName2ID[collectionName]
+	if !ok {
+		return fmt.Errorf("collection not exists: %s", collectionName)
+	}
+	if err := m.catalog.CreateAlias(ctx, &model.Alias{
+		Name:         alias,
+		CollectionID: collectionID,
+		CreatedTime:  ts,
+		State:        pb.AliasState_AliasCreated,
+	}, ts); err != nil {
+		return err
+	}
+	m.collAlias2ID[alias] = collectionID
+	return nil
+}
+
+func (m *MetaTableV2) DropAlias(ctx context.Context, alias string, ts Timestamp) error {
+	if err := m.catalog.DropAlias(ctx, alias, ts); err != nil {
+		return err
+	}
+	delete(m.collAlias2ID, alias)
+	return nil
+}
+
+func (m *MetaTableV2) AlterAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error {
+	collectionID, ok := m.collName2ID[collectionName]
+	if !ok {
+		return fmt.Errorf("collection not exists: %s", collectionName)
+	}
+	if err := m.catalog.AlterAlias(ctx, &model.Alias{
+		Name:         alias,
+		CollectionID: collectionID,
+		CreatedTime:  ts,
+		State:        pb.AliasState_AliasCreated,
+	}, ts); err != nil {
+		return err
+	}
+	m.collAlias2ID[alias] = collectionID
+	return nil
+}
+
 func (m *MetaTableV2) IsAlias(name string) bool {
-	return false
+	_, ok := m.collAlias2ID[name]
+	return ok
 }

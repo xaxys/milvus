@@ -780,6 +780,63 @@ func (c *RootCoord) ShowPartitions(ctx context.Context, in *milvuspb.ShowPartiti
 	return resp, nil
 }
 
+func (c *RootCoord) CreateAlias(ctx context.Context, in *milvuspb.CreateAliasRequest) (*commonpb.Status, error) {
+	t := &createAliasTask{
+		baseUndoTask: baseUndoTask{
+			baseTaskV2: baseTaskV2{
+				core: c,
+				done: make(chan error, 1),
+			},
+		},
+		Req: in,
+	}
+	if err := c.scheduler.AddTask(t); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	if err := t.WaitToFinish(); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	return succStatus(), nil
+}
+
+func (c *RootCoord) DropAlias(ctx context.Context, in *milvuspb.DropAliasRequest) (*commonpb.Status, error) {
+	t := &dropAliasTask{
+		baseRedoTask: baseRedoTask{
+			baseTaskV2: baseTaskV2{
+				core: c,
+				done: make(chan error, 1),
+			},
+		},
+		Req: in,
+	}
+	if err := c.scheduler.AddTask(t); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	if err := t.WaitToFinish(); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	return succStatus(), nil
+}
+
+func (c *RootCoord) AlterAlias(ctx context.Context, in *milvuspb.AlterAliasRequest) (*commonpb.Status, error) {
+	t := &alterAliasTask{
+		baseUndoTask: baseUndoTask{
+			baseTaskV2: baseTaskV2{
+				core: c,
+				done: make(chan error, 1),
+			},
+		},
+		Req: in,
+	}
+	if err := c.scheduler.AddTask(t); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	if err := t.WaitToFinish(); err != nil {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+	}
+	return succStatus(), nil
+}
+
 func (c *RootCoord) AllocTimestamp(ctx context.Context, in *rootcoordpb.AllocTimestampRequest) (*rootcoordpb.AllocTimestampResponse, error) {
 	if code, ok := c.checkHealthy(); !ok {
 		return &rootcoordpb.AllocTimestampResponse{
