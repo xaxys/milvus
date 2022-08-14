@@ -77,6 +77,9 @@ func newMetaTableV2(ctx context.Context, txn kv.TxnKV, snapshot kv.SnapShotKV) (
 }
 
 func (m *MetaTableV2) reload() error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	m.collID2Meta = make(map[UniqueID]*model.Collection)
 	m.collName2ID = make(map[string]UniqueID)
 	m.collAlias2ID = make(map[string]UniqueID)
@@ -103,6 +106,9 @@ func (m *MetaTableV2) reload() error {
 }
 
 func (m *MetaTableV2) AddCreatingCollection(ctx context.Context, coll *model.Collection) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	if coll.State != pb.CollectionState_CollectionCreating {
 		return fmt.Errorf("collection state should be creating, collection name: %s, collection id: %d, state: %s", coll.Name, coll.CollectionID, coll.State)
 	}
@@ -112,6 +118,9 @@ func (m *MetaTableV2) AddCreatingCollection(ctx context.Context, coll *model.Col
 }
 
 func (m *MetaTableV2) SaveCollectionOnly(ctx context.Context, collectionID UniqueID, state pb.CollectionState, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	coll, ok := m.collID2Meta[collectionID]
 	if !ok {
 		return nil
@@ -126,6 +135,9 @@ func (m *MetaTableV2) SaveCollectionOnly(ctx context.Context, collectionID Uniqu
 }
 
 func (m *MetaTableV2) RemoveCollectionOnly(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	if err := m.catalog.DropCollectionOnly(ctx, collectionID, ts); err != nil {
 		return err
 	}
@@ -134,23 +146,32 @@ func (m *MetaTableV2) RemoveCollectionOnly(ctx context.Context, collectionID Uni
 }
 
 func (m *MetaTableV2) GetCollectionByName(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
+	m.ddLock.RLock()
+	defer m.ddLock.RUnlock()
+
 	var collectionID UniqueID
-	collectionID, ok := m.collName2ID[collectionName]
+	collectionID, ok := m.collAlias2ID[collectionName]
 	if ok {
 		return m.GetCollectionByID(ctx, collectionID, ts)
 	}
-	collectionID, ok = m.collAlias2ID[collectionName]
+	collectionID, ok = m.collName2ID[collectionName]
 	if ok {
 		return m.GetCollectionByID(ctx, collectionID, ts)
 	}
-	return nil, fmt.Errorf("collection not exist: %s", collectionName)
+	// travel meta information from catalog.
+	return m.catalog.GetCollectionByName(ctx, collectionName, ts)
 }
 
 func (m *MetaTableV2) GetCollectionByID(ctx context.Context, collectionID UniqueID, ts Timestamp) (*model.Collection, error) {
+	m.ddLock.RLock()
+	defer m.ddLock.RUnlock()
+
 	coll, ok := m.collID2Meta[collectionID]
-	if !ok || !coll.Available() {
-		return nil, fmt.Errorf("collection not exist: %d", collectionID)
+	if !ok || !coll.Available() || coll.CreateTime > ts {
+		// travel meta information from catalog.
+		return m.catalog.GetCollectionByID(ctx, collectionID, ts)
 	}
+
 	clone := coll.Clone()
 	// remove not available resources.
 	toRemovedPartitionIndexes := make([]int, 0, len(clone.Partitions))
@@ -166,6 +187,10 @@ func (m *MetaTableV2) GetCollectionByID(ctx context.Context, collectionID Unique
 }
 
 func (m *MetaTableV2) ListCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
+	m.ddLock.RLock()
+	defer m.ddLock.RUnlock()
+
+	// list collections should always be loaded from catalog.
 	colls, err := m.catalog.ListCollections(ctx, ts)
 	if err != nil {
 		return nil, err
@@ -180,18 +205,24 @@ func (m *MetaTableV2) ListCollections(ctx context.Context, ts Timestamp) ([]*mod
 }
 
 func (m *MetaTableV2) AddCreatingPartition(ctx context.Context, partition *model.Partition) error {
-	if partition.State != pb.PartitionState_PartitionCreating {
-		return fmt.Errorf("partition state is not creating, collection: %d, partition: %d, state: %s", partition.CollectionID, partition.PartitionID, partition.State)
-	}
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	_, ok := m.collID2Meta[partition.CollectionID]
 	if !ok {
 		return fmt.Errorf("collection not exists: %d", partition.CollectionID)
+	}
+	if partition.State != pb.PartitionState_PartitionCreating {
+		return fmt.Errorf("partition state is not creating, collection: %d, partition: %d, state: %s", partition.CollectionID, partition.PartitionID, partition.State)
 	}
 	m.collID2Meta[partition.CollectionID].Partitions = append(m.collID2Meta[partition.CollectionID].Partitions, partition.Clone())
 	return nil
 }
 
 func (m *MetaTableV2) SavePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	coll, ok := m.collID2Meta[collectionID]
 	if !ok {
 		return nil
@@ -211,6 +242,9 @@ func (m *MetaTableV2) SavePartition(ctx context.Context, collectionID UniqueID, 
 }
 
 func (m *MetaTableV2) RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	if err := m.catalog.DropPartition(ctx, collectionID, partitionID, ts); err != nil {
 		return err
 	}
@@ -232,6 +266,9 @@ func (m *MetaTableV2) RemovePartition(ctx context.Context, collectionID UniqueID
 }
 
 func (m *MetaTableV2) SaveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, state schemapb.FieldState, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	coll, ok := m.collID2Meta[collectionID]
 	if !ok {
 		return fmt.Errorf("collection not exist: %d", collectionID)
@@ -256,6 +293,9 @@ func (m *MetaTableV2) SaveFields(ctx context.Context, collectionID UniqueID, fie
 }
 
 func (m *MetaTableV2) RemoveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	if err := m.catalog.RemoveFields(ctx, collectionID, fieldIds, ts); err != nil {
 		return err
 	}
@@ -276,6 +316,9 @@ func (m *MetaTableV2) RemoveFields(ctx context.Context, collectionID UniqueID, f
 }
 
 func (m *MetaTableV2) CreateAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	collectionID, ok := m.collName2ID[collectionName]
 	if !ok {
 		return fmt.Errorf("collection not exists: %s", collectionName)
@@ -293,6 +336,9 @@ func (m *MetaTableV2) CreateAlias(ctx context.Context, alias string, collectionN
 }
 
 func (m *MetaTableV2) DropAlias(ctx context.Context, alias string, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	if err := m.catalog.DropAlias(ctx, alias, ts); err != nil {
 		return err
 	}
@@ -301,6 +347,9 @@ func (m *MetaTableV2) DropAlias(ctx context.Context, alias string, ts Timestamp)
 }
 
 func (m *MetaTableV2) AlterAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error {
+	m.ddLock.Lock()
+	defer m.ddLock.Unlock()
+
 	collectionID, ok := m.collName2ID[collectionName]
 	if !ok {
 		return fmt.Errorf("collection not exists: %s", collectionName)
@@ -318,6 +367,9 @@ func (m *MetaTableV2) AlterAlias(ctx context.Context, alias string, collectionNa
 }
 
 func (m *MetaTableV2) IsAlias(name string) bool {
+	m.ddLock.RLock()
+	defer m.ddLock.RUnlock()
+
 	_, ok := m.collAlias2ID[name]
 	return ok
 }

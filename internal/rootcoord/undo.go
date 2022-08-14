@@ -26,6 +26,9 @@ func (b *baseUndoTask) Execute(ctx context.Context) error {
 	if len(b.todoStep) != len(b.undoStep) {
 		return fmt.Errorf("todo step and undo step length not equal")
 	}
+	if len(b.todoStep) <= 0 || len(b.undoStep) <= 0 {
+		return nil
+	}
 	for i := 0; i < len(b.todoStep); i++ {
 		todoStep := b.todoStep[i]
 		undoStep := b.undoStep[i]

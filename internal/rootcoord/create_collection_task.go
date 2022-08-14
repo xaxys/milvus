@@ -13,6 +13,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"go.uber.org/zap"
 
 	"github.com/golang/protobuf/proto"
@@ -146,7 +147,7 @@ func (t *createCollectionTask) assignChannels() error {
 	return nil
 }
 
-func (t *createCollectionTask) prepareStep() error {
+func (t *createCollectionTask) prepareStep(ctx context.Context) error {
 	t.prepareLogger()
 
 	collID := t.collID
@@ -168,6 +169,22 @@ func (t *createCollectionTask) prepareStep() error {
 		ConsistencyLevel:     t.Req.ConsistencyLevel,
 		CreateTime:           ts,
 		State:                pb.CollectionState_CollectionCreating,
+	}
+
+	clonedCollInfoWithDefaultPartition := collInfo.Clone()
+	clonedCollInfoWithDefaultPartition.Partitions = []*model.Partition{{PartitionName: Params.CommonCfg.DefaultPartitionName}}
+	// need double check in meta table if we can't promise the sequence execution.
+	existedCollInfo, err := t.core.meta.GetCollectionByName(ctx, t.Req.GetCollectionName(), typeutil.MaxTimestamp)
+	if err == nil {
+		equal := existedCollInfo.Equal(*clonedCollInfoWithDefaultPartition)
+		if !equal {
+			fmt.Println(model.MarshalCollectionModel(existedCollInfo))
+			fmt.Println(model.MarshalCollectionModel(clonedCollInfoWithDefaultPartition))
+			return fmt.Errorf("create collection with different parameters, collection: %s", t.Req.GetCollectionName())
+		}
+		// make creating collection idempotent.
+		log.Warn("add duplicate collection", zap.String("collection", t.Req.GetCollectionName()))
+		return nil
 	}
 
 	t.AddStep(&AddCollectionMetaStep{
@@ -334,5 +351,5 @@ func (t *createCollectionTask) Prepare(ctx context.Context) error {
 		return err
 	}
 
-	return t.prepareStep()
+	return t.prepareStep(ctx)
 }

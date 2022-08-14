@@ -22,6 +22,11 @@ func (a Alias) Clone() *Alias {
 	}
 }
 
+func (a Alias) Equal(other Alias) bool {
+	return a.Name == other.Name &&
+		a.CollectionID == other.CollectionID
+}
+
 func MarshalAliasModel(alias *Alias) *pb.AliasInfo {
 	return &pb.AliasInfo{
 		AliasName:    alias.Name,

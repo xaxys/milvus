@@ -3,7 +3,10 @@ package rootcoord
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/metastore/model"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 
@@ -19,6 +22,13 @@ func (t *createPartitionTask) Prepare(ctx context.Context) error {
 	collMeta, err := t.core.meta.GetCollectionByName(ctx, t.Req.GetCollectionName(), t.GetTs())
 	if err != nil {
 		return err
+	}
+
+	for _, partition := range collMeta.Partitions {
+		if partition.Equal(model.Partition{PartitionName: t.Req.GetPartitionName()}) {
+			log.Warn("add duplicate partition", zap.String("collection", t.Req.GetCollectionName()), zap.String("partition", t.Req.GetPartitionName()))
+			return nil
+		}
 	}
 
 	partID, err := t.core.idAllocator.AllocOne()

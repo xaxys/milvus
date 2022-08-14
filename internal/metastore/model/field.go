@@ -43,6 +43,22 @@ func (f Field) Clone() *Field {
 	}
 }
 
+func checkParamsEqual(paramsA, paramsB []*commonpb.KeyValuePair) bool {
+	// TODO
+	return len(paramsA) == len(paramsB)
+}
+
+func (f Field) Equal(other Field) bool {
+	return f.FieldID == other.FieldID &&
+		f.Name == other.Name &&
+		f.IsPrimaryKey == other.IsPrimaryKey &&
+		f.Description == other.Description &&
+		f.DataType == other.DataType &&
+		checkParamsEqual(f.TypeParams, f.TypeParams) &&
+		checkParamsEqual(f.IndexParams, other.IndexParams) &&
+		f.AutoID == other.AutoID
+}
+
 func MarshalFieldModel(field *Field) *schemapb.FieldSchema {
 	if field == nil {
 		return nil

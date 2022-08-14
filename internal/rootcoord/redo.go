@@ -26,6 +26,9 @@ func (b *baseRedoTask) AddAsyncStep(step Step) {
 }
 
 func (b *baseRedoTask) Execute(ctx context.Context) error {
+	if len(b.syncTodoStep) <= 0 && len(b.asyncTodoStep) <= 0 {
+		return nil
+	}
 	for i := len(b.asyncTodoStep) - 1; i >= 0; i-- {
 		step := b.asyncTodoStep[i]
 		b.logs.AddStep(step)

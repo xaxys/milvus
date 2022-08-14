@@ -26,6 +26,10 @@ func (p Partition) Clone() *Partition {
 	}
 }
 
+func (p Partition) Equal(other Partition) bool {
+	return p.PartitionName == other.PartitionName
+}
+
 func MarshalPartitionModel(partition *Partition) *pb.PartitionInfo {
 	return &pb.PartitionInfo{
 		PartitionID:               partition.PartitionID,

@@ -53,6 +53,27 @@ func (c Collection) Clone() *Collection {
 	}
 }
 
+func checkFieldsEqual(fieldsA, fieldsB []*Field) bool {
+	// TODO
+	return len(fieldsA) == len(fieldsB)
+}
+
+func checkPartitionsEqual(partitionsA, partitionsB []*Partition) bool {
+	// TODO
+	return len(partitionsA) == len(partitionsB)
+}
+
+func (c Collection) Equal(other Collection) bool {
+	return c.TenantID == other.TenantID &&
+		checkPartitionsEqual(c.Partitions, other.Partitions) &&
+		c.Name == other.Name &&
+		c.Description == other.Description &&
+		c.AutoID == other.AutoID &&
+		checkFieldsEqual(c.Fields, other.Fields) &&
+		c.ShardsNum == other.ShardsNum &&
+		c.ConsistencyLevel == other.ConsistencyLevel
+}
+
 func UnmarshalCollectionModel(coll *pb.CollectionInfo) *Collection {
 	if coll == nil {
 		return nil

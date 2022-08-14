@@ -36,7 +36,8 @@ func (t *dropCollectionTask) validate() error {
 func (t *dropCollectionTask) prepareMeta(ctx context.Context) error {
 	collMeta, err := t.core.meta.GetCollectionByName(ctx, t.Req.GetCollectionName(), typeutil.MaxTimestamp)
 	if err != nil {
-		return err
+		// make dropping collection idempotent.
+		return nil
 	}
 	t.collMeta = collMeta
 	return nil
