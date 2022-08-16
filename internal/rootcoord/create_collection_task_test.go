@@ -90,11 +90,9 @@ func Test_createCollectionTask_succeed(t *testing.T) {
 
 	req := genTestCreateCollectionReq()
 	task := &createCollectionTask{
-		baseUndoTask: baseUndoTask{
-			baseTaskV2: baseTaskV2{
-				core: genTestCore(),
-				done: make(chan error, 1),
-			},
+		baseTaskV2: baseTaskV2{
+			core: genTestCore(),
+			done: make(chan error, 1),
 		},
 		Req: req,
 	}
@@ -126,11 +124,9 @@ func Test_createCollectionTask_partial_fail(t *testing.T) {
 
 	req := genTestCreateCollectionReq()
 	task := &createCollectionTask{
-		baseUndoTask: baseUndoTask{
-			baseTaskV2: baseTaskV2{
-				core: core,
-				done: make(chan error, 1),
-			},
+		baseTaskV2: baseTaskV2{
+			core: core,
+			done: make(chan error, 1),
 		},
 		Req: req,
 	}

@@ -18,7 +18,7 @@ type mockMetaTable struct {
 	AddCreatingCollectionF func(ctx context.Context, coll *model.Collection) error
 }
 
-func (m mockMetaTable) AddCreatingCollection(ctx context.Context, coll *model.Collection) error {
+func (m mockMetaTable) AddCollection(ctx context.Context, coll *model.Collection) error {
 	return m.AddCreatingCollectionF(ctx, coll)
 }
 

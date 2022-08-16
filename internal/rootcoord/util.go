@@ -135,3 +135,10 @@ func Int64TupleMapToSlice(s map[int]common.Int64Tuple) []common.Int64Tuple {
 	}
 	return ret
 }
+
+func CheckMsgType(got, expect commonpb.MsgType) error {
+	if got != expect {
+		return fmt.Errorf("invalid msg type, expect %s, but got %s", expect, got)
+	}
+	return nil
+}

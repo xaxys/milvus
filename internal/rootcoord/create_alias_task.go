@@ -3,15 +3,20 @@ package rootcoord
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
+
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
 
 type createAliasTask struct {
-	baseUndoTask
+	baseTaskV2
 	Req *milvuspb.CreateAliasRequest
 }
 
 func (t *createAliasTask) Prepare(ctx context.Context) error {
+	if err := CheckMsgType(t.Req.GetBase().GetMsgType(), commonpb.MsgType_CreateAlias); err != nil {
+		return err
+	}
 	return nil
 }
 

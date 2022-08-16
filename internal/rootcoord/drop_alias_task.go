@@ -3,15 +3,20 @@ package rootcoord
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
+
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
 
 type dropAliasTask struct {
-	baseRedoTask
+	baseTaskV2
 	Req *milvuspb.DropAliasRequest
 }
 
 func (t *dropAliasTask) Prepare(ctx context.Context) error {
+	if err := CheckMsgType(t.Req.GetBase().GetMsgType(), commonpb.MsgType_DropAlias); err != nil {
+		return err
+	}
 	return nil
 }
 

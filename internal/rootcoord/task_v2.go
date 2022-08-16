@@ -11,6 +11,7 @@ type taskV2 interface {
 	GetID() UniqueID
 	Prepare(ctx context.Context) error
 	Execute(ctx context.Context) error
+	PostExecute(ctx context.Context) error
 	WaitToFinish() error
 	NotifyDone(err error)
 }
@@ -43,6 +44,10 @@ func (b *baseTaskV2) Prepare(ctx context.Context) error {
 }
 
 func (b *baseTaskV2) Execute(ctx context.Context) error {
+	return nil
+}
+
+func (b *baseTaskV2) PostExecute(ctx context.Context) error {
 	return nil
 }
 

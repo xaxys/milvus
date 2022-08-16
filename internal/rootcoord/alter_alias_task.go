@@ -3,15 +3,19 @@ package rootcoord
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
 
 type alterAliasTask struct {
-	baseUndoTask
+	baseTaskV2
 	Req *milvuspb.AlterAliasRequest
 }
 
 func (t *alterAliasTask) Prepare(ctx context.Context) error {
+	if err := CheckMsgType(t.Req.GetBase().GetMsgType(), commonpb.MsgType_AlterAlias); err != nil {
+		return err
+	}
 	return nil
 }
 
