@@ -3,9 +3,10 @@ package rootcoord
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/internal/metastore/model"
+
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 
 	"github.com/milvus-io/milvus/internal/common"
 
@@ -14,9 +15,8 @@ import (
 
 type dropPartitionTask struct {
 	baseTaskV2
-	Req    *milvuspb.DropPartitionRequest
-	collID typeutil.UniqueID
-	partID typeutil.UniqueID
+	Req      *milvuspb.DropPartitionRequest
+	collMeta *model.Collection
 }
 
 func (t *dropPartitionTask) Prepare(ctx context.Context) error {
@@ -28,53 +28,47 @@ func (t *dropPartitionTask) Prepare(ctx context.Context) error {
 		// Is this idempotent?
 		return err
 	}
-
-	t.partID = common.InvalidPartitionID
-	for _, partition := range collMeta.Partitions {
-		if partition.PartitionName == t.Req.GetPartitionName() {
-			t.partID = partition.PartitionID
-			break
-		}
-	}
-	if t.partID == common.InvalidPartitionID {
-		return nil
-	}
-
-	//t.AddSyncStep(&ExpireCollectionCacheStep{
-	//	baseStep:                  baseStep{core: t.core},
-	//	ExpireCollectionCacheStep: rootcoordpb.ExpireCollectionCacheStep{CollectionId: collMeta.CollectionID, Timestamp: t.GetTs()},
-	//})
-	//t.AddSyncStep(&DisablePartitionMetaStep{
-	//	baseStep:                 baseStep{core: t.core},
-	//	DisablePartitionMetaStep: rootcoordpb.DisablePartitionMetaStep{CollectionId: collMeta.CollectionID, PartitionId: partID, Timestamp: t.GetTs()},
-	//})
-	//t.AddAsyncStep(&DeletePartitionDataStep{
-	//	baseStep:                baseStep{core: t.core},
-	//	DeletePartitionDataStep: rootcoordpb.DeletePartitionDataStep{CollectionId: collMeta.CollectionID, PartitionId: partID},
-	//})
-	//t.AddAsyncStep(&DeletePartitionMetaStep{
-	//	baseStep:                baseStep{core: t.core},
-	//	DeletePartitionMetaStep: rootcoordpb.DeletePartitionMetaStep{CollectionId: collMeta.CollectionID, PartitionId: partID, Timestamp: t.GetTs()},
-	//})
-
+	t.collMeta = collMeta
 	return nil
 }
 
 func (t *dropPartitionTask) Execute(ctx context.Context) error {
-	if err := t.core.ExpireMetaCache(ctx, []string{t.Req.GetCollectionName()}, t.collID, t.GetTs()); err != nil {
-		return err
+	partID := common.InvalidPartitionID
+	for _, partition := range t.collMeta.Partitions {
+		if partition.PartitionName == t.Req.GetPartitionName() {
+			partID = partition.PartitionID
+			break
+		}
 	}
-	if err := t.core.meta.ChangePartitionState(ctx, t.collID, t.partID, pb.PartitionState_PartitionDropping, t.GetTs()); err != nil {
-		return err
+	if partID == common.InvalidPartitionID {
+		// make dropping partition idempotent.
+		return nil
 	}
-	return nil
-}
 
-func (t *dropPartitionTask) PostExecute(ctx context.Context) error {
-	// TODO: delete partition data
+	redoTask := newBaseRedoTask()
+	redoTask.AddSyncStep(&ExpireCacheStep{
+		baseStep:        baseStep{core: t.core},
+		collectionNames: []string{t.Req.GetCollectionName()},
+		collectionId:    t.collMeta.CollectionID,
+		ts:              t.GetTs(),
+	})
+	// TODO: corner case, once expiring cache is done and a read(describe) request entered before you mark collection deleted.
+	redoTask.AddSyncStep(&ChangePartitionStateStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: t.collMeta.CollectionID,
+		partitionId:  partID,
+		state:        pb.PartitionState_PartitionDropping,
+		ts:           t.GetTs(),
+	})
 
-	if err := t.core.meta.RemovePartition(ctx, t.collID, t.partID, t.GetTs()); err != nil {
-		return err
-	}
-	return nil
+	// TODO: release partition when query coord is ready.
+	// TODO: notify datacoord to gc partition data when it's ready.
+	redoTask.AddAsyncStep(&RemovePartitionMetaStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: t.collMeta.CollectionID,
+		partitionId:  partID,
+		ts:           t.GetTs(),
+	})
+
+	return redoTask.Execute(ctx)
 }

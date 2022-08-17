@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	ms "github.com/milvus-io/milvus/internal/mq/msgstream"
+
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
 	"github.com/milvus-io/milvus/internal/proto/querypb"
@@ -399,65 +401,93 @@ func (c *RootCoord) initRbac() (initError error) {
 	return nil
 }
 
+func (c *RootCoord) reDropCollection(collMeta *model.Collection, ts Timestamp) {
+	// TODO: remove this after data gc can be notified by rpc.
+	c.chanTimeTick.addDmlChannels(collMeta.PhysicalChannelNames...)
+	defer c.chanTimeTick.removeDmlChannels(collMeta.PhysicalChannelNames...)
+	// no need to add delta channels, since this collection should be dropped, so it's ok to let tSafe not updated.
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	if err := c.releaseCollection(ctx, collMeta.CollectionID); err != nil {
+		log.Error("failed to release collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
+		return
+	}
+
+	if err := c.notifyDataGC(ctx, collMeta, ts); err != nil {
+		log.Error("failed to notify datacoord to gc collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
+		return
+	}
+
+	if err := c.meta.RemoveCollection(ctx, collMeta.CollectionID, ts); err != nil {
+		log.Error("failed to remove collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
+	}
+}
+
+func (c *RootCoord) removeCreatingCollection(collMeta *model.Collection) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	if err := c.unwatchChannels(ctx, collMeta.CollectionID, collMeta.VirtualChannelNames); err != nil {
+		log.Error("failed to unwatch channels when recovery",
+			zap.Error(err),
+			zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID),
+			zap.Strings("vchans", collMeta.VirtualChannelNames), zap.Strings("pchans", collMeta.PhysicalChannelNames))
+		return
+	}
+
+	if err := c.meta.RemoveCollection(ctx, collMeta.CollectionID, collMeta.CreateTime); err != nil {
+		log.Error("failed to remove collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
+	}
+}
+
+func (c *RootCoord) reDropPartition(partition *model.Partition, ts Timestamp) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	// TODO: release partition when query coord is ready.
+	// TODO: notify datacoord to gc partition data when it's ready.
+	if err := c.meta.RemovePartition(ctx, partition.CollectionID, partition.PartitionID, ts); err != nil {
+		log.Error("failed to remove partition when recovery", zap.Error(err))
+	}
+}
+
 func (c *RootCoord) restore(ctx context.Context) error {
 	colls, err := c.meta.ListAbnormalCollections(ctx, typeutil.MaxTimestamp)
 	if err != nil {
 		return err
 	}
+
 	for _, coll := range colls {
+		ts, err := c.tsoAllocator.GenerateTSO(1)
+		if err != nil {
+			return err
+		}
+
 		switch coll.State {
 		case pb.CollectionState_CollectionDropping:
-			t := &dropCollectionTask{
-				baseTaskV2: baseTaskV2{
-					core: c,
-					done: make(chan error, 1),
-					ts:   coll.CreateTime,
-				},
-				Req: &milvuspb.DropCollectionRequest{
-					Base: &commonpb.MsgBase{
-						Timestamp: coll.CreateTime,
-					},
-				},
-				collMeta: coll,
-			}
-			c.scheduler.AddPostTask(t)
+			go c.reDropCollection(coll.Clone(), ts)
 		case pb.CollectionState_CollectionCreating:
-			t := &createCollectionTask{
-				baseTaskV2: baseTaskV2{
-					core: c,
-					done: make(chan error, 1),
-					ts:   coll.CreateTime,
-				},
-				collID: coll.CollectionID,
-				partID: coll.Partitions[0].PartitionID,
-				channels: collectionChannels{
-					virtualChannels:  coll.VirtualChannelNames,
-					physicalChannels: coll.PhysicalChannelNames,
-				},
-			}
-			c.scheduler.AddPostTask(t)
+			go c.removeCreatingCollection(coll.Clone())
 		default:
-			log.Error("RootCoord restore, unknown collection state", zap.String("collection", coll.Name), zap.Any("state", coll.State))
 		}
 	}
+
 	colls, err = c.meta.ListCollections(ctx, typeutil.MaxTimestamp)
 	if err != nil {
 		return err
 	}
 	for _, coll := range colls {
 		for _, part := range coll.Partitions {
+			ts, err := c.tsoAllocator.GenerateTSO(1)
+			if err != nil {
+				return err
+			}
+
 			switch part.State {
 			case pb.PartitionState_PartitionDropping:
-				t := &dropPartitionTask{
-					baseTaskV2: baseTaskV2{
-						core: c,
-						done: make(chan error, 1),
-						ts:   tsoutil.GetCurrentTime(),
-					},
-					collID: coll.CollectionID,
-					partID: part.PartitionID,
-				}
-				c.scheduler.AddPostTask(t)
+				go c.reDropPartition(part.Clone(), ts)
 			default:
 			}
 		}
@@ -576,10 +606,35 @@ func (c *RootCoord) watchChannels(ctx context.Context, collectionID UniqueID, vC
 }
 
 func (c *RootCoord) unwatchChannels(ctx context.Context, collectionID UniqueID, vChannels []string) error {
+	// TODO: unwatching channels to release flow graph on datanodes.
 	if c.CallUnwatchChannels != nil {
 		return c.CallUnwatchChannels(ctx, collectionID, vChannels)
 	}
 	return nil
+}
+
+func (c *RootCoord) notifyDataGC(ctx context.Context, coll *model.Collection, ts typeutil.Timestamp) error {
+	msgPack := ms.MsgPack{}
+	baseMsg := ms.BaseMsg{
+		Ctx:            ctx,
+		BeginTimestamp: ts,
+		EndTimestamp:   ts,
+		HashValues:     []uint32{0},
+	}
+	msg := &ms.DropCollectionMsg{
+		BaseMsg: baseMsg,
+		DropCollectionRequest: internalpb.DropCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_DropCollection,
+				Timestamp: ts,
+				SourceID:  c.session.ServerID,
+			},
+			CollectionName: coll.Name,
+			CollectionID:   coll.CollectionID,
+		},
+	}
+	msgPack.Msgs = append(msgPack.Msgs, msg)
+	return c.chanTimeTick.broadcastDmlChannels(coll.PhysicalChannelNames, &msgPack)
 }
 
 func (c *RootCoord) releaseCollection(ctx context.Context, collectionID UniqueID) error {
@@ -707,7 +762,11 @@ func (c *RootCoord) HasCollection(ctx context.Context, in *milvuspb.HasCollectio
 
 func (c *RootCoord) ShowCollections(ctx context.Context, in *milvuspb.ShowCollectionsRequest) (*milvuspb.ShowCollectionsResponse, error) {
 	resp := &milvuspb.ShowCollectionsResponse{Status: succStatus()}
-	colls, err := c.meta.ListCollections(ctx, in.GetTimeStamp())
+	ts := in.GetTimeStamp()
+	if ts == 0 {
+		ts = typeutil.MaxTimestamp
+	}
+	colls, err := c.meta.ListCollections(ctx, ts)
 	if err != nil {
 		resp.Status = failStatus(commonpb.ErrorCode_UnexpectedError, err.Error())
 	}

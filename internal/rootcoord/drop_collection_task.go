@@ -5,11 +5,8 @@ import (
 	"fmt"
 
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
-	"github.com/milvus-io/milvus/internal/util/funcutil"
 
 	"github.com/milvus-io/milvus/internal/util/typeutil"
-
-	"github.com/milvus-io/milvus/internal/metastore/model"
 
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 
@@ -18,8 +15,7 @@ import (
 
 type dropCollectionTask struct {
 	baseTaskV2
-	Req      *milvuspb.DropCollectionRequest
-	collMeta *model.Collection
+	Req *milvuspb.DropCollectionRequest
 }
 
 func (t *dropCollectionTask) validate() error {
@@ -32,76 +28,58 @@ func (t *dropCollectionTask) validate() error {
 	return nil
 }
 
-func (t *dropCollectionTask) prepareMeta(ctx context.Context) error {
+func (t *dropCollectionTask) Prepare(ctx context.Context) error {
+	return t.validate()
+}
+
+func (t *dropCollectionTask) Execute(ctx context.Context) error {
 	collMeta, err := t.core.meta.GetCollectionByName(ctx, t.Req.GetCollectionName(), typeutil.MaxTimestamp)
 	if err != nil {
 		// make dropping collection idempotent.
 		return nil
 	}
-	t.collMeta = collMeta
-	return nil
-}
 
-func (t *dropCollectionTask) Execute(ctx context.Context) error {
-	collMeta := t.collMeta.Clone()
-	fmt.Println("coll meta: ", collMeta)
 	ts := t.GetTs()
-	//ddReq := internalpb.DropCollectionRequest{
-	//	Base:           t.Req.Base,
-	//	DbName:         t.Req.GetDbName(),
-	//	CollectionName: t.Req.GetCollectionName(),
-	//	CollectionID:   collMeta.CollectionID,
-	//}
 
-	err := t.core.ExpireMetaCache(ctx, []string{t.collMeta.Name}, t.collMeta.CollectionID, ts)
-	if err != nil {
-		return err
-	}
+	redoTask := newBaseRedoTask()
 
-	err = t.core.meta.ChangeCollectionState(ctx, collMeta.CollectionID, pb.CollectionState_CollectionDropping, ts)
-	if err != nil {
-		return err
-	}
+	redoTask.AddSyncStep(&ExpireCacheStep{
+		baseStep:        baseStep{core: t.core},
+		collectionNames: []string{collMeta.Name},
+		collectionId:    collMeta.CollectionID,
+		ts:              ts,
+	})
+	// TODO: corner case, once expiring cache is done and a read(describe) request entered before you mark collection deleted.
+	redoTask.AddSyncStep(&ChangeCollectionStateStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: collMeta.CollectionID,
+		state:        pb.CollectionState_CollectionDropping,
+		ts:           ts,
+	})
 
-	return nil
-}
-
-func (t *dropCollectionTask) Prepare(ctx context.Context) error {
-	if err := t.validate(); err != nil {
-		return err
-	}
-	if err := t.prepareMeta(ctx); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (t *dropCollectionTask) PostExecute(ctx context.Context) error {
-	err := t.core.releaseCollection(ctx, t.collMeta.CollectionID)
-	if err != nil {
-		return err
-	}
-
+	redoTask.AddAsyncStep(&ReleaseCollectionStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: collMeta.CollectionID,
+	})
 	// TODO: remove index
+	redoTask.AddAsyncStep(&DeleteCollectionDataStep{
+		baseStep: baseStep{core: t.core},
+		coll:     collMeta,
+		ts:       ts,
+	})
+	redoTask.AddAsyncStep(&RemoveDmlChannelsStep{
+		baseStep:  baseStep{core: t.core},
+		pchannels: collMeta.PhysicalChannelNames,
+	})
+	redoTask.AddAsyncStep(&RemoveDeltaChannelsStep{
+		baseStep:     baseStep{core: t.core},
+		dmlPChannels: collMeta.PhysicalChannelNames,
+	})
+	redoTask.AddAsyncStep(&DeleteCollectionMetaStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: collMeta.CollectionID,
+		ts:           ts,
+	})
 
-	// TODO: delete collection data
-
-	chanNames := t.collMeta.PhysicalChannelNames
-	t.core.chanTimeTick.removeDmlChannels(chanNames...)
-
-	// remove delta channels
-	deltaChanNames := make([]string, len(chanNames))
-	for i, chanName := range chanNames {
-		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
-			return err
-		}
-	}
-	t.core.chanTimeTick.removeDeltaChannels(deltaChanNames...)
-
-	err = t.core.meta.RemoveCollection(ctx, t.collMeta.CollectionID, t.GetTs())
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return redoTask.Execute(ctx)
 }

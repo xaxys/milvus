@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/log"
+	"go.uber.org/zap"
+
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
 	kvmetestore "github.com/milvus-io/milvus/internal/metastore/kv"
@@ -105,12 +108,12 @@ func (m *MetaTableV2) AddCollection(ctx context.Context, coll *model.Collection)
 	if coll.State != pb.CollectionState_CollectionCreating {
 		return fmt.Errorf("collection state should be creating, collection name: %s, collection id: %d, state: %s", coll.Name, coll.CollectionID, coll.State)
 	}
-	err := m.catalog.CreateCollection(ctx, coll, coll.CreateTime)
-	if err != nil {
+	if err := m.catalog.CreateCollection(ctx, coll, coll.CreateTime); err != nil {
 		return err
 	}
-	m.collID2Meta[coll.CollectionID] = coll.Clone()
 	m.collName2ID[coll.Name] = coll.CollectionID
+	m.collID2Meta[coll.CollectionID] = coll
+	log.Info("add collection to meta table", zap.String("collection", coll.Name), zap.Int64("id", coll.CollectionID), zap.Uint64("ts", coll.CreateTime))
 	return nil
 }
 
@@ -128,6 +131,8 @@ func (m *MetaTableV2) ChangeCollectionState(ctx context.Context, collectionID Un
 		return err
 	}
 	m.collID2Meta[collectionID] = clone
+	log.Info("change collection state", zap.Int64("collection", collectionID), zap.String("state", state.String()), zap.Uint64("ts", ts))
+
 	return nil
 }
 

@@ -36,11 +36,6 @@ type createCollectionTask struct {
 	collID   UniqueID
 	partID   UniqueID
 	channels collectionChannels
-
-	addDmlChannel   bool
-	addDeltaChannel bool
-
-	success bool
 }
 
 func (t *createCollectionTask) validate() error {
@@ -133,7 +128,7 @@ func (t *createCollectionTask) assignChannels() error {
 			if err != nil {
 				errMsg = err.Error()
 			}
-			log.Debug("dmlChanName deltaChanName mismatch detail", zap.Int32("i", i),
+			log.Warn("dmlChanName deltaChanName mismatch detail", zap.Int32("i", i),
 				zap.String("vchanName", vchanNames[i]),
 				zap.String("phsicalChanName", chanNames[i]),
 				zap.String("deltaChanName", deltaChanNames[i]),
@@ -214,79 +209,51 @@ func (t *createCollectionTask) Execute(ctx context.Context) error {
 	if err == nil {
 		equal := existedCollInfo.Equal(*clonedCollInfoWithDefaultPartition)
 		if !equal {
-			fmt.Println(model.MarshalCollectionModel(existedCollInfo))
-			fmt.Println(model.MarshalCollectionModel(clonedCollInfoWithDefaultPartition))
-			return fmt.Errorf("create collection with different parameters, collection: %s", t.Req.GetCollectionName())
+			return fmt.Errorf("create duplicate collection with different parameters, collection: %s", t.Req.GetCollectionName())
 		}
 		// make creating collection idempotent.
 		log.Warn("add duplicate collection", zap.String("collection", t.Req.GetCollectionName()))
-		t.success = true
 		return nil
 	}
 
-	// do not change the order of the following operations.
-	// add channels must be before add collection.
-	t.core.chanTimeTick.addDmlChannels(chanNames...)
+	undoTask := newBaseUndoTask()
+	undoTask.AddStep(&AddCollectionMetaStep{
+		baseStep: baseStep{core: t.core},
+		coll:     &collInfo,
+	}, &DeleteCollectionMetaStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: collID,
+		ts:           ts,
+	})
+	undoTask.AddStep(&AddDmlChannelsStep{
+		baseStep:  baseStep{core: t.core},
+		pchannels: chanNames,
+	}, &RemoveDmlChannelsStep{
+		baseStep:  baseStep{core: t.core},
+		pchannels: chanNames,
+	})
+	undoTask.AddStep(&AddDeltaChannelsStep{
+		baseStep:     baseStep{core: t.core},
+		dmlPChannels: chanNames,
+	}, &RemoveDeltaChannelsStep{
+		baseStep:     baseStep{core: t.core},
+		dmlPChannels: chanNames,
+	})
+	undoTask.AddStep(&WatchChannelsStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: collID,
+		channels:     t.channels,
+	}, &UnwatchChannelsStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: collID,
+		channels:     t.channels,
+	})
+	undoTask.AddStep(&ChangeCollectionStateStep{
+		baseStep:     baseStep{core: t.core},
+		collectionId: collID,
+		state:        pb.CollectionState_CollectionCreated,
+		ts:           ts,
+	}, &NullStep{}) // We'll remove the whole collection anyway.
 
-	deltaChanNames := make([]string, len(chanNames))
-	for i, chanName := range chanNames {
-		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
-			return err
-		}
-	}
-	t.core.chanTimeTick.addDeltaChannels(deltaChanNames...)
-
-	err = t.core.meta.AddCollection(ctx, &collInfo)
-	if err != nil {
-		return err
-	}
-
-	err = t.core.watchChannels(ctx, collID, vchanNames)
-	if err != nil {
-		return err
-	}
-
-	err = t.core.meta.ChangeCollectionState(ctx, collID, pb.CollectionState_CollectionCreated, ts)
-	if err != nil {
-		return err
-	}
-	t.success = true
-	return nil
-}
-
-func (t *createCollectionTask) PostExecute(ctx context.Context) error {
-	if t.success {
-		return nil
-	}
-
-	//vchanNames := t.channels.virtualChannels
-	chanNames := t.channels.physicalChannels
-
-	if err := t.core.meta.ChangeCollectionState(ctx, t.collID, pb.CollectionState_CollectionDropping, t.ts); err != nil {
-		return err
-	}
-
-	if err := t.core.meta.ChangePartitionState(ctx, t.collID, t.partID, pb.PartitionState_PartitionDropping, t.ts); err != nil {
-		return err
-	}
-
-	// TODO: unwatch channels
-
-	t.core.chanTimeTick.removeDmlChannels(chanNames...)
-
-	// remove delta channels
-	var err error
-	deltaChanNames := make([]string, len(chanNames))
-	for i, chanName := range chanNames {
-		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
-			return err
-		}
-	}
-	t.core.chanTimeTick.removeDeltaChannels(deltaChanNames...)
-	return nil
-
-	if err := t.core.meta.RemoveCollection(ctx, t.collID, t.ts); err != nil {
-		return err
-	}
-	return nil
+	return undoTask.Execute(ctx)
 }
