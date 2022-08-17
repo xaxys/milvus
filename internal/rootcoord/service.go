@@ -98,6 +98,8 @@ type RootCoord struct {
 	factory   dependency.Factory
 }
 
+type Opt func(*RootCoord)
+
 func NewRootCoord(ctx context.Context, factory dependency.Factory) (*RootCoord, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 	rand.Seed(time.Now().UnixNano())
