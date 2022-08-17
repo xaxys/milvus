@@ -16,16 +16,11 @@ type Catalog interface {
 	ListCollections(ctx context.Context, ts typeutil.Timestamp) (map[string]*model.Collection, error)
 	CollectionExists(ctx context.Context, collectionID typeutil.UniqueID, ts typeutil.Timestamp) bool
 	DropCollection(ctx context.Context, collectionInfo *model.Collection, ts typeutil.Timestamp) error
-
-	CreateCollectionOnly(ctx context.Context, collectionInfo *model.Collection, ts typeutil.Timestamp) error
-	DropCollectionOnly(ctx context.Context, collectionID typeutil.UniqueID, ts typeutil.Timestamp) error
-
-	// TODO: should field model contain collection id?
-	AddFields(ctx context.Context, collectionID typeutil.UniqueID, fields []*model.Field, ts typeutil.Timestamp) error
-	RemoveFields(ctx context.Context, collectionID typeutil.UniqueID, fieldIds []typeutil.UniqueID, ts typeutil.Timestamp) error
+	AlterCollection(ctx context.Context, oldColl *model.Collection, newColl *model.Collection, alterType AlterType, ts typeutil.Timestamp) error
 
 	CreatePartition(ctx context.Context, partition *model.Partition, ts typeutil.Timestamp) error
 	DropPartition(ctx context.Context, collectionID typeutil.UniqueID, partitionID typeutil.UniqueID, ts typeutil.Timestamp) error
+	AlterPartition(ctx context.Context, oldPart *model.Partition, newPart *model.Partition, alterType AlterType, ts typeutil.Timestamp) error
 
 	CreateIndex(ctx context.Context, col *model.Collection, index *model.Index) error
 	// AlterIndex newIndex only contains updated parts
@@ -63,3 +58,15 @@ const (
 	DELETE
 	MODIFY
 )
+
+func (t AlterType) String() string {
+	switch t {
+	case ADD:
+		return "ADD"
+	case DELETE:
+		return "DELETE"
+	case MODIFY:
+		return "MODIFY"
+	}
+	return ""
+}

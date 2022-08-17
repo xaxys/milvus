@@ -5,10 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/milvus-io/milvus/internal/util/funcutil"
-
-	"github.com/milvus-io/milvus/internal/proto/schemapb"
-
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
 	kvmetestore "github.com/milvus-io/milvus/internal/metastore/kv"
@@ -20,9 +16,7 @@ import (
 )
 
 const (
-	// DDLLogPrefix prefix for DDL log
-	DDLLogPrefix = kvmetestore.ComponentPrefix + "/ddl-log"
-	maxTxnNum    = 64
+	maxTxnNum = 64
 )
 
 func min(a, b int) int {
@@ -33,17 +27,16 @@ func min(a, b int) int {
 }
 
 type IMetaTableV2 interface {
-	AddCreatingCollection(ctx context.Context, coll *model.Collection) error
-	SaveCollectionOnly(ctx context.Context, collectionID UniqueID, state pb.CollectionState, ts Timestamp) error
-	RemoveCollectionOnly(ctx context.Context, collectionID UniqueID, ts Timestamp) error
+	AddCollection(ctx context.Context, coll *model.Collection) error
+	ChangeCollectionState(ctx context.Context, collectionID UniqueID, state pb.CollectionState, ts Timestamp) error
+	RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error
 	GetCollectionByName(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error)
 	GetCollectionByID(ctx context.Context, collectionID UniqueID, ts Timestamp) (*model.Collection, error)
 	ListCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error)
-	AddCreatingPartition(ctx context.Context, partition *model.Partition) error
-	SavePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error
+	ListAbnormalCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error)
+	AddPartition(ctx context.Context, partition *model.Partition) error
+	ChangePartitionState(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error
 	RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error
-	SaveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, state schemapb.FieldState, ts Timestamp) error
-	RemoveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, ts Timestamp) error
 	CreateAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error
 	DropAlias(ctx context.Context, alias string, ts Timestamp) error
 	AlterAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error
@@ -105,19 +98,23 @@ func (m *MetaTableV2) reload() error {
 	return nil
 }
 
-func (m *MetaTableV2) AddCreatingCollection(ctx context.Context, coll *model.Collection) error {
+func (m *MetaTableV2) AddCollection(ctx context.Context, coll *model.Collection) error {
 	m.ddLock.Lock()
 	defer m.ddLock.Unlock()
 
 	if coll.State != pb.CollectionState_CollectionCreating {
 		return fmt.Errorf("collection state should be creating, collection name: %s, collection id: %d, state: %s", coll.Name, coll.CollectionID, coll.State)
 	}
+	err := m.catalog.CreateCollection(ctx, coll, coll.CreateTime)
+	if err != nil {
+		return err
+	}
 	m.collID2Meta[coll.CollectionID] = coll.Clone()
 	m.collName2ID[coll.Name] = coll.CollectionID
 	return nil
 }
 
-func (m *MetaTableV2) SaveCollectionOnly(ctx context.Context, collectionID UniqueID, state pb.CollectionState, ts Timestamp) error {
+func (m *MetaTableV2) ChangeCollectionState(ctx context.Context, collectionID UniqueID, state pb.CollectionState, ts Timestamp) error {
 	m.ddLock.Lock()
 	defer m.ddLock.Unlock()
 
@@ -127,18 +124,18 @@ func (m *MetaTableV2) SaveCollectionOnly(ctx context.Context, collectionID Uniqu
 	}
 	clone := coll.Clone()
 	clone.State = state
-	if err := m.catalog.CreateCollection(ctx, clone, ts); err != nil {
+	if err := m.catalog.AlterCollection(ctx, coll, clone, metastore.MODIFY, ts); err != nil {
 		return err
 	}
 	m.collID2Meta[collectionID] = clone
 	return nil
 }
 
-func (m *MetaTableV2) RemoveCollectionOnly(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
+func (m *MetaTableV2) RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
 	m.ddLock.Lock()
 	defer m.ddLock.Unlock()
 
-	if err := m.catalog.DropCollectionOnly(ctx, collectionID, ts); err != nil {
+	if err := m.catalog.DropCollection(ctx, &model.Collection{CollectionID: collectionID}, ts); err != nil {
 		return err
 	}
 	delete(m.collID2Meta, collectionID)
@@ -204,7 +201,25 @@ func (m *MetaTableV2) ListCollections(ctx context.Context, ts Timestamp) ([]*mod
 	return onlineCollections, nil
 }
 
-func (m *MetaTableV2) AddCreatingPartition(ctx context.Context, partition *model.Partition) error {
+func (m *MetaTableV2) ListAbnormalCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
+	m.ddLock.RLock()
+	defer m.ddLock.RUnlock()
+
+	// list collections should always be loaded from catalog.
+	colls, err := m.catalog.ListCollections(ctx, ts)
+	if err != nil {
+		return nil, err
+	}
+	abnormalCollections := make([]*model.Collection, 0, len(colls))
+	for _, coll := range colls {
+		if !coll.Available() {
+			abnormalCollections = append(abnormalCollections, coll)
+		}
+	}
+	return abnormalCollections, nil
+}
+
+func (m *MetaTableV2) AddPartition(ctx context.Context, partition *model.Partition) error {
 	m.ddLock.Lock()
 	defer m.ddLock.Unlock()
 
@@ -212,14 +227,14 @@ func (m *MetaTableV2) AddCreatingPartition(ctx context.Context, partition *model
 	if !ok {
 		return fmt.Errorf("collection not exists: %d", partition.CollectionID)
 	}
-	if partition.State != pb.PartitionState_PartitionCreating {
-		return fmt.Errorf("partition state is not creating, collection: %d, partition: %d, state: %s", partition.CollectionID, partition.PartitionID, partition.State)
+	if partition.State != pb.PartitionState_PartitionCreated {
+		return fmt.Errorf("partition state is not created, collection: %d, partition: %d, state: %s", partition.CollectionID, partition.PartitionID, partition.State)
 	}
 	m.collID2Meta[partition.CollectionID].Partitions = append(m.collID2Meta[partition.CollectionID].Partitions, partition.Clone())
 	return nil
 }
 
-func (m *MetaTableV2) SavePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error {
+func (m *MetaTableV2) ChangePartitionState(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error {
 	m.ddLock.Lock()
 	defer m.ddLock.Unlock()
 
@@ -231,7 +246,7 @@ func (m *MetaTableV2) SavePartition(ctx context.Context, collectionID UniqueID, 
 		if part.PartitionID == partitionID {
 			clone := part.Clone()
 			clone.State = state
-			if err := m.catalog.CreatePartition(ctx, clone, ts); err != nil {
+			if err := m.catalog.AlterPartition(ctx, part, clone, metastore.MODIFY, ts); err != nil {
 				return err
 			}
 			coll.Partitions[idx] = clone
@@ -261,56 +276,6 @@ func (m *MetaTableV2) RemovePartition(ctx context.Context, collectionID UniqueID
 	}
 	if loc != -1 {
 		coll.Partitions = append(coll.Partitions[:loc], coll.Partitions[loc+1:]...)
-	}
-	return nil
-}
-
-func (m *MetaTableV2) SaveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, state schemapb.FieldState, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
-
-	coll, ok := m.collID2Meta[collectionID]
-	if !ok {
-		return fmt.Errorf("collection not exist: %d", collectionID)
-	}
-	toSavedFieldIndexes := make([]int, 0, len(fieldIds))
-	toSavedFields := make([]*model.Field, 0, len(fieldIds))
-	for idx, field := range coll.Fields {
-		if funcutil.SliceContain(fieldIds, field.FieldID) {
-			toSavedFieldIndexes = append(toSavedFieldIndexes, idx)
-			clone := field.Clone()
-			clone.State = state
-			toSavedFields = append(toSavedFields, clone)
-		}
-	}
-	if err := m.catalog.AddFields(ctx, collectionID, toSavedFields, ts); err != nil {
-		return err
-	}
-	for idx, fieldIndex := range toSavedFieldIndexes {
-		coll.Fields[fieldIndex] = toSavedFields[idx]
-	}
-	return nil
-}
-
-func (m *MetaTableV2) RemoveFields(ctx context.Context, collectionID UniqueID, fieldIds []UniqueID, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
-
-	if err := m.catalog.RemoveFields(ctx, collectionID, fieldIds, ts); err != nil {
-		return err
-	}
-	coll, ok := m.collID2Meta[collectionID]
-	if !ok {
-		return nil
-	}
-	toSavedFieldIndexes := make([]int, 0, len(fieldIds))
-	for idx := len(coll.Fields) - 1; idx >= 0; idx-- {
-		if funcutil.SliceContain(fieldIds, coll.Fields[idx].FieldID) {
-			toSavedFieldIndexes = append(toSavedFieldIndexes, idx)
-		}
-	}
-	for _, fieldIndex := range toSavedFieldIndexes {
-		coll.Fields = append(coll.Fields[:fieldIndex], coll.Fields[fieldIndex+1:]...)
 	}
 	return nil
 }

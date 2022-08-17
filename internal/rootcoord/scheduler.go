@@ -4,6 +4,9 @@ import (
 	"context"
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/log"
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus/internal/tso"
 
 	"github.com/milvus-io/milvus/internal/allocator"
@@ -13,6 +16,7 @@ type IScheduler interface {
 	Start()
 	Stop()
 	AddTask(t taskV2) error
+	AddPostTask(t taskV2)
 }
 
 type scheduler struct {
@@ -22,8 +26,9 @@ type scheduler struct {
 	idAllocator  allocator.GIDAllocator
 	tsoAllocator tso.Allocator
 
-	taskChan chan taskV2
-	wg       sync.WaitGroup
+	taskChan     chan taskV2
+	postTaskChan chan taskV2
+	wg           sync.WaitGroup
 }
 
 func newScheduler(ctx context.Context, idAllocator allocator.GIDAllocator, tsoAllocator tso.Allocator) *scheduler {
@@ -36,12 +41,14 @@ func newScheduler(ctx context.Context, idAllocator allocator.GIDAllocator, tsoAl
 		idAllocator:  idAllocator,
 		tsoAllocator: tsoAllocator,
 		taskChan:     make(chan taskV2, n),
+		postTaskChan: make(chan taskV2, n),
 	}
 }
 
 func (s *scheduler) Start() {
-	s.wg.Add(1)
+	s.wg.Add(2)
 	go s.taskLoop()
+	go s.postExecuteLoop()
 }
 
 func (s *scheduler) Stop() {
@@ -62,6 +69,8 @@ func (s *scheduler) taskLoop() {
 			}
 			err := task.Execute(s.ctx)
 			task.NotifyDone(err)
+			task.SetSuccess(err == nil)
+			s.postTaskChan <- task
 		}
 	}
 }
@@ -97,4 +106,22 @@ func (s *scheduler) AddTask(task taskV2) error {
 	}
 	s.enqueue(task)
 	return nil
+}
+
+func (s *scheduler) postExecuteLoop() {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case task := <-s.postTaskChan:
+			if err := task.PostExecute(s.ctx); err != nil {
+				log.Error("PostExecute error: %v", zap.Error(err))
+			}
+		}
+	}
+}
+
+func (s *scheduler) AddPostTask(task taskV2) {
+	s.postTaskChan <- task
 }

@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
+
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
 	"github.com/milvus-io/milvus/internal/metastore/model"
-
-	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
@@ -19,8 +19,6 @@ import (
 	"github.com/golang/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
-
-	"github.com/milvus-io/milvus/internal/proto/commonpb"
 
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
@@ -32,20 +30,25 @@ type collectionChannels struct {
 }
 
 type createCollectionTask struct {
-	baseUndoTask
+	baseTaskV2
 	Req      *milvuspb.CreateCollectionRequest
 	schema   *schemapb.CollectionSchema
 	collID   UniqueID
 	partID   UniqueID
 	channels collectionChannels
+
+	addDmlChannel   bool
+	addDeltaChannel bool
+
+	success bool
 }
 
 func (t *createCollectionTask) validate() error {
 	if t.Req == nil {
 		return errors.New("empty requests")
 	}
-	if t.Req.GetBase().GetMsgType() != commonpb.MsgType_CreateCollection {
-		return fmt.Errorf("create collection, msg type = %s", t.Req.GetBase().GetMsgType())
+	if err := CheckMsgType(t.Req.GetBase().GetMsgType(), commonpb.MsgType_CreateCollection); err != nil {
+		return err
 	}
 	return nil
 }
@@ -124,18 +127,18 @@ func (t *createCollectionTask) assignChannels() error {
 		chanNames[i] = funcutil.ToPhysicalChannel(vchanNames[i])
 
 		deltaChanNames[i] = t.core.chanTimeTick.getDeltaChannelName()
-		deltaChanName, err1 := funcutil.ConvertChannelName(chanNames[i], Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta)
-		if err1 != nil || deltaChanName != deltaChanNames[i] {
-			err1Msg := ""
-			if err1 != nil {
-				err1Msg = err1.Error()
+		deltaChanName, err := funcutil.ConvertChannelName(chanNames[i], Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta)
+		if err != nil || deltaChanName != deltaChanNames[i] {
+			errMsg := ""
+			if err != nil {
+				errMsg = err.Error()
 			}
 			log.Debug("dmlChanName deltaChanName mismatch detail", zap.Int32("i", i),
 				zap.String("vchanName", vchanNames[i]),
 				zap.String("phsicalChanName", chanNames[i]),
 				zap.String("deltaChanName", deltaChanNames[i]),
 				zap.String("converted_deltaChanName", deltaChanName),
-				zap.String("err", err1Msg))
+				zap.String("err", errMsg))
 			return fmt.Errorf("dmlChanName %s and deltaChanName %s mis-match", chanNames[i], deltaChanNames[i])
 		}
 	}
@@ -144,187 +147,6 @@ func (t *createCollectionTask) assignChannels() error {
 		physicalChannels: chanNames,
 		deltaChannels:    deltaChanNames,
 	}
-	return nil
-}
-
-func (t *createCollectionTask) prepareStep(ctx context.Context) error {
-	t.prepareLogger()
-
-	collID := t.collID
-	partID := t.partID
-	ts := t.GetTs()
-
-	vchanNames := t.channels.virtualChannels
-	chanNames := t.channels.physicalChannels
-
-	collInfo := model.Collection{
-		CollectionID:         collID,
-		Name:                 t.schema.Name,
-		Description:          t.schema.Description,
-		AutoID:               t.schema.AutoID,
-		Fields:               model.UnmarshalFieldModels(t.schema.Fields),
-		VirtualChannelNames:  vchanNames,
-		PhysicalChannelNames: chanNames,
-		ShardsNum:            t.Req.ShardsNum,
-		ConsistencyLevel:     t.Req.ConsistencyLevel,
-		CreateTime:           ts,
-		State:                pb.CollectionState_CollectionCreating,
-	}
-
-	clonedCollInfoWithDefaultPartition := collInfo.Clone()
-	clonedCollInfoWithDefaultPartition.Partitions = []*model.Partition{{PartitionName: Params.CommonCfg.DefaultPartitionName}}
-	// need double check in meta table if we can't promise the sequence execution.
-	existedCollInfo, err := t.core.meta.GetCollectionByName(ctx, t.Req.GetCollectionName(), typeutil.MaxTimestamp)
-	if err == nil {
-		equal := existedCollInfo.Equal(*clonedCollInfoWithDefaultPartition)
-		if !equal {
-			fmt.Println(model.MarshalCollectionModel(existedCollInfo))
-			fmt.Println(model.MarshalCollectionModel(clonedCollInfoWithDefaultPartition))
-			return fmt.Errorf("create collection with different parameters, collection: %s", t.Req.GetCollectionName())
-		}
-		// make creating collection idempotent.
-		log.Warn("add duplicate collection", zap.String("collection", t.Req.GetCollectionName()))
-		return nil
-	}
-
-	t.AddStep(&AddCollectionMetaStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		coll: &collInfo,
-	}, &DeleteCollectionMetaStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		DeleteCollectionMetaStep: rootcoordpb.DeleteCollectionMetaStep{
-			CollectionId: collID,
-			Timestamp:    ts,
-		},
-	})
-
-	t.AddStep(&AddPartitionMetaStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		AddPartitionMetaStep: rootcoordpb.AddPartitionMetaStep{
-			CollectionId: collID,
-			PartInfo: &pb.PartitionInfo{
-				PartitionID:               partID,
-				PartitionName:             Params.CommonCfg.DefaultPartitionName,
-				PartitionCreatedTimestamp: ts,
-				CollectionId:              collID,
-				State:                     pb.PartitionState_PartitionCreating,
-			},
-			Timestamp: ts,
-		},
-	}, &DeletePartitionMetaStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		DeletePartitionMetaStep: rootcoordpb.DeletePartitionMetaStep{
-			CollectionId: collID,
-			PartitionId:  partID,
-			Timestamp:    ts,
-		},
-	})
-
-	t.AddStep(&CreateChannelStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		CreateChannelStep: rootcoordpb.CreateChannelStep{
-			Pchannels: chanNames,
-		},
-	}, &RemoveChannelStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		RemoveChannelStep: rootcoordpb.RemoveChannelStep{
-			Pchannels: chanNames,
-		},
-	})
-
-	t.AddStep(&WatchChannelStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		WatchChannelStep: rootcoordpb.WatchChannelStep{
-			Vchannels: vchanNames,
-		},
-	}, &UnwatchChannelStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		UnwatchChannelStep: rootcoordpb.UnwatchChannelStep{
-			Vchannels: vchanNames,
-		},
-	})
-
-	t.AddStep(&EnablePartitionMetaStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		EnablePartitionMetaStep: rootcoordpb.EnablePartitionMetaStep{
-			CollectionId: collID,
-			PartitionId:  partID,
-			Timestamp:    ts,
-		},
-	}, &DisablePartitionMetaStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		DisablePartitionMetaStep: rootcoordpb.DisablePartitionMetaStep{
-			CollectionId: collID,
-			PartitionId:  partID,
-			Timestamp:    ts,
-		},
-	})
-
-	for i := 0; i < len(collInfo.Fields); i = i + maxTxnNum {
-		end := min(i+maxTxnNum, len(collInfo.Fields))
-		fieldIds := make([]UniqueID, 0, end-i)
-		for j := i; j < end; j++ {
-			fieldIds = append(fieldIds, collInfo.Fields[j].FieldID)
-		}
-		t.AddStep(&AddFieldsMetaStep{
-			baseStep: baseStep{
-				core: t.core,
-			},
-			AddFieldsMetaStep: rootcoordpb.AddFieldsMetaStep{
-				CollectionId: collID,
-				FieldIds:     fieldIds,
-				Timestamp:    ts,
-			},
-		}, &RemoveFieldsMetaStep{
-			baseStep: baseStep{
-				core: t.core,
-			},
-			RemoveFieldsMetaStep: rootcoordpb.RemoveFieldsMetaStep{
-				CollectionId: collID,
-				FieldIds:     fieldIds,
-				Timestamp:    ts,
-			},
-		})
-	}
-
-	t.AddStep(&EnableCollectionMetaStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		EnableCollectionMetaStep: rootcoordpb.EnableCollectionMetaStep{
-			CollectionId: collID,
-			Timestamp:    ts,
-		},
-	}, &DisableCollectionMetaStep{
-		baseStep: baseStep{
-			core: t.core,
-		},
-		DisableCollectionMetaStep: rootcoordpb.DisableCollectionMetaStep{
-			CollectionId: collID,
-			Timestamp:    ts,
-		},
-	})
-
 	return nil
 }
 
@@ -351,5 +173,118 @@ func (t *createCollectionTask) Prepare(ctx context.Context) error {
 		return err
 	}
 
-	return t.prepareStep(ctx)
+	return nil
+}
+
+func (t *createCollectionTask) Execute(ctx context.Context) error {
+	collID := t.collID
+	partID := t.partID
+	ts := t.GetTs()
+
+	vchanNames := t.channels.virtualChannels
+	chanNames := t.channels.physicalChannels
+
+	collInfo := model.Collection{
+		CollectionID:         collID,
+		Name:                 t.schema.Name,
+		Description:          t.schema.Description,
+		AutoID:               t.schema.AutoID,
+		Fields:               model.UnmarshalFieldModels(t.schema.Fields),
+		VirtualChannelNames:  vchanNames,
+		PhysicalChannelNames: chanNames,
+		ShardsNum:            t.Req.ShardsNum,
+		ConsistencyLevel:     t.Req.ConsistencyLevel,
+		CreateTime:           ts,
+		State:                pb.CollectionState_CollectionCreating,
+		Partitions: []*model.Partition{
+			{
+				PartitionID:               partID,
+				PartitionName:             Params.CommonCfg.DefaultPartitionName,
+				PartitionCreatedTimestamp: ts,
+				CollectionID:              collID,
+				State:                     pb.PartitionState_PartitionCreated,
+			},
+		},
+	}
+
+	clonedCollInfoWithDefaultPartition := collInfo.Clone()
+	clonedCollInfoWithDefaultPartition.Partitions = []*model.Partition{{PartitionName: Params.CommonCfg.DefaultPartitionName}}
+	// need double check in meta table if we can't promise the sequence execution.
+	existedCollInfo, err := t.core.meta.GetCollectionByName(ctx, t.Req.GetCollectionName(), typeutil.MaxTimestamp)
+	if err == nil {
+		equal := existedCollInfo.Equal(*clonedCollInfoWithDefaultPartition)
+		if !equal {
+			fmt.Println(model.MarshalCollectionModel(existedCollInfo))
+			fmt.Println(model.MarshalCollectionModel(clonedCollInfoWithDefaultPartition))
+			return fmt.Errorf("create collection with different parameters, collection: %s", t.Req.GetCollectionName())
+		}
+		// make creating collection idempotent.
+		log.Warn("add duplicate collection", zap.String("collection", t.Req.GetCollectionName()))
+		return nil
+	}
+
+	// do not change the order of the following operations.
+	// add channels must be before add collection.
+	t.core.chanTimeTick.addDmlChannels(chanNames...)
+
+	deltaChanNames := make([]string, len(chanNames))
+	for i, chanName := range chanNames {
+		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
+			return err
+		}
+	}
+	t.core.chanTimeTick.addDeltaChannels(deltaChanNames...)
+
+	err = t.core.meta.AddCollection(ctx, &collInfo)
+	if err != nil {
+		return err
+	}
+
+	err = t.core.watchChannels(ctx, collID, vchanNames)
+	if err != nil {
+		return err
+	}
+
+	err = t.core.meta.ChangeCollectionState(ctx, collID, pb.CollectionState_CollectionCreated, ts)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *createCollectionTask) PostExecute(ctx context.Context) error {
+	if t.IsSuccess() {
+		return nil
+	}
+
+	//vchanNames := t.channels.virtualChannels
+	chanNames := t.channels.physicalChannels
+
+	if err := t.core.meta.ChangeCollectionState(ctx, t.collID, pb.CollectionState_CollectionDropping, t.ts); err != nil {
+		return err
+	}
+
+	if err := t.core.meta.ChangePartitionState(ctx, t.collID, t.partID, pb.PartitionState_PartitionDropping, t.ts); err != nil {
+		return err
+	}
+
+	// TODO: unwatch channels
+
+	t.core.chanTimeTick.removeDmlChannels(chanNames...)
+
+	// remove delta channels
+	var err error
+	deltaChanNames := make([]string, len(chanNames))
+	for i, chanName := range chanNames {
+		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
+			return err
+		}
+	}
+	t.core.chanTimeTick.removeDeltaChannels(deltaChanNames...)
+	return nil
+
+	if err := t.core.meta.RemoveCollection(ctx, t.collID, t.ts); err != nil {
+		return err
+	}
+	return nil
 }
