@@ -641,6 +641,7 @@ func (c *RootCoord) notifyDataGC(ctx context.Context, coll *model.Collection, ts
 
 func (c *RootCoord) releaseCollection(ctx context.Context, collectionID UniqueID) error {
 	if err := funcutil.WaitForComponentHealthy(ctx, c.queryCoord, "QueryCoord", 100, time.Millisecond*200); err != nil {
+		log.Error("failed to release collection, querycoord not healthy", zap.Error(err), zap.Int64("collection", collectionID))
 		return err
 	}
 	resp, err := c.queryCoord.ReleaseCollection(ctx, &querypb.ReleaseCollectionRequest{
@@ -654,6 +655,7 @@ func (c *RootCoord) releaseCollection(ctx context.Context, collectionID UniqueID
 	if resp.GetErrorCode() != commonpb.ErrorCode_Success {
 		return fmt.Errorf("failed to release collection, code: %s, reason: %s", resp.GetErrorCode(), resp.GetReason())
 	}
+	log.Info("done to release collection", zap.Int64("collection", collectionID))
 	return nil
 }
 

@@ -3,6 +3,9 @@ package rootcoord
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/internal/log"
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus/internal/metastore/model"
 
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -41,6 +44,7 @@ func (t *dropPartitionTask) Execute(ctx context.Context) error {
 		}
 	}
 	if partID == common.InvalidPartitionID {
+		log.Warn("drop an non-existent partition", zap.String("collection", t.Req.GetCollectionName()), zap.String("partition", t.Req.GetPartitionName()))
 		// make dropping partition idempotent.
 		return nil
 	}

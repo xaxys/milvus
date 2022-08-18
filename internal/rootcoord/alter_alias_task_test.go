@@ -11,11 +11,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
 
-const (
-	TestProxyID     = 100
-	TestRootCoordID = 200
-)
-
 func Test_alterAliasTask_Prepare(t *testing.T) {
 	t.Run("invalid msg type", func(t *testing.T) {
 		task := &alterAliasTask{Req: &milvuspb.AlterAliasRequest{Base: &commonpb.MsgBase{MsgType: commonpb.MsgType_DropCollection}}}

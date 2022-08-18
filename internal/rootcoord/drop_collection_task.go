@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/milvus-io/milvus/internal/log"
+	"go.uber.org/zap"
+
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -36,6 +39,7 @@ func (t *dropCollectionTask) Execute(ctx context.Context) error {
 	collMeta, err := t.core.meta.GetCollectionByName(ctx, t.Req.GetCollectionName(), typeutil.MaxTimestamp)
 	if err != nil {
 		// make dropping collection idempotent.
+		log.Warn("drop non-existent collection", zap.String("collection", t.Req.GetCollectionName()))
 		return nil
 	}
 
@@ -49,7 +53,6 @@ func (t *dropCollectionTask) Execute(ctx context.Context) error {
 		collectionId:    collMeta.CollectionID,
 		ts:              ts,
 	})
-	// TODO: corner case, once expiring cache is done and a read(describe) request entered before you mark collection deleted.
 	redoTask.AddSyncStep(&ChangeCollectionStateStep{
 		baseStep:     baseStep{core: t.core},
 		collectionId: collMeta.CollectionID,
