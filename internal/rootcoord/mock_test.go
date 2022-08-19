@@ -6,6 +6,8 @@ import (
 	"math/rand"
 	"os"
 
+	"github.com/milvus-io/milvus/internal/util/typeutil"
+
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 
 	"github.com/milvus-io/milvus/internal/util/dependency"
@@ -39,6 +41,7 @@ const (
 
 type mockMetaTable struct {
 	IMetaTableV2
+	ListCollectionsFunc       func(ctx context.Context, ts Timestamp) ([]*model.Collection, error)
 	AddCollectionFunc         func(ctx context.Context, coll *model.Collection) error
 	GetCollectionByNameFunc   func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error)
 	GetCollectionByIDFunc     func(ctx context.Context, collectionID UniqueID, ts Timestamp) (*model.Collection, error)
@@ -51,6 +54,10 @@ type mockMetaTable struct {
 	AlterAliasFunc            func(ctx context.Context, alias string, collectionName string, ts Timestamp) error
 	DropAliasFunc             func(ctx context.Context, alias string, ts Timestamp) error
 	IsAliasFunc               func(name string) bool
+}
+
+func (m *mockMetaTable) ListCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
+	return m.ListCollectionsFunc(ctx, ts)
 }
 
 func (m mockMetaTable) AddCollection(ctx context.Context, coll *model.Collection) error {
@@ -247,8 +254,14 @@ func withMeta(meta IMetaTableV2) Opt {
 
 func withInvalidMeta() Opt {
 	meta := newMockMetaTable()
+	meta.ListCollectionsFunc = func(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
+		return nil, errors.New("error mock ListCollections")
+	}
 	meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
 		return nil, errors.New("error mock GetCollectionByName")
+	}
+	meta.GetCollectionByIDFunc = func(ctx context.Context, collectionID typeutil.UniqueID, ts Timestamp) (*model.Collection, error) {
+		return nil, errors.New("error mock GetCollectionByID")
 	}
 	meta.AddPartitionFunc = func(ctx context.Context, partition *model.Partition) error {
 		return errors.New("error mock AddPartition")
