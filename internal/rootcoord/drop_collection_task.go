@@ -74,10 +74,6 @@ func (t *dropCollectionTask) Execute(ctx context.Context) error {
 		baseStep:  baseStep{core: t.core},
 		pchannels: collMeta.PhysicalChannelNames,
 	})
-	redoTask.AddAsyncStep(&RemoveDeltaChannelsStep{
-		baseStep:     baseStep{core: t.core},
-		dmlPChannels: collMeta.PhysicalChannelNames,
-	})
 	redoTask.AddAsyncStep(&DeleteCollectionMetaStep{
 		baseStep:     baseStep{core: t.core},
 		collectionId: collMeta.CollectionID,

@@ -3,8 +3,6 @@ package rootcoord
 import (
 	"context"
 
-	"github.com/milvus-io/milvus/internal/util/funcutil"
-
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
 	"github.com/milvus-io/milvus/internal/metastore/model"
@@ -54,40 +52,6 @@ type RemoveDmlChannelsStep struct {
 
 func (s *RemoveDmlChannelsStep) Execute(ctx context.Context) error {
 	s.core.chanTimeTick.removeDmlChannels(s.pchannels...)
-	return nil
-}
-
-type AddDeltaChannelsStep struct {
-	baseStep
-	dmlPChannels []string
-}
-
-func (s *AddDeltaChannelsStep) Execute(ctx context.Context) error {
-	var err error
-	deltaChanNames := make([]string, len(s.dmlPChannels))
-	for i, chanName := range s.dmlPChannels {
-		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
-			return err
-		}
-	}
-	s.core.chanTimeTick.addDeltaChannels(deltaChanNames...)
-	return nil
-}
-
-type RemoveDeltaChannelsStep struct {
-	baseStep
-	dmlPChannels []string
-}
-
-func (s *RemoveDeltaChannelsStep) Execute(ctx context.Context) error {
-	var err error
-	deltaChanNames := make([]string, len(s.dmlPChannels))
-	for i, chanName := range s.dmlPChannels {
-		if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
-			return err
-		}
-	}
-	s.core.chanTimeTick.removeDeltaChannels(deltaChanNames...)
 	return nil
 }
 

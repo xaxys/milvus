@@ -294,12 +294,7 @@ func Test_createCollectionTask_Execute(t *testing.T) {
 		shardNum := 2
 
 		ticker := newRocksMqTtSynchronizer()
-		var pchans []string
-		var deltaChans []string
-		for i := 0; i < shardNum; i++ {
-			pchans = append(pchans, ticker.getDmlChannelName())
-			deltaChans = append(deltaChans, ticker.getDeltaChannelName())
-		}
+		pchans := ticker.getDmlChannelNames(shardNum)
 
 		meta := newMockMetaTable()
 		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
@@ -351,7 +346,7 @@ func Test_createCollectionTask_Execute(t *testing.T) {
 				Schema:         marshaledSchema,
 				ShardsNum:      int32(shardNum),
 			},
-			channels: collectionChannels{physicalChannels: pchans, deltaChannels: deltaChans},
+			channels: collectionChannels{physicalChannels: pchans},
 			schema:   schema,
 		}
 

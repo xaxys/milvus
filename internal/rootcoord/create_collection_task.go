@@ -12,7 +12,6 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/model"
 
 	"github.com/milvus-io/milvus/internal/log"
-	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"go.uber.org/zap"
 
@@ -26,7 +25,6 @@ import (
 type collectionChannels struct {
 	virtualChannels  []string
 	physicalChannels []string
-	deltaChannels    []string
 }
 
 type createCollectionTask struct {
@@ -115,32 +113,15 @@ func (t *createCollectionTask) assignPartitionId() error {
 
 func (t *createCollectionTask) assignChannels() error {
 	vchanNames := make([]string, t.Req.ShardsNum)
-	chanNames := make([]string, t.Req.ShardsNum)
-	deltaChanNames := make([]string, t.Req.ShardsNum)
-	for i := int32(0); i < t.Req.ShardsNum; i++ {
-		vchanNames[i] = fmt.Sprintf("%s_%dv%d", t.core.chanTimeTick.getDmlChannelName(), t.collID, i)
-		chanNames[i] = funcutil.ToPhysicalChannel(vchanNames[i])
+	//physical channel names
+	chanNames := t.core.chanTimeTick.getDmlChannelNames(int(t.Req.ShardsNum))
 
-		deltaChanNames[i] = t.core.chanTimeTick.getDeltaChannelName()
-		deltaChanName, err := funcutil.ConvertChannelName(chanNames[i], Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta)
-		if err != nil || deltaChanName != deltaChanNames[i] {
-			errMsg := ""
-			if err != nil {
-				errMsg = err.Error()
-			}
-			log.Warn("dmlChanName deltaChanName mismatch detail", zap.Int32("i", i),
-				zap.String("vchanName", vchanNames[i]),
-				zap.String("phsicalChanName", chanNames[i]),
-				zap.String("deltaChanName", deltaChanNames[i]),
-				zap.String("converted_deltaChanName", deltaChanName),
-				zap.String("err", errMsg))
-			return fmt.Errorf("dmlChanName %s and deltaChanName %s mis-match", chanNames[i], deltaChanNames[i])
-		}
+	for i := int32(0); i < t.Req.ShardsNum; i++ {
+		vchanNames[i] = fmt.Sprintf("%s_%dv%d", chanNames[i], t.collID, i)
 	}
 	t.channels = collectionChannels{
 		virtualChannels:  vchanNames,
 		physicalChannels: chanNames,
-		deltaChannels:    deltaChanNames,
 	}
 	return nil
 }
@@ -231,13 +212,6 @@ func (t *createCollectionTask) Execute(ctx context.Context) error {
 	}, &RemoveDmlChannelsStep{
 		baseStep:  baseStep{core: t.core},
 		pchannels: chanNames,
-	})
-	undoTask.AddStep(&AddDeltaChannelsStep{
-		baseStep:     baseStep{core: t.core},
-		dmlPChannels: chanNames,
-	}, &RemoveDeltaChannelsStep{
-		baseStep:     baseStep{core: t.core},
-		dmlPChannels: chanNames,
 	})
 	undoTask.AddStep(&WatchChannelsStep{
 		baseStep:     baseStep{core: t.core},

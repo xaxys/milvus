@@ -131,14 +131,8 @@ func Test_dropCollectionTask_Execute(t *testing.T) {
 		shardNum := 2
 
 		ticker := newRocksMqTtSynchronizer()
-		var pchans []string
-		var deltaChans []string
-		for i := 0; i < shardNum; i++ {
-			pchans = append(pchans, ticker.getDmlChannelName())
-			deltaChans = append(deltaChans, ticker.getDeltaChannelName())
-		}
+		pchans := ticker.getDmlChannelNames(shardNum)
 		ticker.addDmlChannels(pchans...)
-		ticker.addDeltaChannels(deltaChans...)
 
 		coll := &model.Collection{Name: collectionName, ShardsNum: int32(shardNum), PhysicalChannelNames: pchans}
 		meta := newMockMetaTable()
