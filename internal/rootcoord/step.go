@@ -104,7 +104,18 @@ type DeleteCollectionDataStep struct {
 }
 
 func (s *DeleteCollectionDataStep) Execute(ctx context.Context) error {
-	return s.core.notifyDataGC(ctx, s.coll, s.ts)
+	return s.core.gcCollection(ctx, s.coll, s.ts)
+}
+
+type DeletePartitionDataStep struct {
+	baseStep
+	pchans    []string
+	partition *model.Partition
+	ts        Timestamp
+}
+
+func (s *DeletePartitionDataStep) Execute(ctx context.Context) error {
+	return s.core.gcPartition(ctx, s.pchans, s.partition, s.ts)
 }
 
 type ReleaseCollectionStep struct {

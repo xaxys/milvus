@@ -405,7 +405,6 @@ func (c *RootCoord) reDropCollection(collMeta *model.Collection, ts Timestamp) {
 	// TODO: remove this after data gc can be notified by rpc.
 	c.chanTimeTick.addDmlChannels(collMeta.PhysicalChannelNames...)
 	defer c.chanTimeTick.removeDmlChannels(collMeta.PhysicalChannelNames...)
-	// no need to add delta channels, since this collection should be dropped, so it's ok to let tSafe not updated.
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
@@ -415,7 +414,7 @@ func (c *RootCoord) reDropCollection(collMeta *model.Collection, ts Timestamp) {
 		return
 	}
 
-	if err := c.notifyDataGC(ctx, collMeta, ts); err != nil {
+	if err := c.gcCollection(ctx, collMeta, ts); err != nil {
 		log.Error("failed to notify datacoord to gc collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
 		return
 	}
@@ -442,12 +441,20 @@ func (c *RootCoord) removeCreatingCollection(collMeta *model.Collection) {
 	}
 }
 
-func (c *RootCoord) reDropPartition(partition *model.Partition, ts Timestamp) {
+func (c *RootCoord) reDropPartition(pchans []string, partition *model.Partition, ts Timestamp) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
 
 	// TODO: release partition when query coord is ready.
-	// TODO: notify datacoord to gc partition data when it's ready.
+
+	// TODO: remove this after data gc can be notified by rpc.
+	c.chanTimeTick.addDmlChannels(pchans...)
+	defer c.chanTimeTick.removeDmlChannels(pchans...)
+
+	if err := c.gcPartition(ctx, pchans, partition, ts); err != nil {
+		log.Error("failed to notify datanodes to gc partition", zap.Error(err))
+	}
+
 	if err := c.meta.RemovePartition(ctx, partition.CollectionID, partition.PartitionID, ts); err != nil {
 		log.Error("failed to remove partition when recovery", zap.Error(err))
 	}
@@ -487,7 +494,7 @@ func (c *RootCoord) restore(ctx context.Context) error {
 
 			switch part.State {
 			case pb.PartitionState_PartitionDropping:
-				go c.reDropPartition(part.Clone(), ts)
+				go c.reDropPartition(coll.PhysicalChannelNames, part.Clone(), ts)
 			default:
 			}
 		}
@@ -613,7 +620,7 @@ func (c *RootCoord) unwatchChannels(ctx context.Context, collectionID UniqueID, 
 	return nil
 }
 
-func (c *RootCoord) notifyDataGC(ctx context.Context, coll *model.Collection, ts typeutil.Timestamp) error {
+func (c *RootCoord) gcCollection(ctx context.Context, coll *model.Collection, ts typeutil.Timestamp) error {
 	msgPack := ms.MsgPack{}
 	baseMsg := ms.BaseMsg{
 		Ctx:            ctx,
@@ -635,6 +642,31 @@ func (c *RootCoord) notifyDataGC(ctx context.Context, coll *model.Collection, ts
 	}
 	msgPack.Msgs = append(msgPack.Msgs, msg)
 	return c.chanTimeTick.broadcastDmlChannels(coll.PhysicalChannelNames, &msgPack)
+}
+
+func (c *RootCoord) gcPartition(ctx context.Context, pchans []string, partition *model.Partition, ts typeutil.Timestamp) error {
+	msgPack := ms.MsgPack{}
+	baseMsg := ms.BaseMsg{
+		Ctx:            ctx,
+		BeginTimestamp: ts,
+		EndTimestamp:   ts,
+		HashValues:     []uint32{0},
+	}
+	msg := &ms.DropPartitionMsg{
+		BaseMsg: baseMsg,
+		DropPartitionRequest: internalpb.DropPartitionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_DropPartition,
+				Timestamp: ts,
+				SourceID:  c.session.ServerID,
+			},
+			PartitionName: partition.PartitionName,
+			CollectionID:  partition.CollectionID,
+			PartitionID:   partition.PartitionID,
+		},
+	}
+	msgPack.Msgs = append(msgPack.Msgs, msg)
+	return c.chanTimeTick.broadcastDmlChannels(pchans, &msgPack)
 }
 
 func (c *RootCoord) releaseCollection(ctx context.Context, collectionID UniqueID) error {

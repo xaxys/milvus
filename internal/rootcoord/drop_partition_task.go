@@ -56,7 +56,6 @@ func (t *dropPartitionTask) Execute(ctx context.Context) error {
 		collectionId:    t.collMeta.CollectionID,
 		ts:              t.GetTs(),
 	})
-	// TODO: corner case, once expiring cache is done and a read(describe) request entered before you mark collection deleted.
 	redoTask.AddSyncStep(&ChangePartitionStateStep{
 		baseStep:     baseStep{core: t.core},
 		collectionId: t.collMeta.CollectionID,
@@ -66,7 +65,16 @@ func (t *dropPartitionTask) Execute(ctx context.Context) error {
 	})
 
 	// TODO: release partition when query coord is ready.
-	// TODO: notify datacoord to gc partition data when it's ready.
+	redoTask.AddAsyncStep(&DeletePartitionDataStep{
+		baseStep: baseStep{core: t.core},
+		pchans:   t.collMeta.PhysicalChannelNames,
+		partition: &model.Partition{
+			PartitionID:   partID,
+			PartitionName: t.Req.GetPartitionName(),
+			CollectionID:  t.collMeta.CollectionID,
+		},
+		ts: t.GetTs(),
+	})
 	redoTask.AddAsyncStep(&RemovePartitionMetaStep{
 		baseStep:     baseStep{core: t.core},
 		collectionId: t.collMeta.CollectionID,
