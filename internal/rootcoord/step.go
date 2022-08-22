@@ -57,12 +57,11 @@ func (s *RemoveDmlChannelsStep) Execute(ctx context.Context) error {
 
 type WatchChannelsStep struct {
 	baseStep
-	collectionId UniqueID
-	channels     collectionChannels
+	info *watchInfo
 }
 
 func (s *WatchChannelsStep) Execute(ctx context.Context) error {
-	return s.core.watchChannels(ctx, s.collectionId, s.channels.virtualChannels)
+	return s.core.broker.WatchChannels(ctx, s.info)
 }
 
 type UnwatchChannelsStep struct {

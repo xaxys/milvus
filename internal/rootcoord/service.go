@@ -69,6 +69,7 @@ type RootCoord struct {
 	etcdCli   *clientv3.Client
 	meta      IMetaTableV2
 	scheduler IScheduler
+	broker    Broker
 
 	txn          kv.TxnKV
 	kvBaseCreate func(root string) (kv.TxnKV, error)
@@ -360,6 +361,8 @@ func (c *RootCoord) Init() error {
 		c.chanTimeTick = newTimeTickSync(c.ctx, c.session.ServerID, c.factory, chanMap)
 		c.chanTimeTick.addSession(c.session)
 		c.proxyClientManager = newProxyClientManager(c.NewProxyClient)
+
+		c.broker = newServerBroker(c)
 
 		log.Debug("RootCoord, set proxy manager")
 		c.proxyManager = newProxyManager(

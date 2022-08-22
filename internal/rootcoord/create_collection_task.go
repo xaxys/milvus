@@ -153,6 +153,11 @@ func (t *createCollectionTask) Prepare(ctx context.Context) error {
 }
 
 func (t *createCollectionTask) Execute(ctx context.Context) error {
+	marshaledSchema, err := proto.Marshal(t.schema)
+	if err != nil {
+		return err
+	}
+
 	collID := t.collID
 	partID := t.partID
 	ts := t.GetTs()
@@ -214,9 +219,15 @@ func (t *createCollectionTask) Execute(ctx context.Context) error {
 		pchannels: chanNames,
 	})
 	undoTask.AddStep(&WatchChannelsStep{
-		baseStep:     baseStep{core: t.core},
-		collectionId: collID,
-		channels:     t.channels,
+		baseStep: baseStep{core: t.core},
+		info: &watchInfo{
+			ts:           ts,
+			collectionID: collID,
+			partitionID:  partID,
+			schema:       marshaledSchema,
+			vChannels:    t.channels.virtualChannels,
+			pChannels:    t.channels.physicalChannels,
+		},
 	}, &UnwatchChannelsStep{
 		baseStep:     baseStep{core: t.core},
 		collectionId: collID,
