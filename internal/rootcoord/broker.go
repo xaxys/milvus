@@ -55,6 +55,7 @@ type Broker interface {
 	ReleaseCollection(ctx context.Context, collectionID UniqueID) error
 
 	WatchChannels(ctx context.Context, info *watchInfo) error
+	UnwatchChannels(ctx context.Context, info *watchInfo) error
 }
 
 type ServerBroker struct {
@@ -129,5 +130,10 @@ func (b *ServerBroker) WatchChannels(ctx context.Context, info *watchInfo) error
 	}
 
 	log.Info("done to watch channels", zap.Uint64("ts", info.ts), zap.Int64("collection", info.collectionID), zap.Strings("vChannels", info.vChannels), zap.Strings("pChannels", info.pChannels))
+	return nil
+}
+
+func (b *ServerBroker) UnwatchChannels(ctx context.Context, info *watchInfo) error {
+	// TODO: release flowgraph on datanodes.
 	return nil
 }

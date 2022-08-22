@@ -657,7 +657,7 @@ func TestRootCoordInit(t *testing.T) {
 	err = core.Register()
 	assert.NoError(t, err)
 
-	// inject kvBaseCreate fail
+	// inject txnCreator fail
 	core, err = NewCore(ctx, coreFactory)
 	core.SetEtcdClient(etcdCli)
 	require.Nil(t, err)

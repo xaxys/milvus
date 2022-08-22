@@ -659,7 +659,7 @@ func (c *Core) SetNewProxyClient(f func(sess *sessionutil.Session) (types.Proxy,
 	if c.NewProxyClient == nil {
 		c.NewProxyClient = f
 	} else {
-		log.Debug("NewProxyClient has already set")
+		log.Debug("proxyCreator has already set")
 	}
 }
 

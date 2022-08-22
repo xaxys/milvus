@@ -71,7 +71,7 @@ type UnwatchChannelsStep struct {
 }
 
 func (s *UnwatchChannelsStep) Execute(ctx context.Context) error {
-	return s.core.unwatchChannels(ctx, s.collectionId, s.channels.virtualChannels)
+	return s.core.broker.UnwatchChannels(ctx, &watchInfo{collectionID: s.collectionId, pChannels: s.channels.physicalChannels, vChannels: s.channels.virtualChannels})
 }
 
 type ChangeCollectionStateStep struct {
@@ -103,7 +103,7 @@ type DeleteCollectionDataStep struct {
 }
 
 func (s *DeleteCollectionDataStep) Execute(ctx context.Context) error {
-	return s.core.gcCollection(ctx, s.coll, s.ts)
+	return s.core.garbageCollector.GcCollectionData(ctx, s.coll, s.ts)
 }
 
 type DeletePartitionDataStep struct {
@@ -114,7 +114,7 @@ type DeletePartitionDataStep struct {
 }
 
 func (s *DeletePartitionDataStep) Execute(ctx context.Context) error {
-	return s.core.gcPartition(ctx, s.pchans, s.partition, s.ts)
+	return s.core.garbageCollector.GcPartitionData(ctx, s.pchans, s.partition, s.ts)
 }
 
 type ReleaseCollectionStep struct {
@@ -123,7 +123,7 @@ type ReleaseCollectionStep struct {
 }
 
 func (s *ReleaseCollectionStep) Execute(ctx context.Context) error {
-	return s.core.releaseCollection(ctx, s.collectionId)
+	return s.core.broker.ReleaseCollection(ctx, s.collectionId)
 }
 
 type AddPartitionMetaStep struct {

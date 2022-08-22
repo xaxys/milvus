@@ -10,15 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	ms "github.com/milvus-io/milvus/internal/mq/msgstream"
-
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
-
-	"github.com/milvus-io/milvus/internal/proto/querypb"
-
-	"github.com/milvus-io/milvus/internal/util/funcutil"
-
-	"github.com/milvus-io/milvus/internal/metastore/model"
 
 	"github.com/milvus-io/milvus/internal/util/timerecord"
 
@@ -43,7 +35,6 @@ import (
 
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 
-	"github.com/milvus-io/milvus/internal/proto/datapb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/milvus-io/milvus/internal/types"
@@ -60,24 +51,51 @@ import (
 	"github.com/milvus-io/milvus/internal/log"
 )
 
+type txnCreator func(root string) (kv.TxnKV, error)
+type metaKVCreator func(root string) (kv.MetaKv, error)
+
+type Opt func(*RootCoord)
+
+func WithTxnCreator(f txnCreator) Opt {
+	return func(c *RootCoord) { c.txnCreator = f }
+}
+
+func WithMetaKVCreator(f metaKVCreator) Opt {
+	return func(c *RootCoord) { c.metaKVCreator = f }
+}
+
+func defaultTxnCreator(etcdCli *clientv3.Client) txnCreator {
+	return func(root string) (kv.TxnKV, error) {
+		return etcdkv.NewEtcdKV(etcdCli, root), nil
+	}
+}
+
+func defaultMetaKVCreator(etcdCli *clientv3.Client) metaKVCreator {
+	return func(root string) (kv.MetaKv, error) {
+		return etcdkv.NewEtcdKV(etcdCli, root), nil
+	}
+}
+
 type RootCoord struct {
 	types.RootCoord // TODO: remove me after everything is ready.
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	etcdCli   *clientv3.Client
-	meta      IMetaTableV2
-	scheduler IScheduler
-	broker    Broker
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	etcdCli          *clientv3.Client
+	meta             IMetaTableV2
+	scheduler        IScheduler
+	broker           Broker
+	garbageCollector GarbageCollector
 
-	txn          kv.TxnKV
-	kvBaseCreate func(root string) (kv.TxnKV, error)
-	metaKVCreate func(root string) (kv.MetaKv, error)
+	txn           kv.TxnKV
+	txnCreator    txnCreator
+	metaKVCreator metaKVCreator
 
-	NewProxyClient      func(sess *sessionutil.Session) (types.Proxy, error)
-	proxyManager        *proxyManager
-	proxyClientManager  *proxyClientManager
+	proxyCreator       proxyCreator
+	proxyManager       *proxyManager
+	proxyClientManager *proxyClientManager
+
 	metricsCacheManager *metricsinfo.MetricsCacheManager
 
 	chanTimeTick *timetickSync
@@ -85,21 +103,19 @@ type RootCoord struct {
 	idAllocator  allocator.GIDAllocator
 	tsoAllocator tso.Allocator
 
-	dataCoord           types.DataCoord
-	CallUnwatchChannels func(ctx context.Context, collectionID UniqueID, vChannels []string) error
-	queryCoord          types.QueryCoord
-	indexCoord          types.IndexCoord
+	dataCoord  types.DataCoord
+	queryCoord types.QueryCoord
+	indexCoord types.IndexCoord
 
 	stateCode atomic.Value
 	initOnce  sync.Once
 	startOnce sync.Once
 	session   *sessionutil.Session
-	factory   dependency.Factory
+
+	factory dependency.Factory
 }
 
-type Opt func(*RootCoord)
-
-func NewRootCoord(ctx context.Context, factory dependency.Factory) (*RootCoord, error) {
+func NewRootCoord(ctx context.Context, factory dependency.Factory, opts ...Opt) (*RootCoord, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 	rand.Seed(time.Now().UnixNano())
 	core := &RootCoord{
@@ -108,6 +124,11 @@ func NewRootCoord(ctx context.Context, factory dependency.Factory) (*RootCoord, 
 		factory: factory,
 	}
 	core.UpdateStateCode(internalpb.StateCode_Abnormal)
+
+	for _, opt := range opts {
+		opt(core)
+	}
+
 	return core, nil
 }
 
@@ -141,8 +162,6 @@ func (c *RootCoord) tsLoop() {
 				continue
 			}
 		case <-ctx.Done():
-			// Server is closed and it should return nil.
-			log.Debug("tsLoop is closed")
 			return
 		}
 	}
@@ -173,21 +192,20 @@ func (c *RootCoord) startTimeTickLoop() {
 	for {
 		select {
 		case <-c.ctx.Done():
-			log.Debug("rootcoord context closed", zap.Error(c.ctx.Err()))
 			return
 		case <-ticker.C:
 			if ts, err := c.tsoAllocator.GenerateTSO(1); err == nil {
 				err := c.sendTimeTick(ts, "timetick loop")
 				if err != nil {
-					log.Warn("Failed to send timetick", zap.Error(err))
+					log.Warn("failed to send timetick", zap.Error(err))
 				}
 			}
 		}
 	}
 }
 
-func (c *RootCoord) SetNewProxyClient(f func(sess *sessionutil.Session) (types.Proxy, error)) {
-	c.NewProxyClient = f
+func (c *RootCoord) SetNewProxyClient(f proxyCreator) {
+	c.proxyCreator = f
 }
 
 func (c *RootCoord) SetDataCoord(ctx context.Context, s types.DataCoord) error {
@@ -289,112 +307,70 @@ func (c *RootCoord) initSession() error {
 	return nil
 }
 
-func (c *RootCoord) Init() error {
-	var initError error
-	if c.kvBaseCreate == nil {
-		c.kvBaseCreate = func(root string) (kv.TxnKV, error) {
-			return etcdkv.NewEtcdKV(c.etcdCli, root), nil
-		}
+func (c *RootCoord) initKVCreator() {
+	if c.txnCreator == nil {
+		c.txnCreator = defaultTxnCreator(c.etcdCli)
 	}
-	if c.metaKVCreate == nil {
-		c.metaKVCreate = func(root string) (kv.MetaKv, error) {
-			return etcdkv.NewEtcdKV(c.etcdCli, root), nil
-		}
+
+	if c.metaKVCreator == nil {
+		c.metaKVCreator = defaultMetaKVCreator(c.etcdCli)
 	}
-	c.initOnce.Do(func() {
-		if err := c.initSession(); err != nil {
-			initError = err
-			log.Error("RootCoord init session failed", zap.Error(err))
-			return
-		}
-		connectEtcdFn := func() error {
-			if c.txn, initError = c.kvBaseCreate(Params.EtcdCfg.KvRootPath); initError != nil {
-				log.Error("RootCoord failed to new EtcdKV for kvBase", zap.Any("reason", initError))
-				return initError
-			}
-			var metaKV kv.TxnKV
-			metaKV, initError = c.kvBaseCreate(Params.EtcdCfg.MetaRootPath)
-			if initError != nil {
-				log.Error("RootCoord failed to new EtcdKV", zap.Any("reason", initError))
-				return initError
-			}
-
-			var ss *kvmetestore.SuffixSnapshot
-			if ss, initError = kvmetestore.NewSuffixSnapshot(metaKV, "_ts", Params.EtcdCfg.MetaRootPath, "snapshots"); initError != nil {
-				log.Error("RootCoord failed to new suffixSnapshot", zap.Error(initError))
-				return initError
-			}
-			if c.meta, initError = newMetaTableV2(c.ctx, metaKV, ss); initError != nil {
-				log.Error("RootCoord failed to new MetaTable", zap.Any("reason", initError))
-				return initError
-			}
-
-			return nil
-		}
-		log.Debug("RootCoord, Connecting to Etcd", zap.String("kv root", Params.EtcdCfg.KvRootPath), zap.String("meta root", Params.EtcdCfg.MetaRootPath))
-		err := retry.Do(c.ctx, connectEtcdFn, retry.Attempts(100))
-		if err != nil {
-			return
-		}
-
-		log.Debug("RootCoord, Setting TSO and ID Allocator")
-		kv := tsoutil.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath, "gid")
-		idAllocator := allocator.NewGlobalIDAllocator("idTimestamp", kv)
-		if initError = idAllocator.Initialize(); initError != nil {
-			return
-		}
-		c.idAllocator = idAllocator
-
-		kv = tsoutil.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath, "tso")
-		tsoAllocator := tso.NewGlobalTSOAllocator("timestamp", kv)
-		if initError = tsoAllocator.Initialize(); initError != nil {
-			return
-		}
-		c.tsoAllocator = tsoAllocator
-
-		c.scheduler = newScheduler(c.ctx, c.idAllocator, c.tsoAllocator)
-
-		c.factory.Init(&Params)
-
-		// TODO
-		chanMap := map[UniqueID][]string{}
-		c.chanTimeTick = newTimeTickSync(c.ctx, c.session.ServerID, c.factory, chanMap)
-		c.chanTimeTick.addSession(c.session)
-		c.proxyClientManager = newProxyClientManager(c.NewProxyClient)
-
-		c.broker = newServerBroker(c)
-
-		log.Debug("RootCoord, set proxy manager")
-		c.proxyManager = newProxyManager(
-			c.ctx,
-			c.etcdCli,
-			c.chanTimeTick.initSessions,
-			c.proxyClientManager.GetProxyClients,
-		)
-		c.proxyManager.AddSessionFunc(c.chanTimeTick.addSession, c.proxyClientManager.AddProxyClient)
-		c.proxyManager.DelSessionFunc(c.chanTimeTick.delSession, c.proxyClientManager.DelProxyClient)
-
-		c.metricsCacheManager = metricsinfo.NewMetricsCacheManager()
-
-		// init data
-		initError = c.initData()
-		if initError != nil {
-			return
-		}
-
-		if initError = c.initRbac(); initError != nil {
-			return
-		}
-		log.Debug("RootCoord init user root done")
-	})
-	if initError != nil {
-		log.Debug("RootCoord init error", zap.Error(initError))
-	}
-	log.Debug("RootCoord init done")
-	return initError
 }
 
-func (c *RootCoord) initData() error {
+func (c *RootCoord) initMetaTable() error {
+	c.initKVCreator()
+
+	fn := func() error {
+		var txn kv.TxnKV
+		var metaKV kv.MetaKv
+		var ss *kvmetestore.SuffixSnapshot
+		var err error
+
+		if txn, err = c.txnCreator(Params.EtcdCfg.KvRootPath); err != nil {
+			return err
+		}
+		c.txn = txn
+
+		if metaKV, err = c.metaKVCreator(Params.EtcdCfg.KvRootPath); err != nil {
+			return err
+		}
+
+		if ss, err = kvmetestore.NewSuffixSnapshot(metaKV, snapshotsSep, Params.EtcdCfg.MetaRootPath, snapshotPrefix); err != nil {
+			return err
+		}
+
+		if c.meta, err = newMetaTableV2(c.ctx, c.txn, ss); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	return retry.Do(c.ctx, fn, retry.Attempts(100))
+}
+
+func (c *RootCoord) initIDAllocator() error {
+	tsoKV := tsoutil.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath, globalIDAllocatorSubPath)
+	idAllocator := allocator.NewGlobalIDAllocator(globalIDAllocatorKey, tsoKV)
+	if err := idAllocator.Initialize(); err != nil {
+		return err
+	}
+	c.idAllocator = idAllocator
+	return nil
+}
+
+func (c *RootCoord) initTSOAllocator() error {
+	tsoKV := tsoutil.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath, globalTSOAllocatorSubPath)
+	tsoAllocator := tso.NewGlobalTSOAllocator(globalTSOAllocatorKey, tsoKV)
+	if err := tsoAllocator.Initialize(); err != nil {
+		return err
+	}
+	c.tsoAllocator = tsoAllocator
+
+	return nil
+}
+
+func (c *RootCoord) initCredentials() error {
 	// TODO: implement me.
 	return nil
 }
@@ -404,63 +380,64 @@ func (c *RootCoord) initRbac() (initError error) {
 	return nil
 }
 
-func (c *RootCoord) reDropCollection(collMeta *model.Collection, ts Timestamp) {
-	// TODO: remove this after data gc can be notified by rpc.
-	c.chanTimeTick.addDmlChannels(collMeta.PhysicalChannelNames...)
-	defer c.chanTimeTick.removeDmlChannels(collMeta.PhysicalChannelNames...)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-	defer cancel()
-
-	if err := c.releaseCollection(ctx, collMeta.CollectionID); err != nil {
-		log.Error("failed to release collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
-		return
+func (c *RootCoord) initInternal() error {
+	if err := c.initSession(); err != nil {
+		return err
 	}
 
-	if err := c.gcCollection(ctx, collMeta, ts); err != nil {
-		log.Error("failed to notify datacoord to gc collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
-		return
+	if err := c.initMetaTable(); err != nil {
+		return err
 	}
 
-	if err := c.meta.RemoveCollection(ctx, collMeta.CollectionID, ts); err != nil {
-		log.Error("failed to remove collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
+	if err := c.initIDAllocator(); err != nil {
+		return err
 	}
+
+	if err := c.initTSOAllocator(); err != nil {
+		return err
+	}
+
+	c.scheduler = newScheduler(c.ctx, c.idAllocator, c.tsoAllocator)
+
+	c.factory.Init(&Params)
+
+	// TODO: list physical channels.
+	chanMap := map[UniqueID][]string{}
+	c.chanTimeTick = newTimeTickSync(c.ctx, c.session.ServerID, c.factory, chanMap)
+	c.chanTimeTick.addSession(c.session)
+	c.proxyClientManager = newProxyClientManager(c.proxyCreator)
+
+	c.broker = newServerBroker(c)
+	c.garbageCollector = newGarbageCollectorCtx(c)
+
+	c.proxyManager = newProxyManager(
+		c.ctx,
+		c.etcdCli,
+		c.chanTimeTick.initSessions,
+		c.proxyClientManager.GetProxyClients,
+	)
+	c.proxyManager.AddSessionFunc(c.chanTimeTick.addSession, c.proxyClientManager.AddProxyClient)
+	c.proxyManager.DelSessionFunc(c.chanTimeTick.delSession, c.proxyClientManager.DelProxyClient)
+
+	c.metricsCacheManager = metricsinfo.NewMetricsCacheManager()
+
+	if err := c.initCredentials(); err != nil {
+		return err
+	}
+
+	if err := c.initRbac(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func (c *RootCoord) removeCreatingCollection(collMeta *model.Collection) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-	defer cancel()
-
-	if err := c.unwatchChannels(ctx, collMeta.CollectionID, collMeta.VirtualChannelNames); err != nil {
-		log.Error("failed to unwatch channels when recovery",
-			zap.Error(err),
-			zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID),
-			zap.Strings("vchans", collMeta.VirtualChannelNames), zap.Strings("pchans", collMeta.PhysicalChannelNames))
-		return
-	}
-
-	if err := c.meta.RemoveCollection(ctx, collMeta.CollectionID, collMeta.CreateTime); err != nil {
-		log.Error("failed to remove collection when recovery", zap.Error(err), zap.String("collection", collMeta.Name), zap.Int64("collection id", collMeta.CollectionID))
-	}
-}
-
-func (c *RootCoord) reDropPartition(pchans []string, partition *model.Partition, ts Timestamp) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-	defer cancel()
-
-	// TODO: release partition when query coord is ready.
-
-	// TODO: remove this after data gc can be notified by rpc.
-	c.chanTimeTick.addDmlChannels(pchans...)
-	defer c.chanTimeTick.removeDmlChannels(pchans...)
-
-	if err := c.gcPartition(ctx, pchans, partition, ts); err != nil {
-		log.Error("failed to notify datanodes to gc partition", zap.Error(err))
-	}
-
-	if err := c.meta.RemovePartition(ctx, partition.CollectionID, partition.PartitionID, ts); err != nil {
-		log.Error("failed to remove partition when recovery", zap.Error(err))
-	}
+func (c *RootCoord) Init() error {
+	var initError error
+	c.initOnce.Do(func() {
+		initError = c.initInternal()
+	})
+	return initError
 }
 
 func (c *RootCoord) restore(ctx context.Context) error {
@@ -477,9 +454,9 @@ func (c *RootCoord) restore(ctx context.Context) error {
 
 		switch coll.State {
 		case pb.CollectionState_CollectionDropping:
-			go c.reDropCollection(coll.Clone(), ts)
+			go c.garbageCollector.ReDropCollection(coll.Clone(), ts)
 		case pb.CollectionState_CollectionCreating:
-			go c.removeCreatingCollection(coll.Clone())
+			go c.garbageCollector.RemoveCreatingCollection(coll.Clone())
 		default:
 		}
 	}
@@ -497,7 +474,7 @@ func (c *RootCoord) restore(ctx context.Context) error {
 
 			switch part.State {
 			case pb.PartitionState_PartitionDropping:
-				go c.reDropPartition(coll.PhysicalChannelNames, part.Clone(), ts)
+				go c.garbageCollector.ReDropPartition(coll.PhysicalChannelNames, part.Clone(), ts)
 			default:
 			}
 		}
@@ -505,31 +482,37 @@ func (c *RootCoord) restore(ctx context.Context) error {
 	return nil
 }
 
-// Start starts RootCoord.
-func (c *RootCoord) Start() error {
-	log.Debug("starting service",
-		zap.String("service role", typeutil.RootCoordRole),
-		zap.Int64("node id", c.session.ServerID))
+func (c *RootCoord) startInternal() error {
+	if err := c.proxyManager.WatchProxy(); err != nil {
+		log.Fatal("rootcoord failed to watch proxy", zap.Error(err))
+		// you can not just stuck here,
+		panic(err)
+	}
 
-	c.startOnce.Do(func() {
-		if err := c.proxyManager.WatchProxy(); err != nil {
-			log.Fatal("RootCoord Start WatchProxy failed", zap.Error(err))
-			// you can not just stuck here,
-			panic(err)
-		}
-		if err := c.restore(c.ctx); err != nil {
-			panic(err)
-		}
-		c.wg.Add(3)
-		go c.tsLoop()
-		go c.startTimeTickLoop()
-		go c.chanTimeTick.startWatch(&c.wg)
-		c.scheduler.Start()
-		Params.RootCoordCfg.CreatedTime = time.Now()
-		Params.RootCoordCfg.UpdatedTime = time.Now()
-	})
+	if err := c.restore(c.ctx); err != nil {
+		panic(err)
+	}
+
+	c.wg.Add(3)
+	go c.tsLoop()
+	go c.startTimeTickLoop()
+	go c.chanTimeTick.startWatch(&c.wg)
+
+	c.scheduler.Start()
+
+	Params.RootCoordCfg.CreatedTime = time.Now()
+	Params.RootCoordCfg.UpdatedTime = time.Now()
 
 	return nil
+}
+
+// Start starts RootCoord.
+func (c *RootCoord) Start() error {
+	var err error
+	c.startOnce.Do(func() {
+		err = c.startInternal()
+	})
+	return err
 }
 
 // Stop stops rootCoord.
@@ -546,7 +529,6 @@ func (c *RootCoord) Stop() error {
 // GetComponentStates get states of components
 func (c *RootCoord) GetComponentStates(ctx context.Context) (*internalpb.ComponentStates, error) {
 	code := c.stateCode.Load().(internalpb.StateCode)
-	log.Debug("GetComponentStates", zap.String("State Code", internalpb.StateCode_name[int32(code)]))
 
 	nodeID := common.NotRegisteredID
 	if c.session != nil && c.session.Registered() {
@@ -596,100 +578,6 @@ func (c *RootCoord) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringR
 		},
 		Value: Params.CommonCfg.RootCoordStatistics,
 	}, nil
-}
-
-func (c *RootCoord) watchChannels(ctx context.Context, collectionID UniqueID, vChannels []string) error {
-	if err := funcutil.WaitForComponentHealthy(ctx, c.dataCoord, "DataCoord", 100, time.Millisecond*200); err != nil {
-		return err
-	}
-	resp, err := c.dataCoord.WatchChannels(ctx, &datapb.WatchChannelsRequest{
-		CollectionID: collectionID,
-		ChannelNames: vChannels,
-	})
-	if err != nil {
-		return err
-	}
-	if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-		return fmt.Errorf("failed to watch channels, code: %s, reason: %s", resp.GetStatus().GetErrorCode(), resp.GetStatus().GetReason())
-	}
-	return nil
-}
-
-func (c *RootCoord) unwatchChannels(ctx context.Context, collectionID UniqueID, vChannels []string) error {
-	// TODO: unwatching channels to release flow graph on datanodes.
-	if c.CallUnwatchChannels != nil {
-		return c.CallUnwatchChannels(ctx, collectionID, vChannels)
-	}
-	return nil
-}
-
-func (c *RootCoord) gcCollection(ctx context.Context, coll *model.Collection, ts typeutil.Timestamp) error {
-	msgPack := ms.MsgPack{}
-	baseMsg := ms.BaseMsg{
-		Ctx:            ctx,
-		BeginTimestamp: ts,
-		EndTimestamp:   ts,
-		HashValues:     []uint32{0},
-	}
-	msg := &ms.DropCollectionMsg{
-		BaseMsg: baseMsg,
-		DropCollectionRequest: internalpb.DropCollectionRequest{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_DropCollection,
-				Timestamp: ts,
-				SourceID:  c.session.ServerID,
-			},
-			CollectionName: coll.Name,
-			CollectionID:   coll.CollectionID,
-		},
-	}
-	msgPack.Msgs = append(msgPack.Msgs, msg)
-	return c.chanTimeTick.broadcastDmlChannels(coll.PhysicalChannelNames, &msgPack)
-}
-
-func (c *RootCoord) gcPartition(ctx context.Context, pchans []string, partition *model.Partition, ts typeutil.Timestamp) error {
-	msgPack := ms.MsgPack{}
-	baseMsg := ms.BaseMsg{
-		Ctx:            ctx,
-		BeginTimestamp: ts,
-		EndTimestamp:   ts,
-		HashValues:     []uint32{0},
-	}
-	msg := &ms.DropPartitionMsg{
-		BaseMsg: baseMsg,
-		DropPartitionRequest: internalpb.DropPartitionRequest{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_DropPartition,
-				Timestamp: ts,
-				SourceID:  c.session.ServerID,
-			},
-			PartitionName: partition.PartitionName,
-			CollectionID:  partition.CollectionID,
-			PartitionID:   partition.PartitionID,
-		},
-	}
-	msgPack.Msgs = append(msgPack.Msgs, msg)
-	return c.chanTimeTick.broadcastDmlChannels(pchans, &msgPack)
-}
-
-func (c *RootCoord) releaseCollection(ctx context.Context, collectionID UniqueID) error {
-	if err := funcutil.WaitForComponentHealthy(ctx, c.queryCoord, "QueryCoord", 100, time.Millisecond*200); err != nil {
-		log.Error("failed to release collection, querycoord not healthy", zap.Error(err), zap.Int64("collection", collectionID))
-		return err
-	}
-	resp, err := c.queryCoord.ReleaseCollection(ctx, &querypb.ReleaseCollectionRequest{
-		Base:         &commonpb.MsgBase{MsgType: commonpb.MsgType_ReleaseCollection},
-		CollectionID: collectionID,
-		NodeID:       c.session.ServerID,
-	})
-	if err != nil {
-		return err
-	}
-	if resp.GetErrorCode() != commonpb.ErrorCode_Success {
-		return fmt.Errorf("failed to release collection, code: %s, reason: %s", resp.GetErrorCode(), resp.GetReason())
-	}
-	log.Info("done to release collection", zap.Int64("collection", collectionID))
-	return nil
 }
 
 func (c *RootCoord) CreateCollection(ctx context.Context, in *milvuspb.CreateCollectionRequest) (*commonpb.Status, error) {
