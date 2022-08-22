@@ -1,4 +1,4 @@
-package db
+package rootcoord
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 )
 
 type Catalog struct {
-	metastore.Catalog
+	metastore.RootCoordCatalog
 	metaDomain dbmodel.IMetaDomain
 	txImpl     dbmodel.ITransaction
 }

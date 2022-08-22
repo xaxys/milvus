@@ -19,7 +19,7 @@ import (
 	"github.com/milvus-io/milvus/internal/common"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
-	kvmetestore "github.com/milvus-io/milvus/internal/metastore/kv"
+	kvmetestore "github.com/milvus-io/milvus/internal/metastore/kv/rootcoord"
 
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
 	"github.com/milvus-io/milvus/internal/util/retry"
@@ -204,7 +204,7 @@ func (c *RootCoord) startTimeTickLoop() {
 	}
 }
 
-func (c *RootCoord) SetNewProxyClient(f proxyCreator) {
+func (c *RootCoord) SetNewProxyClient(f func(sess *sessionutil.Session) (types.Proxy, error)) {
 	c.proxyCreator = f
 }
 

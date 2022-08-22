@@ -10,7 +10,7 @@ import (
 
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
-	kvmetestore "github.com/milvus-io/milvus/internal/metastore/kv"
+	kvmetestore "github.com/milvus-io/milvus/internal/metastore/kv/rootcoord"
 
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/metastore"
@@ -50,7 +50,7 @@ type MetaTableV2 struct {
 	ctx      context.Context
 	txn      kv.TxnKV      // client of a reliable txnkv service, i.e. etcd client
 	snapshot kv.SnapShotKV // client of a reliable snapshotkv service, i.e. etcd client
-	catalog  metastore.Catalog
+	catalog  metastore.RootCoordCatalog
 
 	collID2Meta  map[typeutil.UniqueID]*model.Collection // collection id -> collection meta
 	collName2ID  map[string]typeutil.UniqueID            // collection name to collection id
