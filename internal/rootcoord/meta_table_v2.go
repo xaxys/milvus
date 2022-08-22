@@ -10,9 +10,6 @@ import (
 
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
-	kvmetestore "github.com/milvus-io/milvus/internal/metastore/kv/rootcoord"
-
-	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -44,13 +41,13 @@ type IMetaTableV2 interface {
 	DropAlias(ctx context.Context, alias string, ts Timestamp) error
 	AlterAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error
 	IsAlias(name string) bool
+	GetCollectionNameByID(collID UniqueID) (string, error)
+	GetPartitionNameByID(collID UniqueID, partitionID UniqueID, ts Timestamp) (string, error)
 }
 
 type MetaTableV2 struct {
-	ctx      context.Context
-	txn      kv.TxnKV      // client of a reliable txnkv service, i.e. etcd client
-	snapshot kv.SnapShotKV // client of a reliable snapshotkv service, i.e. etcd client
-	catalog  metastore.RootCoordCatalog
+	ctx     context.Context
+	catalog metastore.RootCoordCatalog
 
 	collID2Meta  map[typeutil.UniqueID]*model.Collection // collection id -> collection meta
 	collName2ID  map[string]typeutil.UniqueID            // collection name to collection id
@@ -59,12 +56,10 @@ type MetaTableV2 struct {
 	ddLock sync.RWMutex
 }
 
-func newMetaTableV2(ctx context.Context, txn kv.TxnKV, snapshot kv.SnapShotKV) (*MetaTableV2, error) {
+func newMetaTableV2(ctx context.Context, catalog metastore.RootCoordCatalog) (*MetaTableV2, error) {
 	m := &MetaTableV2{
-		ctx:      ctx,
-		txn:      txn,
-		snapshot: snapshot,
-		catalog:  &kvmetestore.Catalog{Txn: txn, Snapshot: snapshot},
+		ctx:     ctx,
+		catalog: catalog,
 	}
 	if err := m.reload(); err != nil {
 		return nil, err
@@ -342,4 +337,12 @@ func (m *MetaTableV2) IsAlias(name string) bool {
 
 	_, ok := m.collAlias2ID[name]
 	return ok
+}
+
+func (m *MetaTableV2) GetCollectionNameByID(collID UniqueID) (string, error) {
+	panic("implement me")
+}
+
+func (m *MetaTableV2) GetPartitionNameByID(collID UniqueID, partitionID UniqueID, ts Timestamp) (string, error) {
+	panic("implement me")
 }

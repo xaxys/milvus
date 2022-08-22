@@ -10,6 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/metastore"
+
+	"github.com/milvus-io/milvus/internal/util"
+
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
 
 	"github.com/milvus-io/milvus/internal/util/timerecord"
@@ -19,6 +23,10 @@ import (
 	"github.com/milvus-io/milvus/internal/common"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/metastore/db/dao"
+	"github.com/milvus-io/milvus/internal/metastore/db/dbcore"
+	rootcoord2 "github.com/milvus-io/milvus/internal/metastore/db/rootcoord"
+	"github.com/milvus-io/milvus/internal/metastore/kv/rootcoord"
 	kvmetestore "github.com/milvus-io/milvus/internal/metastore/kv/rootcoord"
 
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
@@ -51,24 +59,9 @@ import (
 	"github.com/milvus-io/milvus/internal/log"
 )
 
-type txnCreator func(root string) (kv.TxnKV, error)
 type metaKVCreator func(root string) (kv.MetaKv, error)
 
 type Opt func(*RootCoord)
-
-func WithTxnCreator(f txnCreator) Opt {
-	return func(c *RootCoord) { c.txnCreator = f }
-}
-
-func WithMetaKVCreator(f metaKVCreator) Opt {
-	return func(c *RootCoord) { c.metaKVCreator = f }
-}
-
-func defaultTxnCreator(etcdCli *clientv3.Client) txnCreator {
-	return func(root string) (kv.TxnKV, error) {
-		return etcdkv.NewEtcdKV(etcdCli, root), nil
-	}
-}
 
 func defaultMetaKVCreator(etcdCli *clientv3.Client) metaKVCreator {
 	return func(root string) (kv.MetaKv, error) {
@@ -88,8 +81,6 @@ type RootCoord struct {
 	broker           Broker
 	garbageCollector GarbageCollector
 
-	txn           kv.TxnKV
-	txnCreator    txnCreator
 	metaKVCreator metaKVCreator
 
 	proxyCreator       proxyCreator
@@ -113,6 +104,8 @@ type RootCoord struct {
 	session   *sessionutil.Session
 
 	factory dependency.Factory
+
+	importManager *importManager
 }
 
 func NewRootCoord(ctx context.Context, factory dependency.Factory, opts ...Opt) (*RootCoord, error) {
@@ -308,45 +301,51 @@ func (c *RootCoord) initSession() error {
 }
 
 func (c *RootCoord) initKVCreator() {
-	if c.txnCreator == nil {
-		c.txnCreator = defaultTxnCreator(c.etcdCli)
-	}
-
 	if c.metaKVCreator == nil {
 		c.metaKVCreator = defaultMetaKVCreator(c.etcdCli)
 	}
 }
 
 func (c *RootCoord) initMetaTable() error {
-	c.initKVCreator()
-
 	fn := func() error {
-		var txn kv.TxnKV
-		var metaKV kv.MetaKv
-		var ss *kvmetestore.SuffixSnapshot
+		var catalog metastore.RootCoordCatalog
 		var err error
 
-		if txn, err = c.txnCreator(Params.EtcdCfg.KvRootPath); err != nil {
-			return err
-		}
-		c.txn = txn
+		switch Params.MetaStoreCfg.MetaStoreType {
+		case util.MetaStoreTypeEtcd:
+			var metaKV kv.MetaKv
+			var ss *kvmetestore.SuffixSnapshot
+			var err error
 
-		if metaKV, err = c.metaKVCreator(Params.EtcdCfg.KvRootPath); err != nil {
-			return err
+			if metaKV, err = c.metaKVCreator(Params.EtcdCfg.KvRootPath); err != nil {
+				return err
+			}
+
+			if ss, err = kvmetestore.NewSuffixSnapshot(metaKV, snapshotsSep, Params.EtcdCfg.MetaRootPath, snapshotPrefix); err != nil {
+				return err
+			}
+
+			catalog = &rootcoord.Catalog{Txn: metaKV, Snapshot: ss}
+		case util.MetaStoreTypeMysql:
+			// connect to database
+			err := dbcore.Connect(&Params.DBCfg)
+			if err != nil {
+				return err
+			}
+
+			catalog = rootcoord2.NewTableCatalog(dbcore.NewTxImpl(), dao.NewMetaDomain())
+		default:
+			return fmt.Errorf("not supported meta store: %s", Params.MetaStoreCfg.MetaStoreType)
 		}
 
-		if ss, err = kvmetestore.NewSuffixSnapshot(metaKV, snapshotsSep, Params.EtcdCfg.MetaRootPath, snapshotPrefix); err != nil {
-			return err
-		}
-
-		if c.meta, err = newMetaTableV2(c.ctx, c.txn, ss); err != nil {
+		if c.meta, err = newMetaTableV2(c.ctx, catalog); err != nil {
 			return err
 		}
 
 		return nil
 	}
 
-	return retry.Do(c.ctx, fn, retry.Attempts(100))
+	return retry.Do(c.ctx, fn, retry.Attempts(10))
 }
 
 func (c *RootCoord) initIDAllocator() error {
@@ -380,10 +379,31 @@ func (c *RootCoord) initRbac() (initError error) {
 	return nil
 }
 
+func (c *RootCoord) initImportManager() error {
+	impTaskKv, err := c.metaKVCreator(Params.EtcdCfg.KvRootPath)
+	if err != nil {
+		return err
+	}
+
+	f := NewImportFactory(c)
+	c.importManager = newImportManager(
+		c.ctx,
+		impTaskKv,
+		f.NewIdAllocator(),
+		f.NewImportFunc(),
+		f.NewGetCollectionNameFunc(),
+	)
+	c.importManager.init(c.ctx)
+
+	return nil
+}
+
 func (c *RootCoord) initInternal() error {
 	if err := c.initSession(); err != nil {
 		return err
 	}
+
+	c.initKVCreator()
 
 	if err := c.initMetaTable(); err != nil {
 		return err
@@ -420,6 +440,10 @@ func (c *RootCoord) initInternal() error {
 	c.proxyManager.DelSessionFunc(c.chanTimeTick.delSession, c.proxyClientManager.DelProxyClient)
 
 	c.metricsCacheManager = metricsinfo.NewMetricsCacheManager()
+
+	if err := c.initImportManager(); err != nil {
+		return err
+	}
 
 	if err := c.initCredentials(); err != nil {
 		return err
@@ -493,10 +517,12 @@ func (c *RootCoord) startInternal() error {
 		panic(err)
 	}
 
-	c.wg.Add(3)
+	c.wg.Add(5)
 	go c.tsLoop()
 	go c.startTimeTickLoop()
 	go c.chanTimeTick.startWatch(&c.wg)
+	go c.importManager.expireOldTasksLoop(&c.wg, c.broker.ReleaseSegRefLock)
+	go c.importManager.sendOutTasksLoop(&c.wg)
 
 	c.scheduler.Start()
 
