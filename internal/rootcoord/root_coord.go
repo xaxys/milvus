@@ -1295,11 +1295,14 @@ func (c *Core) initData() error {
 
 func (c *Core) initRbac() (initError error) {
 	// create default roles, including admin, public
-	if initError = c.MetaTable.CreateRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: util.RoleAdmin}); initError != nil {
-		return
-	}
-	if initError = c.MetaTable.CreateRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: util.RolePublic}); initError != nil {
-		return
+	for _, role := range util.DefaultRoles {
+		if initError = c.MetaTable.CreateRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: role}); initError != nil {
+			if common.IsIgnorableError(initError) {
+				initError = nil
+				continue
+			}
+			return
+		}
 	}
 
 	// grant privileges for the public role
@@ -1321,6 +1324,10 @@ func (c *Core) initRbac() (initError error) {
 				Privilege: &milvuspb.PrivilegeEntity{Name: globalPrivilege},
 			},
 		}, milvuspb.OperatePrivilegeType_Grant); initError != nil {
+			if common.IsIgnorableError(initError) {
+				initError = nil
+				continue
+			}
 			return
 		}
 	}
@@ -1334,6 +1341,10 @@ func (c *Core) initRbac() (initError error) {
 				Privilege: &milvuspb.PrivilegeEntity{Name: collectionPrivilege},
 			},
 		}, milvuspb.OperatePrivilegeType_Grant); initError != nil {
+			if common.IsIgnorableError(initError) {
+				initError = nil
+				continue
+			}
 			return
 		}
 	}
@@ -1572,7 +1583,7 @@ func (c *Core) DescribeCollection(ctx context.Context, in *milvuspb.DescribeColl
 	}
 	tr := timerecord.NewTimeRecorder("DescribeCollection")
 
-	log.Debug("DescribeCollection", zap.String("role", typeutil.RootCoordRole),
+	log.Ctx(ctx).Debug("DescribeCollection", zap.String("role", typeutil.RootCoordRole),
 		zap.String("collection name", in.CollectionName), zap.Int64("id", in.CollectionID), zap.Int64("msgID", in.Base.MsgID))
 	t := &DescribeCollectionReqTask{
 		baseReqTask: baseReqTask{
@@ -1584,14 +1595,14 @@ func (c *Core) DescribeCollection(ctx context.Context, in *milvuspb.DescribeColl
 	}
 	err := executeTask(t)
 	if err != nil {
-		log.Error("DescribeCollection failed", zap.String("role", typeutil.RootCoordRole),
+		log.Ctx(ctx).Warn("DescribeCollection failed", zap.String("role", typeutil.RootCoordRole),
 			zap.String("collection name", in.CollectionName), zap.Int64("id", in.CollectionID), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
 		metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeCollection", metrics.FailLabel).Inc()
 		return &milvuspb.DescribeCollectionResponse{
 			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "DescribeCollection failed: "+err.Error()),
 		}, nil
 	}
-	log.Debug("DescribeCollection success", zap.String("role", typeutil.RootCoordRole),
+	log.Ctx(ctx).Debug("DescribeCollection success", zap.String("role", typeutil.RootCoordRole),
 		zap.String("collection name", in.CollectionName), zap.Int64("id", in.CollectionID), zap.Int64("msgID", in.Base.MsgID))
 
 	metrics.RootCoordDDLReqCounter.WithLabelValues("DescribeCollection", metrics.SuccessLabel).Inc()
@@ -2976,14 +2987,6 @@ func (c *Core) CreateRole(ctx context.Context, in *milvuspb.CreateRoleRequest) (
 		return errorutil.UnhealthyStatus(code), errorutil.UnhealthyError()
 	}
 	entity := in.Entity
-	_, err := c.MetaTable.SelectRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: entity.Name}, false)
-	if err == nil {
-		errMsg := "role already exists:" + entity.Name
-		return failStatus(commonpb.ErrorCode_CreateRoleFailure, errMsg), errors.New(errMsg)
-	}
-	if !common.IsKeyNotExistError(err) {
-		return failStatus(commonpb.ErrorCode_CreateRoleFailure, err.Error()), err
-	}
 
 	results, err := c.MetaTable.SelectRole(util.DefaultTenant, nil, false)
 	if err != nil {
@@ -3048,6 +3051,9 @@ func (c *Core) DropRole(ctx context.Context, in *milvuspb.DropRoleRequest) (*com
 	for _, roleResult := range roleResults {
 		for index, userEntity := range roleResult.Users {
 			if err = c.MetaTable.OperateUserRole(util.DefaultTenant, &milvuspb.UserEntity{Name: userEntity.Name}, &milvuspb.RoleEntity{Name: roleResult.Role.Name}, milvuspb.OperateUserRoleType_RemoveUserFromRole); err != nil {
+				if common.IsIgnorableError(err) {
+					continue
+				}
 				errMsg := "fail to remove user from role"
 				logger.Error(errMsg, zap.String("role_name", roleResult.Role.Name), zap.String("username", userEntity.Name), zap.Int("current_index", index), zap.Error(err))
 				return failStatus(commonpb.ErrorCode_OperateUserRoleFailure, errMsg), err
@@ -3093,23 +3099,34 @@ func (c *Core) OperateUserRole(ctx context.Context, in *milvuspb.OperateUserRole
 		logger.Error(errMsg, zap.String("username", in.Username), zap.Error(err))
 		return failStatus(commonpb.ErrorCode_OperateUserRoleFailure, errMsg), err
 	}
+	updateCache := true
 	if err := c.MetaTable.OperateUserRole(util.DefaultTenant, &milvuspb.UserEntity{Name: in.Username}, &milvuspb.RoleEntity{Name: in.RoleName}, in.Type); err != nil {
-		errMsg := "fail to operate user to role"
-		logger.Error(errMsg, zap.String("role_name", in.RoleName), zap.String("username", in.Username), zap.Error(err))
-		return failStatus(commonpb.ErrorCode_OperateUserRoleFailure, errMsg), err
+		if !common.IsIgnorableError(err) {
+			errMsg := "fail to operate user to role"
+			logger.Error(errMsg, zap.String("role_name", in.RoleName), zap.String("username", in.Username), zap.Error(err))
+			return failStatus(commonpb.ErrorCode_OperateUserRoleFailure, errMsg), err
+		}
+		updateCache = false
 	}
 
-	var opType int32
-	if in.Type == milvuspb.OperateUserRoleType_AddUserToRole {
-		opType = int32(typeutil.CacheAddUserToRole)
-	} else if in.Type == milvuspb.OperateUserRoleType_RemoveUserFromRole {
-		opType = int32(typeutil.CacheRemoveUserFromRole)
-	}
-	if err := c.proxyClientManager.RefreshPolicyInfoCache(ctx, &proxypb.RefreshPolicyInfoCacheRequest{
-		OpType: opType,
-		OpKey:  funcutil.EncodeUserRoleCache(in.Username, in.RoleName),
-	}); err != nil {
-		return failStatus(commonpb.ErrorCode_OperateUserRoleFailure, err.Error()), err
+	if updateCache {
+		var opType int32
+		switch in.Type {
+		case milvuspb.OperateUserRoleType_AddUserToRole:
+			opType = int32(typeutil.CacheAddUserToRole)
+		case milvuspb.OperateUserRoleType_RemoveUserFromRole:
+			opType = int32(typeutil.CacheRemoveUserFromRole)
+		default:
+			errMsg := "invalid operate type for the OperateUserRole api"
+			logger.Error(errMsg, zap.Any("op_type", in.Type))
+			return failStatus(commonpb.ErrorCode_OperateUserRoleFailure, errMsg), errors.New(errMsg)
+		}
+		if err := c.proxyClientManager.RefreshPolicyInfoCache(ctx, &proxypb.RefreshPolicyInfoCacheRequest{
+			OpType: opType,
+			OpKey:  funcutil.EncodeUserRoleCache(in.Username, in.RoleName),
+		}); err != nil {
+			return failStatus(commonpb.ErrorCode_OperateUserRoleFailure, err.Error()), err
+		}
 	}
 
 	logger.Debug(method + " success")
@@ -3309,23 +3326,34 @@ func (c *Core) OperatePrivilege(ctx context.Context, in *milvuspb.OperatePrivile
 	if in.Entity.Object.Name == commonpb.ObjectType_Global.String() {
 		in.Entity.ObjectName = util.AnyWord
 	}
+	updateCache := true
 	if err := c.MetaTable.OperatePrivilege(util.DefaultTenant, in.Entity, in.Type); err != nil {
-		errMsg := "fail to operate the privilege"
-		logger.Error(errMsg, zap.Error(err))
-		return failStatus(commonpb.ErrorCode_OperatePrivilegeFailure, errMsg), err
+		if !common.IsIgnorableError(err) {
+			errMsg := "fail to operate the privilege"
+			logger.Error(errMsg, zap.Error(err))
+			return failStatus(commonpb.ErrorCode_OperatePrivilegeFailure, errMsg), err
+		}
+		updateCache = false
 	}
 
-	var opType int32
-	if in.Type == milvuspb.OperatePrivilegeType_Grant {
-		opType = int32(typeutil.CacheGrantPrivilege)
-	} else if in.Type == milvuspb.OperatePrivilegeType_Revoke {
-		opType = int32(typeutil.CacheRevokePrivilege)
-	}
-	if err := c.proxyClientManager.RefreshPolicyInfoCache(ctx, &proxypb.RefreshPolicyInfoCacheRequest{
-		OpType: opType,
-		OpKey:  funcutil.PolicyForPrivilege(in.Entity.Role.Name, in.Entity.Object.Name, in.Entity.ObjectName, in.Entity.Grantor.Privilege.Name),
-	}); err != nil {
-		return failStatus(commonpb.ErrorCode_OperatePrivilegeFailure, err.Error()), err
+	if updateCache {
+		var opType int32
+		switch in.Type {
+		case milvuspb.OperatePrivilegeType_Grant:
+			opType = int32(typeutil.CacheGrantPrivilege)
+		case milvuspb.OperatePrivilegeType_Revoke:
+			opType = int32(typeutil.CacheRevokePrivilege)
+		default:
+			errMsg := "invalid operate type for the OperatePrivilege api"
+			logger.Error(errMsg, zap.Any("op_type", in.Type))
+			return failStatus(commonpb.ErrorCode_OperatePrivilegeFailure, errMsg), errors.New(errMsg)
+		}
+		if err := c.proxyClientManager.RefreshPolicyInfoCache(ctx, &proxypb.RefreshPolicyInfoCacheRequest{
+			OpType: opType,
+			OpKey:  funcutil.PolicyForPrivilege(in.Entity.Role.Name, in.Entity.Object.Name, in.Entity.ObjectName, in.Entity.Grantor.Privilege.Name),
+		}); err != nil {
+			return failStatus(commonpb.ErrorCode_OperatePrivilegeFailure, err.Error()), err
+		}
 	}
 
 	logger.Debug(method + " success")
@@ -3370,6 +3398,11 @@ func (c *Core) SelectGrant(ctx context.Context, in *milvuspb.SelectGrantRequest)
 	}
 
 	grantEntities, err := c.MetaTable.SelectGrant(util.DefaultTenant, in.Entity)
+	if common.IsKeyNotExistError(err) {
+		return &milvuspb.SelectGrantResponse{
+			Status: succStatus(),
+		}, nil
+	}
 	if err != nil {
 		errMsg := "fail to select the grant"
 		logger.Error(errMsg, zap.Error(err))
