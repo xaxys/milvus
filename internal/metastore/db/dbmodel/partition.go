@@ -14,6 +14,7 @@ type Partition struct {
 	PartitionName             string             `gorm:"partition_name"`
 	PartitionCreatedTimestamp uint64             `gorm:"partition_created_timestamp"`
 	CollectionID              int64              `gorm:"collection_id"`
+	Status                    int32              `gorm:"status"`
 	Ts                        typeutil.Timestamp `gorm:"ts"`
 	IsDeleted                 bool               `gorm:"is_deleted"`
 	CreatedAt                 time.Time          `gorm:"created_at"`

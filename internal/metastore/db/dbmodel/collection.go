@@ -21,6 +21,7 @@ type Collection struct {
 	ShardsNum        int32              `gorm:"shards_num"`
 	StartPosition    string             `gorm:"start_position"`
 	ConsistencyLevel int32              `gorm:"consistency_level"`
+	Status           int32              `gorm:"status"`
 	Ts               typeutil.Timestamp `gorm:"ts"`
 	IsDeleted        bool               `gorm:"is_deleted"`
 	CreatedAt        time.Time          `gorm:"created_at"`

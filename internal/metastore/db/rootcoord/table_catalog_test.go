@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
+
 	"github.com/milvus-io/milvus/internal/common"
 
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
@@ -790,6 +792,62 @@ func TestTableCatalog_DropCollection_TsNot0_PartitionInsertError(t *testing.T) {
 	require.Error(t, gotErr)
 }
 
+func TestCatalog_AlterCollection(t *testing.T) {
+	coll := &model.Collection{
+		TenantID:     tenantID,
+		CollectionID: collID1,
+		Name:         collName1,
+		State:        pb.CollectionState_CollectionCreated,
+		Aliases:      []string{collAlias1, collAlias2},
+	}
+	newColl := &model.Collection{
+		TenantID:     tenantID,
+		CollectionID: collID1,
+		Name:         collName1,
+		State:        pb.CollectionState_CollectionDropping,
+		Aliases:      []string{collAlias1, collAlias2},
+	}
+
+	collDbMock.On("Insert", mock.Anything).Return(nil).Once()
+
+	gotErr := mockCatalog.AlterCollection(ctx, coll, newColl, metastore.MODIFY, ts)
+	require.NoError(t, gotErr)
+}
+
+func TestTableCatalog_AlterCollection_TsNot0_AlterTypeError(t *testing.T) {
+	coll := &model.Collection{
+		TenantID:     tenantID,
+		CollectionID: collID1,
+		Name:         collName1,
+		State:        pb.CollectionState_CollectionCreated,
+		Aliases:      []string{collAlias1, collAlias2},
+	}
+
+	gotErr := mockCatalog.AlterCollection(ctx, coll, coll, metastore.ADD, ts)
+	require.Error(t, gotErr)
+
+	gotErr = mockCatalog.AlterCollection(ctx, coll, coll, metastore.DELETE, ts)
+	require.Error(t, gotErr)
+}
+
+func TestCatalog_AlterCollection_TsNot0_CollInsertError(t *testing.T) {
+	coll := &model.Collection{
+		TenantID:     tenantID,
+		CollectionID: collID1,
+		Name:         collName1,
+		State:        pb.CollectionState_CollectionCreated,
+		Aliases:      []string{collAlias1, collAlias2},
+	}
+
+	// expectation
+	errTest := errors.New("test error")
+	collDbMock.On("Insert", mock.Anything).Return(errTest).Once()
+
+	// actual
+	gotErr := mockCatalog.AlterCollection(ctx, coll, coll, metastore.MODIFY, ts)
+	require.Error(t, gotErr)
+}
+
 func TestTableCatalog_CreatePartition(t *testing.T) {
 	partition := &model.Partition{
 		PartitionID:               partitionID1,
@@ -839,6 +897,62 @@ func TestTableCatalog_DropPartition_TsNot0_PartitionInsertError(t *testing.T) {
 
 	// actual
 	gotErr := mockCatalog.DropPartition(ctx, collID1, partitionID1, ts)
+	require.Error(t, gotErr)
+}
+
+func TestCatalog_AlterPartition(t *testing.T) {
+	partition := &model.Partition{
+		PartitionID:               partitionID1,
+		PartitionName:             "test_partition_name_1",
+		PartitionCreatedTimestamp: 1,
+		CollectionID:              collID1,
+		State:                     pb.PartitionState_PartitionCreated,
+	}
+	newPartition := &model.Partition{
+		PartitionID:               partitionID1,
+		PartitionName:             "test_partition_name_1",
+		PartitionCreatedTimestamp: 1,
+		CollectionID:              collID1,
+		State:                     pb.PartitionState_PartitionDropping,
+	}
+
+	partitionDbMock.On("Insert", mock.Anything).Return(nil).Once()
+
+	gotErr := mockCatalog.AlterPartition(ctx, partition, newPartition, metastore.MODIFY, ts)
+	require.NoError(t, gotErr)
+}
+
+func TestCatalog_AlterPartition_TsNot0_AlterTypeError(t *testing.T) {
+	partition := &model.Partition{
+		PartitionID:               partitionID1,
+		PartitionName:             "test_partition_name_1",
+		PartitionCreatedTimestamp: 1,
+		CollectionID:              collID1,
+		State:                     pb.PartitionState_PartitionCreated,
+	}
+
+	gotErr := mockCatalog.AlterPartition(ctx, partition, partition, metastore.ADD, ts)
+	require.Error(t, gotErr)
+
+	gotErr = mockCatalog.AlterPartition(ctx, partition, partition, metastore.DELETE, ts)
+	require.Error(t, gotErr)
+}
+
+func TestCatalog_AlterPartition_TsNot0_PartitionInsertError(t *testing.T) {
+	partition := &model.Partition{
+		PartitionID:               partitionID1,
+		PartitionName:             "test_partition_name_1",
+		PartitionCreatedTimestamp: 1,
+		CollectionID:              collID1,
+		State:                     pb.PartitionState_PartitionCreated,
+	}
+
+	// expectation
+	errTest := errors.New("test error")
+	partitionDbMock.On("Insert", mock.Anything).Return(errTest).Once()
+
+	// actual
+	gotErr := mockCatalog.AlterPartition(ctx, partition, partition, metastore.MODIFY, ts)
 	require.Error(t, gotErr)
 }
 
