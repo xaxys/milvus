@@ -95,7 +95,7 @@ func (s *collectionDb) Insert(in *dbmodel.Collection) error {
 func (s *collectionDb) Upsert(in *dbmodel.Collection) error {
 	err := s.db.Clauses(clause.OnConflict{
 		// constraint UNIQUE (tenant_id, collection_id, ts)
-		DoUpdates: clause.AssignmentColumns([]string{"tenant_id", "collection_id", "ts"}),
+		UpdateAll: true,
 	}).Create(in).Error
 
 	if err != nil {

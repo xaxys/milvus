@@ -38,7 +38,7 @@ func (s *partitionDb) Insert(in []*dbmodel.Partition) error {
 func (s *partitionDb) Upsert(in *dbmodel.Partition) error {
 	err := s.db.Clauses(clause.OnConflict{
 		// constraint UNIQUE (tenant_id, collection_id, ts)
-		DoUpdates: clause.AssignmentColumns([]string{"tenant_id", "collection_id", "partition_id", "ts"}),
+		UpdateAll: true,
 	}).Create(in).Error
 
 	if err != nil {
