@@ -675,6 +675,10 @@ func (c *RootCoord) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringR
 }
 
 func (c *RootCoord) CreateCollection(ctx context.Context, in *milvuspb.CreateCollectionRequest) (*commonpb.Status, error) {
+	if code, ok := c.checkHealthy(); !ok {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]), nil
+	}
+
 	t := &createCollectionTask{
 		baseTaskV2: baseTaskV2{
 			core: c,

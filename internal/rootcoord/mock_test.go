@@ -361,3 +361,52 @@ func withDataCoord(dc types.DataCoord) Opt {
 		c.dataCoord = dc
 	}
 }
+
+func withStateCode(code internalpb.StateCode) Opt {
+	return func(c *RootCoord) {
+		c.UpdateStateCode(code)
+	}
+}
+
+func withHealthyCode() Opt {
+	return withStateCode(internalpb.StateCode_Healthy)
+}
+
+func withAbnormalCode() Opt {
+	return withStateCode(internalpb.StateCode_Abnormal)
+}
+
+type mockScheduler struct {
+	IScheduler
+	AddTaskFunc func(t taskV2) error
+}
+
+func newMockScheduler() *mockScheduler {
+	return &mockScheduler{}
+}
+
+func (m mockScheduler) AddTask(t taskV2) error {
+	if m.AddTaskFunc != nil {
+		return m.AddTaskFunc(t)
+	}
+	return nil
+}
+
+func withScheduler(sched IScheduler) Opt {
+	return func(c *RootCoord) {
+		c.scheduler = sched
+	}
+}
+
+func withValidScheduler() Opt {
+	sched := newMockScheduler()
+	return withScheduler(sched)
+}
+
+func withInvalidScheduler() Opt {
+	sched := newMockScheduler()
+	sched.AddTaskFunc = func(t taskV2) error {
+		return errors.New("error mock AddTask")
+	}
+	return withScheduler(sched)
+}
