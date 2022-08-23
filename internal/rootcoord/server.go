@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/util/crypto"
+
 	"github.com/milvus-io/milvus/internal/metastore"
 
 	"github.com/milvus-io/milvus/internal/util"
@@ -369,13 +371,69 @@ func (c *RootCoord) initTSOAllocator() error {
 	return nil
 }
 
+func (c *RootCoord) createRootCredential() error {
+	encryptedRootPassword, err := crypto.PasswordEncrypt(util.DefaultRootPassword)
+	if err != nil {
+		return err
+	}
+	return c.meta.AddCredential(&internalpb.CredentialInfo{Username: util.UserRoot, EncryptedPassword: encryptedRootPassword})
+}
+
 func (c *RootCoord) initCredentials() error {
-	// TODO: implement me.
+	// error ignored if no root credential found, we'll then create default root credential.
+	credInfo, _ := c.meta.GetCredential(util.UserRoot)
+
+	if credInfo == nil {
+		return c.createRootCredential()
+	}
+
 	return nil
 }
 
 func (c *RootCoord) initRbac() (initError error) {
-	// TODO: implement me.
+	// create default roles, including admin, public
+	if initError = c.meta.CreateRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: util.RoleAdmin}); initError != nil {
+		return
+	}
+	if initError = c.meta.CreateRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: util.RolePublic}); initError != nil {
+		return
+	}
+
+	// grant privileges for the public role
+	globalPrivileges := []string{
+		commonpb.ObjectPrivilege_PrivilegeDescribeCollection.String(),
+		commonpb.ObjectPrivilege_PrivilegeShowCollections.String(),
+	}
+	collectionPrivileges := []string{
+		commonpb.ObjectPrivilege_PrivilegeIndexDetail.String(),
+	}
+
+	for _, globalPrivilege := range globalPrivileges {
+		if initError = c.meta.OperatePrivilege(util.DefaultTenant, &milvuspb.GrantEntity{
+			Role:       &milvuspb.RoleEntity{Name: util.RolePublic},
+			Object:     &milvuspb.ObjectEntity{Name: commonpb.ObjectType_Global.String()},
+			ObjectName: util.AnyWord,
+			Grantor: &milvuspb.GrantorEntity{
+				User:      &milvuspb.UserEntity{Name: util.RoleAdmin},
+				Privilege: &milvuspb.PrivilegeEntity{Name: globalPrivilege},
+			},
+		}, milvuspb.OperatePrivilegeType_Grant); initError != nil {
+			return
+		}
+	}
+	for _, collectionPrivilege := range collectionPrivileges {
+		if initError = c.meta.OperatePrivilege(util.DefaultTenant, &milvuspb.GrantEntity{
+			Role:       &milvuspb.RoleEntity{Name: util.RolePublic},
+			Object:     &milvuspb.ObjectEntity{Name: commonpb.ObjectType_Collection.String()},
+			ObjectName: util.AnyWord,
+			Grantor: &milvuspb.GrantorEntity{
+				User:      &milvuspb.UserEntity{Name: util.RoleAdmin},
+				Privilege: &milvuspb.PrivilegeEntity{Name: collectionPrivilege},
+			},
+		}, milvuspb.OperatePrivilegeType_Grant); initError != nil {
+			return
+		}
+	}
 	return nil
 }
 
@@ -421,8 +479,7 @@ func (c *RootCoord) initInternal() error {
 
 	c.factory.Init(&Params)
 
-	// TODO: list physical channels.
-	chanMap := map[UniqueID][]string{}
+	chanMap := c.meta.ListCollectionPhysicalChannels()
 	c.chanTimeTick = newTimeTickSync(c.ctx, c.session.ServerID, c.factory, chanMap)
 	c.chanTimeTick.addSession(c.session)
 	c.proxyClientManager = newProxyClientManager(c.proxyCreator)
@@ -1025,12 +1082,4 @@ func (c *RootCoord) InvalidateCollectionMetaCache(ctx context.Context, in *proxy
 		return failStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
 	}
 	return succStatus(), nil
-}
-
-func (c *RootCoord) ListPolicy(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
-	return &internalpb.ListPolicyResponse{
-		Status:      succStatus(),
-		PolicyInfos: nil,
-		UserRoles:   nil,
-	}, nil
 }
