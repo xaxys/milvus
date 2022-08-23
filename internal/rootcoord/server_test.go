@@ -3,7 +3,6 @@ package rootcoord
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -19,7 +18,6 @@ func TestRootCoord_CreateCollection(t *testing.T) {
 		resp, err := c.CreateCollection(ctx, &milvuspb.CreateCollectionRequest{})
 		assert.NoError(t, err)
 		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
-		fmt.Println(resp.GetReason())
 	})
 
 	t.Run("failed to add task", func(t *testing.T) {
@@ -30,7 +28,6 @@ func TestRootCoord_CreateCollection(t *testing.T) {
 		resp, err := c.CreateCollection(ctx, &milvuspb.CreateCollectionRequest{})
 		assert.NoError(t, err)
 		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
-		fmt.Println(resp.GetReason())
 	})
 
 	t.Run("failed to execute", func(t *testing.T) {
@@ -48,7 +45,6 @@ func TestRootCoord_CreateCollection(t *testing.T) {
 		resp, err := c.CreateCollection(ctx, &milvuspb.CreateCollectionRequest{})
 		assert.NoError(t, err)
 		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
-		fmt.Println(resp.GetReason())
 	})
 
 	t.Run("normal case, everything is ok", func(t *testing.T) {
@@ -66,6 +62,5 @@ func TestRootCoord_CreateCollection(t *testing.T) {
 		resp, err := c.CreateCollection(ctx, &milvuspb.CreateCollectionRequest{})
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetErrorCode())
-		fmt.Println(resp.GetReason())
 	})
 }
