@@ -11,25 +11,11 @@ CREATE DATABASE if not exists milvus_meta CHARACTER SET utf8mb4;
 
 -- collections
 CREATE TABLE if not exists milvus_meta.collections (
-                                                       id
-                                                       BIGINT
-                                                       NOT
-                                                       NULL
-                                                       AUTO_INCREMENT,
-                                                       tenant_id
-                                                       VARCHAR
-(
-                                                       128
-) DEFAULT NULL,
+    id     BIGINT NOT NULL AUTO_INCREMENT,
+    tenant_id VARCHAR(128) DEFAULT NULL,
     collection_id BIGINT NOT NULL,
-    collection_name VARCHAR
-(
-    256
-),
-    description VARCHAR
-(
-    2048
-) DEFAULT NULL,
+    collection_name VARCHAR(256),
+    description VARCHAR(2048) DEFAULT NULL,
     auto_id BOOL DEFAULT FALSE,
     shards_num INT,
     start_position TEXT,
@@ -102,12 +88,9 @@ CREATE TABLE if not exists milvus_meta.`partitions` (
     id BIGINT NOT NULL AUTO_INCREMENT,
     tenant_id VARCHAR(128) DEFAULT NULL,
     partition_id     BIGINT NOT NULL,
-    partition_name     VARCHAR
-(
-    256
-),
+    partition_name     VARCHAR(256),
     partition_created_timestamp bigint unsigned,
-    collection_id BIGINT NOT NULL,
+    collection_id     BIGINT NOT NULL,
     status INT NOT NULL,
     ts BIGINT UNSIGNED DEFAULT 0,
     is_deleted BOOL DEFAULT FALSE,
