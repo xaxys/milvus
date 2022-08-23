@@ -392,11 +392,14 @@ func (c *RootCoord) initCredentials() error {
 
 func (c *RootCoord) initRbac() (initError error) {
 	// create default roles, including admin, public
-	if initError = c.meta.CreateRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: util.RoleAdmin}); initError != nil {
-		return
-	}
-	if initError = c.meta.CreateRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: util.RolePublic}); initError != nil {
-		return
+	for _, role := range util.DefaultRoles {
+		if initError = c.meta.CreateRole(util.DefaultTenant, &milvuspb.RoleEntity{Name: role}); initError != nil {
+			if common.IsIgnorableError(initError) {
+				initError = nil
+				continue
+			}
+			return
+		}
 	}
 
 	// grant privileges for the public role
@@ -418,6 +421,10 @@ func (c *RootCoord) initRbac() (initError error) {
 				Privilege: &milvuspb.PrivilegeEntity{Name: globalPrivilege},
 			},
 		}, milvuspb.OperatePrivilegeType_Grant); initError != nil {
+			if common.IsIgnorableError(initError) {
+				initError = nil
+				continue
+			}
 			return
 		}
 	}
@@ -431,6 +438,10 @@ func (c *RootCoord) initRbac() (initError error) {
 				Privilege: &milvuspb.PrivilegeEntity{Name: collectionPrivilege},
 			},
 		}, milvuspb.OperatePrivilegeType_Grant); initError != nil {
+			if common.IsIgnorableError(initError) {
+				initError = nil
+				continue
+			}
 			return
 		}
 	}

@@ -92,110 +92,110 @@ func newMetaTableV2(ctx context.Context, catalog metastore.RootCoordCatalog) (*M
 	return m, nil
 }
 
-func (m *MetaTableV2) reload() error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) reload() error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
-	m.collID2Meta = make(map[UniqueID]*model.Collection)
-	m.collName2ID = make(map[string]UniqueID)
-	m.collAlias2ID = make(map[string]UniqueID)
+	mt.collID2Meta = make(map[UniqueID]*model.Collection)
+	mt.collName2ID = make(map[string]UniqueID)
+	mt.collAlias2ID = make(map[string]UniqueID)
 
 	// max ts means listing latest resources.
-	collections, err := m.catalog.ListCollections(m.ctx, typeutil.MaxTimestamp)
+	collections, err := mt.catalog.ListCollections(mt.ctx, typeutil.MaxTimestamp)
 	if err != nil {
 		return err
 	}
 	for name, collection := range collections {
-		m.collID2Meta[collection.CollectionID] = collection
-		m.collName2ID[name] = collection.CollectionID
+		mt.collID2Meta[collection.CollectionID] = collection
+		mt.collName2ID[name] = collection.CollectionID
 	}
 
-	aliases, err := m.catalog.ListAliases(m.ctx, typeutil.MaxTimestamp)
+	aliases, err := mt.catalog.ListAliases(mt.ctx, typeutil.MaxTimestamp)
 	if err != nil {
 		return err
 	}
 	for _, alias := range aliases {
-		m.collAlias2ID[alias.Name] = alias.CollectionID
+		mt.collAlias2ID[alias.Name] = alias.CollectionID
 	}
 
 	return nil
 }
 
-func (m *MetaTableV2) AddCollection(ctx context.Context, coll *model.Collection) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) AddCollection(ctx context.Context, coll *model.Collection) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
 	if coll.State != pb.CollectionState_CollectionCreating {
 		return fmt.Errorf("collection state should be creating, collection name: %s, collection id: %d, state: %s", coll.Name, coll.CollectionID, coll.State)
 	}
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	if err := m.catalog.CreateCollection(ctx1, coll, coll.CreateTime); err != nil {
+	if err := mt.catalog.CreateCollection(ctx1, coll, coll.CreateTime); err != nil {
 		return err
 	}
-	m.collName2ID[coll.Name] = coll.CollectionID
-	m.collID2Meta[coll.CollectionID] = coll
+	mt.collName2ID[coll.Name] = coll.CollectionID
+	mt.collID2Meta[coll.CollectionID] = coll
 	log.Info("add collection to meta table", zap.String("collection", coll.Name), zap.Int64("id", coll.CollectionID), zap.Uint64("ts", coll.CreateTime))
 	return nil
 }
 
-func (m *MetaTableV2) ChangeCollectionState(ctx context.Context, collectionID UniqueID, state pb.CollectionState, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) ChangeCollectionState(ctx context.Context, collectionID UniqueID, state pb.CollectionState, ts Timestamp) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
-	coll, ok := m.collID2Meta[collectionID]
+	coll, ok := mt.collID2Meta[collectionID]
 	if !ok {
 		return nil
 	}
 	clone := coll.Clone()
 	clone.State = state
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	if err := m.catalog.AlterCollection(ctx1, coll, clone, metastore.MODIFY, ts); err != nil {
+	if err := mt.catalog.AlterCollection(ctx1, coll, clone, metastore.MODIFY, ts); err != nil {
 		return err
 	}
-	m.collID2Meta[collectionID] = clone
+	mt.collID2Meta[collectionID] = clone
 	log.Info("change collection state", zap.Int64("collection", collectionID), zap.String("state", state.String()), zap.Uint64("ts", ts))
 
 	return nil
 }
 
-func (m *MetaTableV2) RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	if err := m.catalog.DropCollection(ctx1, &model.Collection{CollectionID: collectionID}, ts); err != nil {
+	if err := mt.catalog.DropCollection(ctx1, &model.Collection{CollectionID: collectionID}, ts); err != nil {
 		return err
 	}
-	delete(m.collID2Meta, collectionID)
+	delete(mt.collID2Meta, collectionID)
 	return nil
 }
 
-func (m *MetaTableV2) GetCollectionByName(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
-	m.ddLock.RLock()
-	defer m.ddLock.RUnlock()
+func (mt *MetaTableV2) GetCollectionByName(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
 
 	var collectionID UniqueID
-	collectionID, ok := m.collAlias2ID[collectionName]
+	collectionID, ok := mt.collAlias2ID[collectionName]
 	if ok {
-		return m.GetCollectionByID(ctx, collectionID, ts)
+		return mt.GetCollectionByID(ctx, collectionID, ts)
 	}
-	collectionID, ok = m.collName2ID[collectionName]
+	collectionID, ok = mt.collName2ID[collectionName]
 	if ok {
-		return m.GetCollectionByID(ctx, collectionID, ts)
+		return mt.GetCollectionByID(ctx, collectionID, ts)
 	}
 	// travel meta information from catalog.
-	return m.catalog.GetCollectionByName(ctx, collectionName, ts)
+	return mt.catalog.GetCollectionByName(ctx, collectionName, ts)
 }
 
-func (m *MetaTableV2) GetCollectionByID(ctx context.Context, collectionID UniqueID, ts Timestamp) (*model.Collection, error) {
-	m.ddLock.RLock()
-	defer m.ddLock.RUnlock()
+func (mt *MetaTableV2) GetCollectionByID(ctx context.Context, collectionID UniqueID, ts Timestamp) (*model.Collection, error) {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
 
-	coll, ok := m.collID2Meta[collectionID]
+	coll, ok := mt.collID2Meta[collectionID]
 	if !ok || !coll.Available() || coll.CreateTime > ts {
 		// travel meta information from catalog.
 		ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-		return m.catalog.GetCollectionByID(ctx1, collectionID, ts)
+		return mt.catalog.GetCollectionByID(ctx1, collectionID, ts)
 	}
 
 	clone := coll.Clone()
@@ -212,13 +212,13 @@ func (m *MetaTableV2) GetCollectionByID(ctx context.Context, collectionID Unique
 	return clone, nil
 }
 
-func (m *MetaTableV2) ListCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
-	m.ddLock.RLock()
-	defer m.ddLock.RUnlock()
+func (mt *MetaTableV2) ListCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
 
 	// list collections should always be loaded from catalog.
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	colls, err := m.catalog.ListCollections(ctx1, ts)
+	colls, err := mt.catalog.ListCollections(ctx1, ts)
 	if err != nil {
 		return nil, err
 	}
@@ -231,13 +231,13 @@ func (m *MetaTableV2) ListCollections(ctx context.Context, ts Timestamp) ([]*mod
 	return onlineCollections, nil
 }
 
-func (m *MetaTableV2) ListAbnormalCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
-	m.ddLock.RLock()
-	defer m.ddLock.RUnlock()
+func (mt *MetaTableV2) ListAbnormalCollections(ctx context.Context, ts Timestamp) ([]*model.Collection, error) {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
 
 	// list collections should always be loaded from catalog.
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	colls, err := m.catalog.ListCollections(ctx1, ts)
+	colls, err := mt.catalog.ListCollections(ctx1, ts)
 	if err != nil {
 		return nil, err
 	}
@@ -250,39 +250,39 @@ func (m *MetaTableV2) ListAbnormalCollections(ctx context.Context, ts Timestamp)
 	return abnormalCollections, nil
 }
 
-func (m *MetaTableV2) ListCollectionPhysicalChannels() map[typeutil.UniqueID][]string {
-	m.ddLock.RLock()
-	defer m.ddLock.RUnlock()
+func (mt *MetaTableV2) ListCollectionPhysicalChannels() map[typeutil.UniqueID][]string {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
 
 	chanMap := make(map[UniqueID][]string)
 
-	for id, collInfo := range m.collID2Meta {
+	for id, collInfo := range mt.collID2Meta {
 		chanMap[id] = collInfo.PhysicalChannelNames
 	}
 
 	return chanMap
 }
 
-func (m *MetaTableV2) AddPartition(ctx context.Context, partition *model.Partition) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) AddPartition(ctx context.Context, partition *model.Partition) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
-	_, ok := m.collID2Meta[partition.CollectionID]
+	_, ok := mt.collID2Meta[partition.CollectionID]
 	if !ok {
 		return fmt.Errorf("collection not exists: %d", partition.CollectionID)
 	}
 	if partition.State != pb.PartitionState_PartitionCreated {
 		return fmt.Errorf("partition state is not created, collection: %d, partition: %d, state: %s", partition.CollectionID, partition.PartitionID, partition.State)
 	}
-	m.collID2Meta[partition.CollectionID].Partitions = append(m.collID2Meta[partition.CollectionID].Partitions, partition.Clone())
+	mt.collID2Meta[partition.CollectionID].Partitions = append(mt.collID2Meta[partition.CollectionID].Partitions, partition.Clone())
 	return nil
 }
 
-func (m *MetaTableV2) ChangePartitionState(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) ChangePartitionState(ctx context.Context, collectionID UniqueID, partitionID UniqueID, state pb.PartitionState, ts Timestamp) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
-	coll, ok := m.collID2Meta[collectionID]
+	coll, ok := mt.collID2Meta[collectionID]
 	if !ok {
 		return nil
 	}
@@ -291,7 +291,7 @@ func (m *MetaTableV2) ChangePartitionState(ctx context.Context, collectionID Uni
 			clone := part.Clone()
 			clone.State = state
 			ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-			if err := m.catalog.AlterPartition(ctx1, part, clone, metastore.MODIFY, ts); err != nil {
+			if err := mt.catalog.AlterPartition(ctx1, part, clone, metastore.MODIFY, ts); err != nil {
 				return err
 			}
 			coll.Partitions[idx] = clone
@@ -301,15 +301,15 @@ func (m *MetaTableV2) ChangePartitionState(ctx context.Context, collectionID Uni
 	return fmt.Errorf("partition not exist, collection: %d, partition: %d", collectionID, partitionID)
 }
 
-func (m *MetaTableV2) RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	if err := m.catalog.DropPartition(ctx1, collectionID, partitionID, ts); err != nil {
+	if err := mt.catalog.DropPartition(ctx1, collectionID, partitionID, ts); err != nil {
 		return err
 	}
-	coll, ok := m.collID2Meta[collectionID]
+	coll, ok := mt.collID2Meta[collectionID]
 	if !ok {
 		return nil
 	}
@@ -326,16 +326,16 @@ func (m *MetaTableV2) RemovePartition(ctx context.Context, collectionID UniqueID
 	return nil
 }
 
-func (m *MetaTableV2) CreateAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) CreateAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
-	collectionID, ok := m.collName2ID[collectionName]
+	collectionID, ok := mt.collName2ID[collectionName]
 	if !ok {
 		return fmt.Errorf("collection not exists: %s", collectionName)
 	}
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	if err := m.catalog.CreateAlias(ctx1, &model.Alias{
+	if err := mt.catalog.CreateAlias(ctx1, &model.Alias{
 		Name:         alias,
 		CollectionID: collectionID,
 		CreatedTime:  ts,
@@ -343,32 +343,32 @@ func (m *MetaTableV2) CreateAlias(ctx context.Context, alias string, collectionN
 	}, ts); err != nil {
 		return err
 	}
-	m.collAlias2ID[alias] = collectionID
+	mt.collAlias2ID[alias] = collectionID
 	return nil
 }
 
-func (m *MetaTableV2) DropAlias(ctx context.Context, alias string, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) DropAlias(ctx context.Context, alias string, ts Timestamp) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	if err := m.catalog.DropAlias(ctx1, alias, ts); err != nil {
+	if err := mt.catalog.DropAlias(ctx1, alias, ts); err != nil {
 		return err
 	}
-	delete(m.collAlias2ID, alias)
+	delete(mt.collAlias2ID, alias)
 	return nil
 }
 
-func (m *MetaTableV2) AlterAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error {
-	m.ddLock.Lock()
-	defer m.ddLock.Unlock()
+func (mt *MetaTableV2) AlterAlias(ctx context.Context, alias string, collectionName string, ts Timestamp) error {
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
-	collectionID, ok := m.collName2ID[collectionName]
+	collectionID, ok := mt.collName2ID[collectionName]
 	if !ok {
 		return fmt.Errorf("collection not exists: %s", collectionName)
 	}
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName)
-	if err := m.catalog.AlterAlias(ctx1, &model.Alias{
+	if err := mt.catalog.AlterAlias(ctx1, &model.Alias{
 		Name:         alias,
 		CollectionID: collectionID,
 		CreatedTime:  ts,
@@ -376,28 +376,28 @@ func (m *MetaTableV2) AlterAlias(ctx context.Context, alias string, collectionNa
 	}, ts); err != nil {
 		return err
 	}
-	m.collAlias2ID[alias] = collectionID
+	mt.collAlias2ID[alias] = collectionID
 	return nil
 }
 
-func (m *MetaTableV2) IsAlias(name string) bool {
-	m.ddLock.RLock()
-	defer m.ddLock.RUnlock()
+func (mt *MetaTableV2) IsAlias(name string) bool {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
 
-	_, ok := m.collAlias2ID[name]
+	_, ok := mt.collAlias2ID[name]
 	return ok
 }
 
-func (m *MetaTableV2) GetCollectionNameByID(collID UniqueID) (string, error) {
+func (mt *MetaTableV2) GetCollectionNameByID(collID UniqueID) (string, error) {
 	panic("implement me")
 }
 
-func (m *MetaTableV2) GetPartitionNameByID(collID UniqueID, partitionID UniqueID, ts Timestamp) (string, error) {
+func (mt *MetaTableV2) GetPartitionNameByID(collID UniqueID, partitionID UniqueID, ts Timestamp) (string, error) {
 	panic("implement me")
 }
 
 // AddCredential add credential
-func (m *MetaTableV2) AddCredential(credInfo *internalpb.CredentialInfo) error {
+func (mt *MetaTableV2) AddCredential(credInfo *internalpb.CredentialInfo) error {
 	if credInfo.Username == "" {
 		return fmt.Errorf("username is empty")
 	}
@@ -406,23 +406,23 @@ func (m *MetaTableV2) AddCredential(credInfo *internalpb.CredentialInfo) error {
 		Username:          credInfo.Username,
 		EncryptedPassword: credInfo.EncryptedPassword,
 	}
-	return m.catalog.CreateCredential(m.ctx, credential)
+	return mt.catalog.CreateCredential(mt.ctx, credential)
 }
 
 // GetCredential get credential by username
-func (m *MetaTableV2) GetCredential(username string) (*internalpb.CredentialInfo, error) {
-	credential, err := m.catalog.GetCredential(m.ctx, username)
+func (mt *MetaTableV2) GetCredential(username string) (*internalpb.CredentialInfo, error) {
+	credential, err := mt.catalog.GetCredential(mt.ctx, username)
 	return model.MarshalCredentialModel(credential), err
 }
 
 // DeleteCredential delete credential
-func (m *MetaTableV2) DeleteCredential(username string) error {
-	return m.catalog.DropCredential(m.ctx, username)
+func (mt *MetaTableV2) DeleteCredential(username string) error {
+	return mt.catalog.DropCredential(mt.ctx, username)
 }
 
 // ListCredentialUsernames list credential usernames
-func (m *MetaTableV2) ListCredentialUsernames() (*milvuspb.ListCredUsersResponse, error) {
-	usernames, err := m.catalog.ListCredentials(m.ctx)
+func (mt *MetaTableV2) ListCredentialUsernames() (*milvuspb.ListCredUsersResponse, error) {
+	usernames, err := mt.catalog.ListCredentials(mt.ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list credential usernames err:%w", err)
 	}
@@ -430,20 +430,20 @@ func (m *MetaTableV2) ListCredentialUsernames() (*milvuspb.ListCredUsersResponse
 }
 
 // CreateRole create role
-func (m *MetaTableV2) CreateRole(tenant string, entity *milvuspb.RoleEntity) error {
+func (mt *MetaTableV2) CreateRole(tenant string, entity *milvuspb.RoleEntity) error {
 	if funcutil.IsEmptyString(entity.Name) {
 		return fmt.Errorf("the role name in the role info is empty")
 	}
-	return m.catalog.CreateRole(m.ctx, tenant, entity)
+	return mt.catalog.CreateRole(mt.ctx, tenant, entity)
 }
 
 // DropRole drop role info
-func (m *MetaTableV2) DropRole(tenant string, roleName string) error {
-	return m.catalog.DropRole(m.ctx, tenant, roleName)
+func (mt *MetaTableV2) DropRole(tenant string, roleName string) error {
+	return mt.catalog.DropRole(mt.ctx, tenant, roleName)
 }
 
 // OperateUserRole operate the relationship between a user and a role, including adding a user to a role and removing a user from a role
-func (m *MetaTableV2) OperateUserRole(tenant string, userEntity *milvuspb.UserEntity, roleEntity *milvuspb.RoleEntity, operateType milvuspb.OperateUserRoleType) error {
+func (mt *MetaTableV2) OperateUserRole(tenant string, userEntity *milvuspb.UserEntity, roleEntity *milvuspb.RoleEntity, operateType milvuspb.OperateUserRoleType) error {
 	if funcutil.IsEmptyString(userEntity.Name) {
 		return fmt.Errorf("username in the user entity is empty")
 	}
@@ -451,25 +451,25 @@ func (m *MetaTableV2) OperateUserRole(tenant string, userEntity *milvuspb.UserEn
 		return fmt.Errorf("role name in the role entity is empty")
 	}
 
-	return m.catalog.OperateUserRole(m.ctx, tenant, userEntity, roleEntity, operateType)
+	return mt.catalog.AlterUserRole(mt.ctx, tenant, userEntity, roleEntity, operateType)
 }
 
 // SelectRole select role.
 // Enter the role condition by the entity param. And this param is nil, which means selecting all roles.
 // Get all users that are added to the role by setting the includeUserInfo param to true.
-func (m *MetaTableV2) SelectRole(tenant string, entity *milvuspb.RoleEntity, includeUserInfo bool) ([]*milvuspb.RoleResult, error) {
-	return m.catalog.SelectRole(m.ctx, tenant, entity, includeUserInfo)
+func (mt *MetaTableV2) SelectRole(tenant string, entity *milvuspb.RoleEntity, includeUserInfo bool) ([]*milvuspb.RoleResult, error) {
+	return mt.catalog.ListRole(mt.ctx, tenant, entity, includeUserInfo)
 }
 
 // SelectUser select user.
 // Enter the user condition by the entity param. And this param is nil, which means selecting all users.
 // Get all roles that are added the user to by setting the includeRoleInfo param to true.
-func (m *MetaTableV2) SelectUser(tenant string, entity *milvuspb.UserEntity, includeRoleInfo bool) ([]*milvuspb.UserResult, error) {
-	return m.catalog.SelectUser(m.ctx, tenant, entity, includeRoleInfo)
+func (mt *MetaTableV2) SelectUser(tenant string, entity *milvuspb.UserEntity, includeRoleInfo bool) ([]*milvuspb.UserResult, error) {
+	return mt.catalog.ListUser(mt.ctx, tenant, entity, includeRoleInfo)
 }
 
 // OperatePrivilege grant or revoke privilege by setting the operateType param
-func (m *MetaTableV2) OperatePrivilege(tenant string, entity *milvuspb.GrantEntity, operateType milvuspb.OperatePrivilegeType) error {
+func (mt *MetaTableV2) OperatePrivilege(tenant string, entity *milvuspb.GrantEntity, operateType milvuspb.OperatePrivilegeType) error {
 	if funcutil.IsEmptyString(entity.ObjectName) {
 		return fmt.Errorf("the object name in the grant entity is empty")
 	}
@@ -492,24 +492,24 @@ func (m *MetaTableV2) OperatePrivilege(tenant string, entity *milvuspb.GrantEnti
 		return fmt.Errorf("the operate type in the grant entity is invalid")
 	}
 
-	return m.catalog.OperatePrivilege(m.ctx, tenant, entity, operateType)
+	return mt.catalog.AlterGrant(mt.ctx, tenant, entity, operateType)
 }
 
 // SelectGrant select grant
 // The principal entity MUST be not empty in the grant entity
 // The resource entity and the resource name are optional, and the two params should be not empty together when you select some grants about the resource kind.
-func (m *MetaTableV2) SelectGrant(tenant string, entity *milvuspb.GrantEntity) ([]*milvuspb.GrantEntity, error) {
+func (mt *MetaTableV2) SelectGrant(tenant string, entity *milvuspb.GrantEntity) ([]*milvuspb.GrantEntity, error) {
 	var entities []*milvuspb.GrantEntity
 	if entity.Role == nil || funcutil.IsEmptyString(entity.Role.Name) {
 		return entities, fmt.Errorf("the role entity in the grant entity is invalid")
 	}
-	return m.catalog.SelectGrant(m.ctx, tenant, entity)
+	return mt.catalog.ListGrant(mt.ctx, tenant, entity)
 }
 
-func (m *MetaTableV2) ListPolicy(tenant string) ([]string, error) {
-	return m.catalog.ListPolicy(m.ctx, tenant)
+func (mt *MetaTableV2) ListPolicy(tenant string) ([]string, error) {
+	return mt.catalog.ListPolicy(mt.ctx, tenant)
 }
 
-func (m *MetaTableV2) ListUserRole(tenant string) ([]string, error) {
-	return m.catalog.ListUserRole(m.ctx, tenant)
+func (mt *MetaTableV2) ListUserRole(tenant string) ([]string, error) {
+	return mt.catalog.ListUserRole(mt.ctx, tenant)
 }
