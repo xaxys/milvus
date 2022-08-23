@@ -696,6 +696,10 @@ func (c *RootCoord) CreateCollection(ctx context.Context, in *milvuspb.CreateCol
 }
 
 func (c *RootCoord) DropCollection(ctx context.Context, in *milvuspb.DropCollectionRequest) (*commonpb.Status, error) {
+	if code, ok := c.checkHealthy(); !ok {
+		return failStatus(commonpb.ErrorCode_UnexpectedError, "StateCode="+internalpb.StateCode_name[int32(code)]), nil
+	}
+
 	t := &dropCollectionTask{
 		baseTaskV2: baseTaskV2{
 			core: c,

@@ -400,6 +400,10 @@ func withScheduler(sched IScheduler) Opt {
 
 func withValidScheduler() Opt {
 	sched := newMockScheduler()
+	sched.AddTaskFunc = func(t taskV2) error {
+		t.NotifyDone(nil)
+		return nil
+	}
 	return withScheduler(sched)
 }
 
@@ -407,6 +411,16 @@ func withInvalidScheduler() Opt {
 	sched := newMockScheduler()
 	sched.AddTaskFunc = func(t taskV2) error {
 		return errors.New("error mock AddTask")
+	}
+	return withScheduler(sched)
+}
+
+func withTaskFailScheduler() Opt {
+	sched := newMockScheduler()
+	sched.AddTaskFunc = func(t taskV2) error {
+		err := errors.New("error mock task fail")
+		t.NotifyDone(err)
+		return nil
 	}
 	return withScheduler(sched)
 }
