@@ -54,3 +54,45 @@ func TestUnmarshalFieldModels(t *testing.T) {
 	assert.Equal(t, []*Field{fieldModel}, ret)
 	assert.Nil(t, UnmarshalFieldModels(nil))
 }
+
+func TestCheckFieldsEqual(t *testing.T) {
+	type args struct {
+		fieldsA []*Field
+		fieldsB []*Field
+	}
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			// length not match.
+			args: args{
+				fieldsA: []*Field{{Name: "f1"}},
+				fieldsB: []*Field{},
+			},
+			want: false,
+		},
+		{
+			args: args{
+				fieldsA: []*Field{{Name: "f1"}},
+				fieldsB: []*Field{{Name: "f2"}},
+			},
+			want: false,
+		},
+		{
+			args: args{
+				fieldsA: []*Field{{Name: "f1"}, {Name: "f2"}},
+				fieldsB: []*Field{{Name: "f1"}, {Name: "f2"}},
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CheckFieldsEqual(tt.args.fieldsA, tt.args.fieldsB); got != tt.want {
+				t.Errorf("CheckFieldsEqual() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

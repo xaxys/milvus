@@ -1,6 +1,8 @@
 package model
 
 import (
+	"reflect"
+
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 )
@@ -43,9 +45,16 @@ func (f Field) Clone() *Field {
 	}
 }
 
+func toMap(params []*commonpb.KeyValuePair) map[string]string {
+	ret := make(map[string]string)
+	for _, pair := range params {
+		ret[pair.GetKey()] = pair.GetValue()
+	}
+	return ret
+}
+
 func checkParamsEqual(paramsA, paramsB []*commonpb.KeyValuePair) bool {
-	// TODO
-	return len(paramsA) == len(paramsB)
+	return reflect.DeepEqual(toMap(paramsA), toMap(paramsB))
 }
 
 func (f Field) Equal(other Field) bool {
@@ -57,6 +66,19 @@ func (f Field) Equal(other Field) bool {
 		checkParamsEqual(f.TypeParams, f.TypeParams) &&
 		checkParamsEqual(f.IndexParams, other.IndexParams) &&
 		f.AutoID == other.AutoID
+}
+
+func CheckFieldsEqual(fieldsA, fieldsB []*Field) bool {
+	if len(fieldsA) != len(fieldsB) {
+		return false
+	}
+	l := len(fieldsA)
+	for i := 0; i < l; i++ {
+		if !fieldsA[i].Equal(*fieldsB[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func MarshalFieldModel(field *Field) *schemapb.FieldSchema {

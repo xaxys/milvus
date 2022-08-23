@@ -132,6 +132,12 @@ func (kc *Catalog) CreateCollection(ctx context.Context, coll *model.Collection,
 		return err
 	}
 
+	// Due to the limit of etcd txn number, we must split these kvs into several batches.
+	// Save collection key first, and the state of collection is creating.
+	// If we save collection key with error, then no garbage will be generated and error will be raised.
+	// If we succeeded to save collection but failed to save other related keys, the garbage meta can be removed
+	// outside and the collection won't be seen by any others (since it's of creating state ^*^).
+	// However, if we save other keys first, there is no chance to remove the intermediate meta.
 	if err := kc.Snapshot.Save(k1, string(v1), ts); err != nil {
 		return err
 	}
@@ -162,7 +168,8 @@ func (kc *Catalog) CreateCollection(ctx context.Context, coll *model.Collection,
 		kvs[k] = string(v)
 	}
 
-	// recovering from failure, if we found collection is creating, we should removing all there related meta.
+	// Though batchSave is not atomic enough, we can promise the atomicity outside.
+	// Recovering from failure, if we found collection is creating, we should removing all these related meta.
 	return batchSave(kc.Snapshot, maxTxnNum, kvs, ts)
 }
 
@@ -195,12 +202,11 @@ func partitionExistByName(collMeta *pb.CollectionInfo, partitionName string) boo
 
 func (kc *Catalog) CreatePartition(ctx context.Context, partition *model.Partition, ts typeutil.Timestamp) error {
 	collMeta, err := kc.loadCollection(ctx, partition.CollectionID, ts)
-	noThisKey := funcutil.ErrIsKeyNotExist(err)
-	if err != nil && !noThisKey {
+	if err != nil {
 		return err
 	}
 
-	if noThisKey || partitionVersionAfter210(collMeta) {
+	if partitionVersionAfter210(collMeta) {
 		// save to newly path.
 		k := buildPartitionKey(partition.CollectionID, partition.PartitionID)
 		partitionInfo := model.MarshalPartitionModel(partition)
@@ -476,39 +482,15 @@ func (kc *Catalog) DropCollection(ctx context.Context, collectionInfo *model.Col
 	delMetakeysSnap = append(delMetakeysSnap, buildPartitionPrefix(collectionInfo.CollectionID))
 	delMetakeysSnap = append(delMetakeysSnap, buildFieldPrefix(collectionInfo.CollectionID))
 
-	err := kc.Snapshot.MultiSaveAndRemoveWithPrefix(map[string]string{}, delMetakeysSnap, ts)
-	if err != nil {
-		log.Error("drop collection update meta fail", zap.Int64("collectionID", collectionInfo.CollectionID), zap.Error(err))
-		return err
-	}
-
+	// Though batchMultiSaveAndRemoveWithPrefix is not atomic enough, we can promise atomicity outside.
+	// If we found collection under dropping state, we know that gc is not completely on this collection.
+	// However, if we remove collection first, we cannot remove other metas.
 	if err := batchMultiSaveAndRemoveWithPrefix(kc.Snapshot, maxTxnNum, nil, delMetakeysSnap, ts); err != nil {
 		return err
 	}
 
 	// if we found collection dropping, we should try removing related resources.
-	if err := kc.Snapshot.MultiSaveAndRemoveWithPrefix(nil, []string{collectionKey}, ts); err != nil {
-		return err
-	}
-
-	// Txn operation
-	kvs := map[string]string{}
-	for k, v := range collectionInfo.Extra {
-		kvs[k] = v
-	}
-
-	delMetaKeysTxn := []string{
-		fmt.Sprintf("%s/%d", SegmentIndexMetaPrefix, collectionInfo.CollectionID),
-		fmt.Sprintf("%s/%d", IndexMetaPrefix, collectionInfo.CollectionID),
-	}
-
-	err = kc.Txn.MultiSaveAndRemoveWithPrefix(kvs, delMetaKeysTxn)
-	if err != nil {
-		log.Warn("drop collection update meta fail", zap.Int64("collectionID", collectionInfo.CollectionID), zap.Error(err))
-		return err
-	}
-
-	return nil
+	return kc.Snapshot.MultiSaveAndRemoveWithPrefix(nil, []string{collectionKey}, ts)
 }
 
 func (kc *Catalog) alterModifyCollection(oldColl *model.Collection, newColl *model.Collection, ts typeutil.Timestamp) error {
@@ -528,7 +510,6 @@ func (kc *Catalog) alterModifyCollection(oldColl *model.Collection, newColl *mod
 	oldCollClone.ConsistencyLevel = newCollClone.ConsistencyLevel
 	oldCollClone.State = newCollClone.State
 	key := buildCollectionKey(oldColl.CollectionID)
-	fmt.Println(oldCollClone)
 	value, err := proto.Marshal(model.MarshalCollectionModel(oldCollClone))
 	if err != nil {
 		return err
@@ -540,13 +521,12 @@ func (kc *Catalog) AlterCollection(ctx context.Context, oldColl *model.Collectio
 	if alterType == metastore.MODIFY {
 		return kc.alterModifyCollection(oldColl, newColl, ts)
 	}
-	// TODO
 	return fmt.Errorf("altering collection doesn't support %s", alterType.String())
 }
 
 func (kc *Catalog) alterModifyPartition(oldPart *model.Partition, newPart *model.Partition, ts typeutil.Timestamp) error {
-	if oldPart.PartitionID != newPart.PartitionID {
-		return fmt.Errorf("altering partition id is forbidden")
+	if oldPart.CollectionID != newPart.CollectionID || oldPart.PartitionID != newPart.PartitionID {
+		return fmt.Errorf("altering collection id or partition id is forbidden")
 	}
 	oldPartClone := oldPart.Clone()
 	newPartClone := newPart.Clone()
@@ -565,7 +545,6 @@ func (kc *Catalog) AlterPartition(ctx context.Context, oldPart *model.Partition,
 	if alterType == metastore.MODIFY {
 		return kc.alterModifyPartition(oldPart, newPart, ts)
 	}
-	// TODO
 	return fmt.Errorf("altering partition doesn't support %s", alterType.String())
 }
 
@@ -592,14 +571,12 @@ func dropPartition(collMeta *pb.CollectionInfo, partitionID typeutil.UniqueID) {
 
 func (kc *Catalog) DropPartition(ctx context.Context, collectionID typeutil.UniqueID, partitionID typeutil.UniqueID, ts typeutil.Timestamp) error {
 	collMeta, err := kc.loadCollection(ctx, collectionID, ts)
-	noThisKey := funcutil.ErrIsKeyNotExist(err)
-	if err != nil && !noThisKey {
+	if err != nil {
 		return err
 	}
 
-	if noThisKey || partitionVersionAfter210(collMeta) {
+	if partitionVersionAfter210(collMeta) {
 		k := buildPartitionKey(collectionID, partitionID)
-		fmt.Printf("drop partition after 210, k: %s, collection: %d, partition: %d, ts: %d\n", k, collectionID, partitionID, ts)
 		return kc.Snapshot.MultiSaveAndRemoveWithPrefix(nil, []string{k}, ts)
 	}
 

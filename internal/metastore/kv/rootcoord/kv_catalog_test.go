@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/milvus-io/milvus/internal/metastore"
+
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -853,6 +855,173 @@ func Test_batchSave(t *testing.T) {
 		}
 		maxTxnNum := 2
 		err := batchSave(snapshot, maxTxnNum, kvs, 100)
+		assert.Error(t, err)
+	})
+}
+
+func Test_min(t *testing.T) {
+	type args struct {
+		a int
+		b int
+	}
+	tests := []struct {
+		name string
+		args args
+		want int
+	}{
+		{
+			args: args{a: 1, b: 2},
+			want: 1,
+		},
+		{
+			args: args{a: 4, b: 3},
+			want: 3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := min(tt.args.a, tt.args.b); got != tt.want {
+				t.Errorf("min() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_batchMultiSaveAndRemoveWithPrefix(t *testing.T) {
+	t.Run("failed to save", func(t *testing.T) {
+		snapshot := kv.NewMockSnapshotKV()
+		snapshot.MultiSaveFunc = func(kvs map[string]string, ts typeutil.Timestamp) error {
+			return errors.New("error mock MultiSave")
+		}
+		saves := map[string]string{"k": "v"}
+		err := batchMultiSaveAndRemoveWithPrefix(snapshot, maxTxnNum, saves, []string{}, 0)
+		assert.Error(t, err)
+	})
+	t.Run("failed to remove", func(t *testing.T) {
+		snapshot := kv.NewMockSnapshotKV()
+		snapshot.MultiSaveFunc = func(kvs map[string]string, ts typeutil.Timestamp) error {
+			return nil
+		}
+		snapshot.MultiSaveAndRemoveWithPrefixFunc = func(saves map[string]string, removals []string, ts typeutil.Timestamp) error {
+			return errors.New("error mock MultiSaveAndRemoveWithPrefix")
+		}
+		saves := map[string]string{"k": "v"}
+		removals := []string{"prefix1", "prefix2"}
+		err := batchMultiSaveAndRemoveWithPrefix(snapshot, maxTxnNum, saves, removals, 0)
+		assert.Error(t, err)
+	})
+	t.Run("normal case", func(t *testing.T) {
+		snapshot := kv.NewMockSnapshotKV()
+		snapshot.MultiSaveFunc = func(kvs map[string]string, ts typeutil.Timestamp) error {
+			return nil
+		}
+		snapshot.MultiSaveAndRemoveWithPrefixFunc = func(saves map[string]string, removals []string, ts typeutil.Timestamp) error {
+			return nil
+		}
+		saves := map[string]string{"k": "v"}
+		removals := []string{"prefix1", "prefix2"}
+		err := batchMultiSaveAndRemoveWithPrefix(snapshot, maxTxnNum, saves, removals, 0)
+		assert.NoError(t, err)
+	})
+}
+
+func TestCatalog_AlterCollection(t *testing.T) {
+	t.Run("add", func(t *testing.T) {
+		kc := &Catalog{}
+		ctx := context.Background()
+		err := kc.AlterCollection(ctx, nil, nil, metastore.ADD, 0)
+		assert.Error(t, err)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		kc := &Catalog{}
+		ctx := context.Background()
+		err := kc.AlterCollection(ctx, nil, nil, metastore.DELETE, 0)
+		assert.Error(t, err)
+	})
+
+	t.Run("modify", func(t *testing.T) {
+		snapshot := kv.NewMockSnapshotKV()
+		kvs := map[string]string{}
+		snapshot.SaveFunc = func(key string, value string, ts typeutil.Timestamp) error {
+			kvs[key] = value
+			return nil
+		}
+		kc := &Catalog{Snapshot: snapshot}
+		ctx := context.Background()
+		var collectionID int64 = 1
+		oldC := &model.Collection{CollectionID: collectionID, State: pb.CollectionState_CollectionCreating}
+		newC := &model.Collection{CollectionID: collectionID, State: pb.CollectionState_CollectionCreated}
+		err := kc.AlterCollection(ctx, oldC, newC, metastore.MODIFY, 0)
+		assert.NoError(t, err)
+		key := buildCollectionKey(collectionID)
+		value, ok := kvs[key]
+		assert.True(t, ok)
+		var collPb pb.CollectionInfo
+		err = proto.Unmarshal([]byte(value), &collPb)
+		assert.NoError(t, err)
+		got := model.UnmarshalCollectionModel(&collPb)
+		assert.Equal(t, pb.CollectionState_CollectionCreated, got.State)
+	})
+
+	t.Run("modify, tenant id changed", func(t *testing.T) {
+		kc := &Catalog{}
+		ctx := context.Background()
+		var collectionID int64 = 1
+		oldC := &model.Collection{TenantID: "1", CollectionID: collectionID, State: pb.CollectionState_CollectionCreating}
+		newC := &model.Collection{TenantID: "2", CollectionID: collectionID, State: pb.CollectionState_CollectionCreated}
+		err := kc.AlterCollection(ctx, oldC, newC, metastore.MODIFY, 0)
+		assert.Error(t, err)
+	})
+}
+
+func TestCatalog_AlterPartition(t *testing.T) {
+	t.Run("add", func(t *testing.T) {
+		kc := &Catalog{}
+		ctx := context.Background()
+		err := kc.AlterPartition(ctx, nil, nil, metastore.ADD, 0)
+		assert.Error(t, err)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		kc := &Catalog{}
+		ctx := context.Background()
+		err := kc.AlterPartition(ctx, nil, nil, metastore.DELETE, 0)
+		assert.Error(t, err)
+	})
+
+	t.Run("modify", func(t *testing.T) {
+		snapshot := kv.NewMockSnapshotKV()
+		kvs := map[string]string{}
+		snapshot.SaveFunc = func(key string, value string, ts typeutil.Timestamp) error {
+			kvs[key] = value
+			return nil
+		}
+		kc := &Catalog{Snapshot: snapshot}
+		ctx := context.Background()
+		var collectionID int64 = 1
+		var partitionID int64 = 2
+		oldP := &model.Partition{PartitionID: partitionID, CollectionID: collectionID, State: pb.PartitionState_PartitionCreating}
+		newP := &model.Partition{PartitionID: partitionID, CollectionID: collectionID, State: pb.PartitionState_PartitionCreated}
+		err := kc.AlterPartition(ctx, oldP, newP, metastore.MODIFY, 0)
+		assert.NoError(t, err)
+		key := buildPartitionKey(collectionID, partitionID)
+		value, ok := kvs[key]
+		assert.True(t, ok)
+		var partPb pb.PartitionInfo
+		err = proto.Unmarshal([]byte(value), &partPb)
+		assert.NoError(t, err)
+		got := model.UnmarshalPartitionModel(&partPb)
+		assert.Equal(t, pb.PartitionState_PartitionCreated, got.State)
+	})
+
+	t.Run("modify, tenant id changed", func(t *testing.T) {
+		kc := &Catalog{}
+		ctx := context.Background()
+		var collectionID int64 = 1
+		oldP := &model.Partition{PartitionID: 1, CollectionID: collectionID, State: pb.PartitionState_PartitionCreating}
+		newP := &model.Partition{PartitionID: 2, CollectionID: collectionID, State: pb.PartitionState_PartitionCreated}
+		err := kc.AlterPartition(ctx, oldP, newP, metastore.MODIFY, 0)
 		assert.Error(t, err)
 	})
 }

@@ -30,6 +30,19 @@ func (p Partition) Equal(other Partition) bool {
 	return p.PartitionName == other.PartitionName
 }
 
+func CheckPartitionsEqual(partitionsA, partitionsB []*Partition) bool {
+	if len(partitionsA) != len(partitionsB) {
+		return false
+	}
+	l := len(partitionsA)
+	for i := 0; i < l; i++ {
+		if !partitionsA[i].Equal(*partitionsB[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func MarshalPartitionModel(partition *Partition) *pb.PartitionInfo {
 	return &pb.PartitionInfo{
 		PartitionID:               partition.PartitionID,

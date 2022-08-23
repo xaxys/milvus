@@ -245,7 +245,6 @@ func binarySearchRecords(records []tsv, ts typeutil.Timestamp) (string, bool) {
 // otherwise, SuffixSnapshot will store a ts-key as "key[sep]ts"-value pair in snapshot path
 // and for acceleration store original key-value if ts is the latest
 func (ss *SuffixSnapshot) Save(key string, value string, ts typeutil.Timestamp) error {
-	fmt.Printf("snapshot.Save, key: %s, value: %s, ts: %d\n", key, value, ts)
 	// if ts == 0, act like TxnKv
 	// will not update lastestTs since ts not not valid
 	if ts == 0 {
@@ -256,7 +255,6 @@ func (ss *SuffixSnapshot) Save(key string, value string, ts typeutil.Timestamp) 
 	defer ss.Unlock()
 
 	tsKey := ss.composeTSKey(key, ts)
-	fmt.Printf("snapshot.Save, key: %s, value: %s, ts: %d, tsKey: %s\n", key, value, ts, tsKey)
 
 	// provided key value is latest
 	// stores both tsKey and orignal key
@@ -264,7 +262,6 @@ func (ss *SuffixSnapshot) Save(key string, value string, ts typeutil.Timestamp) 
 	if err != nil {
 		return err
 	}
-	fmt.Printf("snapshot.Save, key: %s, value: %s, ts: %d, tsKey: %s, after: %v\n", key, value, ts, tsKey, after)
 	if after {
 		err := ss.TxnKV.MultiSave(map[string]string{
 			key:   value,
