@@ -6,6 +6,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type partitionDb struct {
@@ -28,6 +29,20 @@ func (s *partitionDb) Insert(in []*dbmodel.Partition) error {
 	err := s.db.CreateInBatches(in, 100).Error
 	if err != nil {
 		log.Error("insert partition failed", zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
+func (s *partitionDb) Upsert(in *dbmodel.Partition) error {
+	err := s.db.Clauses(clause.OnConflict{
+		// constraint UNIQUE (tenant_id, collection_id, ts)
+		UpdateAll: true,
+	}).Create(in).Error
+
+	if err != nil {
+		log.Error("upsert partition failed", zap.String("tenant", in.TenantID), zap.Int64("collID", in.CollectionID), zap.Int64("partID", in.PartitionID), zap.Uint64("ts", in.Ts), zap.Error(err))
 		return err
 	}
 

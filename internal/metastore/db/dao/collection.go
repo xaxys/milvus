@@ -91,3 +91,17 @@ func (s *collectionDb) Insert(in *dbmodel.Collection) error {
 
 	return nil
 }
+
+func (s *collectionDb) Upsert(in *dbmodel.Collection) error {
+	err := s.db.Clauses(clause.OnConflict{
+		// constraint UNIQUE (tenant_id, collection_id, ts)
+		UpdateAll: true,
+	}).Create(in).Error
+
+	if err != nil {
+		log.Error("upsert collection failed", zap.String("tenant", in.TenantID), zap.Int64("collID", in.CollectionID), zap.Uint64("ts", in.Ts), zap.Error(err))
+		return err
+	}
+
+	return nil
+}
