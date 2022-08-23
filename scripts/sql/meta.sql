@@ -102,7 +102,10 @@ CREATE TABLE if not exists milvus_meta.`partitions` (
     id BIGINT NOT NULL AUTO_INCREMENT,
     tenant_id VARCHAR(128) DEFAULT NULL,
     partition_id     BIGINT NOT NULL,
-    partition_name     VARCHAR(256),
+    partition_name     VARCHAR
+(
+    256
+),
     partition_created_timestamp bigint unsigned,
     collection_id BIGINT NOT NULL,
     status INT NOT NULL,
