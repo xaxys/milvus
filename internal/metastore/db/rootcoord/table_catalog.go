@@ -442,7 +442,7 @@ func (tc *Catalog) alterModifyCollection(ctx context.Context, oldColl *model.Col
 		Ts:               ts,
 	}
 
-	err := tc.metaDomain.CollectionDb(ctx).Insert(coll)
+	err := tc.metaDomain.CollectionDb(ctx).Upsert(coll)
 	if err != nil {
 		log.Error("insert collection failed", zap.String("tenant", tenantID), zap.Int64("collID", oldCollClone.CollectionID), zap.Uint64("ts", ts), zap.Error(err))
 		return err
@@ -520,7 +520,7 @@ func (tc *Catalog) alterModifyPartition(ctx context.Context, oldPart *model.Part
 		Ts:                        ts,
 	}
 
-	err := tc.metaDomain.PartitionDb(ctx).Insert([]*dbmodel.Partition{part})
+	err := tc.metaDomain.PartitionDb(ctx).Upsert(part)
 	if err != nil {
 		log.Error("insert partitions failed", zap.String("tenant", tenantID), zap.Int64("collID", part.CollectionID), zap.Int64("partitionID", part.PartitionID), zap.Uint64("ts", ts), zap.Error(err))
 		return err

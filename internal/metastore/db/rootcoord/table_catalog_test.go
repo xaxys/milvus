@@ -808,7 +808,7 @@ func TestCatalog_AlterCollection(t *testing.T) {
 		Aliases:      []string{collAlias1, collAlias2},
 	}
 
-	collDbMock.On("Insert", mock.Anything).Return(nil).Once()
+	collDbMock.On("Upsert", mock.Anything).Return(nil).Once()
 
 	gotErr := mockCatalog.AlterCollection(ctx, coll, newColl, metastore.MODIFY, ts)
 	require.NoError(t, gotErr)
@@ -841,7 +841,7 @@ func TestCatalog_AlterCollection_TsNot0_CollInsertError(t *testing.T) {
 
 	// expectation
 	errTest := errors.New("test error")
-	collDbMock.On("Insert", mock.Anything).Return(errTest).Once()
+	collDbMock.On("Upsert", mock.Anything).Return(errTest).Once()
 
 	// actual
 	gotErr := mockCatalog.AlterCollection(ctx, coll, coll, metastore.MODIFY, ts)
@@ -916,7 +916,7 @@ func TestCatalog_AlterPartition(t *testing.T) {
 		State:                     pb.PartitionState_PartitionDropping,
 	}
 
-	partitionDbMock.On("Insert", mock.Anything).Return(nil).Once()
+	partitionDbMock.On("Upsert", mock.Anything).Return(nil).Once()
 
 	gotErr := mockCatalog.AlterPartition(ctx, partition, newPartition, metastore.MODIFY, ts)
 	require.NoError(t, gotErr)
@@ -949,7 +949,7 @@ func TestCatalog_AlterPartition_TsNot0_PartitionInsertError(t *testing.T) {
 
 	// expectation
 	errTest := errors.New("test error")
-	partitionDbMock.On("Insert", mock.Anything).Return(errTest).Once()
+	partitionDbMock.On("Upsert", mock.Anything).Return(errTest).Once()
 
 	// actual
 	gotErr := mockCatalog.AlterPartition(ctx, partition, partition, metastore.MODIFY, ts)

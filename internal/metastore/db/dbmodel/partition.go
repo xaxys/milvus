@@ -29,6 +29,7 @@ func (v Partition) TableName() string {
 type IPartitionDb interface {
 	GetByCollectionID(tenantID string, collectionID typeutil.UniqueID, ts typeutil.Timestamp) ([]*Partition, error)
 	Insert(in []*Partition) error
+	Upsert(in *Partition) error
 	//MarkDeleted(tenantID string, collID typeutil.UniqueID) error
 }
 

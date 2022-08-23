@@ -40,6 +40,7 @@ type ICollectionDb interface {
 	Get(tenantID string, collectionID typeutil.UniqueID, ts typeutil.Timestamp) (*Collection, error)
 	GetCollectionIDByName(tenantID string, collectionName string, ts typeutil.Timestamp) (typeutil.UniqueID, error)
 	Insert(in *Collection) error
+	Upsert(in *Collection) error
 }
 
 // model <---> db
