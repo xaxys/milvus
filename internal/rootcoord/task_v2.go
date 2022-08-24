@@ -16,10 +16,19 @@ type taskV2 interface {
 }
 
 type baseTaskV2 struct {
+	ctx  context.Context
 	core *RootCoord
 	done chan error
 	ts   Timestamp
 	id   UniqueID
+}
+
+func (b *baseTaskV2) SetCtx(ctx context.Context) {
+	b.ctx = ctx
+}
+
+func (b *baseTaskV2) GetCtx(ctx context.Context) context.Context {
+	return b.ctx
 }
 
 func (b *baseTaskV2) SetTs(ts Timestamp) {
