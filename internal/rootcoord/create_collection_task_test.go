@@ -5,25 +5,16 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/milvus-io/milvus/internal/proto/etcdpb"
-
-	"github.com/milvus-io/milvus/internal/proto/datapb"
-
-	"github.com/milvus-io/milvus/internal/proto/internalpb"
-
-	"github.com/milvus-io/milvus/internal/metastore/model"
-
-	"github.com/milvus-io/milvus/internal/util/funcutil"
-
-	"github.com/stretchr/testify/assert"
-
-	"github.com/milvus-io/milvus/internal/proto/commonpb"
-
-	"github.com/milvus-io/milvus/internal/proto/milvuspb"
-
 	"github.com/golang/protobuf/proto"
-
+	"github.com/milvus-io/milvus/internal/metastore/model"
+	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/proto/etcdpb"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/stretchr/testify/assert"
 )
 
 func Test_createCollectionTask_validate(t *testing.T) {
@@ -318,7 +309,7 @@ func Test_createCollectionTask_Execute(t *testing.T) {
 				Status:             succStatus(),
 			}, nil
 		}
-		dc.WatchChannelsF = func(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
+		dc.WatchChannelsFunc = func(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
 			return &datapb.WatchChannelsResponse{Status: succStatus()}, nil
 		}
 
