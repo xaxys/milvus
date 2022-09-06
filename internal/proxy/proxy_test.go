@@ -1103,8 +1103,8 @@ func TestProxy(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
-		rowNumStr := funcutil.KeyValuePair2Map(resp.Stats)["row_count"]
-		assert.Equal(t, strconv.Itoa(rowNum), rowNumStr)
+		count := resp.GetStats().GetFields()["row_count"].GetNumberValue()
+		assert.Equal(t, int(count), rowNum)
 
 		// get statistics of other collection -> fail
 		resp, err = proxy.GetStatistics(ctx, &milvuspb.GetStatisticsRequest{
@@ -1291,8 +1291,8 @@ func TestProxy(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
-		rowNumStr := funcutil.KeyValuePair2Map(resp.Stats)["row_count"]
-		assert.Equal(t, strconv.Itoa(rowNum), rowNumStr)
+		count := resp.GetStats().GetFields()["row_count"].GetNumberValue()
+		assert.Equal(t, int(count), rowNum)
 
 		// get statistics of other collection -> fail
 		resp, err = proxy.GetStatistics(ctx, &milvuspb.GetStatisticsRequest{
@@ -1830,8 +1830,8 @@ func TestProxy(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
-		rowNumStr := funcutil.KeyValuePair2Map(resp.Stats)["row_count"]
-		assert.Equal(t, strconv.Itoa(rowNum), rowNumStr)
+		count := resp.GetStats().GetFields()["row_count"].GetNumberValue()
+		assert.Equal(t, int(count), rowNum)
 
 		// non-exist partition -> fail
 		resp, err = proxy.GetStatistics(ctx, &milvuspb.GetStatisticsRequest{
@@ -1870,8 +1870,8 @@ func TestProxy(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
-		rowNumStr := funcutil.KeyValuePair2Map(resp.Stats)["row_count"]
-		assert.Equal(t, strconv.Itoa(rowNum*2), rowNumStr)
+		count := resp.GetStats().GetFields()["row_count"].GetNumberValue()
+		assert.Equal(t, int(count), rowNum*2)
 
 		// get statistics of other collection -> fail
 		resp, err = proxy.GetStatistics(ctx, &milvuspb.GetStatisticsRequest{

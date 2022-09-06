@@ -23,26 +23,23 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/milvus-io/milvus/internal/util/errorutil"
-
-	"github.com/milvus-io/milvus/internal/util"
-
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
-
-	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/crypto"
+	"github.com/milvus-io/milvus/internal/util/errorutil"
 	"github.com/milvus-io/milvus/internal/util/logutil"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/timerecord"

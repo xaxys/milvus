@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type mockNodeDetector struct {
@@ -86,10 +87,13 @@ func (m *mockShardQueryNode) Stop() error {
 func buildMockQueryNode(nodeID int64, addr string) shardQueryNode {
 	return &mockShardQueryNode{
 		statisticResponse: &internalpb.GetStatisticsResponse{
-			Stats: []*commonpb.KeyValuePair{
-				{
-					Key:   "row_count",
-					Value: "0",
+			Stats: &structpb.Struct{
+				Fields: map[string]*structpb.Value{
+					"row_count": {
+						Kind: &structpb.Value_NumberValue{
+							NumberValue: float64(3000),
+						},
+					},
 				},
 			},
 		},
