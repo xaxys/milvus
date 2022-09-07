@@ -22,9 +22,6 @@ import (
 	"fmt"
 	"sync"
 
-	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
-
 	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
@@ -33,9 +30,13 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	queryPb "github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // GetComponentStates returns information about whether the node is healthy
@@ -96,15 +97,14 @@ func (node *QueryNode) GetStatistics(ctx context.Context, req *querypb.GetStatis
 		zap.Int64("msgID", req.GetReq().GetBase().GetMsgID()),
 		zap.Strings("vChannels", req.GetDmlChannels()),
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
-		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()),
-		zap.Uint64("timeTravel", req.GetReq().GetTravelTimestamp()))
+		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()))
 
 	failRet := &internalpb.GetStatisticsResponse{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
 		},
 	}
-	toReduceResults := make([]*internalpb.GetStatisticsResponse, 0)
+	var results []*structpb.Struct
 	runningGp, runningCtx := errgroup.WithContext(ctx)
 	mu := &sync.Mutex{}
 	for _, ch := range req.GetDmlChannels() {
@@ -130,18 +130,25 @@ func (node *QueryNode) GetStatistics(ctx context.Context, req *querypb.GetStatis
 				failRet.Status.ErrorCode = ret.Status.ErrorCode
 				return fmt.Errorf("%s", ret.Status.Reason)
 			}
-			toReduceResults = append(toReduceResults, ret)
+			results = append(results, ret.GetStats())
 			return nil
 		})
 	}
 	if err := runningGp.Wait(); err != nil {
 		return failRet, nil
 	}
-	ret, err := reduceStatisticResponse(toReduceResults)
+	reducer := funcutil.NewMapReducer(funcutil.KeyValuePair2Map(req.GetReq().GetSchema()))
+	result, err := reducer.Reduce(results)
 	if err != nil {
 		failRet.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
 		failRet.Status.Reason = err.Error()
 		return failRet, nil
+	}
+	ret := &internalpb.GetStatisticsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		},
+		Stats: result,
 	}
 	return ret, nil
 }
@@ -164,8 +171,7 @@ func (node *QueryNode) getStatisticsWithDmlChannel(ctx context.Context, req *que
 		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
 		zap.String("vChannel", dmlChannel),
 		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
-		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()),
-		zap.Uint64("timeTravel", req.GetReq().GetTravelTimestamp()))
+		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()))
 
 	if node.queryShardService == nil {
 		failRet.Status.Reason = "queryShardService is nil"
@@ -262,10 +268,21 @@ func (node *QueryNode) getStatisticsWithDmlChannel(ctx context.Context, req *que
 		msgID, req.GetFromShardLeader(), dmlChannel, req.GetSegmentIDs()))
 
 	results = append(results, streamingResult)
-	ret, err := reduceStatisticResponse(results)
+	var stats []*structpb.Struct
+	for _, result := range results {
+		stats = append(stats, result.GetStats())
+	}
+	reducer := funcutil.NewMapReducer(funcutil.KeyValuePair2Map(req.GetReq().GetSchema()))
+	stat, err := reducer.Reduce(stats)
 	if err != nil {
 		failRet.Status.Reason = err.Error()
 		return failRet, nil
+	}
+	ret := &internalpb.GetStatisticsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+		},
+		Stats: stat,
 	}
 	log.Debug("reduce statistic result done", zap.Int64("msgID", msgID), zap.Any("results", ret))
 

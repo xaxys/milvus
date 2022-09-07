@@ -5,14 +5,14 @@ import (
 	"errors"
 	"fmt"
 
-	"go.uber.org/zap"
-
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
+	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // not implement any task
@@ -22,7 +22,6 @@ type statistics struct {
 	ctx                context.Context
 	qs                 *queryShard
 	scope              querypb.DataScope
-	travelTimestamp    Timestamp
 	guaranteeTimestamp Timestamp
 	timeoutTimestamp   Timestamp
 	tr                 *timerecord.TimeRecorder
@@ -30,6 +29,7 @@ type statistics struct {
 	req                *querypb.GetStatisticsRequest
 	Ret                *internalpb.GetStatisticsResponse
 	waitCanDoFunc      func(ctx context.Context) error
+	reducer            funcutil.MapReducer
 }
 
 func (s *statistics) statisticOnStreaming() error {
@@ -105,39 +105,23 @@ func (s *statistics) Execute(ctx context.Context) error {
 }
 
 func (s *statistics) reduceResults(results []map[string]interface{}) error {
-	mergedResults := map[string]interface{}{
-		"row_count": int64(0),
-	}
-	fieldMethod := map[string]func(interface{}) error{
-		"row_count": func(v interface{}) error {
-			count, ok := v.(int64)
-			if !ok {
-				return fmt.Errorf("invalid value type for row_count. expect int64, got %T", v)
-			}
-			mergedResults["row_count"] = mergedResults["row_count"].(int64) + count
-			return nil
-		},
-	}
+	var stats []*structpb.Struct
 	for _, result := range results {
-		for k, v := range result {
-			fn, ok := fieldMethod[k]
-			if !ok {
-				return fmt.Errorf("unknown field %s", k)
-			}
-			if err := fn(v); err != nil {
-				return err
-			}
+		stat, err := structpb.NewStruct(result)
+		if err != nil {
+			return err
 		}
+		stats = append(stats, stat)
 	}
 
-	stringMap := make(map[string]string)
-	for k, v := range mergedResults {
-		stringMap[k] = fmt.Sprint(v)
+	result, err := s.reducer.Reduce(stats)
+	if err != nil {
+		return err
 	}
 
 	s.Ret = &internalpb.GetStatisticsResponse{
 		Status: &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success},
-		Stats:  funcutil.Map2KeyValuePair(stringMap),
+		Stats:  result,
 	}
 	return nil
 }
@@ -149,13 +133,13 @@ func newStatistics(ctx context.Context, src *querypb.GetStatisticsRequest, scope
 		ts:                 src.Req.Base.GetTimestamp(),
 		scope:              scope,
 		qs:                 qs,
-		travelTimestamp:    src.Req.GetTravelTimestamp(),
 		guaranteeTimestamp: src.Req.GetGuaranteeTimestamp(),
 		timeoutTimestamp:   src.Req.GetTimeoutTimestamp(),
 		tr:                 timerecord.NewTimeRecorder("statistics"),
 		iReq:               src.Req,
 		req:                src,
 		waitCanDoFunc:      waitCanDo,
+		reducer:            funcutil.NewMapReducer(funcutil.KeyValuePair2Map(src.Req.GetSchema())),
 	}
 	return target
 }

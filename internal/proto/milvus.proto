@@ -11,6 +11,7 @@ option java_generate_equals_and_hash = true;
 import "common.proto";
 import "schema.proto";
 import "google/protobuf/descriptor.proto";
+import "google/protobuf/struct.proto";
 
 service MilvusService {
   rpc CreateCollection(CreateCollectionRequest) returns (common.Status) {}
@@ -281,14 +282,14 @@ message GetStatisticsRequest {
 }
 
 /**
-* Will return statistics in stats field like [{key:"row_count",value:"1"}]
+* Will return statistics in stats field like {"row_count": 3000}
 * WARNING: This API is experimental and not useful for now.
 */
 message GetStatisticsResponse {
   // Contain error_code and reason
   common.Status status = 1;
   // Collection statistics data
-  repeated common.KeyValuePair stats = 2;
+  google.protobuf.Struct stats = 2;
 }
 
 /**

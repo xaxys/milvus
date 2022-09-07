@@ -8,6 +8,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -118,21 +119,17 @@ func (g *getStatisticsTask) PreExecute(ctx context.Context) error {
 	g.GetStatisticsRequest.DbID = 0 // todo
 	g.GetStatisticsRequest.CollectionID = collID
 
-	if g.TravelTimestamp == 0 {
-		g.TravelTimestamp = g.BeginTs()
-	}
-
-	err = validateTravelTimestamp(g.TravelTimestamp, g.BeginTs())
-	if err != nil {
-		return err
-	}
-
 	g.GuaranteeTimestamp = parseGuaranteeTs(g.GuaranteeTimestamp, g.BeginTs())
 
 	deadline, ok := g.TraceCtx().Deadline()
 	if ok {
 		g.TimeoutTimestamp = tsoutil.ComposeTSByTime(deadline, 0)
 	}
+
+	reduceSchema := map[string]string{
+		"row_count": "sum",
+	}
+	g.Schema = funcutil.Map2KeyValuePair(reduceSchema)
 
 	// check if collection/partitions are loaded into query node
 	loaded, unloaded, err := checkFullLoaded(ctx, g.qc, g.collectionName, partIDs)
@@ -208,7 +205,8 @@ func (g *getStatisticsTask) PostExecute(ctx context.Context) error {
 		return err
 	}
 
-	result, err := reduceStatisticResponse(validResults)
+	reducer := funcutil.NewMapReducer(funcutil.KeyValuePair2Map(g.Schema))
+	result, err := reducer.Reduce(validResults)
 	if err != nil {
 		return err
 	}
@@ -219,6 +217,17 @@ func (g *getStatisticsTask) PostExecute(ctx context.Context) error {
 
 	log.Info("get statistics post execute done", zap.Int64("msgID", g.ID()), zap.Any("result", result))
 	return nil
+}
+
+func decodeGetStatisticsResults(results []*internalpb.GetStatisticsResponse) ([]*structpb.Struct, error) {
+	ret := make([]*structpb.Struct, len(results))
+	for i, result := range results {
+		if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+			return nil, fmt.Errorf("fail to decode result, reason=%s", result.GetStatus().GetReason())
+		}
+		ret[i] = result.GetStats()
+	}
+	return ret, nil
 }
 
 func (g *getStatisticsTask) getStatisticsFromDataCoord(ctx context.Context) error {
@@ -243,9 +252,21 @@ func (g *getStatisticsTask) getStatisticsFromDataCoord(ctx context.Context) erro
 	if result.Status.ErrorCode != commonpb.ErrorCode_Success {
 		return errors.New(result.Status.Reason)
 	}
+	// TODO: change this hard-coded logic
+	// "row_count": "3000" -> "row_count": 3000
+	pairs := funcutil.KeyValuePair2Map(result.Stats)
+	count, err := strconv.ParseInt(pairs["row_count"], 10, 64)
+	if err != nil {
+		return err
+	}
+	stats, err := structpb.NewStruct(map[string]interface{}{"row_count": count})
+	if err != nil {
+		return err
+	}
+
 	g.toReduceResults = append(g.toReduceResults, &internalpb.GetStatisticsResponse{
 		Status: &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success},
-		Stats:  result.Stats,
+		Stats:  stats,
 	})
 	return nil
 }
@@ -374,42 +395,6 @@ func checkFullLoaded(ctx context.Context, qc types.QueryCoord, collectionName st
 		}
 	}
 	return loadedPartitionIDs, unloadPartitionIDs, nil
-}
-
-func decodeGetStatisticsResults(results []*internalpb.GetStatisticsResponse) ([]map[string]string, error) {
-	ret := make([]map[string]string, len(results))
-	for i, result := range results {
-		if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-			return nil, fmt.Errorf("fail to decode result, reason=%s", result.GetStatus().GetReason())
-		}
-		ret[i] = funcutil.KeyValuePair2Map(result.GetStats())
-	}
-	return ret, nil
-}
-
-func reduceStatisticResponse(results []map[string]string) ([]*commonpb.KeyValuePair, error) {
-	mergedResults := map[string]interface{}{
-		"row_count": int64(0),
-	}
-	fieldMethod := map[string]func(string) error{
-		"row_count": func(str string) error {
-			count, err := strconv.ParseInt(str, 10, 64)
-			if err != nil {
-				return err
-			}
-			mergedResults["row_count"] = mergedResults["row_count"].(int64) + count
-			return nil
-		},
-	}
-
-	err := funcutil.MapReduce(results, fieldMethod)
-
-	stringMap := make(map[string]string)
-	for k, v := range mergedResults {
-		stringMap[k] = fmt.Sprint(v)
-	}
-
-	return funcutil.Map2KeyValuePair(stringMap), err
 }
 
 // implement Task
