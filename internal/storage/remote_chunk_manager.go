@@ -65,6 +65,8 @@ type RemoteChunkManager struct {
 	//	ctx        context.Context
 	bucketName string
 	rootPath   string
+	// cloudProvider is a low-cardinality label for object-storage metrics.
+	cloudProvider string
 
 	readRetryAttempts uint
 }
@@ -89,6 +91,7 @@ func NewRemoteChunkManager(ctx context.Context, c *objectstorage.Config) (*Remot
 		client:            client,
 		bucketName:        c.BucketName,
 		rootPath:          strings.TrimLeft(c.RootPath, "/"),
+		cloudProvider:     c.CloudProvider,
 		readRetryAttempts: c.ReadRetryAttempts,
 	}
 	mlog.Info(ctx, "remote chunk manager init success.", mlog.String("remote", c.CloudProvider), mlog.String("bucketname", c.BucketName), mlog.String("root", mcm.RootPath()))
@@ -101,6 +104,7 @@ func NewRemoteChunkManagerForTesting(c *minio.Client, bucket string, rootPath st
 		client:            &MinioObjectStorage{c},
 		bucketName:        bucket,
 		rootPath:          rootPath,
+		cloudProvider:     objectstorage.CloudProviderAWS,
 		readRetryAttempts: 10,
 	}
 	return mcm
@@ -346,10 +350,12 @@ func (mcm *RemoteChunkManager) WalkWithPrefix(ctx context.Context, prefix string
 
 	logger.Info(ctx, "start walk through objects")
 	if err := mcm.client.WalkWithObjects(ctx, mcm.bucketName, prefix, recursive, walkFunc); err != nil {
+		recordObjectStorageRequest(mcm.cloudProvider, ObjectStorageOpWalk, start.ElapseSpan(), 0, 0, err)
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataWalkLabel, metrics.FailLabel).Inc()
 		logger.Warn(ctx, "failed to walk through objects", mlog.Err(err))
 		return err
 	}
+	recordObjectStorageRequest(mcm.cloudProvider, ObjectStorageOpWalk, start.ElapseSpan(), 0, 0, nil)
 	metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataWalkLabel).
 		Observe(float64(start.ElapseSpan().Milliseconds()))
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataWalkLabel, metrics.SuccessLabel).Inc()
@@ -362,6 +368,7 @@ func (mcm *RemoteChunkManager) getObject(ctx context.Context, bucketName, object
 ) (FileReader, error) {
 	start := timerecord.NewTimeRecorder("getObject")
 	reader, err := mcm.client.GetObject(ctx, bucketName, objectName, offset, size)
+	recordObjectStorageRequest(mcm.cloudProvider, ObjectStorageOpGet, start.ElapseSpan(), 0, 0, err)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataGetLabel, metrics.TotalLabel).Inc()
 	if err == nil && reader != nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataGetLabel).
@@ -375,6 +382,13 @@ func (mcm *RemoteChunkManager) getObject(ctx context.Context, bucketName, object
 		}
 	}
 
+	if err == nil && reader != nil {
+		reader = &objectStorageStatsReader{
+			FileReader:    reader,
+			cloudProvider: mcm.cloudProvider,
+		}
+	}
+
 	return reader, err
 }
 
@@ -382,16 +396,17 @@ func (mcm *RemoteChunkManager) putObject(ctx context.Context, bucketName, object
 	start := timerecord.NewTimeRecorder("putObject")
 
 	err := mcm.client.PutObject(ctx, bucketName, objectName, reader, objectSize)
+	recordObjectStorageRequest(mcm.cloudProvider, ObjectStorageOpPut, start.ElapseSpan(), 0, objectSize, err)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.TotalLabel).Inc()
 	if err == nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataPutLabel).
 			Observe(float64(start.ElapseSpan().Milliseconds()))
-		metrics.PersistentDataOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.SuccessLabel).Inc()
+		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.SuccessLabel).Inc()
 	} else {
 		if errors.Is(err, context.Canceled) {
-			metrics.PersistentDataOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.CancelLabel).Inc()
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.CancelLabel).Inc()
 		} else {
-			metrics.PersistentDataOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.FailLabel).Inc()
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.FailLabel).Inc()
 		}
 	}
 
@@ -402,6 +417,7 @@ func (mcm *RemoteChunkManager) getObjectSize(ctx context.Context, bucketName, ob
 	start := timerecord.NewTimeRecorder("getObjectSize")
 
 	info, err := mcm.client.StatObject(ctx, bucketName, objectName)
+	recordObjectStorageRequest(mcm.cloudProvider, ObjectStorageOpStat, start.ElapseSpan(), 0, 0, err)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataStatLabel, metrics.TotalLabel).Inc()
 	if err == nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataStatLabel).
@@ -422,6 +438,7 @@ func (mcm *RemoteChunkManager) removeObject(ctx context.Context, bucketName, obj
 	start := timerecord.NewTimeRecorder("removeObject")
 
 	err := mcm.client.RemoveObject(ctx, bucketName, objectName)
+	recordObjectStorageRequest(mcm.cloudProvider, ObjectStorageOpRemove, start.ElapseSpan(), 0, 0, err)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataRemoveLabel, metrics.TotalLabel).Inc()
 	if err == nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataRemoveLabel).
@@ -455,6 +472,7 @@ func (mcm *RemoteChunkManager) copyObject(ctx context.Context, bucketName, srcOb
 	start := timerecord.NewTimeRecorder("copyObject")
 
 	err := mcm.client.CopyObject(ctx, bucketName, srcObjectName, dstObjectName)
+	recordObjectStorageRequest(mcm.cloudProvider, ObjectStorageOpCopy, start.ElapseSpan(), 0, 0, err)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.TotalLabel).Inc()
 	if err == nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataPutLabel).

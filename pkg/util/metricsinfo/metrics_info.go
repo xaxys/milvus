@@ -347,8 +347,10 @@ type SyncTask struct {
 // DataNodeInfos implements ComponentInfos
 type DataNodeInfos struct {
 	BaseComponentInfos
-	SystemConfigurations DataNodeConfiguration `json:"system_configurations"`
-	QuotaMetrics         *DataNodeQuotaMetrics `json:"quota_metrics"`
+	SystemConfigurations        DataNodeConfiguration        `json:"system_configurations"`
+	QuotaMetrics                *DataNodeQuotaMetrics        `json:"quota_metrics"`
+	ObjectStorageMetrics        *ObjectStorageMetrics        `json:"object_storage_metrics,omitempty"`
+	ObjectStorageDerivedMetrics *ObjectStorageDerivedMetrics `json:"object_storage_derived_metrics,omitempty"`
 }
 
 type DataCoordDist struct {
@@ -378,9 +380,57 @@ type DataCoordCollectionMetrics struct {
 // DataCoordInfos implements ComponentInfos
 type DataCoordInfos struct {
 	BaseComponentInfos
-	SystemConfigurations DataCoordConfiguration      `json:"system_configurations"`
-	QuotaMetrics         *DataCoordQuotaMetrics      `json:"quota_metrics"`
-	CollectionMetrics    *DataCoordCollectionMetrics `json:"collection_metrics"`
+	SystemConfigurations DataCoordConfiguration       `json:"system_configurations"`
+	QuotaMetrics         *DataCoordQuotaMetrics       `json:"quota_metrics"`
+	CollectionMetrics    *DataCoordCollectionMetrics  `json:"collection_metrics"`
+	ObjectStorageMetrics *ObjectStorageDerivedMetrics `json:"object_storage_metrics,omitempty"`
+}
+
+type ObjectStorageOpMetrics struct {
+	StorageType         string  `json:"storage_type,omitempty"`
+	CloudProvider       string  `json:"cloud_provider,omitempty"`
+	Operation           string  `json:"operation,omitempty"`
+	TotalRequests       int64   `json:"total_requests"`
+	SuccessRequests     int64   `json:"success_requests"`
+	FailedRequests      int64   `json:"failed_requests"`
+	CanceledRequests    int64   `json:"canceled_requests"`
+	BytesRead           int64   `json:"bytes_read"`
+	BytesWritten        int64   `json:"bytes_written"`
+	TotalLatencyMs      int64   `json:"total_latency_ms"`
+	LatencyBucketCounts []int64 `json:"latency_bucket_counts,omitempty"`
+}
+
+type ObjectStorageMetrics struct {
+	LatencyBucketBoundsMs []float64                `json:"latency_bucket_bounds_ms,omitempty"`
+	Ops                   []ObjectStorageOpMetrics `json:"ops,omitempty"`
+}
+
+type ObjectStorageDerivedOpMetrics struct {
+	StorageType         string  `json:"storage_type,omitempty"`
+	CloudProvider       string  `json:"cloud_provider,omitempty"`
+	Operation           string  `json:"operation,omitempty"`
+	WindowSeconds       float64 `json:"window_seconds"`
+	QPS                 float64 `json:"qps"`
+	SuccessRate         float64 `json:"success_rate"`
+	FailureRate         float64 `json:"failure_rate"`
+	CancelRate          float64 `json:"cancel_rate"`
+	TotalRequests       int64   `json:"total_requests"`
+	SuccessRequests     int64   `json:"success_requests"`
+	FailedRequests      int64   `json:"failed_requests"`
+	CanceledRequests    int64   `json:"canceled_requests"`
+	BytesRead           int64   `json:"bytes_read"`
+	BytesWritten        int64   `json:"bytes_written"`
+	AvgLatencyMs        float64 `json:"avg_latency_ms"`
+	P95LatencyMs        float64 `json:"p95_latency_ms"`
+	P99LatencyMs        float64 `json:"p99_latency_ms"`
+	LatencyBucketCounts []int64 `json:"latency_bucket_counts,omitempty"`
+}
+
+type ObjectStorageDerivedMetrics struct {
+	SampleReady           bool                            `json:"sample_ready"`
+	ResetDetected         bool                            `json:"reset_detected,omitempty"`
+	LatencyBucketBoundsMs []float64                       `json:"latency_bucket_bounds_ms,omitempty"`
+	Ops                   []ObjectStorageDerivedOpMetrics `json:"ops,omitempty"`
 }
 
 type ImportTask struct {

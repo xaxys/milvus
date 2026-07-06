@@ -60,6 +60,23 @@ func NewIDLEDataNodeMock(ctx context.Context, pkType schemapb.DataType) *DataNod
 	return node
 }
 
+func TestDataNodeGetSystemInfoMetricsObjectStorageMetrics(t *testing.T) {
+	emptyNode := &DataNode{}
+	emptyNode.SetSession(&sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}})
+
+	req, err := metricsinfo.ConstructRequestByMetricType(metricsinfo.SystemInfoMetrics)
+	assert.NoError(t, err)
+	resp, err := emptyNode.getSystemInfoMetrics(context.TODO(), req)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, resp)
+
+	var infos metricsinfo.DataNodeInfos
+	err = metricsinfo.UnmarshalComponentInfos(resp, &infos)
+	assert.NoError(t, err)
+	assert.NotNil(t, infos.ObjectStorageMetrics)
+	assert.NotEmpty(t, infos.ObjectStorageMetrics.LatencyBucketBoundsMs)
+}
+
 func TestDataNode(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

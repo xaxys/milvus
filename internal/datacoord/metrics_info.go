@@ -18,7 +18,10 @@ package datacoord
 
 import (
 	"context"
+	"math"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/tidwall/gjson"
 	"golang.org/x/sync/errgroup"
@@ -197,8 +200,11 @@ func (s *Server) getDataCoordTopology(
 			mlog.Warn(ctx, "fails to get DataNode metrics", mlog.Err(err))
 			continue
 		}
+		infos.ObjectStorageDerivedMetrics = s.updateDataNodeObjectStorageMetrics(node, infos.ObjectStorageMetrics)
 		clusterTopology.ConnectedDataNodes = append(clusterTopology.ConnectedDataNodes, infos)
 	}
+	clusterTopology.Self.ObjectStorageMetrics = aggregateObjectStorageDerivedMetrics(clusterTopology.ConnectedDataNodes)
+	s.cleanupObjectStorageMetricSamples(nodes)
 
 	// compose topology struct
 	return metricsinfo.DataCoordTopology{
@@ -252,6 +258,289 @@ func (s *Server) getDataCoordMetrics(ctx context.Context) metricsinfo.DataCoordI
 	metricsinfo.FillDeployMetricsWithEnv(&ret.SystemInfo)
 
 	return ret
+}
+
+type objectStorageMetricsSample struct {
+	ts      time.Time
+	metrics *metricsinfo.ObjectStorageMetrics
+}
+
+type objectStorageMetricKey struct {
+	storageType   string
+	cloudProvider string
+	operation     string
+}
+
+func (s *Server) updateDataNodeObjectStorageMetrics(nodeID int64, cur *metricsinfo.ObjectStorageMetrics) *metricsinfo.ObjectStorageDerivedMetrics {
+	if cur == nil {
+		return nil
+	}
+
+	now := time.Now()
+	s.objectStorageMetricsMu.Lock()
+	defer s.objectStorageMetricsMu.Unlock()
+	if s.objectStorageMetricsSamples == nil {
+		s.objectStorageMetricsSamples = make(map[int64]objectStorageMetricsSample)
+	}
+
+	prev, ok := s.objectStorageMetricsSamples[nodeID]
+	s.objectStorageMetricsSamples[nodeID] = objectStorageMetricsSample{
+		ts:      now,
+		metrics: cloneObjectStorageMetrics(cur),
+	}
+	if !ok {
+		return &metricsinfo.ObjectStorageDerivedMetrics{
+			SampleReady:           false,
+			LatencyBucketBoundsMs: append([]float64(nil), cur.LatencyBucketBoundsMs...),
+		}
+	}
+
+	windowSeconds := now.Sub(prev.ts).Seconds()
+	if windowSeconds <= 0 {
+		return &metricsinfo.ObjectStorageDerivedMetrics{
+			SampleReady:           false,
+			ResetDetected:         true,
+			LatencyBucketBoundsMs: append([]float64(nil), cur.LatencyBucketBoundsMs...),
+		}
+	}
+
+	derived, reset := calculateObjectStorageDerivedMetrics(prev.metrics, cur, windowSeconds)
+	if reset {
+		derived.SampleReady = false
+		derived.ResetDetected = true
+	}
+	return derived
+}
+
+func (s *Server) cleanupObjectStorageMetricSamples(nodes []int64) {
+	nodeSet := make(map[int64]struct{}, len(nodes))
+	for _, node := range nodes {
+		nodeSet[node] = struct{}{}
+	}
+
+	s.objectStorageMetricsMu.Lock()
+	defer s.objectStorageMetricsMu.Unlock()
+	for node := range s.objectStorageMetricsSamples {
+		if _, ok := nodeSet[node]; !ok {
+			delete(s.objectStorageMetricsSamples, node)
+		}
+	}
+}
+
+func calculateObjectStorageDerivedMetrics(prev, cur *metricsinfo.ObjectStorageMetrics, windowSeconds float64) (*metricsinfo.ObjectStorageDerivedMetrics, bool) {
+	if prev == nil || cur == nil || windowSeconds <= 0 {
+		return &metricsinfo.ObjectStorageDerivedMetrics{SampleReady: false}, true
+	}
+	ret := &metricsinfo.ObjectStorageDerivedMetrics{
+		SampleReady:           false,
+		LatencyBucketBoundsMs: append([]float64(nil), cur.LatencyBucketBoundsMs...),
+	}
+
+	prevOps := objectStorageRawOpMap(prev.Ops)
+	derivedOps := make([]metricsinfo.ObjectStorageDerivedOpMetrics, 0, len(cur.Ops))
+	for _, curOp := range cur.Ops {
+		key := objectStorageOpKey(curOp.StorageType, curOp.CloudProvider, curOp.Operation)
+		prevOp, ok := prevOps[key]
+		if !ok {
+			continue
+		}
+		derivedOp, reset := calculateObjectStorageDerivedOp(prevOp, curOp, cur.LatencyBucketBoundsMs, windowSeconds)
+		if reset {
+			return ret, true
+		}
+		derivedOps = append(derivedOps, derivedOp)
+	}
+
+	sort.Slice(derivedOps, func(i, j int) bool {
+		if derivedOps[i].CloudProvider != derivedOps[j].CloudProvider {
+			return derivedOps[i].CloudProvider < derivedOps[j].CloudProvider
+		}
+		return derivedOps[i].Operation < derivedOps[j].Operation
+	})
+	ret.Ops = derivedOps
+	ret.SampleReady = len(derivedOps) > 0
+	return ret, false
+}
+
+func calculateObjectStorageDerivedOp(
+	prev, cur metricsinfo.ObjectStorageOpMetrics,
+	bounds []float64,
+	windowSeconds float64,
+) (metricsinfo.ObjectStorageDerivedOpMetrics, bool) {
+	op := metricsinfo.ObjectStorageDerivedOpMetrics{
+		StorageType:   cur.StorageType,
+		CloudProvider: cur.CloudProvider,
+		Operation:     cur.Operation,
+		WindowSeconds: windowSeconds,
+	}
+
+	op.TotalRequests = cur.TotalRequests - prev.TotalRequests
+	op.SuccessRequests = cur.SuccessRequests - prev.SuccessRequests
+	op.FailedRequests = cur.FailedRequests - prev.FailedRequests
+	op.CanceledRequests = cur.CanceledRequests - prev.CanceledRequests
+	op.BytesRead = cur.BytesRead - prev.BytesRead
+	op.BytesWritten = cur.BytesWritten - prev.BytesWritten
+	totalLatencyMs := cur.TotalLatencyMs - prev.TotalLatencyMs
+	op.LatencyBucketCounts = deltaObjectStorageBuckets(prev.LatencyBucketCounts, cur.LatencyBucketCounts)
+
+	if op.TotalRequests < 0 || op.SuccessRequests < 0 || op.FailedRequests < 0 ||
+		op.CanceledRequests < 0 || op.BytesRead < 0 || op.BytesWritten < 0 ||
+		totalLatencyMs < 0 || hasNegativeObjectStorageBucket(op.LatencyBucketCounts) {
+		return op, true
+	}
+
+	op.QPS = float64(op.TotalRequests) / windowSeconds
+	if op.TotalRequests > 0 {
+		op.SuccessRate = float64(op.SuccessRequests) / float64(op.TotalRequests)
+		op.FailureRate = float64(op.FailedRequests) / float64(op.TotalRequests)
+		op.CancelRate = float64(op.CanceledRequests) / float64(op.TotalRequests)
+		op.AvgLatencyMs = float64(totalLatencyMs) / float64(op.TotalRequests)
+		op.P95LatencyMs = objectStorageQuantile(bounds, op.LatencyBucketCounts, 0.95)
+		op.P99LatencyMs = objectStorageQuantile(bounds, op.LatencyBucketCounts, 0.99)
+	}
+	return op, false
+}
+
+func aggregateObjectStorageDerivedMetrics(nodes []metricsinfo.DataNodeInfos) *metricsinfo.ObjectStorageDerivedMetrics {
+	var bounds []float64
+	ops := make(map[objectStorageMetricKey]metricsinfo.ObjectStorageDerivedOpMetrics)
+	sampleReady := false
+	resetDetected := false
+
+	for _, node := range nodes {
+		metrics := node.ObjectStorageDerivedMetrics
+		if metrics == nil {
+			continue
+		}
+		if len(bounds) == 0 {
+			bounds = append([]float64(nil), metrics.LatencyBucketBoundsMs...)
+		}
+		resetDetected = resetDetected || metrics.ResetDetected
+		if !metrics.SampleReady {
+			continue
+		}
+		sampleReady = true
+		for _, op := range metrics.Ops {
+			key := objectStorageOpKey(op.StorageType, op.CloudProvider, op.Operation)
+			agg := ops[key]
+			if agg.StorageType == "" {
+				agg.StorageType = op.StorageType
+				agg.CloudProvider = op.CloudProvider
+				agg.Operation = op.Operation
+				agg.LatencyBucketCounts = make([]int64, len(op.LatencyBucketCounts))
+			}
+			agg.WindowSeconds = math.Max(agg.WindowSeconds, op.WindowSeconds)
+			agg.QPS += op.QPS
+			agg.TotalRequests += op.TotalRequests
+			agg.SuccessRequests += op.SuccessRequests
+			agg.FailedRequests += op.FailedRequests
+			agg.CanceledRequests += op.CanceledRequests
+			agg.BytesRead += op.BytesRead
+			agg.BytesWritten += op.BytesWritten
+			agg.AvgLatencyMs += op.AvgLatencyMs * float64(op.TotalRequests)
+			for i := range op.LatencyBucketCounts {
+				if i < len(agg.LatencyBucketCounts) {
+					agg.LatencyBucketCounts[i] += op.LatencyBucketCounts[i]
+				}
+			}
+			ops[key] = agg
+		}
+	}
+
+	ret := &metricsinfo.ObjectStorageDerivedMetrics{
+		SampleReady:           sampleReady,
+		ResetDetected:         resetDetected,
+		LatencyBucketBoundsMs: bounds,
+		Ops:                   make([]metricsinfo.ObjectStorageDerivedOpMetrics, 0, len(ops)),
+	}
+	for _, op := range ops {
+		if op.TotalRequests > 0 {
+			op.SuccessRate = float64(op.SuccessRequests) / float64(op.TotalRequests)
+			op.FailureRate = float64(op.FailedRequests) / float64(op.TotalRequests)
+			op.CancelRate = float64(op.CanceledRequests) / float64(op.TotalRequests)
+			op.AvgLatencyMs = op.AvgLatencyMs / float64(op.TotalRequests)
+			op.P95LatencyMs = objectStorageQuantile(bounds, op.LatencyBucketCounts, 0.95)
+			op.P99LatencyMs = objectStorageQuantile(bounds, op.LatencyBucketCounts, 0.99)
+		}
+		ret.Ops = append(ret.Ops, op)
+	}
+	sort.Slice(ret.Ops, func(i, j int) bool {
+		if ret.Ops[i].CloudProvider != ret.Ops[j].CloudProvider {
+			return ret.Ops[i].CloudProvider < ret.Ops[j].CloudProvider
+		}
+		return ret.Ops[i].Operation < ret.Ops[j].Operation
+	})
+	return ret
+}
+
+func objectStorageRawOpMap(ops []metricsinfo.ObjectStorageOpMetrics) map[objectStorageMetricKey]metricsinfo.ObjectStorageOpMetrics {
+	ret := make(map[objectStorageMetricKey]metricsinfo.ObjectStorageOpMetrics, len(ops))
+	for _, op := range ops {
+		ret[objectStorageOpKey(op.StorageType, op.CloudProvider, op.Operation)] = op
+	}
+	return ret
+}
+
+func objectStorageOpKey(storageType, cloudProvider, operation string) objectStorageMetricKey {
+	return objectStorageMetricKey{
+		storageType:   storageType,
+		cloudProvider: cloudProvider,
+		operation:     operation,
+	}
+}
+
+func deltaObjectStorageBuckets(prev, cur []int64) []int64 {
+	buckets := make([]int64, len(cur))
+	for i := range cur {
+		prevValue := int64(0)
+		if i < len(prev) {
+			prevValue = prev[i]
+		}
+		buckets[i] = cur[i] - prevValue
+	}
+	return buckets
+}
+
+func hasNegativeObjectStorageBucket(buckets []int64) bool {
+	for _, bucket := range buckets {
+		if bucket < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func objectStorageQuantile(bounds []float64, cumulativeBuckets []int64, quantile float64) float64 {
+	if len(bounds) == 0 || len(cumulativeBuckets) == 0 || quantile <= 0 {
+		return 0
+	}
+	total := cumulativeBuckets[len(cumulativeBuckets)-1]
+	if total <= 0 {
+		return 0
+	}
+	rank := int64(math.Ceil(float64(total) * quantile))
+	for i, count := range cumulativeBuckets {
+		if count >= rank && i < len(bounds) {
+			return bounds[i]
+		}
+	}
+	return bounds[len(bounds)-1]
+}
+
+func cloneObjectStorageMetrics(in *metricsinfo.ObjectStorageMetrics) *metricsinfo.ObjectStorageMetrics {
+	if in == nil {
+		return nil
+	}
+	out := &metricsinfo.ObjectStorageMetrics{
+		LatencyBucketBoundsMs: append([]float64(nil), in.LatencyBucketBoundsMs...),
+		Ops:                   make([]metricsinfo.ObjectStorageOpMetrics, 0, len(in.Ops)),
+	}
+	for _, op := range in.Ops {
+		copied := op
+		copied.LatencyBucketCounts = append([]int64(nil), op.LatencyBucketCounts...)
+		out.Ops = append(out.Ops, copied)
+	}
+	return out
 }
 
 // getDataNodeMetrics composes DataNode infos

@@ -19,10 +19,12 @@ package datacoord
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 	"google.golang.org/grpc"
 
@@ -41,6 +43,131 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
+
+func TestObjectStorageDerivedMetrics(t *testing.T) {
+	prev := &metricsinfo.ObjectStorageMetrics{
+		LatencyBucketBoundsMs: []float64{1, 10, 100},
+		Ops: []metricsinfo.ObjectStorageOpMetrics{
+			{
+				StorageType:         "object_storage",
+				CloudProvider:       "aws",
+				Operation:           "get",
+				TotalRequests:       10,
+				SuccessRequests:     8,
+				FailedRequests:      1,
+				CanceledRequests:    1,
+				BytesRead:           100,
+				TotalLatencyMs:      50,
+				LatencyBucketCounts: []int64{2, 8, 10},
+			},
+		},
+	}
+	cur := &metricsinfo.ObjectStorageMetrics{
+		LatencyBucketBoundsMs: []float64{1, 10, 100},
+		Ops: []metricsinfo.ObjectStorageOpMetrics{
+			{
+				StorageType:         "object_storage",
+				CloudProvider:       "aws",
+				Operation:           "get",
+				TotalRequests:       20,
+				SuccessRequests:     17,
+				FailedRequests:      2,
+				CanceledRequests:    1,
+				BytesRead:           300,
+				TotalLatencyMs:      250,
+				LatencyBucketCounts: []int64{3, 16, 20},
+			},
+		},
+	}
+
+	derived, reset := calculateObjectStorageDerivedMetrics(prev, cur, 2)
+	require.False(t, reset)
+	require.True(t, derived.SampleReady)
+	require.Len(t, derived.Ops, 1)
+	op := derived.Ops[0]
+	assert.EqualValues(t, 10, op.TotalRequests)
+	assert.EqualValues(t, 9, op.SuccessRequests)
+	assert.EqualValues(t, 1, op.FailedRequests)
+	assert.EqualValues(t, 0, op.CanceledRequests)
+	assert.EqualValues(t, 200, op.BytesRead)
+	assert.Equal(t, 5.0, op.QPS)
+	assert.Equal(t, 0.9, op.SuccessRate)
+	assert.Equal(t, 20.0, op.AvgLatencyMs)
+	assert.Equal(t, 100.0, op.P95LatencyMs)
+	assert.Equal(t, 100.0, op.P99LatencyMs)
+	assert.Equal(t, []int64{1, 8, 10}, op.LatencyBucketCounts)
+}
+
+func TestObjectStorageDerivedMetricsReset(t *testing.T) {
+	prev := &metricsinfo.ObjectStorageMetrics{
+		LatencyBucketBoundsMs: []float64{1, 10},
+		Ops: []metricsinfo.ObjectStorageOpMetrics{
+			{
+				StorageType:         "object_storage",
+				CloudProvider:       "aws",
+				Operation:           "put",
+				TotalRequests:       10,
+				LatencyBucketCounts: []int64{5, 10},
+			},
+		},
+	}
+	cur := &metricsinfo.ObjectStorageMetrics{
+		LatencyBucketBoundsMs: []float64{1, 10},
+		Ops: []metricsinfo.ObjectStorageOpMetrics{
+			{
+				StorageType:         "object_storage",
+				CloudProvider:       "aws",
+				Operation:           "put",
+				TotalRequests:       1,
+				LatencyBucketCounts: []int64{0, 1},
+			},
+		},
+	}
+
+	derived, reset := calculateObjectStorageDerivedMetrics(prev, cur, time.Second.Seconds())
+	assert.True(t, reset)
+	assert.False(t, derived.SampleReady)
+}
+
+func TestUpdateDataNodeObjectStorageMetricsSamples(t *testing.T) {
+	cur := &metricsinfo.ObjectStorageMetrics{
+		LatencyBucketBoundsMs: []float64{1, 10},
+		Ops: []metricsinfo.ObjectStorageOpMetrics{
+			{
+				StorageType:         "object_storage",
+				CloudProvider:       "aws",
+				Operation:           "stat",
+				TotalRequests:       1,
+				SuccessRequests:     1,
+				LatencyBucketCounts: []int64{0, 1},
+			},
+		},
+	}
+	s := &Server{}
+	first := s.updateDataNodeObjectStorageMetrics(100, cur)
+	require.NotNil(t, first)
+	assert.False(t, first.SampleReady)
+
+	s.objectStorageMetricsSamples[100] = objectStorageMetricsSample{
+		ts: time.Now().Add(-time.Second),
+		metrics: &metricsinfo.ObjectStorageMetrics{
+			LatencyBucketBoundsMs: []float64{1, 10},
+			Ops: []metricsinfo.ObjectStorageOpMetrics{
+				{
+					StorageType:         "object_storage",
+					CloudProvider:       "aws",
+					Operation:           "stat",
+					LatencyBucketCounts: []int64{0, 0},
+				},
+			},
+		},
+	}
+	second := s.updateDataNodeObjectStorageMetrics(100, cur)
+	require.NotNil(t, second)
+	require.True(t, second.SampleReady)
+	require.Len(t, second.Ops, 1)
+	assert.InDelta(t, 1.0, second.Ops[0].QPS, 0.2)
+}
 
 func TestGetDataNodeMetrics(t *testing.T) {
 	ctx := context.Background()

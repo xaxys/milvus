@@ -21,6 +21,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus/internal/flushcommon/util"
+	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
@@ -111,7 +112,8 @@ func (node *DataNode) getSystemInfoMetrics(ctx context.Context, _ *milvuspb.GetM
 			SimdType:              Params.CommonCfg.SimdType.GetValue(),
 			FlushInsertBufferSize: Params.DataNodeCfg.FlushInsertBufferSize.GetAsInt64(),
 		},
-		QuotaMetrics: quotaMetrics,
+		QuotaMetrics:         quotaMetrics,
+		ObjectStorageMetrics: storage.GetObjectStorageStatsSnapshot(),
 	}
 
 	metricsinfo.FillDeployMetricsWithEnv(&nodeInfos.SystemInfo)

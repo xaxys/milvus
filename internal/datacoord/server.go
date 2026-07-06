@@ -133,7 +133,9 @@ type Server struct {
 	compactionInspector      CompactionInspector
 	compactionTriggerManager TriggerManager
 
-	metricsCacheManager *metricsinfo.MetricsCacheManager
+	metricsCacheManager         *metricsinfo.MetricsCacheManager
+	objectStorageMetricsMu      sync.Mutex
+	objectStorageMetricsSamples map[int64]objectStorageMetricsSample
 
 	flushCh         chan UniqueID
 	notifyIndexChan chan UniqueID
@@ -206,15 +208,16 @@ func WithSegmentManager(manager Manager) Option {
 func CreateServer(ctx context.Context, factory dependency.Factory, opts ...Option) *Server {
 	rand.Seed(time.Now().UnixNano())
 	s := &Server{
-		ctx:                 ctx,
-		quitCh:              make(chan struct{}),
-		factory:             factory,
-		flushCh:             make(chan UniqueID, 1024),
-		notifyIndexChan:     make(chan UniqueID, 1024),
-		dataNodeCreator:     defaultDataNodeCreatorFunc,
-		importJobLock:       lock.NewKeyLock[int64](),
-		metricsCacheManager: metricsinfo.NewMetricsCacheManager(),
-		metricsRequest:      metricsinfo.NewMetricsRequest(),
+		ctx:                         ctx,
+		quitCh:                      make(chan struct{}),
+		factory:                     factory,
+		flushCh:                     make(chan UniqueID, 1024),
+		notifyIndexChan:             make(chan UniqueID, 1024),
+		dataNodeCreator:             defaultDataNodeCreatorFunc,
+		importJobLock:               lock.NewKeyLock[int64](),
+		metricsCacheManager:         metricsinfo.NewMetricsCacheManager(),
+		objectStorageMetricsSamples: make(map[int64]objectStorageMetricsSample),
+		metricsRequest:              metricsinfo.NewMetricsRequest(),
 	}
 
 	for _, opt := range opts {
