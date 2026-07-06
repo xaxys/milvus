@@ -67,6 +67,108 @@ func (mr *mockReader) Size() (int64, error) {
 	return mr.size, nil
 }
 
+type testMemoryReservation struct {
+	allocator *testMemoryAllocator
+	size      int64
+	once      sync.Once
+}
+
+func (r *testMemoryReservation) Size() int64 {
+	return r.size
+}
+
+func (r *testMemoryReservation) Release() {
+	r.once.Do(func() {
+		r.allocator.Release(0, r.size)
+	})
+}
+
+type testMemoryAllocator struct {
+	mu           sync.Mutex
+	cond         *sync.Cond
+	limit        int64
+	used         int64
+	peak         int64
+	reservations []int64
+}
+
+func newTestMemoryAllocator(limit int64) *testMemoryAllocator {
+	allocator := &testMemoryAllocator{limit: limit}
+	allocator.cond = sync.NewCond(&allocator.mu)
+	return allocator
+}
+
+func (a *testMemoryAllocator) BlockingAllocate(taskID int64, size int64) {
+	a.Reserve(taskID, size)
+}
+
+func (a *testMemoryAllocator) canReserve(size int64) bool {
+	return a.used+size <= a.limit
+}
+
+func (a *testMemoryAllocator) reserveLocked(size int64) MemoryReservation {
+	a.used += size
+	if a.used > a.peak {
+		a.peak = a.used
+	}
+	a.reservations = append(a.reservations, size)
+	return &testMemoryReservation{allocator: a, size: size}
+}
+
+func (a *testMemoryAllocator) TryReserve(taskID int64, size int64) (MemoryReservation, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.canReserve(size) {
+		return nil, false
+	}
+	return a.reserveLocked(size), true
+}
+
+func (a *testMemoryAllocator) Reserve(taskID int64, size int64) MemoryReservation {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for !a.canReserve(size) {
+		a.cond.Wait()
+	}
+	return a.reserveLocked(size)
+}
+
+func (a *testMemoryAllocator) ForceReserve(taskID int64, size int64) MemoryReservation {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.reserveLocked(size)
+}
+
+func (a *testMemoryAllocator) Release(taskID int64, size int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.used -= size
+	if a.used < 0 {
+		a.used = 0
+	}
+	a.cond.Broadcast()
+}
+
+func (a *testMemoryAllocator) Used() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.used
+}
+
+func (a *testMemoryAllocator) Peak() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.peak
+}
+
+func (a *testMemoryAllocator) ReservationSizes() []int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	reservations := make([]int64, len(a.reservations))
+	copy(reservations, a.reservations)
+	return reservations
+}
+
 type SchedulerSuite struct {
 	suite.Suite
 
@@ -388,6 +490,34 @@ func (s *SchedulerSuite) TestScheduler_ReadFileStat() {
 	s.NoError(err)
 }
 
+func (s *SchedulerSuite) newImportRequest(idRangeEnd int) *datapb.ImportRequest {
+	return &datapb.ImportRequest{
+		JobID:        10,
+		TaskID:       11,
+		CollectionID: 12,
+		PartitionIDs: []int64{13},
+		Vchannels:    []string{"v0"},
+		Schema:       s.schema,
+		Files: []*internalpb.ImportFile{
+			{
+				Paths: []string{"dummy.json"},
+			},
+		},
+		Ts: 1000,
+		IDRange: &datapb.IDRange{
+			Begin: 0,
+			End:   int64(idRangeEnd),
+		},
+		RequestSegments: []*datapb.ImportRequestSegment{
+			{
+				SegmentID:   14,
+				PartitionID: 13,
+				Vchannel:    "v0",
+			},
+		},
+	}
+}
+
 func (s *SchedulerSuite) TestScheduler_ImportFile() {
 	s.syncMgr.EXPECT().SyncDataWithChunkManager(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, task syncmgr.Task, cm storage.ChunkManager, callbacks ...func(error) error) (*conc.Future[struct{}], error) {
 		future := conc.Go(func() (struct{}, error) {
@@ -438,6 +568,202 @@ func (s *SchedulerSuite) TestScheduler_ImportFile() {
 	s.manager.Add(importTask)
 	err = importTask.(*ImportTask).importFile(s.reader)
 	s.NoError(err)
+}
+
+func (s *SchedulerSuite) TestScheduler_ImportFileOverlapsWhenBudgetAllows() {
+	data1, err := testutil.CreateInsertData(s.schema, s.numRows)
+	s.NoError(err)
+	data2, err := testutil.CreateInsertData(s.schema, s.numRows)
+	s.NoError(err)
+
+	firstSyncStarted := make(chan struct{})
+	allowFirstSync := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	readCount := 0
+	syncCall := 0
+
+	s.reader = importutilv2.NewMockReader(s.T())
+	s.reader.EXPECT().Read().RunAndReturn(func() (*storage.InsertData, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		readCount++
+		switch readCount {
+		case 1:
+			return data1, nil
+		case 2:
+			return data2, nil
+		default:
+			return nil, io.EOF
+		}
+	})
+
+	s.syncMgr.EXPECT().SyncDataWithChunkManager(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, task syncmgr.Task, cm storage.ChunkManager, callbacks ...func(error) error) (*conc.Future[struct{}], error) {
+		mu.Lock()
+		syncCall++
+		call := syncCall
+		mu.Unlock()
+		if call == 1 {
+			once.Do(func() {
+				close(firstSyncStarted)
+			})
+			return conc.Go(func() (struct{}, error) {
+				<-allowFirstSync
+				return struct{}{}, nil
+			}), nil
+		}
+		return conc.Go(func() (struct{}, error) {
+			return struct{}{}, nil
+		}), nil
+	})
+
+	importReq := s.newImportRequest(s.numRows * 2)
+	importTask := NewImportTask(importReq, s.manager, s.syncMgr, s.cm)
+	importTask.(*ImportTask).memoryAllocator = newTestMemoryAllocator(1 << 60)
+	s.manager.Add(importTask)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- importTask.(*ImportTask).importFile(s.reader)
+	}()
+
+	s.Eventually(func() bool {
+		select {
+		case <-firstSyncStarted:
+			return true
+		default:
+			return false
+		}
+	}, 5*time.Second, 10*time.Millisecond)
+	s.Eventually(func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return syncCall >= 2
+	}, 5*time.Second, 10*time.Millisecond)
+
+	close(allowFirstSync)
+	s.NoError(<-errCh)
+	mu.Lock()
+	defer mu.Unlock()
+	s.Equal(3, readCount)
+}
+
+func (s *SchedulerSuite) TestScheduler_ImportFileBackpressuresWhenBudgetIsTight() {
+	data1, err := testutil.CreateInsertData(s.schema, s.numRows)
+	s.NoError(err)
+	data2, err := testutil.CreateInsertData(s.schema, s.numRows)
+	s.NoError(err)
+
+	firstSyncStarted := make(chan struct{})
+	allowFirstSync := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	readCount := 0
+	syncCall := 0
+
+	s.reader = importutilv2.NewMockReader(s.T())
+	s.reader.EXPECT().Read().RunAndReturn(func() (*storage.InsertData, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		readCount++
+		switch readCount {
+		case 1:
+			return data1, nil
+		case 2:
+			return data2, nil
+		default:
+			return nil, io.EOF
+		}
+	})
+
+	s.syncMgr.EXPECT().SyncDataWithChunkManager(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, task syncmgr.Task, cm storage.ChunkManager, callbacks ...func(error) error) (*conc.Future[struct{}], error) {
+		mu.Lock()
+		syncCall++
+		call := syncCall
+		mu.Unlock()
+		if call == 1 {
+			once.Do(func() {
+				close(firstSyncStarted)
+			})
+			return conc.Go(func() (struct{}, error) {
+				<-allowFirstSync
+				return struct{}{}, nil
+			}), nil
+		}
+		return conc.Go(func() (struct{}, error) {
+			return struct{}{}, nil
+		}), nil
+	})
+
+	importReq := s.newImportRequest(s.numRows * 2)
+	importTask := NewImportTask(importReq, s.manager, s.syncMgr, s.cm)
+	allocator := newTestMemoryAllocator(1)
+	importTask.(*ImportTask).memoryAllocator = allocator
+	s.manager.Add(importTask)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- importTask.(*ImportTask).importFile(s.reader)
+	}()
+
+	s.Eventually(func() bool {
+		select {
+		case <-firstSyncStarted:
+			return true
+		default:
+			return false
+		}
+	}, 5*time.Second, 10*time.Millisecond)
+	s.Never(func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return syncCall > 1
+	}, 200*time.Millisecond, 10*time.Millisecond)
+
+	close(allowFirstSync)
+	s.NoError(<-errCh)
+	hashedData1, err := HashData(importTask, data1)
+	s.NoError(err)
+	hashedData2, err := HashData(importTask, data2)
+	s.NoError(err)
+	expectedReservation1 := EstimateImportSyncMemorySize(hashedData1)
+	expectedReservation2 := EstimateImportSyncMemorySize(hashedData2)
+	s.Equal([]int64{expectedReservation1, expectedReservation2}, allocator.ReservationSizes())
+	s.Equal(max(expectedReservation1, expectedReservation2), allocator.Peak())
+	s.Equal(int64(0), allocator.Used())
+	mu.Lock()
+	defer mu.Unlock()
+	s.Equal(3, readCount)
+	s.Equal(2, syncCall)
+}
+
+func (s *SchedulerSuite) TestScheduler_ImportFileReleasesReservationOnSyncFailure() {
+	data, err := testutil.CreateInsertData(s.schema, s.numRows)
+	s.NoError(err)
+
+	var once sync.Once
+	s.reader = importutilv2.NewMockReader(s.T())
+	s.reader.EXPECT().Read().RunAndReturn(func() (*storage.InsertData, error) {
+		var res *storage.InsertData
+		once.Do(func() {
+			res = data
+		})
+		if res != nil {
+			return res, nil
+		}
+		return nil, io.EOF
+	})
+	s.syncMgr.EXPECT().SyncDataWithChunkManager(mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("mock sync submit error"))
+
+	importReq := s.newImportRequest(s.numRows)
+	importTask := NewImportTask(importReq, s.manager, s.syncMgr, s.cm)
+	allocator := newTestMemoryAllocator(1 << 60)
+	importTask.(*ImportTask).memoryAllocator = allocator
+	s.manager.Add(importTask)
+
+	err = importTask.(*ImportTask).importFile(s.reader)
+	s.Error(err)
+	s.Equal(int64(0), allocator.Used())
 }
 
 func (s *SchedulerSuite) TestScheduler_ImportFileWithFunction() {

@@ -77,6 +77,26 @@ func HashData(task Task, rows *storage.InsertData) (HashedData, error) {
 	return res, nil
 }
 
+// Sync keeps hashed data plus writer buffers in flight, so reserve above raw InsertData size.
+const importSyncMemoryAmplificationFactor = 2
+
+func EstimateHashedDataSize(hashed HashedData) int64 {
+	var size int64
+	for _, byPartition := range hashed {
+		for _, data := range byPartition {
+			if data == nil || data.GetRowNum() == 0 {
+				continue
+			}
+			size += int64(data.GetMemorySize())
+		}
+	}
+	return size
+}
+
+func EstimateImportSyncMemorySize(hashed HashedData) int64 {
+	return EstimateHashedDataSize(hashed) * importSyncMemoryAmplificationFactor
+}
+
 func HashDeleteData(task Task, delData *storage.DeleteData) ([]*storage.DeleteData, error) {
 	var (
 		schema     = typeutil.AppendSystemFields(task.GetSchema())

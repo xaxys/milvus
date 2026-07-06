@@ -38,21 +38,69 @@ func GetMemoryAllocator() MemoryAllocator {
 	return globalMemoryAllocator
 }
 
+// MemoryReservation represents a held import memory reservation.
+type MemoryReservation interface {
+	Size() int64
+	Release()
+}
+
 // MemoryAllocator handles memory allocation and deallocation for import tasks
 type MemoryAllocator interface {
 	// BlockingAllocate blocks until memory is available and then allocates
 	// This method will block until memory becomes available
 	BlockingAllocate(taskID int64, size int64)
 
+	// TryReserve allocates memory if it is immediately available.
+	TryReserve(taskID int64, size int64) (MemoryReservation, bool)
+
+	// Reserve blocks until memory is available and returns a releasable reservation.
+	Reserve(taskID int64, size int64) MemoryReservation
+
+	// ForceReserve reserves memory even if it exceeds the limit.
+	ForceReserve(taskID int64, size int64) MemoryReservation
+
 	// Release releases memory of the specified size
 	Release(taskID int64, size int64)
 }
+
+type memoryReservation struct {
+	allocator *memoryAllocator
+	taskID    int64
+	size      int64
+	once      sync.Once
+}
+
+func (r *memoryReservation) Size() int64 {
+	return r.size
+}
+
+func (r *memoryReservation) Release() {
+	r.once.Do(func() {
+		if r.allocator != nil && r.size > 0 {
+			r.allocator.Release(r.taskID, r.size)
+		}
+	})
+}
+
+type noopMemoryReservation struct {
+	size int64
+}
+
+func (r *noopMemoryReservation) Size() int64 {
+	return r.size
+}
+
+func (r *noopMemoryReservation) Release() {}
 
 type memoryAllocator struct {
 	systemTotalMemory int64
 	usedMemory        int64
 	mutex             sync.RWMutex
 	cond              *sync.Cond
+}
+
+func newNoopMemoryReservation(size int64) MemoryReservation {
+	return &noopMemoryReservation{size: size}
 }
 
 // NewMemoryAllocator creates a new MemoryAllocator instance
@@ -66,16 +114,60 @@ func NewMemoryAllocator(systemTotalMemory int64) MemoryAllocator {
 	return ma
 }
 
+func (ma *memoryAllocator) memoryLimit() int64 {
+	percentage := paramtable.Get().DataNodeCfg.ImportMemoryLimitPercentage.GetAsFloat()
+	return int64(float64(ma.systemTotalMemory) * percentage / 100.0)
+}
+
+func (ma *memoryAllocator) canAllocate(size int64) bool {
+	return ma.usedMemory+size <= ma.memoryLimit()
+}
+
+func (ma *memoryAllocator) reserveLocked(taskID int64, size int64) MemoryReservation {
+	if size <= 0 {
+		return newNoopMemoryReservation(size)
+	}
+	ma.usedMemory += size
+	memoryLimit := ma.memoryLimit()
+	mlog.Info(context.TODO(), "memory allocated successfully",
+		mlog.FieldTaskID(taskID),
+		mlog.Int64("allocatedSize", size),
+		mlog.Int64("usedMemory", ma.usedMemory),
+		mlog.Int64("availableMemory", memoryLimit-ma.usedMemory))
+	return &memoryReservation{
+		allocator: ma,
+		taskID:    taskID,
+		size:      size,
+	}
+}
+
 // BlockingAllocate blocks until memory is available and then allocates
 func (ma *memoryAllocator) BlockingAllocate(taskID int64, size int64) {
+	ma.Reserve(taskID, size)
+}
+
+func (ma *memoryAllocator) TryReserve(taskID int64, size int64) (MemoryReservation, bool) {
+	if size <= 0 {
+		return newNoopMemoryReservation(size), true
+	}
+	ma.mutex.Lock()
+	defer ma.mutex.Unlock()
+	if !ma.canAllocate(size) {
+		return nil, false
+	}
+	return ma.reserveLocked(taskID, size), true
+}
+
+func (ma *memoryAllocator) Reserve(taskID int64, size int64) MemoryReservation {
+	if size <= 0 {
+		return newNoopMemoryReservation(size)
+	}
 	ma.mutex.Lock()
 	defer ma.mutex.Unlock()
 
-	percentage := paramtable.Get().DataNodeCfg.ImportMemoryLimitPercentage.GetAsFloat()
-	memoryLimit := int64(float64(ma.systemTotalMemory) * percentage / 100.0)
-
 	// Wait until enough memory is available
-	for ma.usedMemory+size > memoryLimit {
+	for !ma.canAllocate(size) {
+		memoryLimit := ma.memoryLimit()
 		mlog.Warn(context.TODO(), "task waiting for memory allocation...",
 			mlog.FieldTaskID(taskID),
 			mlog.Int64("requestedSize", size),
@@ -85,13 +177,16 @@ func (ma *memoryAllocator) BlockingAllocate(taskID int64, size int64) {
 		ma.cond.Wait()
 	}
 
-	// Allocate memory
-	ma.usedMemory += size
-	mlog.Info(context.TODO(), "memory allocated successfully",
-		mlog.FieldTaskID(taskID),
-		mlog.Int64("allocatedSize", size),
-		mlog.Int64("usedMemory", ma.usedMemory),
-		mlog.Int64("availableMemory", memoryLimit-ma.usedMemory))
+	return ma.reserveLocked(taskID, size)
+}
+
+func (ma *memoryAllocator) ForceReserve(taskID int64, size int64) MemoryReservation {
+	if size <= 0 {
+		return newNoopMemoryReservation(size)
+	}
+	ma.mutex.Lock()
+	defer ma.mutex.Unlock()
+	return ma.reserveLocked(taskID, size)
 }
 
 // Release releases memory of the specified size

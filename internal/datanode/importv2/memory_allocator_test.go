@@ -191,7 +191,35 @@ func TestMemoryAllocatorSimple(t *testing.T) {
 	assert.Equal(t, int64(0), ma.(*memoryAllocator).usedMemory)
 }
 
-// TestMemoryAllocatorMassiveConcurrency tests massive concurrent memory allocation and release
+func TestMemoryAllocatorReservation(t *testing.T) {
+	ma := NewMemoryAllocator(1024 * 1024 * 1024)
+	allocator := ma.(*memoryAllocator)
+	limit := allocator.memoryLimit()
+
+	reservation, ok := ma.TryReserve(1, limit)
+	assert.True(t, ok)
+	assert.Equal(t, limit, reservation.Size())
+	assert.Equal(t, limit, allocator.usedMemory)
+
+	_, ok = ma.TryReserve(2, 1)
+	assert.False(t, ok)
+
+	reservation.Release()
+	reservation.Release()
+	assert.Equal(t, int64(0), allocator.usedMemory)
+}
+
+func TestMemoryAllocatorForceReserve(t *testing.T) {
+	ma := NewMemoryAllocator(1024 * 1024 * 1024)
+	allocator := ma.(*memoryAllocator)
+	limit := allocator.memoryLimit()
+
+	reservation := ma.ForceReserve(1, limit+1)
+	assert.Equal(t, limit+1, allocator.usedMemory)
+	reservation.Release()
+	assert.Equal(t, int64(0), allocator.usedMemory)
+}
+
 func TestMemoryAllocatorMassiveConcurrency(t *testing.T) {
 	// Create memory allocator with 1.6GB system memory
 	totalMemory := int64(16 * 1024 * 1024 * 1024) // 16GB * 10%

@@ -48,11 +48,12 @@ type ImportTask struct {
 	segmentsInfo map[int64]*datapb.ImportSegmentInfo
 	req          *datapb.ImportRequest
 
-	allocator  allocator.Interface
-	manager    TaskManager
-	syncMgr    syncmgr.SyncManager
-	cm         storage.ChunkManager
-	metaCaches map[string]metacache.MetaCache
+	allocator       allocator.Interface
+	manager         TaskManager
+	syncMgr         syncmgr.SyncManager
+	cm              storage.ChunkManager
+	metaCaches      map[string]metacache.MetaCache
+	memoryAllocator MemoryAllocator
 }
 
 func NewImportTask(req *datapb.ImportRequest,
@@ -75,14 +76,15 @@ func NewImportTask(req *datapb.ImportRequest,
 			CollectionID: req.GetCollectionID(),
 			State:        datapb.ImportTaskStateV2_Pending,
 		},
-		ctx:          ctx,
-		cancel:       cancel,
-		segmentsInfo: make(map[int64]*datapb.ImportSegmentInfo),
-		req:          req,
-		allocator:    alloc,
-		manager:      manager,
-		syncMgr:      syncMgr,
-		cm:           cm,
+		ctx:             ctx,
+		cancel:          cancel,
+		segmentsInfo:    make(map[int64]*datapb.ImportSegmentInfo),
+		req:             req,
+		allocator:       alloc,
+		manager:         manager,
+		syncMgr:         syncMgr,
+		cm:              cm,
+		memoryAllocator: GetMemoryAllocator(),
 	}
 	task.metaCaches = NewMetaCache(req)
 	return task
@@ -147,16 +149,17 @@ func (t *ImportTask) Clone() Task {
 		infos[id] = typeutil.Clone(info)
 	}
 	return &ImportTask{
-		ImportTaskV2: typeutil.Clone(t.ImportTaskV2),
-		ctx:          ctx,
-		cancel:       cancel,
-		segmentsInfo: infos,
-		req:          t.req,
-		allocator:    t.allocator,
-		manager:      t.manager,
-		syncMgr:      t.syncMgr,
-		cm:           t.cm,
-		metaCaches:   t.metaCaches,
+		ImportTaskV2:    typeutil.Clone(t.ImportTaskV2),
+		ctx:             ctx,
+		cancel:          cancel,
+		segmentsInfo:    infos,
+		req:             t.req,
+		allocator:       t.allocator,
+		manager:         t.manager,
+		syncMgr:         t.syncMgr,
+		cm:              t.cm,
+		metaCaches:      t.metaCaches,
+		memoryAllocator: t.memoryAllocator,
 	}
 }
 
@@ -199,9 +202,9 @@ func (t *ImportTask) Execute() []*conc.Future[any] {
 		file := file
 		f := GetExecPool().Submit(func() (any, error) {
 			// Use blocking allocation - this will wait until memory is available
-			GetMemoryAllocator().BlockingAllocate(t.GetTaskID(), bufferSize)
+			t.getMemoryAllocator().BlockingAllocate(t.GetTaskID(), bufferSize)
 			defer func() {
-				GetMemoryAllocator().Release(t.GetTaskID(), bufferSize)
+				t.getMemoryAllocator().Release(t.GetTaskID(), bufferSize)
 				debug.FreeOSMemory()
 			}()
 			err := fn(file)
@@ -212,16 +215,89 @@ func (t *ImportTask) Execute() []*conc.Future[any] {
 	return futures
 }
 
+type importSyncBatch struct {
+	reservation       MemoryReservation
+	futures           []*conc.Future[struct{}]
+	syncTasks         []syncmgr.Task
+	updateSegmentInfo bool
+}
+
+func (t *ImportTask) getMemoryAllocator() MemoryAllocator {
+	if t.memoryAllocator != nil {
+		return t.memoryAllocator
+	}
+	return GetMemoryAllocator()
+}
+
 func (t *ImportTask) importFile(reader importutilv2.Reader) error {
-	syncFutures := make([]*conc.Future[struct{}], 0)
-	syncTasks := make([]syncmgr.Task, 0)
+	inflight := make([]*importSyncBatch, 0)
+	drainOldest := func() error {
+		if len(inflight) == 0 {
+			return nil
+		}
+		batch := inflight[0]
+		inflight[0] = nil
+		inflight = inflight[1:]
+		return t.drainSyncBatch(batch)
+	}
+	drainReady := func() (bool, error) {
+		if len(inflight) == 0 {
+			return false, nil
+		}
+		drained := false
+		var err error
+		next := make([]*importSyncBatch, 0, len(inflight))
+		for _, batch := range inflight {
+			if batch.done() {
+				drained = true
+				err = errors.CombineErrors(err, t.drainSyncBatch(batch))
+				continue
+			}
+			next = append(next, batch)
+		}
+		inflight = next
+		return drained, err
+	}
+	drainAll := func() error {
+		var err error
+		for len(inflight) > 0 {
+			err = errors.CombineErrors(err, drainOldest())
+		}
+		return err
+	}
+	reserve := func(bytes int64) (MemoryReservation, error) {
+		allocator := t.getMemoryAllocator()
+		for {
+			if reservation, ok := allocator.TryReserve(t.GetTaskID(), bytes); ok {
+				return reservation, nil
+			}
+			drained, err := drainReady()
+			if err != nil {
+				return nil, err
+			}
+			if drained {
+				continue
+			}
+			if len(inflight) == 0 {
+				return allocator.ForceReserve(t.GetTaskID(), bytes), nil
+			}
+			if err := drainOldest(); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	for {
+		if _, err := drainReady(); err != nil {
+			return errors.CombineErrors(err, drainAll())
+		}
+
 		data, err := reader.Read()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return err
+			return errors.CombineErrors(err, drainAll())
 		}
 		rowNum, _ := GetInsertDataRowCount(data, t.GetSchema())
 		if rowNum == 0 {
@@ -230,39 +306,72 @@ func (t *ImportTask) importFile(reader importutilv2.Reader) error {
 		}
 		err = AppendSystemFieldsData(t, data, rowNum)
 		if err != nil {
-			return err
+			return errors.CombineErrors(err, drainAll())
 		}
 		err = AppendNullableDefaultFieldsData(t.GetSchema(), data, rowNum)
 		if err != nil {
-			return err
+			return errors.CombineErrors(err, drainAll())
 		}
 		err = FillDynamicData(t.GetSchema(), data, rowNum)
 		if err != nil {
-			return err
+			return errors.CombineErrors(err, drainAll())
 		}
 		if !importutilv2.IsBackup(t.req.GetOptions()) {
 			err = RunEmbeddingFunction(t, data)
 			if err != nil {
 				mlog.Warn(t.ctx, "run embedding function failed", WrapLogFields(t, mlog.Err(err))...)
-				return err
+				return errors.CombineErrors(err, drainAll())
 			}
 		}
 		hashedData, err := HashData(t, data)
 		if err != nil {
-			return err
+			return errors.CombineErrors(err, drainAll())
+		}
+		bytes := EstimateImportSyncMemorySize(hashedData)
+		reservation, err := reserve(bytes)
+		if err != nil {
+			return errors.CombineErrors(err, drainAll())
 		}
 		fs, sts, err := t.sync(hashedData)
 		if err != nil {
-			return err
+			if len(fs) > 0 {
+				inflight = append(inflight, &importSyncBatch{
+					reservation:       reservation,
+					futures:           fs,
+					syncTasks:         sts,
+					updateSegmentInfo: false,
+				})
+				return errors.CombineErrors(err, drainAll())
+			}
+			reservation.Release()
+			return errors.CombineErrors(err, drainAll())
 		}
-		syncFutures = append(syncFutures, fs...)
-		syncTasks = append(syncTasks, sts...)
+		inflight = append(inflight, &importSyncBatch{
+			reservation:       reservation,
+			futures:           fs,
+			syncTasks:         sts,
+			updateSegmentInfo: true,
+		})
 	}
-	err := conc.AwaitAll(syncFutures...)
-	if err != nil {
+	return drainAll()
+}
+
+func (b *importSyncBatch) done() bool {
+	for _, future := range b.futures {
+		if !future.Done() {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *ImportTask) drainSyncBatch(batch *importSyncBatch) error {
+	err := conc.AwaitAll(batch.futures...)
+	batch.reservation.Release()
+	if err != nil || !batch.updateSegmentInfo {
 		return err
 	}
-	for _, syncTask := range syncTasks {
+	for _, syncTask := range batch.syncTasks {
 		segmentInfo, err := NewImportSegmentInfo(syncTask, t.metaCaches)
 		if err != nil {
 			return err
@@ -286,7 +395,7 @@ func (t *ImportTask) sync(hashedData HashedData) ([]*conc.Future[struct{}], []sy
 			partitionID := t.GetPartitionIDs()[partitionIdx]
 			segmentID, err := PickSegment(t.req.GetRequestSegments(), channel, partitionID)
 			if err != nil {
-				return nil, nil, err
+				return futures, syncTasks, err
 			}
 			bm25Stats := make(map[int64]*storage.BM25Stats)
 			for _, fn := range t.req.GetSchema().GetFunctions() {
@@ -301,12 +410,12 @@ func (t *ImportTask) sync(hashedData HashedData) ([]*conc.Future[struct{}], []sy
 				segmentID, partitionID, t.GetCollectionID(), channel, data, nil,
 				bm25Stats, t.req.GetStorageVersion(), t.req.GetUseLoonFfi(), t.req.GetStorageConfig())
 			if err != nil {
-				return nil, nil, err
+				return futures, syncTasks, err
 			}
 			future, err := t.syncMgr.SyncDataWithChunkManager(t.ctx, syncTask, t.cm)
 			if err != nil {
 				mlog.Error(context.TODO(), "sync data failed", WrapLogFields(t, mlog.Err(err))...)
-				return nil, nil, err
+				return futures, syncTasks, err
 			}
 			futures = append(futures, future)
 			syncTasks = append(syncTasks, syncTask)
