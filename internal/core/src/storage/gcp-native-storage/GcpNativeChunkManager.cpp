@@ -16,7 +16,30 @@
 #include "common/EasyAssert.h"
 #include "log/Log.h"
 #include "monitor/Monitor.h"
+#include "prometheus/counter.h"
+#include "prometheus/gauge.h"
 #include "storage/gcp-native-storage/GcpNativeChunkManager.h"
+
+namespace {
+
+class ScopedStorageOperation {
+ public:
+    ScopedStorageOperation(prometheus::Counter& total,
+                           prometheus::Gauge& in_flight)
+        : in_flight_(in_flight) {
+        total.Increment();
+        in_flight_.Increment();
+    }
+
+    ~ScopedStorageOperation() {
+        in_flight_.Decrement();
+    }
+
+ private:
+    prometheus::Gauge& in_flight_;
+};
+
+}  // namespace
 
 namespace milvus {
 namespace storage {
@@ -134,6 +157,9 @@ GcpNativeChunkManager::ObjectExists(const std::string& bucket_name,
     bool res;
     try {
         auto start = std::chrono::system_clock::now();
+        ScopedStorageOperation metric_scope(
+            milvus::monitor::internal_storage_op_count_stat_total,
+            milvus::monitor::internal_storage_in_flight_stat);
         res = client_->ObjectExists(bucket_name, object_name);
         milvus::monitor::internal_storage_request_latency_stat.Observe(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -157,6 +183,9 @@ GcpNativeChunkManager::GetObjectSize(const std::string& bucket_name,
     uint64_t res;
     try {
         auto start = std::chrono::system_clock::now();
+        ScopedStorageOperation metric_scope(
+            milvus::monitor::internal_storage_op_count_stat_total,
+            milvus::monitor::internal_storage_in_flight_stat);
         res = client_->GetObjectSize(bucket_name, object_name);
         milvus::monitor::internal_storage_request_latency_stat.Observe(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -180,6 +209,9 @@ GcpNativeChunkManager::DeleteObject(const std::string& bucket_name,
     bool res;
     try {
         auto start = std::chrono::system_clock::now();
+        ScopedStorageOperation metric_scope(
+            milvus::monitor::internal_storage_op_count_remove_total,
+            milvus::monitor::internal_storage_in_flight_remove);
         res = client_->DeleteObject(bucket_name, object_name);
         milvus::monitor::internal_storage_request_latency_remove.Observe(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -205,6 +237,9 @@ GcpNativeChunkManager::PutObjectBuffer(const std::string& bucket_name,
     bool res;
     try {
         auto start = std::chrono::system_clock::now();
+        ScopedStorageOperation metric_scope(
+            milvus::monitor::internal_storage_op_count_put_total,
+            milvus::monitor::internal_storage_in_flight_put);
         res = client_->PutObjectBuffer(bucket_name, object_name, buf, size);
         milvus::monitor::internal_storage_request_latency_put.Observe(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -231,6 +266,9 @@ GcpNativeChunkManager::GetObjectBuffer(const std::string& bucket_name,
     uint64_t res;
     try {
         auto start = std::chrono::system_clock::now();
+        ScopedStorageOperation metric_scope(
+            milvus::monitor::internal_storage_op_count_get_total,
+            milvus::monitor::internal_storage_in_flight_get);
         res = client_->GetObjectBuffer(bucket_name, object_name, buf, size);
         milvus::monitor::internal_storage_request_latency_get.Observe(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -255,6 +293,9 @@ GcpNativeChunkManager::ListObjects(const std::string& bucket_name,
     std::vector<std::string> res;
     try {
         auto start = std::chrono::system_clock::now();
+        ScopedStorageOperation metric_scope(
+            milvus::monitor::internal_storage_op_count_list_total,
+            milvus::monitor::internal_storage_in_flight_list);
         res = client_->ListObjects(bucket_name, prefix);
         milvus::monitor::internal_storage_request_latency_list.Observe(
             std::chrono::duration_cast<std::chrono::milliseconds>(

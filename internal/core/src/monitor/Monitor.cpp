@@ -33,31 +33,41 @@ std::map<std::string, std::string> getMap = {
 std::map<std::string, std::string> getSucMap = {
     {"persistent_data_op_type", "get"}, {"status", "success"}};
 std::map<std::string, std::string> getFailMap = {
-    {"persistent_data_op_type", "get"}};
+    {"persistent_data_op_type", "get"}, {"status", "fail"}};
+std::map<std::string, std::string> getTotalMap = {
+    {"persistent_data_op_type", "get"}, {"status", "total"}};
 std::map<std::string, std::string> putMap = {
     {"persistent_data_op_type", "put"}};
 std::map<std::string, std::string> putSucMap = {
     {"persistent_data_op_type", "put"}, {"status", "success"}};
 std::map<std::string, std::string> putFailMap = {
     {"persistent_data_op_type", "put"}, {"status", "fail"}};
+std::map<std::string, std::string> putTotalMap = {
+    {"persistent_data_op_type", "put"}, {"status", "total"}};
 std::map<std::string, std::string> statMap = {
     {"persistent_data_op_type", "stat"}};
 std::map<std::string, std::string> statSucMap = {
     {"persistent_data_op_type", "stat"}, {"status", "success"}};
 std::map<std::string, std::string> statFailMap = {
     {"persistent_data_op_type", "stat"}, {"status", "fail"}};
+std::map<std::string, std::string> statTotalMap = {
+    {"persistent_data_op_type", "stat"}, {"status", "total"}};
 std::map<std::string, std::string> listMap = {
     {"persistent_data_op_type", "list"}};
 std::map<std::string, std::string> listSucMap = {
     {"persistent_data_op_type", "list"}, {"status", "success"}};
 std::map<std::string, std::string> listFailMap = {
     {"persistent_data_op_type", "list"}, {"status", "fail"}};
+std::map<std::string, std::string> listTotalMap = {
+    {"persistent_data_op_type", "list"}, {"status", "total"}};
 std::map<std::string, std::string> removeMap = {
     {"persistent_data_op_type", "remove"}};
 std::map<std::string, std::string> removeSucMap = {
     {"persistent_data_op_type", "remove"}, {"status", "success"}};
 std::map<std::string, std::string> removeFailMap = {
     {"persistent_data_op_type", "remove"}, {"status", "fail"}};
+std::map<std::string, std::string> removeTotalMap = {
+    {"persistent_data_op_type", "remove"}, {"status", "total"}};
 
 DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(internal_storage_kv_size,
                                    "[cpp]kv size stats")
@@ -93,30 +103,63 @@ DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_get_suc,
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_get_fail,
                           internal_storage_op_count,
                           getFailMap)
+DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_get_total,
+                          internal_storage_op_count,
+                          getTotalMap)
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_put_suc,
                           internal_storage_op_count,
                           putSucMap)
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_put_fail,
                           internal_storage_op_count,
                           putFailMap)
+DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_put_total,
+                          internal_storage_op_count,
+                          putTotalMap)
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_stat_suc,
                           internal_storage_op_count,
                           statSucMap)
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_stat_fail,
                           internal_storage_op_count,
                           statFailMap)
+DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_stat_total,
+                          internal_storage_op_count,
+                          statTotalMap)
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_list_suc,
                           internal_storage_op_count,
                           listSucMap)
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_list_fail,
                           internal_storage_op_count,
                           listFailMap)
+DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_list_total,
+                          internal_storage_op_count,
+                          listTotalMap)
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_remove_suc,
                           internal_storage_op_count,
                           removeSucMap)
 DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_remove_fail,
                           internal_storage_op_count,
                           removeFailMap)
+DEFINE_PROMETHEUS_COUNTER(internal_storage_op_count_remove_total,
+                          internal_storage_op_count,
+                          removeTotalMap)
+
+DEFINE_PROMETHEUS_GAUGE_FAMILY(internal_storage_in_flight,
+                               "[cpp]number of in-flight persistent data operations")
+DEFINE_PROMETHEUS_GAUGE(internal_storage_in_flight_get,
+                        internal_storage_in_flight,
+                        getMap)
+DEFINE_PROMETHEUS_GAUGE(internal_storage_in_flight_put,
+                        internal_storage_in_flight,
+                        putMap)
+DEFINE_PROMETHEUS_GAUGE(internal_storage_in_flight_stat,
+                        internal_storage_in_flight,
+                        statMap)
+DEFINE_PROMETHEUS_GAUGE(internal_storage_in_flight_list,
+                        internal_storage_in_flight,
+                        listMap)
+DEFINE_PROMETHEUS_GAUGE(internal_storage_in_flight_remove,
+                        internal_storage_in_flight,
+                        removeMap)
 
 //load metrics
 std::map<std::string, std::string> downloadDurationLabels{{"type", "download"}};

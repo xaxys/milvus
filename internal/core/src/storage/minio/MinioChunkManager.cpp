@@ -55,10 +55,32 @@
 #include "log/Log.h"
 #include "monitor/Monitor.h"
 #include "prometheus/counter.h"
+#include "prometheus/gauge.h"
 #include "prometheus/histogram.h"
 #include "signal.h"
 #include "storage/Types.h"
 #include "storage/aliyun/AliyunCredentialsProvider.h"
+
+namespace {
+
+class ScopedStorageOperation {
+ public:
+    ScopedStorageOperation(prometheus::Counter& total,
+                           prometheus::Gauge& in_flight)
+        : in_flight_(in_flight) {
+        total.Increment();
+        in_flight_.Increment();
+    }
+
+    ~ScopedStorageOperation() {
+        in_flight_.Decrement();
+    }
+
+ private:
+    prometheus::Gauge& in_flight_;
+};
+
+}  // namespace
 
 namespace milvus::storage {
 
@@ -577,6 +599,9 @@ MinioChunkManager::ObjectExists(const std::string& bucket_name,
     request.SetKey(object_name.c_str());
 
     auto start = std::chrono::system_clock::now();
+    ScopedStorageOperation metric_scope(
+        milvus::monitor::internal_storage_op_count_stat_total,
+        milvus::monitor::internal_storage_in_flight_stat);
     auto outcome = client_->HeadObject(request);
     milvus::monitor::internal_storage_request_latency_stat.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -608,6 +633,9 @@ MinioChunkManager::GetObjectSize(const std::string& bucket_name,
     request.SetKey(object_name.c_str());
 
     auto start = std::chrono::system_clock::now();
+    ScopedStorageOperation metric_scope(
+        milvus::monitor::internal_storage_op_count_stat_total,
+        milvus::monitor::internal_storage_in_flight_stat);
     auto outcome = client_->HeadObject(request);
     milvus::monitor::internal_storage_request_latency_stat.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -634,6 +662,9 @@ MinioChunkManager::DeleteObject(const std::string& bucket_name,
     request.SetKey(object_name.c_str());
 
     auto start = std::chrono::system_clock::now();
+    ScopedStorageOperation metric_scope(
+        milvus::monitor::internal_storage_op_count_remove_total,
+        milvus::monitor::internal_storage_in_flight_remove);
     auto outcome = client_->DeleteObject(request);
     milvus::monitor::internal_storage_request_latency_remove.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -676,6 +707,9 @@ MinioChunkManager::PutObjectBuffer(const std::string& bucket_name,
     request.SetBody(input_data);
 
     auto start = std::chrono::system_clock::now();
+    ScopedStorageOperation metric_scope(
+        milvus::monitor::internal_storage_op_count_put_total,
+        milvus::monitor::internal_storage_in_flight_put);
     auto outcome = client_->PutObject(request);
     milvus::monitor::internal_storage_request_latency_put.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -757,6 +791,9 @@ MinioChunkManager::GetObjectBuffer(const std::string& bucket_name,
         return stream.release();
     });
     auto start = std::chrono::system_clock::now();
+    ScopedStorageOperation metric_scope(
+        milvus::monitor::internal_storage_op_count_get_total,
+        milvus::monitor::internal_storage_in_flight_get);
     auto outcome = client_->GetObject(request);
     milvus::monitor::internal_storage_request_latency_get.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -788,6 +825,9 @@ MinioChunkManager::ListObjects(const std::string& bucket_name,
     }
 
     auto start = std::chrono::system_clock::now();
+    ScopedStorageOperation metric_scope(
+        milvus::monitor::internal_storage_op_count_list_total,
+        milvus::monitor::internal_storage_in_flight_list);
     auto outcome = client_->ListObjects(request);
     milvus::monitor::internal_storage_request_latency_list.Observe(
         std::chrono::duration_cast<std::chrono::milliseconds>(

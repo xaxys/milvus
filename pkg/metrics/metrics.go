@@ -30,6 +30,7 @@ const (
 	SuccessLabel  = "success"
 	FailLabel     = "fail"
 	CancelLabel   = "cancel"
+	NotFoundLabel = "not_found"
 	TotalLabel    = "total"
 	RetryLabel    = "retry"
 	RejectedLabel = "rejected"

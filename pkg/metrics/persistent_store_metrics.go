@@ -26,11 +26,18 @@ const (
 	DataRemoveLabel = "remove"
 	DataWalkLabel   = "walk"
 	DataStatLabel   = "stat"
+	DataCopyLabel   = "copy"
+	DataListLabel   = "list"
 
 	persistentDataOpType = "persistent_data_op_type"
+
+	objectStorageProviderLabelName  = "provider"
+	objectStorageOperationLabelName = "operation"
 )
 
 var (
+	objectStorageLatencySecondsBuckets = prometheus.ExponentialBuckets(0.001, 2, 18)
+
 	PersistentDataKvSize = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: milvusNamespace,
@@ -56,6 +63,40 @@ var (
 			Name:      "op_count",
 			Help:      "count of persistent data operation",
 		}, []string{persistentDataOpType, statusLabelName})
+
+	ObjectStorageRequestTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "object_storage_request_total",
+			Help:      "total number of object storage requests",
+		}, []string{objectStorageProviderLabelName, objectStorageOperationLabelName, statusLabelName})
+
+	ObjectStorageRequestLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "object_storage_request_latency_seconds",
+			Help:      "object storage request latency in seconds",
+			Buckets:   objectStorageLatencySecondsBuckets,
+		}, []string{objectStorageProviderLabelName, objectStorageOperationLabelName, statusLabelName})
+
+	ObjectStorageRequestSize = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "object_storage_request_size_bytes",
+			Help:      "object storage request payload size in bytes",
+			Buckets:   sizeBuckets,
+		}, []string{objectStorageProviderLabelName, objectStorageOperationLabelName})
+
+	ObjectStorageInFlight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "object_storage_in_flight",
+			Help:      "number of in-flight object storage requests",
+		}, []string{objectStorageProviderLabelName, objectStorageOperationLabelName})
 
 	// Filesystem metrics (default filesystem only) - common across all nodes
 	FilesystemReadCount = prometheus.NewGaugeVec(
@@ -144,6 +185,10 @@ func RegisterStorageMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(PersistentDataKvSize)
 	registry.MustRegister(PersistentDataRequestLatency)
 	registry.MustRegister(PersistentDataOpCounter)
+	registry.MustRegister(ObjectStorageRequestTotal)
+	registry.MustRegister(ObjectStorageRequestLatency)
+	registry.MustRegister(ObjectStorageRequestSize)
+	registry.MustRegister(ObjectStorageInFlight)
 
 	// filesystem metrics
 	registry.MustRegister(FilesystemReadCount)

@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -114,4 +115,25 @@ func TestPublishFilesystemMetricsZeroValues(t *testing.T) {
 	assert.NotNil(t, FilesystemFailedCount.With(labels))
 	assert.NotNil(t, FilesystemMultiPartUploadCreated.With(labels))
 	assert.NotNil(t, FilesystemMultiPartUploadFinished.With(labels))
+}
+
+func TestObjectStorageMetrics(t *testing.T) {
+	provider := "aws"
+	operation := DataGetLabel
+	status := SuccessLabel
+
+	counter := ObjectStorageRequestTotal.WithLabelValues(provider, operation, status)
+	beforeCounter := testutil.ToFloat64(counter)
+	counter.Inc()
+	assert.Equal(t, float64(1), testutil.ToFloat64(counter)-beforeCounter)
+
+	inFlight := ObjectStorageInFlight.WithLabelValues(provider, operation)
+	beforeInFlight := testutil.ToFloat64(inFlight)
+	inFlight.Inc()
+	assert.Equal(t, float64(1), testutil.ToFloat64(inFlight)-beforeInFlight)
+	inFlight.Dec()
+	assert.Equal(t, beforeInFlight, testutil.ToFloat64(inFlight))
+
+	assert.NotNil(t, ObjectStorageRequestLatency.WithLabelValues(provider, operation, status))
+	assert.NotNil(t, ObjectStorageRequestSize.WithLabelValues(provider, operation))
 }
