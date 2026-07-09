@@ -23,6 +23,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"golang.org/x/exp/mmap"
@@ -70,13 +71,16 @@ func (lcm *LocalChunkManager) Path(ctx context.Context, filePath string) (string
 }
 
 func (lcm *LocalChunkManager) Reader(ctx context.Context, filePath string) (FileReader, error) {
+	start := time.Now()
 	file, err := Open(filePath)
 	if err != nil {
+		recordStorageAccess(ctx, StorageAccessOpRead, 0, err, start)
 		return nil, err
 	}
-	return &LocalReader{
+	recordStorageAccess(ctx, StorageAccessOpRead, 0, nil, start)
+	return wrapStorageAccessReader(ctx, &LocalReader{
 		File: file,
-	}, nil
+	}), nil
 }
 
 func (lcm *LocalChunkManager) ReaderAtOffset(ctx context.Context, filePath string, offset int64) (FileReader, error) {
@@ -98,18 +102,26 @@ func (lcm *LocalChunkManager) ReaderAtOffset(ctx context.Context, filePath strin
 
 // Write writes the data to local storage.
 func (lcm *LocalChunkManager) Write(ctx context.Context, filePath string, content []byte) error {
+	start := time.Now()
 	dir := path.Dir(filePath)
 	exist, err := lcm.Exist(ctx, dir)
 	if err != nil {
+		recordStorageAccess(ctx, StorageAccessOpWrite, int64(len(content)), err, start)
 		return err
 	}
 	if !exist {
+		createDirStart := time.Now()
 		err := os.MkdirAll(dir, os.ModePerm)
 		if err != nil {
+			recordStorageAccess(ctx, StorageAccessOpCreateDir, 0, err, createDirStart)
+			recordStorageAccess(ctx, StorageAccessOpWrite, int64(len(content)), err, start)
 			return merr.WrapErrIoFailed(filePath, err)
 		}
+		recordStorageAccess(ctx, StorageAccessOpCreateDir, 0, nil, createDirStart)
 	}
-	return WriteFile(filePath, content, os.ModePerm)
+	err = WriteFile(filePath, content, os.ModePerm)
+	recordStorageAccess(ctx, StorageAccessOpWrite, int64(len(content)), err, start)
+	return err
 }
 
 // MultiWrite writes the data to local storage.
@@ -126,19 +138,26 @@ func (lcm *LocalChunkManager) MultiWrite(ctx context.Context, contents map[strin
 
 // Exist checks whether chunk is saved to local storage.
 func (lcm *LocalChunkManager) Exist(ctx context.Context, filePath string) (bool, error) {
+	start := time.Now()
 	_, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			recordStorageAccess(ctx, StorageAccessOpStat, 0, nil, start)
 			return false, nil
 		}
+		recordStorageAccess(ctx, StorageAccessOpStat, 0, err, start)
 		return false, merr.WrapErrIoFailed(filePath, err)
 	}
+	recordStorageAccess(ctx, StorageAccessOpStat, 0, nil, start)
 	return true, nil
 }
 
 // Read reads the local storage data if exists.
 func (lcm *LocalChunkManager) Read(ctx context.Context, filePath string) ([]byte, error) {
-	return ReadFile(filePath)
+	start := time.Now()
+	content, err := ReadFile(filePath)
+	recordStorageAccess(ctx, StorageAccessOpRead, int64(len(content)), err, start)
+	return content, err
 }
 
 // MultiRead reads the local storage data if exists.
@@ -156,9 +175,11 @@ func (lcm *LocalChunkManager) MultiRead(ctx context.Context, filePaths []string)
 }
 
 func (lcm *LocalChunkManager) WalkWithPrefix(ctx context.Context, prefix string, recursive bool, walkFunc ChunkObjectWalkFunc) (err error) {
+	start := time.Now()
 	logger := mlog.With(mlog.String("prefix", prefix), mlog.Bool("recursive", recursive))
 	logger.Info(ctx, "start walk through objects")
 	defer func() {
+		recordStorageAccess(ctx, StorageAccessOpList, 0, err, start)
 		if err != nil {
 			logger.Warn(ctx, "failed to walk through objects", mlog.Err(err))
 			return
@@ -210,12 +231,15 @@ func (lcm *LocalChunkManager) WalkWithPrefix(ctx context.Context, prefix string,
 
 // ReadAt reads specific position data of local storage if exists.
 func (lcm *LocalChunkManager) ReadAt(ctx context.Context, filePath string, off int64, length int64) ([]byte, error) {
+	start := time.Now()
 	if off < 0 || length < 0 {
+		recordStorageAccess(ctx, StorageAccessOpRead, 0, io.EOF, start)
 		return nil, io.EOF
 	}
 
 	file, err := Open(path.Clean(filePath))
 	if err != nil {
+		recordStorageAccess(ctx, StorageAccessOpRead, 0, err, start)
 		return nil, err
 	}
 	defer file.Close()
@@ -223,8 +247,10 @@ func (lcm *LocalChunkManager) ReadAt(ctx context.Context, filePath string, off i
 	res := make([]byte, length)
 	_, err = file.ReadAt(res, off)
 	if err != nil {
+		recordStorageAccess(ctx, StorageAccessOpRead, 0, err, start)
 		return nil, merr.WrapErrIoFailed(filePath, err)
 	}
+	recordStorageAccess(ctx, StorageAccessOpRead, length, nil, start)
 	return res, nil
 }
 
@@ -238,20 +264,26 @@ func (lcm *LocalChunkManager) Mmap(ctx context.Context, filePath string) (*mmap.
 }
 
 func (lcm *LocalChunkManager) Size(ctx context.Context, filePath string) (int64, error) {
+	start := time.Now()
 	fi, err := os.Stat(filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			recordStorageAccess(ctx, StorageAccessOpStat, 0, err, start)
 			return 0, merr.WrapErrIoKeyNotFound(filePath, err.Error())
 		}
+		recordStorageAccess(ctx, StorageAccessOpStat, 0, err, start)
 		return 0, merr.WrapErrIoFailed(filePath, err)
 	}
 	// get the size
 	size := fi.Size()
+	recordStorageAccess(ctx, StorageAccessOpStat, 0, nil, start)
 	return size, nil
 }
 
 func (lcm *LocalChunkManager) Remove(ctx context.Context, filePath string) error {
+	start := time.Now()
 	err := os.RemoveAll(filePath)
+	recordStorageAccess(ctx, StorageAccessOpDelete, 0, err, start)
 	return merr.WrapErrIoFailed(filePath, err)
 }
 
@@ -286,9 +318,11 @@ func (lcm *LocalChunkManager) RemoveWithPrefix(ctx context.Context, prefix strin
 }
 
 func (lcm *LocalChunkManager) Copy(ctx context.Context, srcFilePath string, dstFilePath string) error {
+	start := time.Now()
 	// Read source file
 	srcFile, err := Open(srcFilePath)
 	if err != nil {
+		recordStorageAccess(ctx, StorageAccessOpCopy, 0, err, start)
 		return merr.WrapErrIoFailed(srcFilePath, err)
 	}
 	defer srcFile.Close()
@@ -297,24 +331,31 @@ func (lcm *LocalChunkManager) Copy(ctx context.Context, srcFilePath string, dstF
 	dstDir := path.Dir(dstFilePath)
 	exist, err := lcm.Exist(ctx, dstDir)
 	if err != nil {
+		recordStorageAccess(ctx, StorageAccessOpCopy, 0, err, start)
 		return err
 	}
 	if !exist {
+		createDirStart := time.Now()
 		err := os.MkdirAll(dstDir, os.ModePerm)
 		if err != nil {
+			recordStorageAccess(ctx, StorageAccessOpCreateDir, 0, err, createDirStart)
+			recordStorageAccess(ctx, StorageAccessOpCopy, 0, err, start)
 			return merr.WrapErrIoFailed(dstFilePath, err)
 		}
+		recordStorageAccess(ctx, StorageAccessOpCreateDir, 0, nil, createDirStart)
 	}
 
 	// Create destination file
 	dstFile, err := os.Create(dstFilePath)
 	if err != nil {
+		recordStorageAccess(ctx, StorageAccessOpCopy, 0, err, start)
 		return merr.WrapErrIoFailed(dstFilePath, err)
 	}
 	defer dstFile.Close()
 
 	// Copy content
-	_, err = io.Copy(dstFile, srcFile)
+	copied, err := io.Copy(dstFile, srcFile)
+	recordStorageAccess(ctx, StorageAccessOpCopy, copied, err, start)
 	if err != nil {
 		return merr.WrapErrIoFailed(dstFilePath, err)
 	}

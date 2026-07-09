@@ -31,13 +31,19 @@ func TestPublishFilesystemMetrics(t *testing.T) {
 	readBytes := int64(1024000)
 	writeBytes := int64(512000)
 	getFileInfoCount := int64(200)
+	createDirCount := int64(30)
+	deleteDirCount := int64(20)
+	deleteFileCount := int64(15)
+	moveCount := int64(12)
+	copyFileCount := int64(9)
 	failedCount := int64(5)
 	multiPartUploadCreated := int64(10)
 	multiPartUploadFinished := int64(8)
 
 	// Call the function
 	PublishFilesystemMetrics(fsName, readCount, writeCount, readBytes, writeBytes,
-		getFileInfoCount, failedCount, multiPartUploadCreated, multiPartUploadFinished)
+		getFileInfoCount, createDirCount, deleteDirCount, deleteFileCount, moveCount, copyFileCount,
+		failedCount, multiPartUploadCreated, multiPartUploadFinished)
 
 	// Verify each metric
 	labels := prometheus.Labels{filesystemKeyLabelName: fsName}
@@ -62,6 +68,12 @@ func TestPublishFilesystemMetrics(t *testing.T) {
 	getFileInfoMetric := FilesystemGetFileInfoCount.With(labels)
 	assert.NotNil(t, getFileInfoMetric)
 
+	assert.NotNil(t, FilesystemCreateDirCount.With(labels))
+	assert.NotNil(t, FilesystemDeleteDirCount.With(labels))
+	assert.NotNil(t, FilesystemDeleteFileCount.With(labels))
+	assert.NotNil(t, FilesystemMoveCount.With(labels))
+	assert.NotNil(t, FilesystemCopyFileCount.With(labels))
+
 	// Check FilesystemFailedCount
 	failedMetric := FilesystemFailedCount.With(labels)
 	assert.NotNil(t, failedMetric)
@@ -81,10 +93,10 @@ func TestPublishFilesystemMetricsMultipleFilesystems(t *testing.T) {
 	fs2 := "s3"
 
 	// Publish metrics for first filesystem
-	PublishFilesystemMetrics(fs1, 100, 50, 1000, 500, 10, 1, 5, 3)
+	PublishFilesystemMetrics(fs1, 100, 50, 1000, 500, 10, 1, 2, 3, 4, 5, 1, 5, 3)
 
 	// Publish metrics for second filesystem
-	PublishFilesystemMetrics(fs2, 200, 100, 2000, 1000, 20, 2, 10, 6)
+	PublishFilesystemMetrics(fs2, 200, 100, 2000, 1000, 20, 2, 3, 4, 5, 6, 2, 10, 6)
 
 	// Verify both filesystems have their own metric values
 	labels1 := prometheus.Labels{filesystemKeyLabelName: fs1}
@@ -101,7 +113,7 @@ func TestPublishFilesystemMetricsZeroValues(t *testing.T) {
 	// Test with zero values to ensure no issues with edge cases
 	fsName := "empty-filesystem"
 
-	PublishFilesystemMetrics(fsName, 0, 0, 0, 0, 0, 0, 0, 0)
+	PublishFilesystemMetrics(fsName, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 	labels := prometheus.Labels{filesystemKeyLabelName: fsName}
 
@@ -111,6 +123,11 @@ func TestPublishFilesystemMetricsZeroValues(t *testing.T) {
 	assert.NotNil(t, FilesystemReadBytes.With(labels))
 	assert.NotNil(t, FilesystemWriteBytes.With(labels))
 	assert.NotNil(t, FilesystemGetFileInfoCount.With(labels))
+	assert.NotNil(t, FilesystemCreateDirCount.With(labels))
+	assert.NotNil(t, FilesystemDeleteDirCount.With(labels))
+	assert.NotNil(t, FilesystemDeleteFileCount.With(labels))
+	assert.NotNil(t, FilesystemMoveCount.With(labels))
+	assert.NotNil(t, FilesystemCopyFileCount.With(labels))
 	assert.NotNil(t, FilesystemFailedCount.With(labels))
 	assert.NotNil(t, FilesystemMultiPartUploadCreated.With(labels))
 	assert.NotNil(t, FilesystemMultiPartUploadFinished.With(labels))

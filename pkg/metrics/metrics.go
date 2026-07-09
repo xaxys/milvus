@@ -175,6 +175,7 @@ const (
 
 	filesystemKeyLabelName = "fs"
 	reasonLabelName        = "reason"
+	storageAccessOpType    = "storage_access_op_type"
 )
 
 var (
@@ -192,6 +193,9 @@ var (
 
 	// size provides size in byte
 	sizeBuckets = []float64{10000, 100000, 1000000, 100000000, 500000000, 1024000000, 2048000000, 4096000000, 10000000000, 50000000000} // unit byte
+
+	// StorageAccessLatencyBucketsMs are fixed bucket boundaries in milliseconds.
+	StorageAccessLatencyBucketsMs = []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000}
 
 	NumNodes = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{

@@ -108,6 +108,56 @@ var (
 			filesystemKeyLabelName,
 		})
 
+	FilesystemCreateDirCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "filesystem_create_dir_count",
+			Help:      "number of create dir filesystem operations",
+		}, []string{
+			filesystemKeyLabelName,
+		})
+
+	FilesystemDeleteDirCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "filesystem_delete_dir_count",
+			Help:      "number of delete dir filesystem operations",
+		}, []string{
+			filesystemKeyLabelName,
+		})
+
+	FilesystemDeleteFileCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "filesystem_delete_file_count",
+			Help:      "number of delete file filesystem operations",
+		}, []string{
+			filesystemKeyLabelName,
+		})
+
+	FilesystemMoveCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "filesystem_move_count",
+			Help:      "number of move filesystem operations",
+		}, []string{
+			filesystemKeyLabelName,
+		})
+
+	FilesystemCopyFileCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "filesystem_copy_file_count",
+			Help:      "number of copy file filesystem operations",
+		}, []string{
+			filesystemKeyLabelName,
+		})
+
 	FilesystemFailedCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: milvusNamespace,
@@ -137,6 +187,40 @@ var (
 		}, []string{
 			filesystemKeyLabelName,
 		})
+
+	StorageAccessOpCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "access_op_count",
+			Help:      "count of storage access operations",
+		}, []string{
+			storageAccessOpType,
+			statusLabelName,
+		})
+
+	StorageAccessRequestLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "access_request_latency",
+			Help:      "latency of storage access operations in milliseconds",
+			Buckets:   StorageAccessLatencyBucketsMs,
+		}, []string{
+			storageAccessOpType,
+			statusLabelName,
+		})
+
+	StorageAccessBytes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "access_bytes",
+			Help:      "bytes transferred by storage access operations",
+		}, []string{
+			storageAccessOpType,
+			statusLabelName,
+		})
 )
 
 // RegisterStorageMetrics registers storage metrics
@@ -151,13 +235,21 @@ func RegisterStorageMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(FilesystemReadBytes)
 	registry.MustRegister(FilesystemWriteBytes)
 	registry.MustRegister(FilesystemGetFileInfoCount)
+	registry.MustRegister(FilesystemCreateDirCount)
+	registry.MustRegister(FilesystemDeleteDirCount)
+	registry.MustRegister(FilesystemDeleteFileCount)
+	registry.MustRegister(FilesystemMoveCount)
+	registry.MustRegister(FilesystemCopyFileCount)
 	registry.MustRegister(FilesystemFailedCount)
 	registry.MustRegister(FilesystemMultiPartUploadCreated)
 	registry.MustRegister(FilesystemMultiPartUploadFinished)
+	registry.MustRegister(StorageAccessOpCount)
+	registry.MustRegister(StorageAccessRequestLatency)
+	registry.MustRegister(StorageAccessBytes)
 }
 
 // PublishFilesystemMetrics publishes filesystem metrics (common across all nodes)
-func PublishFilesystemMetrics(fs string, readCount, writeCount, readBytes, writeBytes, getFileInfoCount, failedCount, multiPartUploadCreated, multiPartUploadFinished int64) {
+func PublishFilesystemMetrics(fs string, readCount, writeCount, readBytes, writeBytes, getFileInfoCount, createDirCount, deleteDirCount, deleteFileCount, moveCount, copyFileCount, failedCount, multiPartUploadCreated, multiPartUploadFinished int64) {
 	labels := prometheus.Labels{
 		filesystemKeyLabelName: fs,
 	}
@@ -167,6 +259,11 @@ func PublishFilesystemMetrics(fs string, readCount, writeCount, readBytes, write
 	FilesystemReadBytes.With(labels).Set(float64(readBytes))
 	FilesystemWriteBytes.With(labels).Set(float64(writeBytes))
 	FilesystemGetFileInfoCount.With(labels).Set(float64(getFileInfoCount))
+	FilesystemCreateDirCount.With(labels).Set(float64(createDirCount))
+	FilesystemDeleteDirCount.With(labels).Set(float64(deleteDirCount))
+	FilesystemDeleteFileCount.With(labels).Set(float64(deleteFileCount))
+	FilesystemMoveCount.With(labels).Set(float64(moveCount))
+	FilesystemCopyFileCount.With(labels).Set(float64(copyFileCount))
 	FilesystemFailedCount.With(labels).Set(float64(failedCount))
 	FilesystemMultiPartUploadCreated.With(labels).Set(float64(multiPartUploadCreated))
 	FilesystemMultiPartUploadFinished.With(labels).Set(float64(multiPartUploadFinished))
