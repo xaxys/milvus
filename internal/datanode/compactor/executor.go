@@ -35,6 +35,10 @@ const (
 	maxTaskQueueNum = 1024
 )
 
+type storageAccessStatsProvider interface {
+	StorageAccessStats() *datapb.StorageAccessStats
+}
+
 type Executor interface {
 	Start(ctx context.Context)
 	Enqueue(task Compactor) (bool, error)
@@ -217,6 +221,9 @@ func (e *executor) executeTask(task Compactor) {
 	}
 
 	// Update task with result
+	if provider, ok := task.(storageAccessStatsProvider); ok {
+		result.StorageAccessStats = provider.StorageAccessStats()
+	}
 	e.completeTask(task.GetPlanID(), result)
 
 	// Emit metrics

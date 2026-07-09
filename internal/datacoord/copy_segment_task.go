@@ -756,9 +756,13 @@ func SyncCopySegmentTask(task CopySegmentTask, resp *datapb.QueryCopySegmentResp
 				mlog.Duration("taskTimeCost/copying", copyingDuration),
 				mlog.Duration("taskTimeCost/total", totalDuration))...)
 
-		return copyMeta.UpdateTask(ctx, task.GetTaskId(),
+		if err := copyMeta.UpdateTask(ctx, task.GetTaskId(),
 			UpdateCopyTaskState(datapb.CopySegmentTaskState_CopySegmentTaskCompleted),
-			UpdateCopyTaskCompleteTs(completeTs))
+			UpdateCopyTaskCompleteTs(completeTs)); err != nil {
+			return err
+		}
+		reportStorageAccessStats(storageAccessTaskCopySegment, resp.GetStorageAccessStats())
+		return nil
 
 	case datapb.CopySegmentTaskState_CopySegmentTaskFailed:
 		return copyMeta.UpdateTask(ctx, task.GetTaskId(),

@@ -59,6 +59,7 @@ type bumpSchemaVersionCompactionTask struct {
 }
 
 func (t *bumpSchemaVersionCompactionTask) Compact() (*datapb.CompactionPlanResult, error) {
+	t.ctx = withCompactionStorageAccess(t.ctx, t.GetPlanID())
 	if !funcutil.CheckCtxValid(t.ctx) {
 		return nil, t.ctx.Err()
 	}

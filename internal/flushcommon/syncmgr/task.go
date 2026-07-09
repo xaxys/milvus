@@ -33,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storagecommon"
 	"github.com/milvus-io/milvus/internal/storagev2"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -88,7 +89,8 @@ type SyncTask struct {
 
 	// storage config used in pooled tasks, optional
 	// use singleton config for non-pooled tasks
-	storageConfig *indexpb.StorageConfig
+	storageConfig          *indexpb.StorageConfig
+	storageAccessCollector *storageaccess.Collector
 }
 
 func (t *SyncTask) getLogger() *mlog.Logger {
@@ -113,6 +115,8 @@ func (t *SyncTask) HandleError(err error) {
 }
 
 func (t *SyncTask) Run(ctx context.Context) (err error) {
+	t.storageAccessCollector = storageaccess.NewCollector()
+	ctx = storageaccess.WithCollector(ctx, t.storageAccessCollector)
 	t.tr = timerecord.NewTimeRecorder("syncTask")
 
 	logger := t.getLogger()

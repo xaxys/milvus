@@ -258,6 +258,7 @@ func (t *clusteringCompactionTask) init() error {
 }
 
 func (t *clusteringCompactionTask) Compact() (*datapb.CompactionPlanResult, error) {
+	t.ctx = withCompactionStorageAccess(t.ctx, t.GetPlanID())
 	ctx, span := otel.Tracer(typeutil.DataNodeRole).Start(t.ctx, fmt.Sprintf("clusteringCompaction-%d", t.GetPlanID()))
 	defer span.End()
 	// 0, verify and init

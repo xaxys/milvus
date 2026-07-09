@@ -428,6 +428,7 @@ func (t *mixCompactionTask) writeSegment(ctx context.Context,
 }
 
 func (t *mixCompactionTask) Compact() (*datapb.CompactionPlanResult, error) {
+	t.ctx = withCompactionStorageAccess(t.ctx, t.GetPlanID())
 	durInQueue := t.tr.RecordSpan()
 	ctx, span := otel.Tracer(typeutil.DataNodeRole).Start(t.ctx, fmt.Sprintf("MixCompact-%d", t.GetPlanID()))
 	defer span.End()

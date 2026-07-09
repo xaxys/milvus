@@ -173,6 +173,7 @@ func (p *preImportTask) QueryTaskOnWorker(cluster session.Cluster) {
 	if resp.GetState() == datapb.ImportTaskStateV2_Completed {
 		preimportDuration := p.GetTR().RecordSpan()
 		metrics.ImportTaskLatency.WithLabelValues(metrics.ImportStagePreImport).Observe(float64(preimportDuration.Milliseconds()))
+		reportStorageAccessStats(storageAccessTaskPreImport, resp.GetStorageAccessStats())
 		mlog.Info(context.TODO(), "preimport done", WrapTaskLog(p, mlog.Duration("taskTimeCost/preimport", preimportDuration))...)
 	}
 }

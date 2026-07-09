@@ -37,6 +37,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/fileresource"
 	"github.com/milvus-io/milvus/internal/util/hookutil"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -444,11 +445,12 @@ func (node *DataNode) QueryPreImport(ctx context.Context, req *datapb.QueryPreIm
 	}
 
 	return &datapb.QueryPreImportResponse{
-		Status:    merr.Success(),
-		TaskID:    task.GetTaskID(),
-		State:     task.GetState(),
-		Reason:    task.GetReason(),
-		FileStats: fileStats,
+		Status:             merr.Success(),
+		TaskID:             task.GetTaskID(),
+		State:              task.GetState(),
+		Reason:             task.GetReason(),
+		FileStats:          fileStats,
+		StorageAccessStats: importv2.StorageAccessStats(task),
 	}, nil
 }
 
@@ -494,6 +496,7 @@ func (node *DataNode) QueryImport(ctx context.Context, req *datapb.QueryImportRe
 		State:              task.GetState(),
 		Reason:             task.GetReason(),
 		ImportSegmentsInfo: segmentsInfo,
+		StorageAccessStats: importv2.StorageAccessStats(task),
 	}, nil
 }
 
@@ -568,12 +571,13 @@ func (node *DataNode) QueryCopySegment(ctx context.Context, req *datapb.QueryCop
 	}
 
 	return &datapb.QueryCopySegmentResponse{
-		Status:         merr.Success(),
-		TaskID:         task.GetTaskID(),
-		State:          importStateV2ToCopySegmentTaskState(task.GetState()),
-		Reason:         task.GetReason(),
-		SegmentResults: segmentResults,
-		Slots:          task.GetSlots(),
+		Status:             merr.Success(),
+		TaskID:             task.GetTaskID(),
+		State:              importStateV2ToCopySegmentTaskState(task.GetState()),
+		Reason:             task.GetReason(),
+		SegmentResults:     segmentResults,
+		Slots:              task.GetSlots(),
+		StorageAccessStats: importv2.StorageAccessStats(task),
 	}, nil
 }
 
@@ -864,11 +868,12 @@ func (node *DataNode) QueryTask(ctx context.Context, request *workerpb.QueryTask
 			return wrapQueryTaskResult(resp, resProperties)
 		}
 		resp := &datapb.RefreshExternalCollectionTaskResponse{
-			Status:          merr.Success(),
-			State:           info.State,
-			FailReason:      info.FailReason,
-			KeptSegments:    info.KeptSegments,
-			UpdatedSegments: info.UpdatedSegments,
+			Status:             merr.Success(),
+			State:              info.State,
+			FailReason:         info.FailReason,
+			KeptSegments:       info.KeptSegments,
+			UpdatedSegments:    info.UpdatedSegments,
+			StorageAccessStats: info.StorageAccessStats,
 		}
 		resProperties := taskcommon.NewProperties(nil)
 		resProperties.AppendTaskState(info.State)
@@ -1005,10 +1010,11 @@ func (node *DataNode) createRefreshExternalCollectionTask(ctx context.Context, c
 			mlog.Int("updatedSegments", len(task.GetUpdatedSegments())))
 
 		resp := &datapb.RefreshExternalCollectionTaskResponse{
-			Status:          merr.Success(),
-			State:           indexpb.JobState_JobStateFinished,
-			KeptSegments:    task.GetKeptSegmentIDs(),
-			UpdatedSegments: task.GetUpdatedSegments(),
+			Status:             merr.Success(),
+			State:              indexpb.JobState_JobStateFinished,
+			KeptSegments:       task.GetKeptSegmentIDs(),
+			UpdatedSegments:    task.GetUpdatedSegments(),
+			StorageAccessStats: storageaccess.FromContext(taskCtx).Snapshot(),
 		}
 
 		return resp, nil

@@ -23,10 +23,13 @@ package packed
 import "C"
 
 import (
+	"context"
 	"net/url"
 	"strings"
+	"time"
 	"unsafe"
 
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
@@ -38,6 +41,22 @@ func WriteFile(
 	filePath string,
 	data []byte,
 ) error {
+	return WriteFileWithContext(context.Background(), storageConfig, filePath, data)
+}
+
+// WriteFileWithContext writes raw bytes to a file and attributes the operation
+// to the storage access collector carried by ctx.
+func WriteFileWithContext(
+	ctx context.Context,
+	storageConfig *indexpb.StorageConfig,
+	filePath string,
+	data []byte,
+) (err error) {
+	start := time.Now()
+	defer func() {
+		storageaccess.RecordAccess(ctx, storageaccess.OpWrite, int64(len(data)), err, start)
+	}()
+
 	cProperties, err := MakePropertiesFromStorageConfig(storageConfig, nil)
 	if err != nil {
 		return merr.WrapErrStorage(err, "failed to create properties")
@@ -63,10 +82,13 @@ func WriteFile(
 			dir := filePath[:idx]
 			cDir := C.CString(dir)
 			defer C.free(unsafe.Pointer(cDir))
+			createDirStart := time.Now()
 			result = C.loon_filesystem_create_dir(fsHandle, cDir, C.uint32_t(len(dir)), true)
 			if err := HandleLoonFFIResult(result); err != nil {
+				storageaccess.RecordAccess(ctx, storageaccess.OpCreateDir, 0, err, createDirStart)
 				return merr.WrapErrStorage(err, "failed to create parent directory %q", dir)
 			}
+			storageaccess.RecordAccess(ctx, storageaccess.OpCreateDir, 0, nil, createDirStart)
 		}
 	}
 
@@ -90,7 +112,16 @@ func ReadFile(
 	storageConfig *indexpb.StorageConfig,
 	filePath string,
 ) ([]byte, error) {
-	return ReadFileWithExternalSpec(storageConfig, filePath, ExternalSpecContext{})
+	return ReadFileWithContext(context.Background(), storageConfig, filePath)
+}
+
+// ReadFileWithContext reads an entire file and attributes the operation to ctx.
+func ReadFileWithContext(
+	ctx context.Context,
+	storageConfig *indexpb.StorageConfig,
+	filePath string,
+) ([]byte, error) {
+	return ReadFileWithExternalSpecWithContext(ctx, storageConfig, filePath, ExternalSpecContext{})
 }
 
 // ReadFileWithExternalSpec reads an entire file after injecting external spec
@@ -101,6 +132,22 @@ func ReadFileWithExternalSpec(
 	filePath string,
 	extfs ExternalSpecContext,
 ) ([]byte, error) {
+	return ReadFileWithExternalSpecWithContext(context.Background(), storageConfig, filePath, extfs)
+}
+
+// ReadFileWithExternalSpecWithContext reads an entire file after injecting
+// external spec aliases and attributes the operation to ctx.
+func ReadFileWithExternalSpecWithContext(
+	ctx context.Context,
+	storageConfig *indexpb.StorageConfig,
+	filePath string,
+	extfs ExternalSpecContext,
+) (data []byte, err error) {
+	start := time.Now()
+	defer func() {
+		storageaccess.RecordAccess(ctx, storageaccess.OpRead, int64(len(data)), err, start)
+	}()
+
 	cProperties, err := MakePropertiesFromStorageConfig(storageConfig, nil)
 	if err != nil {
 		return nil, merr.Wrap(err, "failed to create properties")

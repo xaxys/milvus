@@ -112,14 +112,15 @@ func (b *brokerMetaWriter) UpdateSync(ctx context.Context, pack *SyncTask) error
 
 		CheckPoints: checkPoints,
 
-		StartPositions:  startPos,
-		Flushed:         pack.pack.isFlush,
-		Dropped:         pack.pack.isDrop,
-		Channel:         pack.channelName,
-		SegLevel:        pack.level,
-		StorageVersion:  segment.GetStorageVersion(),
-		WithFullBinlogs: true,
-		ManifestPath:    pack.manifestPath,
+		StartPositions:     startPos,
+		Flushed:            pack.pack.isFlush,
+		Dropped:            pack.pack.isDrop,
+		Channel:            pack.channelName,
+		SegLevel:           pack.level,
+		StorageVersion:     segment.GetStorageVersion(),
+		WithFullBinlogs:    true,
+		ManifestPath:       pack.manifestPath,
+		StorageAccessStats: pack.storageAccessCollector.Snapshot(),
 	}
 	err := retry.Handle(ctx, func() (bool, error) {
 		err := b.broker.SaveBinlogPaths(ctx, req)
@@ -218,6 +219,7 @@ func (b *brokerMetaWriter) UpdateGrowingSourceSync(ctx context.Context, task *Gr
 		StorageVersion:      storage.StorageV3,
 		WithFullBinlogs:     true,
 		ManifestPath:        task.manifestPath,
+		StorageAccessStats:  task.storageAccessCollector.Snapshot(),
 	}
 
 	err := retry.Handle(ctx, func() (bool, error) {

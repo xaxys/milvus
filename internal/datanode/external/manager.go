@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
@@ -39,17 +40,18 @@ type TaskKey struct {
 
 // TaskInfo stores the mutable state of an external collection task.
 type TaskInfo struct {
-	Cancel          context.CancelFunc
-	State           indexpb.JobState
-	FailReason      string
-	CollID          int64
-	KeptSegments    []int64
-	UpdatedSegments []*datapb.SegmentInfo
+	Cancel             context.CancelFunc
+	State              indexpb.JobState
+	FailReason         string
+	CollID             int64
+	KeptSegments       []int64
+	UpdatedSegments    []*datapb.SegmentInfo
+	StorageAccessStats *datapb.StorageAccessStats
 }
 
 // Clone creates a deep copy so callers can freely mutate the result.
 func (t *TaskInfo) Clone() *TaskInfo {
-	return &TaskInfo{
+	clone := &TaskInfo{
 		Cancel:          t.Cancel,
 		State:           t.State,
 		FailReason:      t.FailReason,
@@ -57,6 +59,10 @@ func (t *TaskInfo) Clone() *TaskInfo {
 		KeptSegments:    cloneSegmentIDs(t.KeptSegments),
 		UpdatedSegments: cloneSegments(t.UpdatedSegments),
 	}
+	if t.StorageAccessStats != nil {
+		clone.StorageAccessStats = proto.Clone(t.StorageAccessStats).(*datapb.StorageAccessStats)
+	}
+	return clone
 }
 
 func makeTaskKey(clusterID string, taskID int64) TaskKey {
@@ -185,6 +191,7 @@ func (m *ExternalCollectionManager) UpdateResult(clusterID string, taskID int64,
 	failReason string,
 	keptSegments []int64,
 	updatedSegments []*datapb.SegmentInfo,
+	storageAccessStats ...*datapb.StorageAccessStats,
 ) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -194,6 +201,9 @@ func (m *ExternalCollectionManager) UpdateResult(clusterID string, taskID int64,
 		info.FailReason = failReason
 		info.KeptSegments = append([]int64(nil), keptSegments...)
 		info.UpdatedSegments = cloneSegments(updatedSegments)
+		if len(storageAccessStats) > 0 && storageAccessStats[0] != nil {
+			info.StorageAccessStats = proto.Clone(storageAccessStats[0]).(*datapb.StorageAccessStats)
+		}
 	}
 }
 
@@ -222,6 +232,8 @@ func (m *ExternalCollectionManager) SubmitTask(
 	taskID := req.GetTaskID()
 
 	taskCtx, cancel := context.WithCancel(m.ctx)
+	storageAccessCollector := storageaccess.NewCollector()
+	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	keptSegments := extractSegmentIDs(req.GetCurrentSegments())
 
 	info := &TaskInfo{
@@ -283,7 +295,7 @@ func (m *ExternalCollectionManager) SubmitTask(
 		}
 		failReason := resp.GetFailReason()
 		kept := resp.GetKeptSegments()
-		m.UpdateResult(clusterID, taskID, state, failReason, kept, resp.GetUpdatedSegments())
+		m.UpdateResult(clusterID, taskID, state, failReason, kept, resp.GetUpdatedSegments(), resp.GetStorageAccessStats())
 		mlog.Info(m.ctx, "external collection task completed",
 			mlog.FieldTaskID(taskID))
 		return nil, nil

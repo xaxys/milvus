@@ -24,6 +24,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
@@ -73,19 +74,20 @@ import (
 //   - Cleanup of copied files on task failure
 //   - Resource management via slot allocation
 type CopySegmentTask struct {
-	ctx            context.Context                     // Context for cancellation and timeout
-	cancel         context.CancelFunc                  // Cancel function for aborting task execution
-	jobID          int64                               // Parent job ID for tracking related tasks
-	taskID         int64                               // Unique task ID assigned by DataCoord
-	collectionID   int64                               // Target collection ID
-	partitionIDs   []int64                             // Target partition IDs (deduplicated from targets)
-	state          datapb.ImportTaskStateV2            // Current task state (Pending/InProgress/Completed/Failed)
-	reason         string                              // Failure reason if state is Failed
-	slots          int64                               // Resource slots allocated for this task
-	segmentResults map[int64]*datapb.CopySegmentResult // Results for each target segment
-	req            *datapb.CopySegmentRequest          // Original request with source/target pairs
-	manager        TaskManager                         // Task manager for state updates and coordination
-	cm             storage.ChunkManager                // ChunkManager for file copy operations
+	ctx                    context.Context                     // Context for cancellation and timeout
+	cancel                 context.CancelFunc                  // Cancel function for aborting task execution
+	jobID                  int64                               // Parent job ID for tracking related tasks
+	taskID                 int64                               // Unique task ID assigned by DataCoord
+	collectionID           int64                               // Target collection ID
+	partitionIDs           []int64                             // Target partition IDs (deduplicated from targets)
+	state                  datapb.ImportTaskStateV2            // Current task state (Pending/InProgress/Completed/Failed)
+	reason                 string                              // Failure reason if state is Failed
+	slots                  int64                               // Resource slots allocated for this task
+	segmentResults         map[int64]*datapb.CopySegmentResult // Results for each target segment
+	req                    *datapb.CopySegmentRequest          // Original request with source/target pairs
+	manager                TaskManager                         // Task manager for state updates and coordination
+	cm                     storage.ChunkManager                // ChunkManager for file copy operations
+	storageAccessCollector *storageaccess.Collector
 
 	// Cleanup tracking: records all successfully copied files for cleanup on failure
 	copiedFilesMu sync.Mutex // Protects copiedFiles for concurrent segment copies
@@ -119,6 +121,8 @@ func NewCopySegmentTask(
 	cm storage.ChunkManager,
 ) Task {
 	ctx, cancel := context.WithCancel(context.Background())
+	storageAccessCollector := storageaccess.NewCollector()
+	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
 
 	// Step 1: Initialize empty result structures for each target segment
 	// These will be populated during execution with binlog/index metadata
@@ -155,19 +159,20 @@ func NewCopySegmentTask(
 
 	// Step 3: Create task with all components
 	task := &CopySegmentTask{
-		ctx:            ctx,
-		cancel:         cancel,
-		jobID:          req.GetJobID(),
-		taskID:         req.GetTaskID(),
-		collectionID:   collectionID,
-		partitionIDs:   partitionIDs,
-		state:          datapb.ImportTaskStateV2_Pending,
-		reason:         "",
-		slots:          req.GetTaskSlot(),
-		segmentResults: segmentResults,
-		req:            req,
-		manager:        manager,
-		cm:             cm,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		jobID:                  req.GetJobID(),
+		taskID:                 req.GetTaskID(),
+		collectionID:           collectionID,
+		partitionIDs:           partitionIDs,
+		state:                  datapb.ImportTaskStateV2_Pending,
+		reason:                 "",
+		slots:                  req.GetTaskSlot(),
+		segmentResults:         segmentResults,
+		req:                    req,
+		manager:                manager,
+		cm:                     cm,
+		storageAccessCollector: storageAccessCollector,
 	}
 	return task
 }
@@ -239,19 +244,20 @@ func (t *CopySegmentTask) Clone() Task {
 	}
 
 	return &CopySegmentTask{
-		ctx:            t.ctx,
-		cancel:         t.cancel,
-		jobID:          t.jobID,
-		taskID:         t.taskID,
-		collectionID:   t.collectionID,
-		partitionIDs:   t.partitionIDs,
-		state:          t.state,
-		reason:         t.reason,
-		slots:          t.slots,
-		segmentResults: results,
-		req:            t.req,
-		manager:        t.manager,
-		cm:             t.cm,
+		ctx:                    t.ctx,
+		cancel:                 t.cancel,
+		jobID:                  t.jobID,
+		taskID:                 t.taskID,
+		collectionID:           t.collectionID,
+		partitionIDs:           t.partitionIDs,
+		state:                  t.state,
+		reason:                 t.reason,
+		slots:                  t.slots,
+		segmentResults:         results,
+		req:                    t.req,
+		manager:                t.manager,
+		cm:                     t.cm,
+		storageAccessCollector: t.storageAccessCollector,
 	}
 }
 

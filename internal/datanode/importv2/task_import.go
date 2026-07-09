@@ -32,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/flushcommon/syncmgr"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -48,11 +49,12 @@ type ImportTask struct {
 	segmentsInfo map[int64]*datapb.ImportSegmentInfo
 	req          *datapb.ImportRequest
 
-	allocator  allocator.Interface
-	manager    TaskManager
-	syncMgr    syncmgr.SyncManager
-	cm         storage.ChunkManager
-	metaCaches map[string]metacache.MetaCache
+	allocator              allocator.Interface
+	manager                TaskManager
+	syncMgr                syncmgr.SyncManager
+	cm                     storage.ChunkManager
+	metaCaches             map[string]metacache.MetaCache
+	storageAccessCollector *storageaccess.Collector
 }
 
 func NewImportTask(req *datapb.ImportRequest,
@@ -61,6 +63,8 @@ func NewImportTask(req *datapb.ImportRequest,
 	cm storage.ChunkManager,
 ) Task {
 	ctx, cancel := context.WithCancel(context.Background())
+	storageAccessCollector := storageaccess.NewCollector()
+	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
 	// During binlog import, even if the primary key's autoID is set to true,
 	// the primary key from the binlog should be used instead of being reassigned.
 	if importutilv2.IsBackup(req.GetOptions()) {
@@ -75,14 +79,15 @@ func NewImportTask(req *datapb.ImportRequest,
 			CollectionID: req.GetCollectionID(),
 			State:        datapb.ImportTaskStateV2_Pending,
 		},
-		ctx:          ctx,
-		cancel:       cancel,
-		segmentsInfo: make(map[int64]*datapb.ImportSegmentInfo),
-		req:          req,
-		allocator:    alloc,
-		manager:      manager,
-		syncMgr:      syncMgr,
-		cm:           cm,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		segmentsInfo:           make(map[int64]*datapb.ImportSegmentInfo),
+		req:                    req,
+		allocator:              alloc,
+		manager:                manager,
+		syncMgr:                syncMgr,
+		cm:                     cm,
+		storageAccessCollector: storageAccessCollector,
 	}
 	task.metaCaches = NewMetaCache(req)
 	return task
@@ -147,16 +152,17 @@ func (t *ImportTask) Clone() Task {
 		infos[id] = typeutil.Clone(info)
 	}
 	return &ImportTask{
-		ImportTaskV2: typeutil.Clone(t.ImportTaskV2),
-		ctx:          ctx,
-		cancel:       cancel,
-		segmentsInfo: infos,
-		req:          t.req,
-		allocator:    t.allocator,
-		manager:      t.manager,
-		syncMgr:      t.syncMgr,
-		cm:           t.cm,
-		metaCaches:   t.metaCaches,
+		ImportTaskV2:           typeutil.Clone(t.ImportTaskV2),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		segmentsInfo:           infos,
+		req:                    t.req,
+		allocator:              t.allocator,
+		manager:                t.manager,
+		syncMgr:                t.syncMgr,
+		cm:                     t.cm,
+		metaCaches:             t.metaCaches,
+		storageAccessCollector: t.storageAccessCollector,
 	}
 }
 

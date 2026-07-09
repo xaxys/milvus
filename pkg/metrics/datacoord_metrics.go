@@ -213,6 +213,43 @@ var (
 			stageLabelName,
 		})
 
+	DataCoordTaskStorageAccessOpCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.DataCoordRole,
+			Name:      "task_storage_access_op_count",
+			Help:      "count of storage access operations reported by completed tasks",
+		}, []string{
+			TaskTypeLabel,
+			storageAccessOpType,
+			statusLabelName,
+		})
+
+	DataCoordTaskStorageAccessBytes = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.DataCoordRole,
+			Name:      "task_storage_access_bytes",
+			Help:      "bytes transferred by storage access operations reported by completed tasks",
+		}, []string{
+			TaskTypeLabel,
+			storageAccessOpType,
+			statusLabelName,
+		})
+
+	DataCoordTaskStorageAccessLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.DataCoordRole,
+			Name:      "task_storage_access_latency",
+			Help:      "latency of storage access operations reported by completed tasks in milliseconds",
+			Buckets:   StorageAccessLatencyBucketsMs,
+		}, []string{
+			TaskTypeLabel,
+			storageAccessOpType,
+			statusLabelName,
+		})
+
 	ImportJobLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: milvusNamespace,
@@ -452,6 +489,9 @@ func RegisterDataCoord(registry *prometheus.Registry) {
 	registry.MustRegister(DataCoordCompactedSegmentSize)
 	registry.MustRegister(DataCoordCompactionTaskNum)
 	registry.MustRegister(DataCoordCompactionLatency)
+	registry.MustRegister(DataCoordTaskStorageAccessOpCount)
+	registry.MustRegister(DataCoordTaskStorageAccessBytes)
+	registry.MustRegister(DataCoordTaskStorageAccessLatency)
 	registry.MustRegister(ImportJobLatency)
 	registry.MustRegister(ImportTaskLatency)
 	registry.MustRegister(DataCoordSizeStoredL0Segment)

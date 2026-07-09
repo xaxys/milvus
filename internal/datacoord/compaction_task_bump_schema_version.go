@@ -379,6 +379,7 @@ func (t *bumpSchemaVersionTask) saveSegmentMeta(result *datapb.CompactionPlanRes
 		log.Warn(context.TODO(), "bumpSchemaVersionTask failed to setState meta saved", mlog.Err(err))
 		return err
 	}
+	reportStorageAccessStats(storageAccessTaskCompaction, result.GetStorageAccessStats())
 	log.Info(context.TODO(), "bumpSchemaVersionTask success to save segment meta")
 	return nil
 }

@@ -163,7 +163,8 @@ type Server struct {
 	// manage ways that data coord access other coord
 	broker broker.Broker
 
-	metricsRequest *metricsinfo.MetricsRequest
+	metricsRequest                 *metricsinfo.MetricsRequest
+	storageAccessFlushFingerprints *storageAccessFingerprintCache
 
 	// file resource
 	fileResourceObserver FileResourceObserver
@@ -206,15 +207,16 @@ func WithSegmentManager(manager Manager) Option {
 func CreateServer(ctx context.Context, factory dependency.Factory, opts ...Option) *Server {
 	rand.Seed(time.Now().UnixNano())
 	s := &Server{
-		ctx:                 ctx,
-		quitCh:              make(chan struct{}),
-		factory:             factory,
-		flushCh:             make(chan UniqueID, 1024),
-		notifyIndexChan:     make(chan UniqueID, 1024),
-		dataNodeCreator:     defaultDataNodeCreatorFunc,
-		importJobLock:       lock.NewKeyLock[int64](),
-		metricsCacheManager: metricsinfo.NewMetricsCacheManager(),
-		metricsRequest:      metricsinfo.NewMetricsRequest(),
+		ctx:                            ctx,
+		quitCh:                         make(chan struct{}),
+		factory:                        factory,
+		flushCh:                        make(chan UniqueID, 1024),
+		notifyIndexChan:                make(chan UniqueID, 1024),
+		dataNodeCreator:                defaultDataNodeCreatorFunc,
+		importJobLock:                  lock.NewKeyLock[int64](),
+		metricsCacheManager:            metricsinfo.NewMetricsCacheManager(),
+		metricsRequest:                 metricsinfo.NewMetricsRequest(),
+		storageAccessFlushFingerprints: newStorageAccessFingerprintCache(),
 	}
 
 	for _, opt := range opts {

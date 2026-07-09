@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -49,8 +50,9 @@ type PreImportTask struct {
 	options      []*commonpb.KeyValuePair
 	req          *datapb.PreImportRequest
 
-	manager TaskManager
-	cm      storage.ChunkManager
+	manager                TaskManager
+	cm                     storage.ChunkManager
+	storageAccessCollector *storageaccess.Collector
 }
 
 func NewPreImportTask(req *datapb.PreImportRequest,
@@ -63,6 +65,8 @@ func NewPreImportTask(req *datapb.PreImportRequest,
 		}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
+	storageAccessCollector := storageaccess.NewCollector()
+	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
 	// During binlog import, even if the primary key's autoID is set to true,
 	// the primary key from the binlog should be used instead of being reassigned.
 	if importutilv2.IsBackup(req.GetOptions()) {
@@ -76,15 +80,16 @@ func NewPreImportTask(req *datapb.PreImportRequest,
 			State:        datapb.ImportTaskStateV2_Pending,
 			FileStats:    fileStats,
 		},
-		ctx:          ctx,
-		cancel:       cancel,
-		partitionIDs: req.GetPartitionIDs(),
-		vchannels:    req.GetVchannels(),
-		schema:       req.GetSchema(),
-		options:      req.GetOptions(),
-		req:          req,
-		manager:      manager,
-		cm:           cm,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		partitionIDs:           req.GetPartitionIDs(),
+		vchannels:              req.GetVchannels(),
+		schema:                 req.GetSchema(),
+		options:                req.GetOptions(),
+		req:                    req,
+		manager:                manager,
+		cm:                     cm,
+		storageAccessCollector: storageAccessCollector,
 	}
 }
 
@@ -120,16 +125,17 @@ func (t *PreImportTask) Cancel() {
 func (t *PreImportTask) Clone() Task {
 	ctx, cancel := context.WithCancel(t.ctx)
 	return &PreImportTask{
-		PreImportTask: typeutil.Clone(t.PreImportTask),
-		ctx:           ctx,
-		cancel:        cancel,
-		partitionIDs:  t.GetPartitionIDs(),
-		vchannels:     t.GetVchannels(),
-		schema:        t.GetSchema(),
-		options:       t.options,
-		req:           t.req,
-		manager:       t.manager,
-		cm:            t.cm,
+		PreImportTask:          typeutil.Clone(t.PreImportTask),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		partitionIDs:           t.GetPartitionIDs(),
+		vchannels:              t.GetVchannels(),
+		schema:                 t.GetSchema(),
+		options:                t.options,
+		req:                    t.req,
+		manager:                t.manager,
+		cm:                     t.cm,
+		storageAccessCollector: t.storageAccessCollector,
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
 	"github.com/milvus-io/milvus/internal/util/importutilv2/binlog"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -46,8 +47,9 @@ type L0PreImportTask struct {
 	schema       *schemapb.CollectionSchema
 	req          *datapb.PreImportRequest
 
-	manager TaskManager
-	cm      storage.ChunkManager
+	manager                TaskManager
+	cm                     storage.ChunkManager
+	storageAccessCollector *storageaccess.Collector
 }
 
 func NewL0PreImportTask(req *datapb.PreImportRequest,
@@ -60,6 +62,8 @@ func NewL0PreImportTask(req *datapb.PreImportRequest,
 		}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
+	storageAccessCollector := storageaccess.NewCollector()
+	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
 	return &L0PreImportTask{
 		PreImportTask: &datapb.PreImportTask{
 			JobID:        req.GetJobID(),
@@ -68,14 +72,15 @@ func NewL0PreImportTask(req *datapb.PreImportRequest,
 			State:        datapb.ImportTaskStateV2_Pending,
 			FileStats:    fileStats,
 		},
-		ctx:          ctx,
-		cancel:       cancel,
-		partitionIDs: req.GetPartitionIDs(),
-		vchannels:    req.GetVchannels(),
-		schema:       req.GetSchema(),
-		req:          req,
-		manager:      manager,
-		cm:           cm,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		partitionIDs:           req.GetPartitionIDs(),
+		vchannels:              req.GetVchannels(),
+		schema:                 req.GetSchema(),
+		req:                    req,
+		manager:                manager,
+		cm:                     cm,
+		storageAccessCollector: storageAccessCollector,
 	}
 }
 
@@ -111,15 +116,16 @@ func (t *L0PreImportTask) Cancel() {
 func (t *L0PreImportTask) Clone() Task {
 	ctx, cancel := context.WithCancel(t.ctx)
 	return &L0PreImportTask{
-		PreImportTask: typeutil.Clone(t.PreImportTask),
-		ctx:           ctx,
-		cancel:        cancel,
-		partitionIDs:  t.GetPartitionIDs(),
-		vchannels:     t.GetVchannels(),
-		schema:        t.GetSchema(),
-		req:           t.req,
-		manager:       t.manager,
-		cm:            t.cm,
+		PreImportTask:          typeutil.Clone(t.PreImportTask),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		partitionIDs:           t.GetPartitionIDs(),
+		vchannels:              t.GetVchannels(),
+		schema:                 t.GetSchema(),
+		req:                    t.req,
+		manager:                t.manager,
+		cm:                     t.cm,
+		storageAccessCollector: t.storageAccessCollector,
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/storagecommon"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -348,9 +349,10 @@ type GrowingSourceSyncTask struct {
 	committedBM25Stats     map[int64]*storage.BM25Stats
 	committedInsertBinlogs map[int64]*datapb.FieldBinlog
 
-	writeRetryOpts  []retry.Option
-	failureCallback func(error)
-	tr              *timerecord.TimeRecorder
+	writeRetryOpts         []retry.Option
+	failureCallback        func(error)
+	tr                     *timerecord.TimeRecorder
+	storageAccessCollector *storageaccess.Collector
 }
 
 func NewGrowingSourceSyncTask() *GrowingSourceSyncTask {
@@ -537,6 +539,8 @@ func (t *GrowingSourceSyncTask) ReleaseSource() {
 }
 
 func (t *GrowingSourceSyncTask) Run(ctx context.Context) (err error) {
+	t.storageAccessCollector = storageaccess.NewCollector()
+	ctx = storageaccess.WithCollector(ctx, t.storageAccessCollector)
 	t.tr = timerecord.NewTimeRecorder("growingSourceSyncTask")
 	log := mlog.With(
 		mlog.Int64("collectionID", t.collectionID),

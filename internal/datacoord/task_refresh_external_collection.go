@@ -579,14 +579,18 @@ func applyExternalRefreshPatch(oldSeg *SegmentInfo, incoming *datapb.SegmentInfo
 
 // SetJobInfo processes a complete job-level response and updates segment information atomically.
 func (t *refreshExternalCollectionTask) SetJobInfo(ctx context.Context, resp *datapb.RefreshExternalCollectionTaskResponse) error {
-	return applyExternalCollectionSegmentUpdate(
+	if err := applyExternalCollectionSegmentUpdate(
 		ctx,
 		t.mt,
 		t.GetCollectionId(),
 		resp.GetKeptSegments(),
 		resp.GetUpdatedSegments(),
 		mlog.Int64("taskID", t.GetTaskId()),
-	)
+	); err != nil {
+		return err
+	}
+	reportStorageAccessStats(storageAccessTaskRefreshExternal, resp.GetStorageAccessStats())
+	return nil
 }
 
 func (t *refreshExternalCollectionTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) {

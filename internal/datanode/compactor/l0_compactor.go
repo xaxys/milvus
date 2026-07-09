@@ -115,6 +115,7 @@ func (t *LevelZeroCompactionTask) GetCollection() int64 {
 }
 
 func (t *LevelZeroCompactionTask) Compact() (*datapb.CompactionPlanResult, error) {
+	t.ctx = withCompactionStorageAccess(t.ctx, t.GetPlanID())
 	ctx, span := otel.Tracer(typeutil.DataNodeRole).Start(t.ctx, "L0Compact")
 	defer span.End()
 	mlog.Info(context.TODO(), "L0 compaction", mlog.Duration("wait in queue elapse", t.tr.RecordSpan()))

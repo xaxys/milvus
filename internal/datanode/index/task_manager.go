@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -44,6 +45,7 @@ type IndexTaskInfo struct {
 	CurrentIndexVersion       int32
 	CurrentScalarIndexVersion int32
 	IndexStorePathVersion     indexpb.IndexStorePathVersion
+	StorageAccessCollector    *storageaccess.Collector
 
 	// task statistics
 	statistic *indexpb.JobInfo
@@ -60,6 +62,7 @@ func (i *IndexTaskInfo) Clone() *IndexTaskInfo {
 		CurrentIndexVersion:       i.CurrentIndexVersion,
 		CurrentScalarIndexVersion: i.CurrentScalarIndexVersion,
 		IndexStorePathVersion:     i.IndexStorePathVersion,
+		StorageAccessCollector:    i.StorageAccessCollector,
 		statistic:                 typeutil.Clone(i.statistic),
 	}
 }
@@ -75,6 +78,7 @@ func (i *IndexTaskInfo) ToIndexTaskInfo(buildID int64) *workerpb.IndexTaskInfo {
 		CurrentIndexVersion:       i.CurrentIndexVersion,
 		CurrentScalarIndexVersion: i.CurrentScalarIndexVersion,
 		IndexStorePathVersion:     i.IndexStorePathVersion,
+		StorageAccessStats:        i.StorageAccessCollector.Snapshot(),
 	}
 }
 
@@ -192,10 +196,11 @@ func (m *TaskManager) deleteAllIndexTasks() []*IndexTaskInfo {
 }
 
 type AnalyzeTaskInfo struct {
-	Cancel        context.CancelFunc
-	State         indexpb.JobState
-	FailReason    string
-	CentroidsFile string
+	Cancel                 context.CancelFunc
+	State                  indexpb.JobState
+	FailReason             string
+	CentroidsFile          string
+	StorageAccessCollector *storageaccess.Collector
 }
 
 func (m *TaskManager) LoadOrStoreAnalyzeTask(clusterID string, taskID typeutil.UniqueID, info *AnalyzeTaskInfo) *AnalyzeTaskInfo {
@@ -253,10 +258,11 @@ func (m *TaskManager) GetAnalyzeTaskInfo(clusterID string, taskID typeutil.Uniqu
 
 	if info, ok := m.analyzeTasks[Key{ClusterID: clusterID, TaskID: taskID}]; ok {
 		return &AnalyzeTaskInfo{
-			Cancel:        info.Cancel,
-			State:         info.State,
-			FailReason:    info.FailReason,
-			CentroidsFile: info.CentroidsFile,
+			Cancel:                 info.Cancel,
+			State:                  info.State,
+			FailReason:             info.FailReason,
+			CentroidsFile:          info.CentroidsFile,
+			StorageAccessCollector: info.StorageAccessCollector,
 		}
 	}
 	return nil
@@ -343,59 +349,62 @@ func (m *TaskManager) WaitTaskFinish() {
 }
 
 type StatsTaskInfo struct {
-	Cancel           context.CancelFunc
-	State            indexpb.JobState
-	FailReason       string
-	CollID           typeutil.UniqueID
-	PartID           typeutil.UniqueID
-	SegID            typeutil.UniqueID
-	InsertChannel    string
-	NumRows          int64
-	InsertLogs       []*datapb.FieldBinlog
-	StatsLogs        []*datapb.FieldBinlog
-	TextStatsLogs    map[int64]*datapb.TextIndexStats
-	Bm25Logs         []*datapb.FieldBinlog
-	JSONKeyStatsLogs map[int64]*datapb.JsonKeyStats
-	FileResources    []*internalpb.FileResourceInfo
-	Manifest         string
+	Cancel                 context.CancelFunc
+	State                  indexpb.JobState
+	FailReason             string
+	CollID                 typeutil.UniqueID
+	PartID                 typeutil.UniqueID
+	SegID                  typeutil.UniqueID
+	InsertChannel          string
+	NumRows                int64
+	InsertLogs             []*datapb.FieldBinlog
+	StatsLogs              []*datapb.FieldBinlog
+	TextStatsLogs          map[int64]*datapb.TextIndexStats
+	Bm25Logs               []*datapb.FieldBinlog
+	JSONKeyStatsLogs       map[int64]*datapb.JsonKeyStats
+	FileResources          []*internalpb.FileResourceInfo
+	Manifest               string
+	StorageAccessCollector *storageaccess.Collector
 }
 
 func (s *StatsTaskInfo) Clone() *StatsTaskInfo {
 	return &StatsTaskInfo{
-		Cancel:           s.Cancel,
-		State:            s.State,
-		FailReason:       s.FailReason,
-		CollID:           s.CollID,
-		PartID:           s.PartID,
-		SegID:            s.SegID,
-		InsertChannel:    s.InsertChannel,
-		NumRows:          s.NumRows,
-		InsertLogs:       s.CloneInsertLogs(),
-		StatsLogs:        s.CloneStatsLogs(),
-		TextStatsLogs:    s.CloneTextStatsLogs(),
-		Bm25Logs:         s.CloneBm25Logs(),
-		JSONKeyStatsLogs: s.CloneJSONKeyStatsLogs(),
-		FileResources:    s.CloneFileResources(),
-		Manifest:         s.Manifest,
+		Cancel:                 s.Cancel,
+		State:                  s.State,
+		FailReason:             s.FailReason,
+		CollID:                 s.CollID,
+		PartID:                 s.PartID,
+		SegID:                  s.SegID,
+		InsertChannel:          s.InsertChannel,
+		NumRows:                s.NumRows,
+		InsertLogs:             s.CloneInsertLogs(),
+		StatsLogs:              s.CloneStatsLogs(),
+		TextStatsLogs:          s.CloneTextStatsLogs(),
+		Bm25Logs:               s.CloneBm25Logs(),
+		JSONKeyStatsLogs:       s.CloneJSONKeyStatsLogs(),
+		FileResources:          s.CloneFileResources(),
+		Manifest:               s.Manifest,
+		StorageAccessCollector: s.StorageAccessCollector,
 	}
 }
 
 func (s *StatsTaskInfo) ToStatsResult(taskID int64) *workerpb.StatsResult {
 	return &workerpb.StatsResult{
-		TaskID:           taskID,
-		State:            s.State,
-		FailReason:       s.FailReason,
-		CollectionID:     s.CollID,
-		PartitionID:      s.PartID,
-		SegmentID:        s.SegID,
-		Channel:          s.InsertChannel,
-		InsertLogs:       s.InsertLogs,
-		StatsLogs:        s.StatsLogs,
-		TextStatsLogs:    s.TextStatsLogs,
-		Bm25Logs:         s.Bm25Logs,
-		NumRows:          s.NumRows,
-		JsonKeyStatsLogs: s.JSONKeyStatsLogs,
-		Manifest:         s.Manifest,
+		TaskID:             taskID,
+		State:              s.State,
+		FailReason:         s.FailReason,
+		CollectionID:       s.CollID,
+		PartitionID:        s.PartID,
+		SegmentID:          s.SegID,
+		Channel:            s.InsertChannel,
+		InsertLogs:         s.InsertLogs,
+		StatsLogs:          s.StatsLogs,
+		TextStatsLogs:      s.TextStatsLogs,
+		Bm25Logs:           s.Bm25Logs,
+		NumRows:            s.NumRows,
+		JsonKeyStatsLogs:   s.JSONKeyStatsLogs,
+		Manifest:           s.Manifest,
+		StorageAccessStats: s.StorageAccessCollector.Snapshot(),
 	}
 }
 

@@ -399,6 +399,7 @@ func (t *sortCompactionTask) sortSegment(ctx context.Context) (*datapb.Compactio
 }
 
 func (t *sortCompactionTask) Compact() (*datapb.CompactionPlanResult, error) {
+	t.ctx = withCompactionStorageAccess(t.ctx, t.GetPlanID())
 	if !funcutil.CheckCtxValid(t.ctx) {
 		return nil, t.ctx.Err()
 	}

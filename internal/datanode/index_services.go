@@ -29,6 +29,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/datanode/index"
 	"github.com/milvus-io/milvus/internal/util/hookutil"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
@@ -72,9 +73,12 @@ func (node *DataNode) CreateJob(ctx context.Context, req *workerpb.CreateJobRequ
 	metrics.DataNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.TotalLabel).Inc()
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
+	storageAccessCollector := storageaccess.NewCollector()
+	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreIndexTask(req.GetClusterID(), req.GetBuildID(), &index.IndexTaskInfo{
-		Cancel: taskCancel,
-		State:  commonpb.IndexState_InProgress,
+		Cancel:                 taskCancel,
+		State:                  commonpb.IndexState_InProgress,
+		StorageAccessCollector: storageAccessCollector,
 	}); oldInfo != nil {
 		// Node-internal dedup of a coordinator-dispatched build task: a duplicate
 		// is a scheduling race, not the user re-creating an index.
@@ -274,10 +278,13 @@ func (node *DataNode) createIndexTask(ctx context.Context, req *workerpb.CreateJ
 		req.TaskSlot = 64
 	}
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
+	storageAccessCollector := storageaccess.NewCollector()
+	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreIndexTask(req.GetClusterID(), req.GetBuildID(), &index.IndexTaskInfo{
-		Cancel:                taskCancel,
-		State:                 commonpb.IndexState_InProgress,
-		IndexStorePathVersion: req.GetIndexStorePathVersion(),
+		Cancel:                 taskCancel,
+		State:                  commonpb.IndexState_InProgress,
+		IndexStorePathVersion:  req.GetIndexStorePathVersion(),
+		StorageAccessCollector: storageAccessCollector,
 	}); oldInfo != nil {
 		err := merr.WrapErrTaskDuplicate(indexpb.JobType_JobTypeIndexJob.String(),
 			fmt.Sprintf("building index task existed with %s-%d", req.GetClusterID(), req.GetBuildID()))
@@ -338,9 +345,12 @@ func (node *DataNode) createAnalyzeTask(ctx context.Context, req *workerpb.Analy
 	}
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
+	storageAccessCollector := storageaccess.NewCollector()
+	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreAnalyzeTask(req.GetClusterID(), req.GetTaskID(), &index.AnalyzeTaskInfo{
-		Cancel: taskCancel,
-		State:  indexpb.JobState_JobStateInProgress,
+		Cancel:                 taskCancel,
+		State:                  indexpb.JobState_JobStateInProgress,
+		StorageAccessCollector: storageAccessCollector,
 	}); oldInfo != nil {
 		err := merr.WrapErrTaskDuplicate(indexpb.JobType_JobTypeAnalyzeJob.String(),
 			fmt.Sprintf("analyze task already existed with %s-%d", req.GetClusterID(), req.GetTaskID()))
@@ -379,9 +389,12 @@ func (node *DataNode) createStatsTask(ctx context.Context, req *workerpb.CreateS
 	}
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
+	storageAccessCollector := storageaccess.NewCollector()
+	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreStatsTask(req.GetClusterID(), req.GetTaskID(), &index.StatsTaskInfo{
-		Cancel: taskCancel,
-		State:  indexpb.JobState_JobStateInProgress,
+		Cancel:                 taskCancel,
+		State:                  indexpb.JobState_JobStateInProgress,
+		StorageAccessCollector: storageAccessCollector,
 	}); oldInfo != nil {
 		err := merr.WrapErrTaskDuplicate(indexpb.JobType_JobTypeStatsJob.String(),
 			fmt.Sprintf("stats task already existed with %s-%d", req.GetClusterID(), req.GetTaskID()))
@@ -504,10 +517,11 @@ func (node *DataNode) queryAnalyzeTask(ctx context.Context, req *workerpb.QueryJ
 		info := node.taskManager.GetAnalyzeTaskInfo(req.GetClusterID(), taskID)
 		if info != nil {
 			results = append(results, &workerpb.AnalyzeResult{
-				TaskID:        taskID,
-				State:         info.State,
-				FailReason:    info.FailReason,
-				CentroidsFile: info.CentroidsFile,
+				TaskID:             taskID,
+				State:              info.State,
+				FailReason:         info.FailReason,
+				CentroidsFile:      info.CentroidsFile,
+				StorageAccessStats: info.StorageAccessCollector.Snapshot(),
 			})
 		}
 	}

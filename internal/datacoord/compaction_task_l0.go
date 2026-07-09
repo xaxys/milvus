@@ -175,6 +175,7 @@ func (t *l0CompactionTask) QueryTaskOnWorker(cluster session.Cluster) {
 			log.Warn(context.TODO(), "l0CompactionTask failed to save task meta_saved state", mlog.Err(err))
 			return
 		}
+		reportStorageAccessStats(storageAccessTaskCompaction, result.GetStorageAccessStats())
 		UpdateCompactionSegmentSizeMetrics(result.GetSegments())
 		t.processMetaSaved()
 	case datapb.CompactionTaskState_pipelining, datapb.CompactionTaskState_executing:

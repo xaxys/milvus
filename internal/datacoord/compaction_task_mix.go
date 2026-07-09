@@ -244,6 +244,7 @@ func (t *mixCompactionTask) saveSegmentMeta(result *datapb.CompactionPlanResult)
 		mlog.Warn(context.TODO(), "mixCompaction failed to setState meta saved", mlog.Err(err))
 		return err
 	}
+	reportStorageAccessStats(storageAccessTaskCompaction, result.GetStorageAccessStats())
 	mlog.Info(context.TODO(), "mixCompactionTask success to save segment meta")
 	return nil
 }
