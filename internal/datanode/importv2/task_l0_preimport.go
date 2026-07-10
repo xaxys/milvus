@@ -62,7 +62,7 @@ func NewL0PreImportTask(req *datapb.PreImportRequest,
 		}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
 	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
 	return &L0PreImportTask{
 		PreImportTask: &datapb.PreImportTask{

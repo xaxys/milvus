@@ -424,6 +424,6 @@ func (st *statsTask) SetJobInfo(ctx context.Context, result *workerpb.StatsResul
 	mlog.Info(ctx, "SetJobInfo for stats task success", mlog.FieldTaskID(st.GetTaskID()),
 		mlog.Int64("oldSegmentID", st.GetSegmentID()), mlog.Int64("targetSegmentID", st.GetTargetSegmentID()),
 		mlog.String("subJobType", st.GetSubJobType().String()), mlog.String("state", st.GetState().String()))
-	reportStorageAccessStats(storageAccessTaskStats, result.GetStorageAccessStats())
+	reportStorageAccessStats(ctx, storageAccessTaskStats, st.GetTaskID(), result.GetStorageAccessStats())
 	return nil
 }

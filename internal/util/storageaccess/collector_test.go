@@ -22,13 +22,15 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 )
 
 func TestCollectorSnapshotAndQuantile(t *testing.T) {
-	collector := NewCollector()
+	collector := NewCollector(WithTaskID(101), WithRequestID("request-1"))
 	collector.Record(OpRead, metrics.SuccessLabel, 10, 1)
 	collector.Record(OpRead, metrics.SuccessLabel, 20, 5)
 	collector.Record(OpWrite, metrics.FailLabel, 30, 125000)
@@ -40,6 +42,8 @@ func TestCollectorSnapshotAndQuantile(t *testing.T) {
 	require.EqualValues(t, 1, stats.GetFailedCount())
 	require.EqualValues(t, 1, stats.GetCanceledCount())
 	require.EqualValues(t, 60, stats.GetBytes())
+	require.EqualValues(t, 101, stats.GetTaskId())
+	require.Equal(t, "request-1", stats.GetRequestId())
 
 	var readStats, failedWriteStats *datapb.StorageAccessOpStats
 	for _, opStats := range stats.GetOpStats() {
@@ -85,6 +89,8 @@ func TestCollectorMergeAndContext(t *testing.T) {
 	require.Len(t, stats.GetOpStats(), 1)
 	require.Equal(t, OpRead, stats.GetOpStats()[0].GetOpType())
 	require.Equal(t, metrics.SuccessLabel, stats.GetOpStats()[0].GetStatus())
+	require.EqualValues(t, snapshot.GetTaskId(), stats.GetTaskId())
+	require.Equal(t, snapshot.GetRequestId(), stats.GetRequestId())
 }
 
 func TestCollectorConcurrentRecord(t *testing.T) {
@@ -117,4 +123,38 @@ func TestNilCollector(t *testing.T) {
 		collector.Record(OpRead, metrics.SuccessLabel, 1, 1)
 		collector.Merge(nil)
 	})
+}
+
+func TestRequestIDFromContext(t *testing.T) {
+	spanRecorder := tracetest.NewSpanRecorder()
+	provider := trace.NewTracerProvider(trace.WithSpanProcessor(spanRecorder))
+	ctx, span := provider.Tracer("storage-access-test").Start(context.Background(), "request")
+	requestID := RequestIDFromContext(ctx)
+	span.End()
+
+	require.NotEmpty(t, requestID)
+	require.Equal(t, spanRecorder.Ended()[0].SpanContext().TraceID().String(), requestID)
+	require.Empty(t, RequestIDFromContext(context.Background()))
+}
+
+func TestStorageAccessObservability(t *testing.T) {
+	collector := NewCollector(WithTaskID(10), WithRequestID("request-10"))
+	collector.Record(OpRead, metrics.SuccessLabel, 128, 2.5)
+	stats := collector.Snapshot()
+
+	fields := LogFields(stats)
+	require.Len(t, fields, 7)
+	require.Contains(t, formatOperations(stats), "read/success:count=1,bytes=128")
+
+	spanRecorder := tracetest.NewSpanRecorder()
+	provider := trace.NewTracerProvider(trace.WithSpanProcessor(spanRecorder))
+	ctx, span := provider.Tracer("storage-access-test").Start(context.Background(), "task")
+	AddTraceEvent(ctx, "storage_access.task.finished", stats)
+	span.End()
+
+	ended := spanRecorder.Ended()
+	require.Len(t, ended, 1)
+	require.Len(t, ended[0].Events(), 2)
+	require.Equal(t, "storage_access.task.finished", ended[0].Events()[0].Name)
+	require.Equal(t, "storage_access.task.finished.operation", ended[0].Events()[1].Name)
 }

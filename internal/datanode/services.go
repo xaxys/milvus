@@ -23,6 +23,8 @@ import (
 	"context"
 	"fmt"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 	"google.golang.org/protobuf/proto"
 
@@ -183,6 +185,7 @@ func (node *DataNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRe
 // CompactionV2 handles compaction request from DataCoord
 // returns status as long as compaction task enqueued or invalid
 func (node *DataNode) CompactionV2(ctx context.Context, req *datapb.CompactionPlan) (*commonpb.Status, error) {
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetPlanID()))
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		mlog.Warn(context.TODO(), "DataNode.Compaction failed", mlog.Int64("nodeId", node.GetNodeID()), mlog.Err(err))
 		return merr.Status(err), nil
@@ -312,6 +315,7 @@ func (node *DataNode) CompactionV2(ctx context.Context, req *datapb.CompactionPl
 
 	succeed, err := node.compactionExecutor.Enqueue(task)
 	if succeed {
+		mlog.Info(ctx, "compaction task enqueued", mlog.FieldTaskID(req.GetPlanID()), mlog.Int64("planID", req.GetPlanID()))
 		return merr.Success(), nil
 	} else {
 		return merr.Status(err), nil
@@ -329,6 +333,11 @@ func (node *DataNode) GetCompactionState(ctx context.Context, req *datapb.Compac
 	}
 
 	results := node.compactionExecutor.GetResults(req.GetPlanID())
+	for _, result := range results {
+		if result.GetState() == datapb.CompactionTaskState_completed || result.GetState() == datapb.CompactionTaskState_failed {
+			traceFinishedTaskStorageAccess(ctx, result.GetStorageAccessStats())
+		}
+	}
 	return &datapb.CompactionStateResponse{
 		Status:  merr.Success(),
 		Results: results,
@@ -363,7 +372,8 @@ func (node *DataNode) FlushChannels(ctx context.Context, req *datapb.FlushChanne
 }
 
 func (node *DataNode) PreImport(ctx context.Context, req *datapb.PreImportRequest) (*commonpb.Status, error) {
-	mlog.Info(context.TODO(), "datanode receive preimport request")
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetTaskID()))
+	mlog.Info(ctx, "datanode receive preimport request", mlog.FieldTaskID(req.GetTaskID()))
 
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return merr.Status(err), nil
@@ -386,12 +396,13 @@ func (node *DataNode) PreImport(ctx context.Context, req *datapb.PreImportReques
 	}
 	node.importTaskMgr.Add(task)
 
-	mlog.Info(context.TODO(), "datanode added preimport task")
+	mlog.Info(ctx, "datanode added preimport task", mlog.FieldTaskID(req.GetTaskID()))
 	return merr.Success(), nil
 }
 
 func (node *DataNode) ImportV2(ctx context.Context, req *datapb.ImportRequest) (*commonpb.Status, error) {
-	mlog.Info(context.TODO(), "datanode receive import request")
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetTaskID()))
+	mlog.Info(ctx, "datanode receive import request", mlog.FieldTaskID(req.GetTaskID()))
 
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return merr.Status(err), nil
@@ -413,7 +424,7 @@ func (node *DataNode) ImportV2(ctx context.Context, req *datapb.ImportRequest) (
 	}
 	node.importTaskMgr.Add(task)
 
-	mlog.Info(context.TODO(), "datanode added import task")
+	mlog.Info(ctx, "datanode added import task", mlog.FieldTaskID(req.GetTaskID()))
 	return merr.Success(), nil
 }
 
@@ -444,13 +455,17 @@ func (node *DataNode) QueryPreImport(ctx context.Context, req *datapb.QueryPreIm
 		mlog.Info(context.TODO(), "datanode query preimport", logFields...)
 	}
 
+	storageAccessStats := importv2.StorageAccessStats(task)
+	if task.GetState() == datapb.ImportTaskStateV2_Completed || task.GetState() == datapb.ImportTaskStateV2_Failed {
+		traceFinishedTaskStorageAccess(ctx, storageAccessStats)
+	}
 	return &datapb.QueryPreImportResponse{
 		Status:             merr.Success(),
 		TaskID:             task.GetTaskID(),
 		State:              task.GetState(),
 		Reason:             task.GetReason(),
 		FileStats:          fileStats,
-		StorageAccessStats: importv2.StorageAccessStats(task),
+		StorageAccessStats: storageAccessStats,
 	}, nil
 }
 
@@ -490,13 +505,17 @@ func (node *DataNode) QueryImport(ctx context.Context, req *datapb.QueryImportRe
 	} else {
 		mlog.Info(context.TODO(), "datanode query import", logFields...)
 	}
+	storageAccessStats := importv2.StorageAccessStats(task)
+	if task.GetState() == datapb.ImportTaskStateV2_Completed || task.GetState() == datapb.ImportTaskStateV2_Failed {
+		traceFinishedTaskStorageAccess(ctx, storageAccessStats)
+	}
 	return &datapb.QueryImportResponse{
 		Status:             merr.Success(),
 		TaskID:             task.GetTaskID(),
 		State:              task.GetState(),
 		Reason:             task.GetReason(),
 		ImportSegmentsInfo: segmentsInfo,
-		StorageAccessStats: importv2.StorageAccessStats(task),
+		StorageAccessStats: storageAccessStats,
 	}, nil
 }
 
@@ -513,7 +532,8 @@ func (node *DataNode) DropImport(ctx context.Context, req *datapb.DropImportRequ
 }
 
 func (node *DataNode) CopySegment(ctx context.Context, req *datapb.CopySegmentRequest) (*commonpb.Status, error) {
-	mlog.Info(context.TODO(), "datanode receive copy segment request")
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetTaskID()))
+	mlog.Info(ctx, "datanode receive copy segment request", mlog.FieldTaskID(req.GetTaskID()))
 
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return merr.Status(err), nil
@@ -532,7 +552,7 @@ func (node *DataNode) CopySegment(ctx context.Context, req *datapb.CopySegmentRe
 	task := importv2.NewCopySegmentTask(req, node.importTaskMgr, cm)
 	node.importTaskMgr.Add(task)
 
-	mlog.Info(context.TODO(), "datanode added copy segment task")
+	mlog.Info(ctx, "datanode added copy segment task", mlog.FieldTaskID(req.GetTaskID()))
 	return merr.Success(), nil
 }
 
@@ -570,6 +590,10 @@ func (node *DataNode) QueryCopySegment(ctx context.Context, req *datapb.QueryCop
 		}
 	}
 
+	storageAccessStats := importv2.StorageAccessStats(task)
+	if task.GetState() == datapb.ImportTaskStateV2_Completed || task.GetState() == datapb.ImportTaskStateV2_Failed {
+		traceFinishedTaskStorageAccess(ctx, storageAccessStats)
+	}
 	return &datapb.QueryCopySegmentResponse{
 		Status:             merr.Success(),
 		TaskID:             task.GetTaskID(),
@@ -577,7 +601,7 @@ func (node *DataNode) QueryCopySegment(ctx context.Context, req *datapb.QueryCop
 		Reason:             task.GetReason(),
 		SegmentResults:     segmentResults,
 		Slots:              task.GetSlots(),
-		StorageAccessStats: importv2.StorageAccessStats(task),
+		StorageAccessStats: storageAccessStats,
 	}, nil
 }
 
@@ -875,6 +899,9 @@ func (node *DataNode) QueryTask(ctx context.Context, request *workerpb.QueryTask
 			UpdatedSegments:    info.UpdatedSegments,
 			StorageAccessStats: info.StorageAccessStats,
 		}
+		if info.State == indexpb.JobState_JobStateFinished || info.State == indexpb.JobState_JobStateFailed {
+			traceFinishedTaskStorageAccess(ctx, info.StorageAccessStats)
+		}
 		resProperties := taskcommon.NewProperties(nil)
 		resProperties.AppendTaskState(info.State)
 		resProperties.AppendReason(info.FailReason)
@@ -978,7 +1005,9 @@ func (node *DataNode) SyncFileResource(ctx context.Context, req *internalpb.Sync
 // clusterID is the caller's cluster identifier (from CreateTask properties),
 // used as the task key so that QueryTask from the same caller can locate the result.
 func (node *DataNode) createRefreshExternalCollectionTask(ctx context.Context, clusterID string, req *datapb.RefreshExternalCollectionTaskRequest) (*commonpb.Status, error) {
-	mlog.Info(context.TODO(), "createRefreshExternalCollectionTask received",
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetTaskID()))
+	mlog.Info(ctx, "createRefreshExternalCollectionTask received",
+		mlog.FieldTaskID(req.GetTaskID()),
 		mlog.Int("currentSegments", len(req.GetCurrentSegments())),
 		mlog.String("externalSource", req.GetExternalSource()))
 
@@ -1024,6 +1053,6 @@ func (node *DataNode) createRefreshExternalCollectionTask(ctx context.Context, c
 		return merr.Status(err), nil
 	}
 
-	mlog.Info(context.TODO(), "external collection task submitted to manager")
+	mlog.Info(ctx, "external collection task submitted to manager", mlog.FieldTaskID(req.GetTaskID()))
 	return merr.Success(), nil
 }

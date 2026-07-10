@@ -134,7 +134,7 @@ func (it *indexBuildTask) setJobInfo(result *workerpb.IndexTaskInfo) error {
 	if err := it.meta.indexMeta.FinishTask(result); err != nil {
 		return err
 	}
-	reportStorageAccessStats(storageAccessTaskIndex, result.GetStorageAccessStats())
+	reportStorageAccessStats(context.TODO(), storageAccessTaskIndex, it.GetTaskID(), result.GetStorageAccessStats())
 	it.SetState(indexpb.JobState(result.GetState()), result.GetFailReason())
 	return nil
 }

@@ -49,6 +49,7 @@ func (node *DataNode) CreateJob(ctx context.Context, req *workerpb.CreateJobRequ
 	}
 	defer node.lifetime.Done()
 	mlog.Info(context.TODO(), "DataNode building index ...",
+		mlog.FieldTaskID(req.GetBuildID()),
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64("partitionID", req.GetPartitionID()),
 		mlog.Int64("segmentID", req.GetSegmentID()),
@@ -66,6 +67,7 @@ func (node *DataNode) CreateJob(ctx context.Context, req *workerpb.CreateJobRequ
 		mlog.Any("dim", req.GetDim()),
 	)
 	ctx, sp := otel.Tracer(typeutil.DataNodeRole).Start(ctx, "DataNode-CreateIndex", trace.WithAttributes(
+		attribute.Int64("taskID", req.GetBuildID()),
 		attribute.Int64("indexBuildID", req.GetBuildID()),
 		attribute.String("clusterID", req.GetClusterID()),
 	))
@@ -73,7 +75,7 @@ func (node *DataNode) CreateJob(ctx context.Context, req *workerpb.CreateJobRequ
 	metrics.DataNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.TotalLabel).Inc()
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetBuildID()))
 	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreIndexTask(req.GetClusterID(), req.GetBuildID(), &index.IndexTaskInfo{
 		Cancel:                 taskCancel,
@@ -251,9 +253,10 @@ func (node *DataNode) CreateJobV2(ctx context.Context, req *workerpb.CreateJobV2
 }
 
 func (node *DataNode) createIndexTask(ctx context.Context, req *workerpb.CreateJobRequest) (*commonpb.Status, error) {
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetBuildID()))
 	mlog.Info(ctx, "DataNode building index ...",
 		mlog.String("clusterID", req.GetClusterID()),
-		mlog.Int64("taskID", req.GetBuildID()),
+		mlog.FieldTaskID(req.GetBuildID()),
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64("partitionID", req.GetPartitionID()),
 		mlog.Int64("segmentID", req.GetSegmentID()),
@@ -278,7 +281,7 @@ func (node *DataNode) createIndexTask(ctx context.Context, req *workerpb.CreateJ
 		req.TaskSlot = 64
 	}
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetBuildID()))
 	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreIndexTask(req.GetClusterID(), req.GetBuildID(), &index.IndexTaskInfo{
 		Cancel:                 taskCancel,
@@ -319,14 +322,16 @@ func (node *DataNode) createIndexTask(ctx context.Context, req *workerpb.CreateJ
 	}
 	metrics.DataNodeBuildIndexTaskCounter.WithLabelValues(paramtable.GetStringNodeID(), metrics.SuccessLabel).Inc()
 	mlog.Info(context.TODO(), "DataNode index job enqueued successfully",
+		mlog.FieldTaskID(req.GetBuildID()),
 		mlog.String("indexName", req.GetIndexName()))
 	return ret, nil
 }
 
 func (node *DataNode) createAnalyzeTask(ctx context.Context, req *workerpb.AnalyzeRequest) (*commonpb.Status, error) {
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetTaskID()))
 	mlog.Info(ctx, "receive analyze job",
 		mlog.String("clusterID", req.GetClusterID()),
-		mlog.Int64("taskID", req.GetTaskID()),
+		mlog.FieldTaskID(req.GetTaskID()),
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64("partitionID", req.GetPartitionID()),
 		mlog.Int64("fieldID", req.GetFieldID()),
@@ -345,7 +350,7 @@ func (node *DataNode) createAnalyzeTask(ctx context.Context, req *workerpb.Analy
 	}
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
 	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreAnalyzeTask(req.GetClusterID(), req.GetTaskID(), &index.AnalyzeTaskInfo{
 		Cancel:                 taskCancel,
@@ -364,14 +369,15 @@ func (node *DataNode) createAnalyzeTask(ctx context.Context, req *workerpb.Analy
 		ret = merr.Status(err)
 		return ret, nil
 	}
-	mlog.Info(context.TODO(), "DataNode analyze job enqueued successfully")
+	mlog.Info(context.TODO(), "DataNode analyze job enqueued successfully", mlog.FieldTaskID(req.GetTaskID()))
 	return ret, nil
 }
 
 func (node *DataNode) createStatsTask(ctx context.Context, req *workerpb.CreateStatsRequest) (*commonpb.Status, error) {
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetTaskID()))
 	mlog.Info(ctx, "receive stats job",
 		mlog.String("clusterID", req.GetClusterID()),
-		mlog.Int64("taskID", req.GetTaskID()),
+		mlog.FieldTaskID(req.GetTaskID()),
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64("partitionID", req.GetPartitionID()),
 		mlog.Int64("segmentID", req.GetSegmentID()),
@@ -389,7 +395,7 @@ func (node *DataNode) createStatsTask(ctx context.Context, req *workerpb.CreateS
 	}
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
 	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreStatsTask(req.GetClusterID(), req.GetTaskID(), &index.StatsTaskInfo{
 		Cancel:                 taskCancel,
@@ -418,7 +424,7 @@ func (node *DataNode) createStatsTask(ctx context.Context, req *workerpb.CreateS
 		ret = merr.Status(err)
 		return ret, nil
 	}
-	mlog.Info(context.TODO(), "DataNode stats job enqueued successfully")
+	mlog.Info(context.TODO(), "DataNode stats job enqueued successfully", mlog.FieldTaskID(req.GetTaskID()))
 	return ret, nil
 }
 
@@ -466,7 +472,11 @@ func (node *DataNode) queryIndexTask(ctx context.Context, req *workerpb.QueryJob
 	results := make([]*workerpb.IndexTaskInfo, 0, len(req.GetTaskIDs()))
 	for _, buildID := range req.GetTaskIDs() {
 		if info, ok := infos[buildID]; ok {
-			results = append(results, info.ToIndexTaskInfo(buildID))
+			result := info.ToIndexTaskInfo(buildID)
+			if result.GetState() == commonpb.IndexState_Finished || result.GetState() == commonpb.IndexState_Failed {
+				traceFinishedTaskStorageAccess(ctx, result.GetStorageAccessStats())
+			}
+			results = append(results, result)
 		}
 	}
 	mlog.Debug(context.TODO(), "query index jobs result success", mlog.Any("results", results))
@@ -491,7 +501,11 @@ func (node *DataNode) queryStatsTask(ctx context.Context, req *workerpb.QueryJob
 	for _, taskID := range req.GetTaskIDs() {
 		info := node.taskManager.GetStatsTaskInfo(req.GetClusterID(), taskID)
 		if info != nil {
-			results = append(results, info.ToStatsResult(taskID))
+			result := info.ToStatsResult(taskID)
+			if result.GetState() == indexpb.JobState_JobStateFinished || result.GetState() == indexpb.JobState_JobStateFailed {
+				traceFinishedTaskStorageAccess(ctx, result.GetStorageAccessStats())
+			}
+			results = append(results, result)
 		}
 	}
 	mlog.Debug(context.TODO(), "query stats job result success", mlog.Any("results", results))
@@ -516,13 +530,17 @@ func (node *DataNode) queryAnalyzeTask(ctx context.Context, req *workerpb.QueryJ
 	for _, taskID := range req.GetTaskIDs() {
 		info := node.taskManager.GetAnalyzeTaskInfo(req.GetClusterID(), taskID)
 		if info != nil {
-			results = append(results, &workerpb.AnalyzeResult{
+			result := &workerpb.AnalyzeResult{
 				TaskID:             taskID,
 				State:              info.State,
 				FailReason:         info.FailReason,
 				CentroidsFile:      info.CentroidsFile,
 				StorageAccessStats: info.StorageAccessCollector.Snapshot(),
-			})
+			}
+			if result.GetState() == indexpb.JobState_JobStateFinished || result.GetState() == indexpb.JobState_JobStateFailed {
+				traceFinishedTaskStorageAccess(ctx, result.GetStorageAccessStats())
+			}
+			results = append(results, result)
 		}
 	}
 	mlog.Debug(context.TODO(), "query analyze jobs result success", mlog.Any("results", results))

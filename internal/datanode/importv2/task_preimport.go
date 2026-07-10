@@ -65,7 +65,7 @@ func NewPreImportTask(req *datapb.PreImportRequest,
 		}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
 	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
 	// During binlog import, even if the primary key's autoID is set to true,
 	// the primary key from the binlog should be used instead of being reassigned.

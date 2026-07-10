@@ -121,7 +121,7 @@ func NewCopySegmentTask(
 	cm storage.ChunkManager,
 ) Task {
 	ctx, cancel := context.WithCancel(context.Background())
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
 	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
 
 	// Step 1: Initialize empty result structures for each target segment

@@ -200,7 +200,7 @@ func (t *clusteringCompactionTask) QueryTaskOnWorker(cluster session.Cluster) {
 			mlog.Warn(context.TODO(), "update clustering compaction task meta failed", mlog.Err(err))
 			return
 		}
-		reportStorageAccessStats(storageAccessTaskCompaction, result.GetStorageAccessStats())
+		reportStorageAccessStats(context.TODO(), storageAccessTaskCompaction, t.GetTaskID(), result.GetStorageAccessStats())
 		err = t.processMetaSaved()
 		if err != nil {
 			mlog.Warn(context.TODO(), "processMetaSaved failed", mlog.Err(err))

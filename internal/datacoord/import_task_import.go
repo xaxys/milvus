@@ -266,7 +266,7 @@ func (t *importTask) QueryTaskOnWorker(cluster session.Cluster) {
 		}
 		importDuration := t.GetTR().RecordSpan()
 		metrics.ImportTaskLatency.WithLabelValues(metrics.ImportStageImport).Observe(float64(importDuration.Milliseconds()))
-		reportStorageAccessStats(storageAccessTaskImport, resp.GetStorageAccessStats())
+		reportStorageAccessStats(context.TODO(), storageAccessTaskImport, t.GetTaskID(), resp.GetStorageAccessStats())
 		mlog.Info(context.TODO(), "import done", WrapTaskLog(t, mlog.Int64("totalRows", totalRows), mlog.Duration("taskTimeCost/import", importDuration))...)
 	}
 	mlog.Info(context.TODO(), "query import", WrapTaskLog(t, mlog.String("respState", resp.GetState().String()),

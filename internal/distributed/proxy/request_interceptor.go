@@ -25,8 +25,10 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
@@ -65,8 +67,11 @@ func UnaryRequestStatsInterceptor(ctx context.Context, req any, rpcInfo *grpc.Un
 	).Inc()
 
 	start := time.Now()
-	resp, err := handler(ctx, req)
+	collector := storageaccess.NewCollector(storageaccess.WithRequestID(storageaccess.RequestIDFromContext(ctx)))
+	requestCtx := storageaccess.WithCollector(ctx, collector)
+	resp, err := handler(requestCtx, req)
 	label := requestutil.ParseMetricLabel(resp, err)
+	reportRequestStorageAccessStats(requestCtx, methodTag, dbName, collectionName, collector.Snapshot())
 
 	// set metrics for state code
 	metrics.ProxyFunctionCall.WithLabelValues(
@@ -114,6 +119,22 @@ func UnaryRequestStatsInterceptor(ctx context.Context, req any, rpcInfo *grpc.Un
 	).Observe(float64(time.Since(start).Milliseconds()))
 
 	return resp, err
+}
+
+func reportRequestStorageAccessStats(ctx context.Context, methodTag string, dbName string, collectionName string, stats *datapb.StorageAccessStats) {
+	if stats == nil || stats.GetRequestCount() == 0 || methodTag == "" {
+		return
+	}
+	fields := []mlog.Field{mlog.String("method", methodTag)}
+	if dbName != "" {
+		fields = append(fields, mlog.FieldDbName(dbName))
+	}
+	if collectionName != "" {
+		fields = append(fields, mlog.FieldCollectionName(collectionName))
+	}
+	fields = append(fields, storageaccess.LogFields(stats)...)
+	mlog.Info(ctx, "request storage access stats coordinated", fields...)
+	storageaccess.AddTraceEvent(ctx, "storage_access.request.coordinated", stats)
 }
 
 // FullMethodName2Tag returns method tag for grpc full method name

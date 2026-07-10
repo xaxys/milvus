@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -58,15 +59,38 @@ type opStats struct {
 
 // Collector records task-local storage access stats without retaining raw samples.
 type Collector struct {
-	mu    sync.Mutex
-	stats map[opKey]*opStats
+	mu        sync.Mutex
+	stats     map[opKey]*opStats
+	taskID    int64
+	requestID string
+}
+
+// CollectorOption configures transient correlation metadata on a collector.
+type CollectorOption func(*Collector)
+
+// WithTaskID attaches a stable task identifier to snapshots.
+func WithTaskID(taskID int64) CollectorOption {
+	return func(collector *Collector) {
+		collector.taskID = taskID
+	}
+}
+
+// WithRequestID attaches a request identifier to snapshots.
+func WithRequestID(requestID string) CollectorOption {
+	return func(collector *Collector) {
+		collector.requestID = requestID
+	}
 }
 
 // NewCollector creates a concurrency-safe storage access collector.
-func NewCollector() *Collector {
-	return &Collector{
-		stats: make(map[opKey]*opStats),
+func NewCollector(options ...CollectorOption) *Collector {
+	collector := &Collector{}
+	for _, option := range options {
+		if option != nil {
+			option(collector)
+		}
 	}
+	return collector
 }
 
 // WithCollector returns a context carrying collector.
@@ -84,6 +108,18 @@ func FromContext(ctx context.Context) *Collector {
 	}
 	collector, _ := ctx.Value(contextKey{}).(*Collector)
 	return collector
+}
+
+// RequestIDFromContext returns the current trace ID for request correlation.
+func RequestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	traceID := trace.SpanContextFromContext(ctx).TraceID()
+	if !traceID.IsValid() {
+		return ""
+	}
+	return traceID.String()
 }
 
 func statusFromError(err error) string {
@@ -122,6 +158,9 @@ func RecordAccess(ctx context.Context, opType string, bytes int64, err error, st
 }
 
 func (c *Collector) getOrCreateLocked(key opKey) *opStats {
+	if c.stats == nil {
+		c.stats = make(map[opKey]*opStats)
+	}
 	stats, ok := c.stats[key]
 	if ok {
 		return stats
@@ -167,7 +206,10 @@ func (c *Collector) Snapshot() *datapb.StorageAccessStats {
 		return nil
 	}
 
-	result := &datapb.StorageAccessStats{}
+	result := &datapb.StorageAccessStats{
+		TaskId:    c.taskID,
+		RequestId: c.requestID,
+	}
 	keys := make([]opKey, 0, len(c.stats))
 	for key := range c.stats {
 		keys = append(keys, key)
@@ -217,6 +259,12 @@ func (c *Collector) Merge(stats *datapb.StorageAccessStats) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.taskID == 0 {
+		c.taskID = stats.GetTaskId()
+	}
+	if c.requestID == "" {
+		c.requestID = stats.GetRequestId()
+	}
 
 	for _, incoming := range stats.GetOpStats() {
 		if incoming.GetOpType() == "" || incoming.GetStatus() == "" {

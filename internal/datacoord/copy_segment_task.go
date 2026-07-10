@@ -761,7 +761,7 @@ func SyncCopySegmentTask(task CopySegmentTask, resp *datapb.QueryCopySegmentResp
 			UpdateCopyTaskCompleteTs(completeTs)); err != nil {
 			return err
 		}
-		reportStorageAccessStats(storageAccessTaskCopySegment, resp.GetStorageAccessStats())
+		reportStorageAccessStats(ctx, storageAccessTaskCopySegment, task.GetTaskId(), resp.GetStorageAccessStats())
 		return nil
 
 	case datapb.CopySegmentTaskState_CopySegmentTaskFailed:

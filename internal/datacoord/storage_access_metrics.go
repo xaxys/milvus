@@ -17,6 +17,7 @@
 package datacoord
 
 import (
+	"context"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 )
 
@@ -41,11 +43,20 @@ const (
 	maxStorageAccessFlushFingerprints = 100000
 )
 
-func reportStorageAccessStats(taskType string, stats *datapb.StorageAccessStats) {
+func reportStorageAccessStats(ctx context.Context, taskType string, taskID int64, stats *datapb.StorageAccessStats) {
 	if stats == nil || taskType == "" {
 		return
 	}
-	for _, opStats := range stats.GetOpStats() {
+	if ctx == nil {
+		ctx = context.TODO()
+	}
+	correlatedStats := stats
+	if taskID != 0 && stats.GetTaskId() == 0 {
+		copy := *stats
+		copy.TaskId = taskID
+		correlatedStats = &copy
+	}
+	for _, opStats := range correlatedStats.GetOpStats() {
 		if opStats.GetOpType() == "" || opStats.GetStatus() == "" || opStats.GetRequestCount() == 0 {
 			continue
 		}
@@ -72,6 +83,13 @@ func reportStorageAccessStats(taskType string, stats *datapb.StorageAccessStats)
 
 		_ = summarizeStorageAccessOpStats(opStats)
 	}
+	if correlatedStats.GetRequestCount() == 0 {
+		return
+	}
+	fields := []mlog.Field{mlog.String("taskType", taskType)}
+	fields = append(fields, storageaccess.LogFields(correlatedStats)...)
+	mlog.Info(ctx, "task storage access stats coordinated", fields...)
+	storageaccess.AddTraceEvent(ctx, "storage_access.task.coordinated", correlatedStats)
 }
 
 func summarizeStorageAccessOpStats(opStats *datapb.StorageAccessOpStats) storageAccessSummary {
@@ -122,7 +140,7 @@ func (c *storageAccessFingerprintCache) mark(fingerprint string) bool {
 	return true
 }
 
-func (s *Server) reportSaveBinlogPathsStorageAccessStats(req *datapb.SaveBinlogPathsRequest) {
+func (s *Server) reportSaveBinlogPathsStorageAccessStats(ctx context.Context, req *datapb.SaveBinlogPathsRequest) {
 	if req.GetStorageAccessStats() == nil {
 		return
 	}
@@ -132,7 +150,7 @@ func (s *Server) reportSaveBinlogPathsStorageAccessStats(req *datapb.SaveBinlogP
 	if !s.storageAccessFlushFingerprints.mark(saveBinlogPathsStorageAccessFingerprint(req)) {
 		return
 	}
-	reportStorageAccessStats(storageAccessTaskFlush, req.GetStorageAccessStats())
+	reportStorageAccessStats(ctx, storageAccessTaskFlush, req.GetStorageAccessStats().GetTaskId(), req.GetStorageAccessStats())
 }
 
 func saveBinlogPathsStorageAccessFingerprint(req *datapb.SaveBinlogPathsRequest) string {

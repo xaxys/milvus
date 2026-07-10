@@ -205,6 +205,7 @@ func (e *executor) Start(ctx context.Context) {
 
 func (e *executor) executeTask(task Compactor) {
 	log := mlog.With(
+		mlog.FieldTaskID(task.GetPlanID()),
 		mlog.Int64("planID", task.GetPlanID()),
 		mlog.Int64("collection", task.GetCollection()),
 		mlog.String("channel", task.GetChannelName()),

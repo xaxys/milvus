@@ -62,7 +62,7 @@ func NewL0ImportTask(req *datapb.ImportRequest,
 	cm storage.ChunkManager,
 ) Task {
 	ctx, cancel := context.WithCancel(context.Background())
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
 	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
 	// Allocator for autoIDs and logIDs.
 	alloc := allocator.NewLocalAllocator(req.GetIDRange().GetBegin(), req.GetIDRange().GetEnd())

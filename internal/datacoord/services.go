@@ -679,7 +679,7 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	}
 
 	s.meta.SetLastWrittenTime(req.GetSegmentID())
-	s.reportSaveBinlogPathsStorageAccessStats(req)
+	s.reportSaveBinlogPathsStorageAccessStats(ctx, req)
 	mlog.Info(context.TODO(), "SaveBinlogPaths sync segment with meta",
 		mlog.Any("checkpoints", req.GetCheckPoints()),
 		mlog.Strings("binlogs", stringifyBinlogs(req.GetField2BinlogPaths())),

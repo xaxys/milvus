@@ -28,7 +28,7 @@ import (
 var compactionStorageAccessCollectors sync.Map
 
 func withCompactionStorageAccess(ctx context.Context, planID typeutil.UniqueID) context.Context {
-	collector := storageaccess.NewCollector()
+	collector := storageaccess.NewCollector(storageaccess.WithTaskID(planID))
 	compactionStorageAccessCollectors.Store(planID, collector)
 	return storageaccess.WithCollector(ctx, collector)
 }

@@ -589,7 +589,7 @@ func (t *refreshExternalCollectionTask) SetJobInfo(ctx context.Context, resp *da
 	); err != nil {
 		return err
 	}
-	reportStorageAccessStats(storageAccessTaskRefreshExternal, resp.GetStorageAccessStats())
+	reportStorageAccessStats(context.TODO(), storageAccessTaskRefreshExternal, t.GetTaskId(), resp.GetStorageAccessStats())
 	return nil
 }
 

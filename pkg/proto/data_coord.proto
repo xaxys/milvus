@@ -514,6 +514,10 @@ message StorageAccessStats {
   uint64 failed_count = 3;
   uint64 canceled_count = 4;
   uint64 bytes = 5;
+  // Transient correlation fields for logs and traces. These values must not be
+  // used as Prometheus labels or retained in long-lived per-ID maps.
+  int64 task_id = 6;
+  string request_id = 7;
 }
 
 message CheckPoint {

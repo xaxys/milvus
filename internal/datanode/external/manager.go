@@ -232,7 +232,7 @@ func (m *ExternalCollectionManager) SubmitTask(
 	taskID := req.GetTaskID()
 
 	taskCtx, cancel := context.WithCancel(m.ctx)
-	storageAccessCollector := storageaccess.NewCollector()
+	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(taskID))
 	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	keptSegments := extractSegmentIDs(req.GetCurrentSegments())
 
