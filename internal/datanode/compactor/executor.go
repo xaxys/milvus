@@ -35,10 +35,6 @@ const (
 	maxTaskQueueNum = 1024
 )
 
-type storageAccessStatsProvider interface {
-	StorageAccessStats() *datapb.StorageAccessStats
-}
-
 type Executor interface {
 	Start(ctx context.Context)
 	Enqueue(task Compactor) (bool, error)
@@ -205,7 +201,6 @@ func (e *executor) Start(ctx context.Context) {
 
 func (e *executor) executeTask(task Compactor) {
 	log := mlog.With(
-		mlog.FieldTaskID(task.GetPlanID()),
 		mlog.Int64("planID", task.GetPlanID()),
 		mlog.Int64("collection", task.GetCollection()),
 		mlog.String("channel", task.GetChannelName()),
@@ -222,9 +217,6 @@ func (e *executor) executeTask(task Compactor) {
 	}
 
 	// Update task with result
-	if provider, ok := task.(storageAccessStatsProvider); ok {
-		result.StorageAccessStats = provider.StorageAccessStats()
-	}
 	e.completeTask(task.GetPlanID(), result)
 
 	// Emit metrics

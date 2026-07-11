@@ -26,12 +26,12 @@ import (
 	"context"
 	"net/url"
 	"strings"
-	"time"
 	"unsafe"
 
 	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 )
 
 // WriteFile writes raw bytes to a file using milvus-storage filesystem FFI.
@@ -52,9 +52,9 @@ func WriteFileWithContext(
 	filePath string,
 	data []byte,
 ) (err error) {
-	start := time.Now()
+	recorder := timerecord.NewTimeRecorder("packedWriteFile")
 	defer func() {
-		storageaccess.RecordAccess(ctx, storageaccess.OpWrite, int64(len(data)), err, start)
+		storageaccess.RecordAccess(ctx, storageaccess.OpWrite, int64(len(data)), err, recorder.ElapseSpan())
 	}()
 
 	cProperties, err := MakePropertiesFromStorageConfig(storageConfig, nil)
@@ -82,13 +82,10 @@ func WriteFileWithContext(
 			dir := filePath[:idx]
 			cDir := C.CString(dir)
 			defer C.free(unsafe.Pointer(cDir))
-			createDirStart := time.Now()
 			result = C.loon_filesystem_create_dir(fsHandle, cDir, C.uint32_t(len(dir)), true)
 			if err := HandleLoonFFIResult(result); err != nil {
-				storageaccess.RecordAccess(ctx, storageaccess.OpCreateDir, 0, err, createDirStart)
 				return merr.WrapErrStorage(err, "failed to create parent directory %q", dir)
 			}
-			storageaccess.RecordAccess(ctx, storageaccess.OpCreateDir, 0, nil, createDirStart)
 		}
 	}
 
@@ -143,9 +140,9 @@ func ReadFileWithExternalSpecWithContext(
 	filePath string,
 	extfs ExternalSpecContext,
 ) (data []byte, err error) {
-	start := time.Now()
+	recorder := timerecord.NewTimeRecorder("packedReadFile")
 	defer func() {
-		storageaccess.RecordAccess(ctx, storageaccess.OpRead, int64(len(data)), err, start)
+		storageaccess.RecordAccess(ctx, storageaccess.OpRead, int64(len(data)), err, recorder.ElapseSpan())
 	}()
 
 	cProperties, err := MakePropertiesFromStorageConfig(storageConfig, nil)

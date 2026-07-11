@@ -20,7 +20,6 @@ import (
 	"github.com/samber/lo"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
-	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
@@ -190,29 +189,6 @@ type Task interface {
 	GetBufferSize() int64
 	Cancel()
 	Clone() Task
-}
-
-func StorageAccessStats(task Task) *datapb.StorageAccessStats {
-	if task == nil {
-		return nil
-	}
-	var collector *storageaccess.Collector
-	switch t := task.(type) {
-	case *PreImportTask:
-		collector = t.storageAccessCollector
-	case *ImportTask:
-		collector = t.storageAccessCollector
-	case *L0PreImportTask:
-		collector = t.storageAccessCollector
-	case *L0ImportTask:
-		collector = t.storageAccessCollector
-	case *CopySegmentTask:
-		collector = t.storageAccessCollector
-	}
-	if collector == nil {
-		return nil
-	}
-	return collector.Snapshot()
 }
 
 func WrapLogFields(task Task, fields ...mlog.Field) []mlog.Field {

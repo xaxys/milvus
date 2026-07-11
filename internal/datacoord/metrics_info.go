@@ -162,6 +162,11 @@ func (s *Server) getSyncTaskJSON(ctx context.Context, req *milvuspb.GetMetricsRe
 	return metricsinfo.MarshalGetMetricsValues(ret, err)
 }
 
+func (s *Server) getStorageAccessJSON(ctx context.Context, req *milvuspb.GetMetricsRequest) (string, error) {
+	ret, err := getMetrics[*metricsinfo.StorageAccessStats](ctx, s, req)
+	return metricsinfo.MarshalGetMetricsValues(ret, err)
+}
+
 // getSystemInfoMetrics composes data cluster metrics
 func (s *Server) getSystemInfoMetrics(
 	ctx context.Context,

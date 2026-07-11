@@ -133,6 +133,36 @@ func TestGetDataNodeMetrics(t *testing.T) {
 	assert.True(t, info.HasError)
 }
 
+func TestGetStorageAccessJSON(t *testing.T) {
+	mockNodeManager := session.NewMockNodeManager(t)
+	dn := mocks.NewMockDataNodeClient(t)
+	mockNodeManager.EXPECT().GetClientIDs().Return([]int64{11})
+	mockNodeManager.EXPECT().GetClient(int64(11)).Return(dn, nil)
+	dn.EXPECT().GetMetrics(mock.Anything, mock.Anything).RunAndReturn(
+		func(ctx context.Context, req *milvuspb.GetMetricsRequest, option ...grpc.CallOption) (*milvuspb.GetMetricsResponse, error) {
+			assert.Equal(t, metricsinfo.StorageAccessMetrics, gjson.Get(req.GetRequest(), metricsinfo.MetricTypeKey).String())
+			return &milvuspb.GetMetricsResponse{
+				Status: merr.Success(),
+				Response: `[{"node_id":"11","task_type":"index","task_id":"101","op_stats":[],` +
+					`"request_count":1,"failed_count":0,"canceled_count":0,"bytes":128}]`,
+			}, nil
+		})
+
+	server := &Server{nodeManager: mockNodeManager}
+	req, err := metricsinfo.ConstructRequestByMetricType(metricsinfo.StorageAccessMetrics)
+	assert.NoError(t, err)
+	response, err := server.getStorageAccessJSON(context.Background(), req)
+	assert.NoError(t, err)
+
+	var stats []*metricsinfo.StorageAccessStats
+	assert.NoError(t, json.Unmarshal([]byte(response), &stats))
+	if assert.Len(t, stats, 1) {
+		assert.Equal(t, int64(11), stats[0].NodeID)
+		assert.Equal(t, int64(101), stats[0].TaskID)
+		assert.EqualValues(t, 128, stats[0].Bytes)
+	}
+}
+
 func TestGetIndexNodeMetrics(t *testing.T) {
 	svr := newTestServer(t)
 	defer closeTestServer(t, svr)

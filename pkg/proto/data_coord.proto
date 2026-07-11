@@ -490,34 +490,6 @@ message SaveBinlogPathsRequest {
   repeated FieldBinlog field2Bm25logPaths = 16;
   bool with_full_binlogs = 17; // report with full data for verification.
   string manifest_path = 18; //
-  StorageAccessStats storage_access_stats = 19;
-}
-
-message StorageAccessLatencyBucket {
-  double upper_bound_ms = 1;
-  uint64 cumulative_count = 2;
-}
-
-message StorageAccessOpStats {
-  string op_type = 1;
-  string status = 2;
-  uint64 request_count = 3;
-  uint64 bytes = 4;
-  double latency_sum_ms = 5;
-  double latency_max_ms = 6;
-  repeated StorageAccessLatencyBucket latency_buckets = 7;
-}
-
-message StorageAccessStats {
-  repeated StorageAccessOpStats op_stats = 1;
-  uint64 request_count = 2;
-  uint64 failed_count = 3;
-  uint64 canceled_count = 4;
-  uint64 bytes = 5;
-  // Transient correlation fields for logs and traces. These values must not be
-  // used as Prometheus labels or retained in long-lived per-ID maps.
-  int64 task_id = 6;
-  string request_id = 7;
 }
 
 message CheckPoint {
@@ -820,7 +792,6 @@ message CompactionPlanResult {
   repeated CompactionSegment segments = 3;
   string channel = 4;
   CompactionType type = 5;
-  StorageAccessStats storage_access_stats = 6;
 }
 
 message CompactionStateResponse {
@@ -1039,7 +1010,6 @@ message QueryPreImportResponse {
   string reason = 4;
   int64 slots = 5;
   repeated ImportFileStats file_stats = 6;
-  StorageAccessStats storage_access_stats = 7;
 }
 
 message QueryImportRequest {
@@ -1066,7 +1036,6 @@ message QueryImportResponse {
   string reason = 4;
   int64 slots = 5;
   repeated ImportSegmentInfo import_segments_info = 6;
-  StorageAccessStats storage_access_stats = 7;
 }
 
 message DropImportRequest {
@@ -1150,7 +1119,6 @@ message QueryCopySegmentResponse {
   string reason = 4;
   repeated CopySegmentResult segment_results = 5;  // Complete segment and index metadata
   int64 slots = 6;
-  StorageAccessStats storage_access_stats = 7;
 }
 
 message DropCopySegmentRequest {
@@ -1483,7 +1451,6 @@ message RefreshExternalCollectionTaskResponse {
   repeated SegmentInfo updatedSegments = 3;
   index.JobState state = 4;
   string fail_reason = 5;
-  StorageAccessStats storage_access_stats = 6;
 }
 
 // External Table Refresh Messages

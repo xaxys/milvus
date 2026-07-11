@@ -47,9 +47,8 @@ type L0PreImportTask struct {
 	schema       *schemapb.CollectionSchema
 	req          *datapb.PreImportRequest
 
-	manager                TaskManager
-	cm                     storage.ChunkManager
-	storageAccessCollector *storageaccess.Collector
+	manager TaskManager
+	cm      storage.ChunkManager
 }
 
 func NewL0PreImportTask(req *datapb.PreImportRequest,
@@ -62,8 +61,7 @@ func NewL0PreImportTask(req *datapb.PreImportRequest,
 		}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
-	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
+	ctx = storageaccess.WithCollector(ctx, storageaccess.NewTaskCollector(storageaccess.TaskTypePreImport, req.GetTaskID()))
 	return &L0PreImportTask{
 		PreImportTask: &datapb.PreImportTask{
 			JobID:        req.GetJobID(),
@@ -72,15 +70,14 @@ func NewL0PreImportTask(req *datapb.PreImportRequest,
 			State:        datapb.ImportTaskStateV2_Pending,
 			FileStats:    fileStats,
 		},
-		ctx:                    ctx,
-		cancel:                 cancel,
-		partitionIDs:           req.GetPartitionIDs(),
-		vchannels:              req.GetVchannels(),
-		schema:                 req.GetSchema(),
-		req:                    req,
-		manager:                manager,
-		cm:                     cm,
-		storageAccessCollector: storageAccessCollector,
+		ctx:          ctx,
+		cancel:       cancel,
+		partitionIDs: req.GetPartitionIDs(),
+		vchannels:    req.GetVchannels(),
+		schema:       req.GetSchema(),
+		req:          req,
+		manager:      manager,
+		cm:           cm,
 	}
 }
 
@@ -116,16 +113,15 @@ func (t *L0PreImportTask) Cancel() {
 func (t *L0PreImportTask) Clone() Task {
 	ctx, cancel := context.WithCancel(t.ctx)
 	return &L0PreImportTask{
-		PreImportTask:          typeutil.Clone(t.PreImportTask),
-		ctx:                    ctx,
-		cancel:                 cancel,
-		partitionIDs:           t.GetPartitionIDs(),
-		vchannels:              t.GetVchannels(),
-		schema:                 t.GetSchema(),
-		req:                    t.req,
-		manager:                t.manager,
-		cm:                     t.cm,
-		storageAccessCollector: t.storageAccessCollector,
+		PreImportTask: typeutil.Clone(t.PreImportTask),
+		ctx:           ctx,
+		cancel:        cancel,
+		partitionIDs:  t.GetPartitionIDs(),
+		vchannels:     t.GetVchannels(),
+		schema:        t.GetSchema(),
+		req:           t.req,
+		manager:       t.manager,
+		cm:            t.cm,
 	}
 }
 

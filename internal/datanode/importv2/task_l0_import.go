@@ -48,12 +48,11 @@ type L0ImportTask struct {
 	segmentsInfo map[int64]*datapb.ImportSegmentInfo
 	req          *datapb.ImportRequest
 
-	allocator              allocator.Interface
-	manager                TaskManager
-	syncMgr                syncmgr.SyncManager
-	cm                     storage.ChunkManager
-	metaCaches             map[string]metacache.MetaCache
-	storageAccessCollector *storageaccess.Collector
+	allocator  allocator.Interface
+	manager    TaskManager
+	syncMgr    syncmgr.SyncManager
+	cm         storage.ChunkManager
+	metaCaches map[string]metacache.MetaCache
 }
 
 func NewL0ImportTask(req *datapb.ImportRequest,
@@ -62,8 +61,7 @@ func NewL0ImportTask(req *datapb.ImportRequest,
 	cm storage.ChunkManager,
 ) Task {
 	ctx, cancel := context.WithCancel(context.Background())
-	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
-	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
+	ctx = storageaccess.WithCollector(ctx, storageaccess.NewTaskCollector(storageaccess.TaskTypeImport, req.GetTaskID()))
 	// Allocator for autoIDs and logIDs.
 	alloc := allocator.NewLocalAllocator(req.GetIDRange().GetBegin(), req.GetIDRange().GetEnd())
 	task := &L0ImportTask{
@@ -73,15 +71,14 @@ func NewL0ImportTask(req *datapb.ImportRequest,
 			CollectionID: req.GetCollectionID(),
 			State:        datapb.ImportTaskStateV2_Pending,
 		},
-		ctx:                    ctx,
-		cancel:                 cancel,
-		segmentsInfo:           make(map[int64]*datapb.ImportSegmentInfo),
-		req:                    req,
-		allocator:              alloc,
-		manager:                manager,
-		syncMgr:                syncMgr,
-		cm:                     cm,
-		storageAccessCollector: storageAccessCollector,
+		ctx:          ctx,
+		cancel:       cancel,
+		segmentsInfo: make(map[int64]*datapb.ImportSegmentInfo),
+		req:          req,
+		allocator:    alloc,
+		manager:      manager,
+		syncMgr:      syncMgr,
+		cm:           cm,
 	}
 	task.metaCaches = NewMetaCache(req)
 	return task
@@ -127,17 +124,16 @@ func (t *L0ImportTask) Clone() Task {
 		infos[id] = typeutil.Clone(info)
 	}
 	return &L0ImportTask{
-		ImportTaskV2:           typeutil.Clone(t.ImportTaskV2),
-		ctx:                    ctx,
-		cancel:                 cancel,
-		segmentsInfo:           infos,
-		req:                    t.req,
-		allocator:              t.allocator,
-		manager:                t.manager,
-		syncMgr:                t.syncMgr,
-		cm:                     t.cm,
-		metaCaches:             t.metaCaches,
-		storageAccessCollector: t.storageAccessCollector,
+		ImportTaskV2: typeutil.Clone(t.ImportTaskV2),
+		ctx:          ctx,
+		cancel:       cancel,
+		segmentsInfo: infos,
+		req:          t.req,
+		allocator:    t.allocator,
+		manager:      t.manager,
+		syncMgr:      t.syncMgr,
+		cm:           t.cm,
+		metaCaches:   t.metaCaches,
 	}
 }
 

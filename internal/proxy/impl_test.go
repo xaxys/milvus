@@ -1759,6 +1759,7 @@ func TestRegisterRestRouter(t *testing.T) {
 		{path: mhttp.QCDistPath, statusCode: http.StatusInternalServerError},
 		{path: mhttp.QCAllTasksPath, statusCode: http.StatusInternalServerError},
 		{path: mhttp.DNSyncTasksPath, statusCode: http.StatusInternalServerError},
+		{path: mhttp.DNStorageAccessPath, statusCode: http.StatusInternalServerError},
 		{path: mhttp.DCCompactionTasksPath, statusCode: http.StatusInternalServerError},
 		{path: mhttp.DCImportTasksPath, statusCode: http.StatusInternalServerError},
 		{path: mhttp.DCBuildIndexTasksPath, statusCode: http.StatusInternalServerError},

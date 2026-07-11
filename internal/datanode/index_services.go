@@ -49,7 +49,6 @@ func (node *DataNode) CreateJob(ctx context.Context, req *workerpb.CreateJobRequ
 	}
 	defer node.lifetime.Done()
 	mlog.Info(context.TODO(), "DataNode building index ...",
-		mlog.FieldTaskID(req.GetBuildID()),
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64("partitionID", req.GetPartitionID()),
 		mlog.Int64("segmentID", req.GetSegmentID()),
@@ -67,7 +66,6 @@ func (node *DataNode) CreateJob(ctx context.Context, req *workerpb.CreateJobRequ
 		mlog.Any("dim", req.GetDim()),
 	)
 	ctx, sp := otel.Tracer(typeutil.DataNodeRole).Start(ctx, "DataNode-CreateIndex", trace.WithAttributes(
-		attribute.Int64("taskID", req.GetBuildID()),
 		attribute.Int64("indexBuildID", req.GetBuildID()),
 		attribute.String("clusterID", req.GetClusterID()),
 	))
@@ -75,12 +73,9 @@ func (node *DataNode) CreateJob(ctx context.Context, req *workerpb.CreateJobRequ
 	metrics.DataNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.TotalLabel).Inc()
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
-	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetBuildID()))
-	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreIndexTask(req.GetClusterID(), req.GetBuildID(), &index.IndexTaskInfo{
-		Cancel:                 taskCancel,
-		State:                  commonpb.IndexState_InProgress,
-		StorageAccessCollector: storageAccessCollector,
+		Cancel: taskCancel,
+		State:  commonpb.IndexState_InProgress,
 	}); oldInfo != nil {
 		// Node-internal dedup of a coordinator-dispatched build task: a duplicate
 		// is a scheduling race, not the user re-creating an index.
@@ -89,6 +84,7 @@ func (node *DataNode) CreateJob(ctx context.Context, req *workerpb.CreateJobRequ
 		metrics.DataNodeBuildIndexTaskCounter.WithLabelValues(paramtable.GetStringNodeID(), metrics.FailLabel).Inc()
 		return merr.Status(err), nil
 	}
+	taskCtx = storageaccess.WithCollector(taskCtx, storageaccess.NewTaskCollector(storageaccess.TaskTypeIndex, req.GetBuildID()))
 	cm, err := node.storageFactory.NewChunkManager(node.ctx, req.GetStorageConfig())
 	if err != nil {
 		mlog.Error(context.TODO(), "create chunk manager failed", mlog.String("bucket", req.GetStorageConfig().GetBucketName()),
@@ -253,10 +249,9 @@ func (node *DataNode) CreateJobV2(ctx context.Context, req *workerpb.CreateJobV2
 }
 
 func (node *DataNode) createIndexTask(ctx context.Context, req *workerpb.CreateJobRequest) (*commonpb.Status, error) {
-	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetBuildID()))
 	mlog.Info(ctx, "DataNode building index ...",
 		mlog.String("clusterID", req.GetClusterID()),
-		mlog.FieldTaskID(req.GetBuildID()),
+		mlog.Int64("taskID", req.GetBuildID()),
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64("partitionID", req.GetPartitionID()),
 		mlog.Int64("segmentID", req.GetSegmentID()),
@@ -281,13 +276,10 @@ func (node *DataNode) createIndexTask(ctx context.Context, req *workerpb.CreateJ
 		req.TaskSlot = 64
 	}
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
-	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetBuildID()))
-	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreIndexTask(req.GetClusterID(), req.GetBuildID(), &index.IndexTaskInfo{
-		Cancel:                 taskCancel,
-		State:                  commonpb.IndexState_InProgress,
-		IndexStorePathVersion:  req.GetIndexStorePathVersion(),
-		StorageAccessCollector: storageAccessCollector,
+		Cancel:                taskCancel,
+		State:                 commonpb.IndexState_InProgress,
+		IndexStorePathVersion: req.GetIndexStorePathVersion(),
 	}); oldInfo != nil {
 		err := merr.WrapErrTaskDuplicate(indexpb.JobType_JobTypeIndexJob.String(),
 			fmt.Sprintf("building index task existed with %s-%d", req.GetClusterID(), req.GetBuildID()))
@@ -295,6 +287,7 @@ func (node *DataNode) createIndexTask(ctx context.Context, req *workerpb.CreateJ
 		metrics.DataNodeBuildIndexTaskCounter.WithLabelValues(paramtable.GetStringNodeID(), metrics.FailLabel).Inc()
 		return merr.Status(err), nil
 	}
+	taskCtx = storageaccess.WithCollector(taskCtx, storageaccess.NewTaskCollector(storageaccess.TaskTypeIndex, req.GetBuildID()))
 	cm, err := node.storageFactory.NewChunkManager(node.ctx, req.GetStorageConfig())
 	if err != nil {
 		mlog.Error(context.TODO(), "create chunk manager failed", mlog.String("bucket", req.GetStorageConfig().GetBucketName()),
@@ -322,16 +315,14 @@ func (node *DataNode) createIndexTask(ctx context.Context, req *workerpb.CreateJ
 	}
 	metrics.DataNodeBuildIndexTaskCounter.WithLabelValues(paramtable.GetStringNodeID(), metrics.SuccessLabel).Inc()
 	mlog.Info(context.TODO(), "DataNode index job enqueued successfully",
-		mlog.FieldTaskID(req.GetBuildID()),
 		mlog.String("indexName", req.GetIndexName()))
 	return ret, nil
 }
 
 func (node *DataNode) createAnalyzeTask(ctx context.Context, req *workerpb.AnalyzeRequest) (*commonpb.Status, error) {
-	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetTaskID()))
 	mlog.Info(ctx, "receive analyze job",
 		mlog.String("clusterID", req.GetClusterID()),
-		mlog.FieldTaskID(req.GetTaskID()),
+		mlog.Int64("taskID", req.GetTaskID()),
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64("partitionID", req.GetPartitionID()),
 		mlog.Int64("fieldID", req.GetFieldID()),
@@ -350,18 +341,16 @@ func (node *DataNode) createAnalyzeTask(ctx context.Context, req *workerpb.Analy
 	}
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
-	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
-	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreAnalyzeTask(req.GetClusterID(), req.GetTaskID(), &index.AnalyzeTaskInfo{
-		Cancel:                 taskCancel,
-		State:                  indexpb.JobState_JobStateInProgress,
-		StorageAccessCollector: storageAccessCollector,
+		Cancel: taskCancel,
+		State:  indexpb.JobState_JobStateInProgress,
 	}); oldInfo != nil {
 		err := merr.WrapErrTaskDuplicate(indexpb.JobType_JobTypeAnalyzeJob.String(),
 			fmt.Sprintf("analyze task already existed with %s-%d", req.GetClusterID(), req.GetTaskID()))
 		mlog.Warn(context.TODO(), "duplicated analyze task", mlog.Err(err))
 		return merr.Status(err), nil
 	}
+	taskCtx = storageaccess.WithCollector(taskCtx, storageaccess.NewTaskCollector(storageaccess.TaskTypeAnalyze, req.GetTaskID()))
 	t := index.NewAnalyzeTask(taskCtx, taskCancel, req, node.taskManager)
 	ret := merr.Success()
 	if err := node.taskScheduler.TaskQueue.Enqueue(t); err != nil {
@@ -369,15 +358,14 @@ func (node *DataNode) createAnalyzeTask(ctx context.Context, req *workerpb.Analy
 		ret = merr.Status(err)
 		return ret, nil
 	}
-	mlog.Info(context.TODO(), "DataNode analyze job enqueued successfully", mlog.FieldTaskID(req.GetTaskID()))
+	mlog.Info(context.TODO(), "DataNode analyze job enqueued successfully")
 	return ret, nil
 }
 
 func (node *DataNode) createStatsTask(ctx context.Context, req *workerpb.CreateStatsRequest) (*commonpb.Status, error) {
-	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("taskID", req.GetTaskID()))
 	mlog.Info(ctx, "receive stats job",
 		mlog.String("clusterID", req.GetClusterID()),
-		mlog.FieldTaskID(req.GetTaskID()),
+		mlog.Int64("taskID", req.GetTaskID()),
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64("partitionID", req.GetPartitionID()),
 		mlog.Int64("segmentID", req.GetSegmentID()),
@@ -395,18 +383,16 @@ func (node *DataNode) createStatsTask(ctx context.Context, req *workerpb.CreateS
 	}
 
 	taskCtx, taskCancel := context.WithCancel(node.ctx)
-	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
-	taskCtx = storageaccess.WithCollector(taskCtx, storageAccessCollector)
 	if oldInfo := node.taskManager.LoadOrStoreStatsTask(req.GetClusterID(), req.GetTaskID(), &index.StatsTaskInfo{
-		Cancel:                 taskCancel,
-		State:                  indexpb.JobState_JobStateInProgress,
-		StorageAccessCollector: storageAccessCollector,
+		Cancel: taskCancel,
+		State:  indexpb.JobState_JobStateInProgress,
 	}); oldInfo != nil {
 		err := merr.WrapErrTaskDuplicate(indexpb.JobType_JobTypeStatsJob.String(),
 			fmt.Sprintf("stats task already existed with %s-%d", req.GetClusterID(), req.GetTaskID()))
 		mlog.Warn(context.TODO(), "duplicated stats task", mlog.Err(err))
 		return merr.Status(err), nil
 	}
+	taskCtx = storageaccess.WithCollector(taskCtx, storageaccess.NewTaskCollector(storageaccess.TaskTypeStats, req.GetTaskID()))
 	cm, err := node.storageFactory.NewChunkManager(node.ctx, req.GetStorageConfig())
 	if err != nil {
 		mlog.Error(context.TODO(), "create chunk manager failed", mlog.String("bucket", req.GetStorageConfig().GetBucketName()),
@@ -424,7 +410,7 @@ func (node *DataNode) createStatsTask(ctx context.Context, req *workerpb.CreateS
 		ret = merr.Status(err)
 		return ret, nil
 	}
-	mlog.Info(context.TODO(), "DataNode stats job enqueued successfully", mlog.FieldTaskID(req.GetTaskID()))
+	mlog.Info(context.TODO(), "DataNode stats job enqueued successfully")
 	return ret, nil
 }
 
@@ -472,11 +458,7 @@ func (node *DataNode) queryIndexTask(ctx context.Context, req *workerpb.QueryJob
 	results := make([]*workerpb.IndexTaskInfo, 0, len(req.GetTaskIDs()))
 	for _, buildID := range req.GetTaskIDs() {
 		if info, ok := infos[buildID]; ok {
-			result := info.ToIndexTaskInfo(buildID)
-			if result.GetState() == commonpb.IndexState_Finished || result.GetState() == commonpb.IndexState_Failed {
-				traceFinishedTaskStorageAccess(ctx, result.GetStorageAccessStats())
-			}
-			results = append(results, result)
+			results = append(results, info.ToIndexTaskInfo(buildID))
 		}
 	}
 	mlog.Debug(context.TODO(), "query index jobs result success", mlog.Any("results", results))
@@ -501,11 +483,7 @@ func (node *DataNode) queryStatsTask(ctx context.Context, req *workerpb.QueryJob
 	for _, taskID := range req.GetTaskIDs() {
 		info := node.taskManager.GetStatsTaskInfo(req.GetClusterID(), taskID)
 		if info != nil {
-			result := info.ToStatsResult(taskID)
-			if result.GetState() == indexpb.JobState_JobStateFinished || result.GetState() == indexpb.JobState_JobStateFailed {
-				traceFinishedTaskStorageAccess(ctx, result.GetStorageAccessStats())
-			}
-			results = append(results, result)
+			results = append(results, info.ToStatsResult(taskID))
 		}
 	}
 	mlog.Debug(context.TODO(), "query stats job result success", mlog.Any("results", results))
@@ -530,17 +508,12 @@ func (node *DataNode) queryAnalyzeTask(ctx context.Context, req *workerpb.QueryJ
 	for _, taskID := range req.GetTaskIDs() {
 		info := node.taskManager.GetAnalyzeTaskInfo(req.GetClusterID(), taskID)
 		if info != nil {
-			result := &workerpb.AnalyzeResult{
-				TaskID:             taskID,
-				State:              info.State,
-				FailReason:         info.FailReason,
-				CentroidsFile:      info.CentroidsFile,
-				StorageAccessStats: info.StorageAccessCollector.Snapshot(),
-			}
-			if result.GetState() == indexpb.JobState_JobStateFinished || result.GetState() == indexpb.JobState_JobStateFailed {
-				traceFinishedTaskStorageAccess(ctx, result.GetStorageAccessStats())
-			}
-			results = append(results, result)
+			results = append(results, &workerpb.AnalyzeResult{
+				TaskID:        taskID,
+				State:         info.State,
+				FailReason:    info.FailReason,
+				CentroidsFile: info.CentroidsFile,
+			})
 		}
 	}
 	mlog.Debug(context.TODO(), "query analyze jobs result success", mlog.Any("results", results))

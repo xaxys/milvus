@@ -42,6 +42,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/analyzer"
 	"github.com/milvus-io/milvus/internal/util/fileresource"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
@@ -243,6 +244,17 @@ func (node *DataNode) registerMetricsRequest() {
 	node.metricsRequest.RegisterMetricsRequest(metricsinfo.SyncTaskKey,
 		func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
 			return node.syncMgr.TaskStatsJSON(), nil
+		})
+
+	node.metricsRequest.RegisterMetricsRequest(metricsinfo.StorageAccessMetrics,
+		func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+			taskType := jsonReq.Get(metricsinfo.StorageAccessTaskTypeKey).String()
+			taskID := jsonReq.Get(metricsinfo.StorageAccessTaskIDKey).Int()
+			stats := storageaccess.DefaultRegistry.Snapshots(taskType, taskID)
+			for _, snapshot := range stats {
+				snapshot.NodeID = paramtable.GetNodeID()
+			}
+			return metricsinfo.MarshalGetMetricsValues(stats, nil)
 		})
 	mlog.Info(node.ctx, "register metrics actions finished")
 }

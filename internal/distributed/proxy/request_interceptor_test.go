@@ -19,18 +19,14 @@ package grpcproxy
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
-	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
@@ -139,33 +135,6 @@ func (suite *StatsInterceptorSuite) TestUnaryRequestStatsInterceptor() {
 			metrics.ProxyFunctionCall.DeletePartialMatch(prometheus.Labels{})
 		})
 	}
-}
-
-func (suite *StatsInterceptorSuite) TestUnaryRequestStorageAccessCorrelation() {
-	spanRecorder := tracetest.NewSpanRecorder()
-	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
-	ctx, span := provider.Tracer("proxy-request-test").Start(context.Background(), "request")
-
-	var statsRequestID string
-	handler := func(ctx context.Context, req any) (interface{}, error) {
-		storageaccess.RecordAccess(ctx, storageaccess.OpRead, 128, nil, time.Now().Add(-time.Millisecond))
-		statsRequestID = storageaccess.FromContext(ctx).Snapshot().GetRequestId()
-		return merr.Success(), nil
-	}
-
-	_, err := UnaryRequestStatsInterceptor(ctx, &milvuspb.QueryRequest{
-		DbName:         "default",
-		CollectionName: "test",
-	}, &grpc.UnaryServerInfo{
-		FullMethod: milvuspb.MilvusService_Query_FullMethodName,
-	}, handler)
-	span.End()
-
-	suite.NoError(err)
-	suite.Equal(spanRecorder.Ended()[0].SpanContext().TraceID().String(), statsRequestID)
-	suite.Len(spanRecorder.Ended()[0].Events(), 2)
-	suite.Equal("storage_access.request.coordinated", spanRecorder.Ended()[0].Events()[0].Name)
-	metrics.ProxyFunctionCall.DeletePartialMatch(prometheus.Labels{})
 }
 
 func TestUnaryRequestStatsInterceptor(t *testing.T) {

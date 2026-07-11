@@ -111,7 +111,6 @@ func (at *analyzeTask) setJobInfo(result *workerpb.AnalyzeResult) error {
 	if err := at.meta.analyzeMeta.FinishTask(at.GetTaskID(), result); err != nil {
 		return err
 	}
-	reportStorageAccessStats(context.TODO(), storageAccessTaskAnalyze, at.GetTaskID(), result.GetStorageAccessStats())
 	at.SetState(result.GetState(), result.GetFailReason())
 	return nil
 }

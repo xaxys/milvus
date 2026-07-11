@@ -18,19 +18,18 @@ package storageaccess
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
-	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 )
 
 func TestCollectorSnapshotAndQuantile(t *testing.T) {
-	collector := NewCollector(WithTaskID(101), WithRequestID("request-1"))
+	collector := NewTaskCollector(TaskTypeIndex, 101)
 	collector.Record(OpRead, metrics.SuccessLabel, 10, 1)
 	collector.Record(OpRead, metrics.SuccessLabel, 20, 5)
 	collector.Record(OpWrite, metrics.FailLabel, 30, 125000)
@@ -38,73 +37,54 @@ func TestCollectorSnapshotAndQuantile(t *testing.T) {
 
 	stats := collector.Snapshot()
 	require.NotNil(t, stats)
-	require.EqualValues(t, 4, stats.GetRequestCount())
-	require.EqualValues(t, 1, stats.GetFailedCount())
-	require.EqualValues(t, 1, stats.GetCanceledCount())
-	require.EqualValues(t, 60, stats.GetBytes())
-	require.EqualValues(t, 101, stats.GetTaskId())
-	require.Equal(t, "request-1", stats.GetRequestId())
+	require.Equal(t, TaskTypeIndex, stats.TaskType)
+	require.EqualValues(t, 101, stats.TaskID)
+	require.EqualValues(t, 4, stats.RequestCount)
+	require.EqualValues(t, 1, stats.FailedCount)
+	require.EqualValues(t, 1, stats.CanceledCount)
+	require.EqualValues(t, 60, stats.Bytes)
 
-	var readStats, failedWriteStats *datapb.StorageAccessOpStats
-	for _, opStats := range stats.GetOpStats() {
-		switch {
-		case opStats.GetOpType() == OpRead && opStats.GetStatus() == metrics.SuccessLabel:
-			readStats = opStats
-		case opStats.GetOpType() == OpWrite && opStats.GetStatus() == metrics.FailLabel:
-			failedWriteStats = opStats
+	var readStatsIndex int
+	for idx, opStats := range stats.OpStats {
+		if opStats.OpType == OpRead && opStats.Status == metrics.SuccessLabel {
+			readStatsIndex = idx
+			break
 		}
 	}
-	require.NotNil(t, readStats)
-	require.EqualValues(t, 2, readStats.GetRequestCount())
-	require.EqualValues(t, 30, readStats.GetBytes())
-	require.Equal(t, 6.0, readStats.GetLatencySumMs())
-	require.Equal(t, 5.0, readStats.GetLatencyMaxMs())
-	require.EqualValues(t, 2, readStats.GetLatencyBuckets()[2].GetCumulativeCount())
-	require.Greater(t, Quantile(0.95, readStats.GetLatencyBuckets()), 0.0)
-
-	require.NotNil(t, failedWriteStats)
-	require.EqualValues(t, 1, failedWriteStats.GetLatencyBuckets()[len(failedWriteStats.GetLatencyBuckets())-1].GetCumulativeCount())
+	readStats := stats.OpStats[readStatsIndex]
+	require.EqualValues(t, 2, readStats.RequestCount)
+	require.EqualValues(t, 30, readStats.Bytes)
+	require.Equal(t, 6.0, readStats.LatencySumMs)
+	require.Equal(t, 5.0, readStats.LatencyMaxMs)
+	require.Greater(t, Quantile(0.95, readStats.LatencyBuckets), 0.0)
 }
 
-func TestCollectorMergeAndContext(t *testing.T) {
+func TestLatencyBucketsCombineDynamicAndClassicBounds(t *testing.T) {
+	buckets := LatencyBuckets()
+	require.Contains(t, buckets, 0.25)
+	require.Contains(t, buckets, 4.0)
+	require.Contains(t, buckets, 5.0)
+	require.Contains(t, buckets, 30000.0)
+	require.IsIncreasing(t, buckets)
+}
+
+func TestCollectorContextAndConcurrentRecord(t *testing.T) {
 	ctx := context.Background()
 	require.Nil(t, FromContext(ctx))
 
 	collector := NewCollector()
 	ctx = WithCollector(ctx, collector)
 	require.Same(t, collector, FromContext(ctx))
-	require.Same(t, ctx, WithCollector(ctx, nil))
 
-	collector.Record(OpRead, metrics.SuccessLabel, 10, 1)
-	snapshot := collector.Snapshot()
-
-	merged := NewCollector()
-	merged.Merge(snapshot)
-	merged.Merge(nil)
-
-	stats := merged.Snapshot()
-	require.NotNil(t, stats)
-	require.EqualValues(t, 1, stats.GetRequestCount())
-	require.EqualValues(t, 10, stats.GetBytes())
-	require.Len(t, stats.GetOpStats(), 1)
-	require.Equal(t, OpRead, stats.GetOpStats()[0].GetOpType())
-	require.Equal(t, metrics.SuccessLabel, stats.GetOpStats()[0].GetStatus())
-	require.EqualValues(t, snapshot.GetTaskId(), stats.GetTaskId())
-	require.Equal(t, snapshot.GetRequestId(), stats.GetRequestId())
-}
-
-func TestCollectorConcurrentRecord(t *testing.T) {
-	collector := NewCollector()
 	const goroutines = 8
 	const recordsPerGoroutine = 100
-
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < recordsPerGoroutine; j++ {
-				collector.Record(OpCopy, metrics.SuccessLabel, 1, 2)
+				RecordAccess(ctx, OpCopy, 1, nil, 2*time.Millisecond)
 			}
 		}()
 	}
@@ -112,49 +92,46 @@ func TestCollectorConcurrentRecord(t *testing.T) {
 
 	stats := collector.Snapshot()
 	require.NotNil(t, stats)
-	require.EqualValues(t, goroutines*recordsPerGoroutine, stats.GetRequestCount())
-	require.EqualValues(t, goroutines*recordsPerGoroutine, stats.GetBytes())
+	require.EqualValues(t, goroutines*recordsPerGoroutine, stats.RequestCount)
+	require.EqualValues(t, goroutines*recordsPerGoroutine, stats.Bytes)
 }
 
-func TestNilCollector(t *testing.T) {
-	var collector *Collector
-	require.Nil(t, collector.Snapshot())
-	require.NotPanics(t, func() {
-		collector.Record(OpRead, metrics.SuccessLabel, 1, 1)
-		collector.Merge(nil)
-	})
-}
+func TestRecordAccessClassifiesFailureModes(t *testing.T) {
+	collector := NewCollector()
+	ctx := WithCollector(context.Background(), collector)
+	RecordAccess(ctx, OpRead, 0, context.Canceled, time.Millisecond)
+	RecordAccess(ctx, OpRead, 0, context.DeadlineExceeded, time.Millisecond)
+	RecordAccess(ctx, OpRead, 0, errors.New("storage failure"), 250*time.Second)
 
-func TestRequestIDFromContext(t *testing.T) {
-	spanRecorder := tracetest.NewSpanRecorder()
-	provider := trace.NewTracerProvider(trace.WithSpanProcessor(spanRecorder))
-	ctx, span := provider.Tracer("storage-access-test").Start(context.Background(), "request")
-	requestID := RequestIDFromContext(ctx)
-	span.End()
-
-	require.NotEmpty(t, requestID)
-	require.Equal(t, spanRecorder.Ended()[0].SpanContext().TraceID().String(), requestID)
-	require.Empty(t, RequestIDFromContext(context.Background()))
-}
-
-func TestStorageAccessObservability(t *testing.T) {
-	collector := NewCollector(WithTaskID(10), WithRequestID("request-10"))
-	collector.Record(OpRead, metrics.SuccessLabel, 128, 2.5)
 	stats := collector.Snapshot()
+	require.NotNil(t, stats)
+	require.EqualValues(t, 3, stats.RequestCount)
+	require.EqualValues(t, 1, stats.FailedCount)
+	require.EqualValues(t, 2, stats.CanceledCount)
 
-	fields := LogFields(stats)
-	require.Len(t, fields, 7)
-	require.Contains(t, formatOperations(stats), "read/success:count=1,bytes=128")
+	for _, opStats := range stats.OpStats {
+		if opStats.Status == metrics.FailLabel {
+			require.EqualValues(t, 1, opStats.LatencyBuckets[len(opStats.LatencyBuckets)-1].CumulativeCount)
+		}
+	}
+}
 
-	spanRecorder := tracetest.NewSpanRecorder()
-	provider := trace.NewTracerProvider(trace.WithSpanProcessor(spanRecorder))
-	ctx, span := provider.Tracer("storage-access-test").Start(context.Background(), "task")
-	AddTraceEvent(ctx, "storage_access.task.finished", stats)
-	span.End()
+func TestRegistryFiltersAndExpiresSnapshots(t *testing.T) {
+	registry := NewRegistry(2, time.Minute)
+	first := &Collector{taskType: TaskTypeIndex, taskID: 1}
+	second := &Collector{taskType: TaskTypeImport, taskID: 2}
+	first.Record(OpRead, metrics.SuccessLabel, 1, 1)
+	second.Record(OpWrite, metrics.SuccessLabel, 2, 2)
+	registry.Register(first)
+	registry.Register(second)
 
-	ended := spanRecorder.Ended()
-	require.Len(t, ended, 1)
-	require.Len(t, ended[0].Events(), 2)
-	require.Equal(t, "storage_access.task.finished", ended[0].Events()[0].Name)
-	require.Equal(t, "storage_access.task.finished.operation", ended[0].Events()[1].Name)
+	require.Len(t, registry.Snapshots("", 0), 2)
+	filtered := registry.Snapshots(TaskTypeImport, 2)
+	require.Len(t, filtered, 1)
+	require.Equal(t, TaskTypeImport, filtered[0].TaskType)
+
+	expired := NewRegistry(1, time.Nanosecond)
+	expired.Register(first)
+	time.Sleep(time.Millisecond)
+	require.Empty(t, expired.Snapshots("", 0))
 }

@@ -732,7 +732,7 @@ func (t *bumpSchemaVersionCompactionTask) addV3Stats(prefix string, fieldID int6
 
 	statsRelPath := fmt.Sprintf("_stats/%s.%d/%d", prefix, fieldID, statsID)
 	absStatsPath := path.Join(writerResult.basePath, statsRelPath)
-	if err := packed.WriteFile(t.compactionParams.StorageConfig, absStatsPath, bytes); err != nil {
+	if err := packed.WriteFileWithContext(t.ctx, t.compactionParams.StorageConfig, absStatsPath, bytes); err != nil {
 		return merr.Wrap(err, "failed to write V3 stats")
 	}
 	writerResult.v3Stats = append(writerResult.v3Stats, packed.FieldBinlogStatEntry(prefix, fieldID, &datapb.FieldBinlog{

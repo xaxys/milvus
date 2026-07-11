@@ -18,6 +18,7 @@ package datanode
 
 import (
 	"context"
+	"encoding/json"
 	"math/rand"
 	"os"
 	"strconv"
@@ -30,6 +31,8 @@ import (
 	"github.com/milvus-io/milvus/internal/flushcommon/syncmgr"
 	util2 "github.com/milvus-io/milvus/internal/flushcommon/util"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/storageaccess"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/util/etcd"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
@@ -111,4 +114,35 @@ func TestDataNode(t *testing.T) {
 		assert.Empty(t, resp)
 		util2.RegisterRateCollector(metricsinfo.InsertConsumeThroughput)
 	})
+}
+
+func TestStorageAccessMetricsRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node := NewIDLEDataNodeMock(ctx, schemapb.DataType_Int64)
+	node.registerMetricsRequest()
+	paramtable.SetNodeID(101)
+
+	taskID := time.Now().UnixNano()
+	collector := storageaccess.NewTaskCollector(storageaccess.TaskTypeIndex, taskID)
+	collector.Record(storageaccess.OpRead, metrics.SuccessLabel, 128, 2.5)
+
+	req, err := metricsinfo.ConstructGetMetricsRequest(map[string]interface{}{
+		metricsinfo.MetricTypeKey:            metricsinfo.StorageAccessMetrics,
+		metricsinfo.StorageAccessTaskTypeKey: storageaccess.TaskTypeIndex,
+		metricsinfo.StorageAccessTaskIDKey:   taskID,
+	})
+	assert.NoError(t, err)
+	response, err := node.metricsRequest.ExecuteMetricsRequest(ctx, req)
+	assert.NoError(t, err)
+
+	var stats []*metricsinfo.StorageAccessStats
+	assert.NoError(t, json.Unmarshal([]byte(response), &stats))
+	if assert.Len(t, stats, 1) {
+		assert.Equal(t, int64(101), stats[0].NodeID)
+		assert.Equal(t, storageaccess.TaskTypeIndex, stats[0].TaskType)
+		assert.Equal(t, taskID, stats[0].TaskID)
+		assert.EqualValues(t, 1, stats[0].RequestCount)
+	}
 }

@@ -46,7 +46,6 @@ import (
 	"github.com/milvus-io/milvus/internal/util/hookutil"
 	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
 	"github.com/milvus-io/milvus/internal/util/segcore"
-	"github.com/milvus-io/milvus/internal/util/storageaccess"
 	typeutil2 "github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
@@ -3009,27 +3008,6 @@ func SetStorageCost(status *commonpb.Status, storageCost segcore.StorageCost) {
 	status.ExtraInfo["scanned_total_bytes"] = strconv.FormatInt(storageCost.ScannedTotalBytes, 10)
 	cacheHitRatio := float64(storageCost.ScannedTotalBytes-storageCost.ScannedRemoteBytes) / float64(storageCost.ScannedTotalBytes)
 	status.ExtraInfo["cache_hit_ratio"] = strconv.FormatFloat(cacheHitRatio, 'f', -1, 64)
-}
-
-// ReportRequestStorageAccess adds the existing storage cost to the transient
-// request collector. The Proxy interceptor emits one boundary log and trace
-// event; request IDs are deliberately excluded from Prometheus labels.
-func ReportRequestStorageAccess(ctx context.Context, storageCost segcore.StorageCost, latencyMs int64, status *commonpb.Status) {
-	if !Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() {
-		return
-	}
-	if storageCost.ScannedRemoteBytes <= 0 || !merr.Ok(status) {
-		return
-	}
-	if latencyMs < 0 {
-		latencyMs = 0
-	}
-
-	collector := storageaccess.FromContext(ctx)
-	if collector == nil {
-		return
-	}
-	collector.Record(storageaccess.OpRead, metrics.SuccessLabel, uint64(storageCost.ScannedRemoteBytes), float64(latencyMs))
 }
 
 func GetCostValue(status *commonpb.Status) int {

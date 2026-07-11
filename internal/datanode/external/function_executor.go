@@ -453,7 +453,7 @@ func appendBM25Stats(
 			return merr.Wrapf(err, "serialize bm25 stats for field %d", outID)
 		}
 		fullPath := path.Join(basePath, fmt.Sprintf("_stats/bm25.%d/%d", outID, 0))
-		if err := packed.WriteFile(storageConfig, fullPath, blob); err != nil {
+		if err := packed.WriteFileWithContext(ctx, storageConfig, fullPath, blob); err != nil {
 			return merr.Wrapf(err, "write bm25 stats file %s", fullPath)
 		}
 		entries = append(entries, packed.StatEntry{

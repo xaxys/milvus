@@ -141,6 +141,8 @@ const (
 
 	// DNSyncTasksPath is the path to get sync tasks in DataNode.
 	DNSyncTasksPath = "/_dn/tasks/sync"
+	// DNStorageAccessPath is the path to get task-local storage access stats from DataNode.
+	DNStorageAccessPath = "/_dn/storage_access"
 	// DNSegmentsPath is the path to get segments in DataNode.
 	DNSegmentsPath = "/_dn/segments"
 	// DNChannelsPath is the path to get channels in DataNode.

@@ -38,18 +38,13 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
-// FilesystemMetrics holds filesystem metrics retrieved from the default filesystem.
+// FilesystemMetrics holds the 8 filesystem metrics retrieved from the default filesystem
 type FilesystemMetrics struct {
 	ReadCount               int64
 	WriteCount              int64
 	ReadBytes               int64
 	WriteBytes              int64
 	GetFileInfoCount        int64
-	CreateDirCount          int64
-	DeleteDirCount          int64
-	DeleteFileCount         int64
-	MoveCount               int64
-	CopyFileCount           int64
 	FailedCount             int64
 	MultiPartUploadCreated  int64
 	MultiPartUploadFinished int64
@@ -70,11 +65,6 @@ func getMetricsFromHandle(cFilesystem C.FileSystemHandle) (*FilesystemMetrics, e
 		ReadBytes:               int64(cMetrics.read_bytes),
 		WriteBytes:              int64(cMetrics.write_bytes),
 		GetFileInfoCount:        int64(cMetrics.get_file_info_count),
-		CreateDirCount:          int64(cMetrics.create_dir_count),
-		DeleteDirCount:          int64(cMetrics.delete_dir_count),
-		DeleteFileCount:         int64(cMetrics.delete_file_count),
-		MoveCount:               int64(cMetrics.move_count),
-		CopyFileCount:           int64(cMetrics.copy_file_count),
 		FailedCount:             int64(cMetrics.failed_count),
 		MultiPartUploadCreated:  int64(cMetrics.multi_part_upload_created),
 		MultiPartUploadFinished: int64(cMetrics.multi_part_upload_finished),
@@ -320,11 +310,6 @@ func PublishFilesystemMetricsWithConfig(storageConfig *indexpb.StorageConfig) (*
 		metricSnapshot.ReadBytes,
 		metricSnapshot.WriteBytes,
 		metricSnapshot.GetFileInfoCount,
-		metricSnapshot.CreateDirCount,
-		metricSnapshot.DeleteDirCount,
-		metricSnapshot.DeleteFileCount,
-		metricSnapshot.MoveCount,
-		metricSnapshot.CopyFileCount,
 		metricSnapshot.FailedCount,
 		metricSnapshot.MultiPartUploadCreated,
 		metricSnapshot.MultiPartUploadFinished,

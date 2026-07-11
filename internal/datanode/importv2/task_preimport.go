@@ -50,9 +50,8 @@ type PreImportTask struct {
 	options      []*commonpb.KeyValuePair
 	req          *datapb.PreImportRequest
 
-	manager                TaskManager
-	cm                     storage.ChunkManager
-	storageAccessCollector *storageaccess.Collector
+	manager TaskManager
+	cm      storage.ChunkManager
 }
 
 func NewPreImportTask(req *datapb.PreImportRequest,
@@ -65,8 +64,7 @@ func NewPreImportTask(req *datapb.PreImportRequest,
 		}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	storageAccessCollector := storageaccess.NewCollector(storageaccess.WithTaskID(req.GetTaskID()))
-	ctx = storageaccess.WithCollector(ctx, storageAccessCollector)
+	ctx = storageaccess.WithCollector(ctx, storageaccess.NewTaskCollector(storageaccess.TaskTypePreImport, req.GetTaskID()))
 	// During binlog import, even if the primary key's autoID is set to true,
 	// the primary key from the binlog should be used instead of being reassigned.
 	if importutilv2.IsBackup(req.GetOptions()) {
@@ -80,16 +78,15 @@ func NewPreImportTask(req *datapb.PreImportRequest,
 			State:        datapb.ImportTaskStateV2_Pending,
 			FileStats:    fileStats,
 		},
-		ctx:                    ctx,
-		cancel:                 cancel,
-		partitionIDs:           req.GetPartitionIDs(),
-		vchannels:              req.GetVchannels(),
-		schema:                 req.GetSchema(),
-		options:                req.GetOptions(),
-		req:                    req,
-		manager:                manager,
-		cm:                     cm,
-		storageAccessCollector: storageAccessCollector,
+		ctx:          ctx,
+		cancel:       cancel,
+		partitionIDs: req.GetPartitionIDs(),
+		vchannels:    req.GetVchannels(),
+		schema:       req.GetSchema(),
+		options:      req.GetOptions(),
+		req:          req,
+		manager:      manager,
+		cm:           cm,
 	}
 }
 
@@ -125,17 +122,16 @@ func (t *PreImportTask) Cancel() {
 func (t *PreImportTask) Clone() Task {
 	ctx, cancel := context.WithCancel(t.ctx)
 	return &PreImportTask{
-		PreImportTask:          typeutil.Clone(t.PreImportTask),
-		ctx:                    ctx,
-		cancel:                 cancel,
-		partitionIDs:           t.GetPartitionIDs(),
-		vchannels:              t.GetVchannels(),
-		schema:                 t.GetSchema(),
-		options:                t.options,
-		req:                    t.req,
-		manager:                t.manager,
-		cm:                     t.cm,
-		storageAccessCollector: t.storageAccessCollector,
+		PreImportTask: typeutil.Clone(t.PreImportTask),
+		ctx:           ctx,
+		cancel:        cancel,
+		partitionIDs:  t.GetPartitionIDs(),
+		vchannels:     t.GetVchannels(),
+		schema:        t.GetSchema(),
+		options:       t.options,
+		req:           t.req,
+		manager:       t.manager,
+		cm:            t.cm,
 	}
 }
 

@@ -89,8 +89,7 @@ type SyncTask struct {
 
 	// storage config used in pooled tasks, optional
 	// use singleton config for non-pooled tasks
-	storageConfig          *indexpb.StorageConfig
-	storageAccessCollector *storageaccess.Collector
+	storageConfig *indexpb.StorageConfig
 }
 
 func (t *SyncTask) getLogger() *mlog.Logger {
@@ -115,8 +114,8 @@ func (t *SyncTask) HandleError(err error) {
 }
 
 func (t *SyncTask) Run(ctx context.Context) (err error) {
-	t.storageAccessCollector = storageaccess.NewCollector()
-	ctx = storageaccess.WithCollector(ctx, t.storageAccessCollector)
+	collector := storageaccess.NewTaskCollector(storageaccess.TaskTypeFlush, int64(t.tsTo))
+	ctx = storageaccess.WithCollector(ctx, collector)
 	t.tr = timerecord.NewTimeRecorder("syncTask")
 
 	logger := t.getLogger()

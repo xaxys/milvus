@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"strings"
 	"syscall"
-	"time"
 
 	cstorage "cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -342,20 +341,19 @@ func (mcm *RemoteChunkManager) RemoveWithPrefix(ctx context.Context, prefix stri
 
 func (mcm *RemoteChunkManager) WalkWithPrefix(ctx context.Context, prefix string, recursive bool, walkFunc ChunkObjectWalkFunc) (err error) {
 	start := timerecord.NewTimeRecorder("WalkWithPrefix")
-	storageAccessStart := time.Now()
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataWalkLabel, metrics.TotalLabel).Inc()
 	logger := mlog.With(mlog.String("prefix", prefix), mlog.Bool("recursive", recursive))
 
 	logger.Info(ctx, "start walk through objects")
 	if err := mcm.client.WalkWithObjects(ctx, mcm.bucketName, prefix, recursive, walkFunc); err != nil {
-		recordStorageAccess(ctx, StorageAccessOpList, 0, err, storageAccessStart)
+		recordStorageAccess(ctx, StorageAccessOpList, 0, err, start)
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataWalkLabel, metrics.FailLabel).Inc()
 		logger.Warn(ctx, "failed to walk through objects", mlog.Err(err))
 		return err
 	}
-	recordStorageAccess(ctx, StorageAccessOpList, 0, nil, storageAccessStart)
+	elapsed := recordStorageAccess(ctx, StorageAccessOpList, 0, nil, start)
 	metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataWalkLabel).
-		Observe(float64(start.ElapseSpan().Milliseconds()))
+		Observe(float64(elapsed.Milliseconds()))
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataWalkLabel, metrics.SuccessLabel).Inc()
 	logger.Info(ctx, "finish walk through objects")
 	return nil
@@ -365,16 +363,18 @@ func (mcm *RemoteChunkManager) getObject(ctx context.Context, bucketName, object
 	offset int64, size int64,
 ) (FileReader, error) {
 	start := timerecord.NewTimeRecorder("getObject")
-	storageAccessStart := time.Now()
 	reader, err := mcm.client.GetObject(ctx, bucketName, objectName, offset, size)
-	recordStorageAccess(ctx, StorageAccessOpRead, 0, err, storageAccessStart)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataGetLabel, metrics.TotalLabel).Inc()
 	if err == nil && reader != nil {
+		elapsed := start.ElapseSpan()
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataGetLabel).
-			Observe(float64(start.ElapseSpan().Milliseconds()))
+			Observe(float64(elapsed.Milliseconds()))
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataGetLabel, metrics.SuccessLabel).Inc()
-		reader = wrapStorageAccessReader(ctx, reader)
+		reader = wrapStorageAccessReader(ctx, reader, start)
 	} else {
+		if err != nil {
+			recordStorageAccess(ctx, StorageAccessOpRead, 0, err, start)
+		}
 		if errors.Is(err, context.Canceled) {
 			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataGetLabel, metrics.CancelLabel).Inc()
 		} else {
@@ -387,14 +387,13 @@ func (mcm *RemoteChunkManager) getObject(ctx context.Context, bucketName, object
 
 func (mcm *RemoteChunkManager) putObject(ctx context.Context, bucketName, objectName string, reader io.Reader, objectSize int64) error {
 	start := timerecord.NewTimeRecorder("putObject")
-	storageAccessStart := time.Now()
 
 	err := mcm.client.PutObject(ctx, bucketName, objectName, reader, objectSize)
-	recordStorageAccess(ctx, StorageAccessOpWrite, objectSize, err, storageAccessStart)
+	elapsed := recordStorageAccess(ctx, StorageAccessOpWrite, objectSize, err, start)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.TotalLabel).Inc()
 	if err == nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataPutLabel).
-			Observe(float64(start.ElapseSpan().Milliseconds()))
+			Observe(float64(elapsed.Milliseconds()))
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.SuccessLabel).Inc()
 	} else {
 		if errors.Is(err, context.Canceled) {
@@ -409,14 +408,13 @@ func (mcm *RemoteChunkManager) putObject(ctx context.Context, bucketName, object
 
 func (mcm *RemoteChunkManager) getObjectSize(ctx context.Context, bucketName, objectName string) (int64, error) {
 	start := timerecord.NewTimeRecorder("getObjectSize")
-	storageAccessStart := time.Now()
 
 	info, err := mcm.client.StatObject(ctx, bucketName, objectName)
-	recordStorageAccess(ctx, StorageAccessOpStat, 0, err, storageAccessStart)
+	elapsed := recordStorageAccess(ctx, StorageAccessOpStat, 0, err, start)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataStatLabel, metrics.TotalLabel).Inc()
 	if err == nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataStatLabel).
-			Observe(float64(start.ElapseSpan().Milliseconds()))
+			Observe(float64(elapsed.Milliseconds()))
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataStatLabel, metrics.SuccessLabel).Inc()
 	} else {
 		if errors.Is(err, context.Canceled) {
@@ -431,14 +429,13 @@ func (mcm *RemoteChunkManager) getObjectSize(ctx context.Context, bucketName, ob
 
 func (mcm *RemoteChunkManager) removeObject(ctx context.Context, bucketName, objectName string) error {
 	start := timerecord.NewTimeRecorder("removeObject")
-	storageAccessStart := time.Now()
 
 	err := mcm.client.RemoveObject(ctx, bucketName, objectName)
-	recordStorageAccess(ctx, StorageAccessOpDelete, 0, err, storageAccessStart)
+	elapsed := recordStorageAccess(ctx, StorageAccessOpDelete, 0, err, start)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataRemoveLabel, metrics.TotalLabel).Inc()
 	if err == nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataRemoveLabel).
-			Observe(float64(start.ElapseSpan().Milliseconds()))
+			Observe(float64(elapsed.Milliseconds()))
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataRemoveLabel, metrics.SuccessLabel).Inc()
 	} else {
 		if errors.Is(err, context.Canceled) {
@@ -466,14 +463,13 @@ func (mcm *RemoteChunkManager) Copy(ctx context.Context, srcFilePath string, dst
 
 func (mcm *RemoteChunkManager) copyObject(ctx context.Context, bucketName, srcObjectName, dstObjectName string) error {
 	start := timerecord.NewTimeRecorder("copyObject")
-	storageAccessStart := time.Now()
 
 	err := mcm.client.CopyObject(ctx, bucketName, srcObjectName, dstObjectName)
-	recordStorageAccess(ctx, StorageAccessOpCopy, 0, err, storageAccessStart)
+	elapsed := recordStorageAccess(ctx, StorageAccessOpCopy, 0, err, start)
 	metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.TotalLabel).Inc()
 	if err == nil {
 		metrics.PersistentDataRequestLatency.WithLabelValues(metrics.DataPutLabel).
-			Observe(float64(start.ElapseSpan().Milliseconds()))
+			Observe(float64(elapsed.Milliseconds()))
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataPutLabel, metrics.SuccessLabel).Inc()
 	} else {
 		if errors.Is(err, context.Canceled) {

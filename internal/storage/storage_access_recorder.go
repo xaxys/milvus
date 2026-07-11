@@ -19,94 +19,109 @@ package storage
 import (
 	"context"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/internal/util/storageaccess"
+	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 )
 
 const (
-	StorageAccessOpRead       = storageaccess.OpRead
-	StorageAccessOpWrite      = storageaccess.OpWrite
-	StorageAccessOpStat       = storageaccess.OpStat
-	StorageAccessOpList       = storageaccess.OpList
-	StorageAccessOpDelete     = storageaccess.OpDelete
-	StorageAccessOpCopy       = storageaccess.OpCopy
-	StorageAccessOpCreateDir  = storageaccess.OpCreateDir
-	StorageAccessOpDeleteDir  = storageaccess.OpDeleteDir
-	StorageAccessOpDeleteFile = storageaccess.OpDeleteFile
-	StorageAccessOpMove       = storageaccess.OpMove
+	StorageAccessOpRead   = storageaccess.OpRead
+	StorageAccessOpWrite  = storageaccess.OpWrite
+	StorageAccessOpStat   = storageaccess.OpStat
+	StorageAccessOpList   = storageaccess.OpList
+	StorageAccessOpDelete = storageaccess.OpDelete
+	StorageAccessOpCopy   = storageaccess.OpCopy
 )
 
-func recordStorageAccess(ctx context.Context, opType string, bytes int64, err error, start time.Time) {
-	RecordStorageAccess(ctx, opType, bytes, err, start)
+func recordStorageAccess(ctx context.Context, opType string, bytes int64, err error, recorder *timerecord.TimeRecorder) time.Duration {
+	if recorder == nil {
+		return 0
+	}
+	elapsed := recorder.ElapseSpan()
+	storageaccess.RecordAccess(ctx, opType, bytes, err, elapsed)
+	return elapsed
 }
 
-// RecordStorageAccess records one storage access observation to Prometheus and
-// to the task-local collector stored in ctx, if present.
-func RecordStorageAccess(ctx context.Context, opType string, bytes int64, err error, start time.Time) {
-	storageaccess.RecordAccess(ctx, opType, bytes, err, start)
-}
-
-func wrapStorageAccessReader(ctx context.Context, reader FileReader) FileReader {
+func wrapStorageAccessReader(ctx context.Context, reader FileReader, recorder *timerecord.TimeRecorder) FileReader {
 	if reader == nil {
 		return nil
 	}
-	return &storageAccessFileReader{
-		ctx:    ctx,
-		reader: reader,
+	if recorder == nil {
+		recorder = timerecord.NewTimeRecorder("storageReader")
 	}
+	return &storageAccessFileReader{ctx: ctx, reader: reader, recorder: recorder}
 }
 
 type storageAccessFileReader struct {
-	ctx    context.Context
-	reader FileReader
+	ctx      context.Context
+	reader   FileReader
+	recorder *timerecord.TimeRecorder
+
+	mu       sync.Mutex
+	bytes    int64
+	readErr  error
+	recorded bool
 }
 
 func (r *storageAccessFileReader) Read(p []byte) (int, error) {
-	start := time.Now()
 	n, err := r.reader.Read(p)
-	r.recordRead(n, err, start)
+	r.recordResult(n, err)
 	return n, err
 }
 
 func (r *storageAccessFileReader) ReadAt(p []byte, off int64) (int, error) {
-	start := time.Now()
 	n, err := r.reader.ReadAt(p, off)
-	r.recordRead(n, err, start)
+	r.recordResult(n, err)
 	return n, err
 }
 
 func (r *storageAccessFileReader) Seek(offset int64, whence int) (int64, error) {
-	start := time.Now()
-	pos, err := r.reader.Seek(offset, whence)
-	recordStorageAccess(r.ctx, StorageAccessOpRead, 0, err, start)
-	return pos, err
+	position, err := r.reader.Seek(offset, whence)
+	if err != nil {
+		r.recordResult(0, err)
+	}
+	return position, err
 }
 
 func (r *storageAccessFileReader) Close() error {
-	start := time.Now()
 	err := r.reader.Close()
-	if err != nil {
-		recordStorageAccess(r.ctx, StorageAccessOpRead, 0, err, start)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.recorded {
+		resultErr := r.readErr
+		if resultErr == nil {
+			resultErr = err
+		}
+		recordStorageAccess(r.ctx, StorageAccessOpRead, r.bytes, resultErr, r.recorder)
+		r.recorded = true
 	}
 	return err
 }
 
 func (r *storageAccessFileReader) Size() (int64, error) {
-	start := time.Now()
+	recorder := timerecord.NewTimeRecorder("storageReaderSize")
 	size, err := r.reader.Size()
-	recordStorageAccess(r.ctx, StorageAccessOpStat, 0, err, start)
+	recordStorageAccess(r.ctx, StorageAccessOpStat, 0, err, recorder)
 	return size, err
 }
 
-func (r *storageAccessFileReader) recordRead(n int, err error, start time.Time) {
+func (r *storageAccessFileReader) recordResult(n int, err error) {
 	if n == 0 && (err == nil || errors.Is(err, io.EOF)) {
 		return
 	}
 	if n > 0 && errors.Is(err, io.EOF) {
 		err = nil
 	}
-	recordStorageAccess(r.ctx, StorageAccessOpRead, int64(n), err, start)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n > 0 {
+		r.bytes += int64(n)
+	}
+	if err != nil && r.readErr == nil {
+		r.readErr = err
+	}
 }

@@ -242,7 +242,6 @@ message IndexTaskInfo {
   // The actual index file path layout used by the worker for this build.
   // See milvus.proto.index.IndexStorePathVersion for value semantics.
   index.IndexStorePathVersion index_store_path_version = 10;
-  data.StorageAccessStats storage_access_stats = 11;
 }
 
 message IndexJobResults {
@@ -254,7 +253,6 @@ message AnalyzeResult {
   index.JobState state = 2;
   string fail_reason = 3;
   string centroids_file = 4;
-  data.StorageAccessStats storage_access_stats = 5;
 }
 
 message AnalyzeResults {
@@ -276,7 +274,6 @@ message StatsResult {
   repeated data.FieldBinlog bm25_logs = 12;
   map<int64, data.JsonKeyStats> json_key_stats_logs = 13;
   string manifest = 14;
-  data.StorageAccessStats storage_access_stats = 15;
 }
 
 message StatsResults {

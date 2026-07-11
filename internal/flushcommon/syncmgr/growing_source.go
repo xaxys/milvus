@@ -349,10 +349,9 @@ type GrowingSourceSyncTask struct {
 	committedBM25Stats     map[int64]*storage.BM25Stats
 	committedInsertBinlogs map[int64]*datapb.FieldBinlog
 
-	writeRetryOpts         []retry.Option
-	failureCallback        func(error)
-	tr                     *timerecord.TimeRecorder
-	storageAccessCollector *storageaccess.Collector
+	writeRetryOpts  []retry.Option
+	failureCallback func(error)
+	tr              *timerecord.TimeRecorder
 }
 
 func NewGrowingSourceSyncTask() *GrowingSourceSyncTask {
@@ -539,8 +538,12 @@ func (t *GrowingSourceSyncTask) ReleaseSource() {
 }
 
 func (t *GrowingSourceSyncTask) Run(ctx context.Context) (err error) {
-	t.storageAccessCollector = storageaccess.NewCollector()
-	ctx = storageaccess.WithCollector(ctx, t.storageAccessCollector)
+	taskID := int64(t.targetOffset)
+	if t.checkpoint != nil && t.checkpoint.GetTimestamp() != 0 {
+		taskID = int64(t.checkpoint.GetTimestamp())
+	}
+	collector := storageaccess.NewTaskCollector(storageaccess.TaskTypeFlush, taskID)
+	ctx = storageaccess.WithCollector(ctx, collector)
 	t.tr = timerecord.NewTimeRecorder("growingSourceSyncTask")
 	log := mlog.With(
 		mlog.Int64("collectionID", t.collectionID),

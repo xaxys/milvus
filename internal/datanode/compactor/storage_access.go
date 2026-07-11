@@ -18,49 +18,12 @@ package compactor
 
 import (
 	"context"
-	"sync"
 
 	"github.com/milvus-io/milvus/internal/util/storageaccess"
-	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
-var compactionStorageAccessCollectors sync.Map
-
 func withCompactionStorageAccess(ctx context.Context, planID typeutil.UniqueID) context.Context {
-	collector := storageaccess.NewCollector(storageaccess.WithTaskID(planID))
-	compactionStorageAccessCollectors.Store(planID, collector)
+	collector := storageaccess.NewTaskCollector(storageaccess.TaskTypeCompaction, planID)
 	return storageaccess.WithCollector(ctx, collector)
-}
-
-func compactionStorageAccessStats(planID typeutil.UniqueID) *datapb.StorageAccessStats {
-	collector, ok := compactionStorageAccessCollectors.Load(planID)
-	if !ok {
-		return nil
-	}
-	return collector.(*storageaccess.Collector).Snapshot()
-}
-
-func (t *mixCompactionTask) StorageAccessStats() *datapb.StorageAccessStats {
-	return compactionStorageAccessStats(t.GetPlanID())
-}
-
-func (t *LevelZeroCompactionTask) StorageAccessStats() *datapb.StorageAccessStats {
-	return compactionStorageAccessStats(t.GetPlanID())
-}
-
-func (t *sortCompactionTask) StorageAccessStats() *datapb.StorageAccessStats {
-	return compactionStorageAccessStats(t.GetPlanID())
-}
-
-func (t *bumpSchemaVersionCompactionTask) StorageAccessStats() *datapb.StorageAccessStats {
-	return compactionStorageAccessStats(t.GetPlanID())
-}
-
-func (t *clusteringCompactionTask) StorageAccessStats() *datapb.StorageAccessStats {
-	return compactionStorageAccessStats(t.GetPlanID())
-}
-
-func (c *NamespaceCompactor) StorageAccessStats() *datapb.StorageAccessStats {
-	return compactionStorageAccessStats(c.GetPlanID())
 }

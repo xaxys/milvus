@@ -2722,10 +2722,6 @@ func (node *Proxy) Delete(ctx context.Context, request *milvuspb.DeleteRequest) 
 		ScannedRemoteBytes: dr.scannedRemoteBytes.Load(),
 		ScannedTotalBytes:  dr.scannedTotalBytes.Load(),
 	})
-	ReportRequestStorageAccess(ctx, segcore.StorageCost{
-		ScannedRemoteBytes: dr.scannedRemoteBytes.Load(),
-		ScannedTotalBytes:  dr.scannedTotalBytes.Load(),
-	}, tr.ElapseSpan().Milliseconds(), dr.result.GetStatus())
 
 	if merr.Ok(dr.result.GetStatus()) {
 		metrics.ProxyReportValue.WithLabelValues(nodeID, hookutil.OpTypeDelete, dbName, username).Add(float64(v))
@@ -2858,7 +2854,6 @@ func (node *Proxy) Upsert(ctx context.Context, request *milvuspb.UpsertRequest) 
 	})
 	SetReportValue(it.result.GetStatus(), v)
 	SetStorageCost(it.result.GetStatus(), it.storageCost)
-	ReportRequestStorageAccess(ctx, it.storageCost, tr.ElapseSpan().Milliseconds(), it.result.GetStatus())
 	if Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() {
 		metrics.ProxyScannedRemoteMB.WithLabelValues(nodeID, metrics.UpsertLabel, dbName, collectionName).Add(float64(it.storageCost.ScannedRemoteBytes) / 1024 / 1024)
 		metrics.ProxyScannedTotalMB.WithLabelValues(nodeID, metrics.UpsertLabel, dbName, collectionName).Add(float64(it.storageCost.ScannedTotalBytes) / 1024 / 1024)
@@ -3154,7 +3149,6 @@ func (node *Proxy) search(ctx context.Context, request *milvuspb.SearchRequest, 
 		})
 		SetReportValue(qt.result.GetStatus(), v)
 		SetStorageCost(qt.result.GetStatus(), qt.storageCost)
-		ReportRequestStorageAccess(ctx, qt.storageCost, searchDur, qt.result.GetStatus())
 		if merr.Ok(qt.result.GetStatus()) {
 			metrics.ProxyReportValue.WithLabelValues(nodeID, hookutil.OpTypeSearch, dbName, username).Add(float64(v))
 		}
@@ -3386,7 +3380,6 @@ func (node *Proxy) hybridSearch(ctx context.Context, request *milvuspb.HybridSea
 		})
 		SetReportValue(qt.result.GetStatus(), v)
 		SetStorageCost(qt.result.GetStatus(), qt.storageCost)
-		ReportRequestStorageAccess(ctx, qt.storageCost, searchDur, qt.result.GetStatus())
 		if merr.Ok(qt.result.GetStatus()) {
 			metrics.ProxyReportValue.WithLabelValues(nodeID, hookutil.OpTypeHybridSearch, dbName, username).Add(float64(v))
 		}
@@ -3866,7 +3859,6 @@ func (node *Proxy) Query(ctx context.Context, request *milvuspb.QueryRequest) (*
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-Query")
 	defer sp.End()
 	method := "Query"
-	queryStart := time.Now()
 
 	res, storageCost, err := node.query(ctx, qt, sp)
 
@@ -3904,7 +3896,6 @@ func (node *Proxy) Query(ctx context.Context, request *milvuspb.QueryRequest) (*
 	})
 	SetReportValue(res.Status, v)
 	SetStorageCost(res.Status, storageCost)
-	ReportRequestStorageAccess(ctx, storageCost, time.Since(queryStart).Milliseconds(), res.Status)
 	metrics.ProxyReportValue.WithLabelValues(nodeID, hookutil.OpTypeQuery, request.DbName, username).Add(float64(v))
 
 	if mlog.LevelEnabled(mlog.DebugLevel) && matchCountRule(request.OutputFields) {
@@ -6579,6 +6570,7 @@ func (node *Proxy) RegisterRestRouter(router gin.IRouter) {
 
 	// Datanode requests that are forwarded from datacoord
 	router.GET(http.DNSyncTasksPath, getDataComponentMetrics(node, metricsinfo.SyncTaskKey))
+	router.GET(http.DNStorageAccessPath, getDataComponentMetrics(node, metricsinfo.StorageAccessMetrics))
 	router.GET(http.DNSegmentsPath, getDataComponentMetrics(node, metricsinfo.SegmentKey, metricsinfo.RequestParamsInDN))
 	router.GET(http.DNChannelsPath, getDataComponentMetrics(node, metricsinfo.ChannelKey))
 

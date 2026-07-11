@@ -163,8 +163,7 @@ type Server struct {
 	// manage ways that data coord access other coord
 	broker broker.Broker
 
-	metricsRequest                 *metricsinfo.MetricsRequest
-	storageAccessFlushFingerprints *storageAccessFingerprintCache
+	metricsRequest *metricsinfo.MetricsRequest
 
 	// file resource
 	fileResourceObserver FileResourceObserver
@@ -207,16 +206,15 @@ func WithSegmentManager(manager Manager) Option {
 func CreateServer(ctx context.Context, factory dependency.Factory, opts ...Option) *Server {
 	rand.Seed(time.Now().UnixNano())
 	s := &Server{
-		ctx:                            ctx,
-		quitCh:                         make(chan struct{}),
-		factory:                        factory,
-		flushCh:                        make(chan UniqueID, 1024),
-		notifyIndexChan:                make(chan UniqueID, 1024),
-		dataNodeCreator:                defaultDataNodeCreatorFunc,
-		importJobLock:                  lock.NewKeyLock[int64](),
-		metricsCacheManager:            metricsinfo.NewMetricsCacheManager(),
-		metricsRequest:                 metricsinfo.NewMetricsRequest(),
-		storageAccessFlushFingerprints: newStorageAccessFingerprintCache(),
+		ctx:                 ctx,
+		quitCh:              make(chan struct{}),
+		factory:             factory,
+		flushCh:             make(chan UniqueID, 1024),
+		notifyIndexChan:     make(chan UniqueID, 1024),
+		dataNodeCreator:     defaultDataNodeCreatorFunc,
+		importJobLock:       lock.NewKeyLock[int64](),
+		metricsCacheManager: metricsinfo.NewMetricsCacheManager(),
+		metricsRequest:      metricsinfo.NewMetricsRequest(),
 	}
 
 	for _, opt := range opts {
@@ -1152,6 +1150,11 @@ func (s *Server) registerMetricsRequest() {
 	s.metricsRequest.RegisterMetricsRequest(metricsinfo.SyncTaskKey,
 		func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
 			return s.getSyncTaskJSON(ctx, req)
+		})
+
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.StorageAccessMetrics,
+		func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+			return s.getStorageAccessJSON(ctx, req)
 		})
 
 	s.metricsRequest.RegisterMetricsRequest(metricsinfo.SegmentKey,
