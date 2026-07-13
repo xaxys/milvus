@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 )
 
 type TaskManager interface {
@@ -90,7 +91,11 @@ func (m *taskManager) Remove(taskID int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if task, ok := m.tasks[taskID]; ok {
+		pending := task.GetState() == datapb.ImportTaskStateV2_Pending
 		task.Cancel()
+		if profiledTask, ok := task.(profiledImportTask); ok && pending {
+			profiledTask.FinishStorageProfile()
+		}
 	}
 	delete(m.tasks, taskID)
 }
