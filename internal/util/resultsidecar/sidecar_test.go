@@ -67,19 +67,24 @@ func TestSelectIgnoresUnknownTypesAndRejectsUnknownSelectedVersion(t *testing.T)
 	assert.Equal(t, "known", string(payloads[0]))
 }
 
-func TestSidecarsUseASeparateWireFieldFromLegacyStorageProfile(t *testing.T) {
+func TestSidecarsReuseUnreleasedStorageProfileWireFields(t *testing.T) {
 	result := &internalpb.SearchResults{
-		StorageProfile: []byte("legacy-json"),
-		Sidecars:       New("storage_profile", 1, []byte("sidecar-json")),
+		Sidecars: New("storage_profile", 1, []byte("sidecar-json")),
 	}
 	encoded, err := proto.Marshal(result)
 	require.NoError(t, err)
 
 	decoded := &internalpb.SearchResults{}
 	require.NoError(t, proto.Unmarshal(encoded, decoded))
-	assert.Equal(t, "legacy-json", string(decoded.GetStorageProfile()))
 	payloads, incomplete := Select(decoded.GetSidecars(), "storage_profile", 1)
 	assert.False(t, incomplete)
 	require.Len(t, payloads, 1)
 	assert.Equal(t, "sidecar-json", string(payloads[0]))
+
+	searchSidecars := result.ProtoReflect().Descriptor().Fields().ByName("sidecars")
+	require.NotNil(t, searchSidecars)
+	assert.Equal(t, int32(24), int32(searchSidecars.Number()))
+	retrieveSidecars := (&internalpb.RetrieveResults{}).ProtoReflect().Descriptor().Fields().ByName("sidecars")
+	require.NotNil(t, retrieveSidecars)
+	assert.Equal(t, int32(20), int32(retrieveSidecars.Number()))
 }

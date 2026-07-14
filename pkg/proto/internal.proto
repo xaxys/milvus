@@ -225,8 +225,7 @@ message SearchResults {
   // Per-segment filter valid counts for two-stage search (filter-only mode).
   // Index corresponds to sealed_segmentIDs_searched.
   repeated int64 filter_valid_counts = 23;
-  bytes storage_profile = 24 [deprecated = true];
-  ResultSidecars sidecars = 25;
+  ResultSidecars sidecars = 24;
 }
 
 message CostAggregation {
@@ -296,8 +295,7 @@ message RetrieveResults {
    // Element-level query support
   bool element_level = 18;
   repeated ElementIndices element_indices = 19;
-  bytes storage_profile = 20 [deprecated = true];
-  ResultSidecars sidecars = 21;
+  ResultSidecars sidecars = 20;
 }
 
 message LoadIndex {

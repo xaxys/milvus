@@ -573,14 +573,12 @@ message ResultSidecars {
 
 message SearchResults {
   // ...
-  bytes storage_profile = 24 [deprecated = true];
-  ResultSidecars sidecars = 25;
+  ResultSidecars sidecars = 24;
 }
 
 message RetrieveResults {
   // ...
-  bytes storage_profile = 20 [deprecated = true];
-  ResultSidecars sidecars = 21;
+  ResultSidecars sidecars = 20;
 }
 ```
 
@@ -596,7 +594,7 @@ payload = JSON contribution envelope
 
 `ResultSidecars.incomplete` 表示某个输入未提供 sidecar，或 sidecar 因 malformed、单项超限、总预算超限而被丢弃。该字段只传递“sidecar 集合可能不完整”这一通用事实；最终消费者决定它如何影响自己的 coverage。
 
-原来的 `bytes storage_profile` 字段保留并标记 deprecated，但新 producer 不再写入。不能把原 field number 直接改成 message：虽然两者 wire type 都是 length-delimited，旧 JSON bytes 会被新代码当作嵌套 protobuf 解析，可能让整个 internal response 解码失败。使用新 field number 后，混合版本最多丢失诊断 sidecar，不能影响 Search/Query 业务结果。
+上一版实验实现尚未上线，因此直接把原 `bytes storage_profile` 字段替换为 `ResultSidecars sidecars`，并复用 SearchResults 的 field number 24 和 RetrieveResults 的 field number 20。不保留 deprecated 字段，也不额外占用新的顶层 field number。
 
 ### 11.3 Segcore 局部 Handoff
 
@@ -840,7 +838,7 @@ QueryNode 在 `storageUsageTrackingEnabled=true` 时，把已有：
 
 ### 15.2 RPC 兼容
 
-所有 internal request/result 字段都是新增可选字段。旧节点会忽略 request control 或不返回 `ResultSidecars`。旧版实验实现使用的 `bytes storage_profile` field number 被保留为 deprecated，避免 mixed revision 把 JSON bytes 误解为嵌套 sidecar message。
+所有 internal request/result 字段都是可选字段。旧节点会忽略 request control 或不返回 `ResultSidecars`。由于上一版 `bytes storage_profile` 实验实现尚未上线，本实现直接复用其 field number，不承诺与该未发布实验版本进行 mixed-revision 兼容。
 
 新节点看到缺失 contribution 时标记 coverage partial/quantile incomplete，不解释成零存储访问。
 
