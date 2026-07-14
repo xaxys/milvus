@@ -24,7 +24,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/milvus-io/milvus/internal/storageprofile"
+	"github.com/milvus-io/milvus/internal/util/resultsidecar"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
+	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/contextutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
@@ -53,16 +55,21 @@ func beginProxyStorageProfile(ctx context.Context, workload storageprofile.Workl
 	return scope.Bind(storageprofile.WithDefaultAttribution(ctx, attribution)), scope, decision.Effective, traceID
 }
 
-func publishMergedStorageProfiles(ctx context.Context, payloads ...[]byte) {
-	mergedPayload, err := storageprofile.MergeContributionPayloads(payloads...)
-	if err != nil {
-		metrics.StorageProfileDroppedSummaries.WithLabelValues(storageprofile.ProfileReasonSerialization.String()).Inc()
-		return
+func publishMergedStorageProfiles(ctx context.Context, inputs ...*internalpb.ResultSidecars) {
+	sidecars := resultsidecar.Merge(inputs...)
+	payloads, incomplete := resultsidecar.Select(sidecars, storageprofile.SidecarType, storageprofile.SidecarSchemaVersion)
+	contributions := make([]storageprofile.Contribution, 0, len(payloads))
+	for _, payload := range payloads {
+		decoded, err := storageprofile.UnmarshalContributions(payload)
+		if err != nil {
+			metrics.StorageProfileDroppedSummaries.WithLabelValues(storageprofile.ProfileReasonSerialization.String()).Inc()
+			incomplete = true
+			continue
+		}
+		contributions = append(contributions, decoded...)
 	}
-	contributions, err := storageprofile.UnmarshalContributions(mergedPayload)
-	if err != nil {
-		metrics.StorageProfileDroppedSummaries.WithLabelValues(storageprofile.ProfileReasonSerialization.String()).Inc()
-		return
+	if incomplete {
+		storageprofile.MarkContributionsIncomplete(contributions)
 	}
 	profile := storageprofile.MergeContributions(contributions)
 	if profile != nil {

@@ -264,7 +264,26 @@ func TestContributionEncodingIsSparseAndRoundTrips(t *testing.T) {
 	assert.Equal(t, profile.OperationBreakdownCount, decoded.Profile.OperationBreakdownCount)
 }
 
-func TestMergeContributionPayloadsMarksRollingUpgradeGap(t *testing.T) {
+func TestContributionDecodingPreservesCompatibleStatsForUnknownBucketSchema(t *testing.T) {
+	profile := NewProfile(Attribution{Component: "querynode"}, time.Now())
+	profile.BucketSchema = 999
+	profile.Operations[StorageOperationRead].Count = 1
+	profile.Operations[StorageOperationRead].Duration.Observe(time.Millisecond)
+
+	encoded, err := MarshalContribution(Contribution{
+		Identity: ContributionIdentity{ClusterID: "cluster", NodeID: 1, ScopeID: "scope", ExecutionID: "execution"},
+		Profile:  &profile,
+	})
+	require.NoError(t, err)
+	decoded, err := UnmarshalContribution(encoded)
+	require.NoError(t, err)
+	require.NotNil(t, decoded.Profile)
+	assert.Equal(t, uint64(1), decoded.Profile.Operations[StorageOperationRead].Count)
+	assert.False(t, decoded.Profile.QuantilesComplete)
+	assert.Zero(t, decoded.Profile.Operations[StorageOperationRead].Duration.Buckets)
+}
+
+func TestMarkContributionsIncompleteMarksRollingUpgradeGap(t *testing.T) {
 	profile := NewProfile(Attribution{Component: "querynode"}, time.Now())
 	profile.Coverage.GoStorageOperations = CoverageInstrumented
 	profile.Coverage.CppStorageOperations = CoverageUnavailable
@@ -275,11 +294,10 @@ func TestMergeContributionPayloadsMarksRollingUpgradeGap(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	mergedPayload, err := MergeContributionPayloads(payload, nil)
-	require.NoError(t, err)
-	contributions, err := UnmarshalContributions(mergedPayload)
+	contributions, err := UnmarshalContributions(payload)
 	require.NoError(t, err)
 	require.Len(t, contributions, 1)
+	MarkContributionsIncomplete(contributions)
 	merged := contributions[0].Profile
 	require.NotNil(t, merged)
 	assert.False(t, merged.QuantilesComplete)

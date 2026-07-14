@@ -225,7 +225,8 @@ message SearchResults {
   // Per-segment filter valid counts for two-stage search (filter-only mode).
   // Index corresponds to sealed_segmentIDs_searched.
   repeated int64 filter_valid_counts = 23;
-  bytes storage_profile = 24;
+  bytes storage_profile = 24 [deprecated = true];
+  ResultSidecars sidecars = 25;
 }
 
 message CostAggregation {
@@ -295,7 +296,8 @@ message RetrieveResults {
    // Element-level query support
   bool element_level = 18;
   repeated ElementIndices element_indices = 19;
-  bytes storage_profile = 20;
+  bytes storage_profile = 20 [deprecated = true];
+  ResultSidecars sidecars = 21;
 }
 
 message LoadIndex {
@@ -546,4 +548,20 @@ message BackupEzkRequest {
 message BackupEzkResponse {
   common.Status status = 1;
   string ezk = 2;
+}
+
+// ResultSidecar carries an opaque, versioned payload alongside an internal
+// business result. Reducers must not interpret payload contents.
+message ResultSidecar {
+  string type = 1;
+  uint32 schema_version = 2;
+  bytes payload = 3;
+}
+
+// ResultSidecars is a bounded collection of opaque result sidecars.
+// incomplete is set when an input omitted sidecars or an item was discarded;
+// the final consumer decides how that affects type-specific coverage.
+message ResultSidecars {
+  repeated ResultSidecar items = 1;
+  bool incomplete = 2;
 }

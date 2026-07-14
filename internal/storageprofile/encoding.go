@@ -22,7 +22,11 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
-const MaxContributionSize = 1 << 20
+const (
+	TargetContributionSize = 8 << 10
+	SoftContributionSize   = 32 << 10
+	MaxContributionSize    = 64 << 10
+)
 
 type contributionEnvelope struct {
 	Contributions []contributionWire `json:"contributions"`
@@ -105,32 +109,13 @@ func UnmarshalContributions(data []byte) ([]Contribution, error) {
 	return contributions, nil
 }
 
-func MergeContributionPayloads(payloads ...[]byte) ([]byte, error) {
-	contributions := make([]Contribution, 0, len(payloads))
-	missingContribution := false
-	for _, payload := range payloads {
-		if len(payload) == 0 {
-			missingContribution = true
-			continue
-		}
-		decoded, err := UnmarshalContributions(payload)
-		if err != nil {
-			return nil, err
-		}
-		contributions = append(contributions, decoded...)
+func MarkContributionsIncomplete(contributions []Contribution) {
+	for contributionIndex := range contributions {
+		markContributionIncomplete(contributions[contributionIndex].Profile)
 	}
-	if len(contributions) == 0 {
-		return nil, nil
-	}
-	if missingContribution {
-		for contributionIndex := range contributions {
-			markMissingContribution(contributions[contributionIndex].Profile)
-		}
-	}
-	return MarshalContributions(contributions)
 }
 
-func markMissingContribution(profile *StorageProfile) {
+func markContributionIncomplete(profile *StorageProfile) {
 	if profile == nil {
 		return
 	}
@@ -178,6 +163,8 @@ func decodeProfile(wire *profileWire) (*StorageProfile, error) {
 	if wire == nil {
 		return nil, nil
 	}
+	knownSchema := wire.SchemaVersion == SchemaVersionV1
+	knownBuckets := wire.BucketSchema == LatencyBucketSchemaV1
 	profile := &StorageProfile{
 		SchemaVersion:             wire.SchemaVersion,
 		BucketSchema:              wire.BucketSchema,
@@ -187,13 +174,13 @@ func decodeProfile(wire *profileWire) (*StorageProfile, error) {
 		Coverage:                  wire.Coverage,
 		StartedAtUnixNano:         wire.StartedAtUnixNano,
 		FinishedAtUnixNano:        wire.FinishedAtUnixNano,
-		QuantilesComplete:         wire.QuantilesComplete,
+		QuantilesComplete:         wire.QuantilesComplete && knownSchema && knownBuckets,
 	}
 	for _, operation := range wire.Operations {
 		if !operation.Operation.Valid() {
 			return nil, merr.WrapErrSerializationFailed(nil, "storage profile contains unknown operation %d", operation.Operation)
 		}
-		mergeOperationStats(&profile.Operations[operation.Operation], operation.Stats, true)
+		mergeOperationStats(&profile.Operations[operation.Operation], operation.Stats, knownBuckets)
 	}
 	for _, breakdown := range wire.OperationBreakdown {
 		if !breakdown.Operation.Valid() || !breakdown.Phase.Valid() || !breakdown.StorageRole.Valid() {
@@ -204,7 +191,7 @@ func decodeProfile(wire *profileWire) (*StorageProfile, error) {
 			profile.OperationBreakdownDropped += breakdown.Stats.Count
 			continue
 		}
-		mergeOperationStats(stats, breakdown.Stats, true)
+		mergeOperationStats(stats, breakdown.Stats, knownBuckets)
 	}
 	return profile, nil
 }

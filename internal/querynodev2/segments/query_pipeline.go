@@ -21,10 +21,10 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/agg"
-	"github.com/milvus-io/milvus/internal/storageprofile"
 	"github.com/milvus-io/milvus/internal/util/queryutil"
 	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/internal/util/reduce/orderby"
+	"github.com/milvus-io/milvus/internal/util/resultsidecar"
 	"github.com/milvus-io/milvus/internal/util/segcore"
 	typeutil2 "github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -294,11 +294,11 @@ func RunDelegatorQueryPipeline(
 	output.HasMoreResult = anyFieldTrueInternal(results, func(r *internalpb.RetrieveResults) bool { return r.GetHasMoreResult() })
 	output.ScannedRemoteBytes = sumInt64FieldInternal(results, func(r *internalpb.RetrieveResults) int64 { return r.GetScannedRemoteBytes() })
 	output.ScannedTotalBytes = sumInt64FieldInternal(results, func(r *internalpb.RetrieveResults) int64 { return r.GetScannedTotalBytes() })
-	profilePayloads := make([][]byte, 0, len(results))
+	sidecars := make([]*internalpb.ResultSidecars, 0, len(results))
 	for _, result := range results {
-		profilePayloads = append(profilePayloads, result.GetStorageProfile())
+		sidecars = append(sidecars, result.GetSidecars())
 	}
-	output.StorageProfile, _ = storageprofile.MergeContributionPayloads(profilePayloads...)
+	output.Sidecars = resultsidecar.Merge(sidecars...)
 
 	// Only fill empty fields when result has no data at all (same guard as QN level).
 	if len(output.GetFieldsData()) == 0 {

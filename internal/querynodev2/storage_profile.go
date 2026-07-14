@@ -23,7 +23,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/milvus-io/milvus/internal/storageprofile"
+	"github.com/milvus-io/milvus/internal/util/resultsidecar"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
+	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
@@ -58,7 +60,7 @@ func finishRequestStorageContribution(
 	scopeID, executionID string,
 	nodeID int64,
 	scannedColdBytes, scannedTotalBytes int64,
-) []byte {
+) *internalpb.ResultSidecars {
 	if scope == nil {
 		return nil
 	}
@@ -93,5 +95,5 @@ func finishRequestStorageContribution(
 		metrics.StorageProfileDroppedSummaries.WithLabelValues(storageprofile.ProfileReasonSerialization.String()).Inc()
 		return nil
 	}
-	return data
+	return resultsidecar.New(storageprofile.SidecarType, storageprofile.SidecarSchemaVersion, data)
 }

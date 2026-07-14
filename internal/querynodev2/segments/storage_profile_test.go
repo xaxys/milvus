@@ -25,10 +25,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/storageprofile"
+	"github.com/milvus-io/milvus/internal/util/resultsidecar"
+	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/segcorepb"
 )
 
-func makeStorageProfileContribution(t testing.TB, nodeID int64, scopeID string, completedBytes uint64) []byte {
+func makeStorageProfileContribution(t testing.TB, nodeID int64, scopeID string, completedBytes uint64) *internalpb.ResultSidecars {
 	t.Helper()
 	profile := storageprofile.NewProfile(storageprofile.Attribution{
 		Component:     "querynode",
@@ -53,13 +55,21 @@ func makeStorageProfileContribution(t testing.TB, nodeID int64, scopeID string, 
 		Profile: &profile,
 	})
 	require.NoError(t, err)
-	return payload
+	return resultsidecar.New(storageprofile.SidecarType, storageprofile.SidecarSchemaVersion, payload)
 }
 
-func mergedStorageProfileFromPayload(t testing.TB, payload []byte) *storageprofile.StorageProfile {
+func mergedStorageProfileFromSidecars(t testing.TB, sidecars *internalpb.ResultSidecars) *storageprofile.StorageProfile {
 	t.Helper()
-	contributions, err := storageprofile.UnmarshalContributions(payload)
-	require.NoError(t, err)
+	payloads, incomplete := resultsidecar.Select(sidecars, storageprofile.SidecarType, storageprofile.SidecarSchemaVersion)
+	var contributions []storageprofile.Contribution
+	for _, payload := range payloads {
+		decoded, err := storageprofile.UnmarshalContributions(payload)
+		require.NoError(t, err)
+		contributions = append(contributions, decoded...)
+	}
+	if incomplete {
+		storageprofile.MarkContributionsIncomplete(contributions)
+	}
 	profile := storageprofile.MergeContributions(contributions)
 	require.NotNil(t, profile)
 	return profile

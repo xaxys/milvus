@@ -1589,11 +1589,11 @@ func (t *searchTask) collectSearchResults(ctx context.Context) ([]*internalpb.Se
 				mlog.Int64("sourceID", res.GetBase().GetSourceID()))
 			return true
 		})
-		payloads := make([][]byte, 0, len(toReduceResults))
+		sidecars := make([]*internalpb.ResultSidecars, 0, len(toReduceResults))
 		for _, result := range toReduceResults {
-			payloads = append(payloads, result.GetStorageProfile())
+			sidecars = append(sidecars, result.GetSidecars())
 		}
-		publishMergedStorageProfiles(ctx, payloads...)
+		publishMergedStorageProfiles(ctx, sidecars...)
 		return toReduceResults, nil
 	}
 }

@@ -834,7 +834,7 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 		storageprofile.WorkloadKindSearch,
 	)
 	defer func() {
-		resp.StorageProfile = finishRequestStorageContribution(
+		resp.Sidecars = finishRequestStorageContribution(
 			ctx,
 			profileScope,
 			req.GetReq().GetStorageProfile().GetScopeId(),
@@ -995,7 +995,7 @@ func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequ
 		workloadKind,
 	)
 	defer func() {
-		resp.StorageProfile = finishRequestStorageContribution(
+		resp.Sidecars = finishRequestStorageContribution(
 			ctx,
 			profileScope,
 			req.GetReq().GetStorageProfile().GetScopeId(),
