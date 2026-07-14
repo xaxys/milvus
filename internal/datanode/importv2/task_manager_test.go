@@ -18,12 +18,27 @@ package importv2
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/milvus-io/milvus/internal/storageprofile"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
+
+type profiledManagerTask struct {
+	Task
+	scope         *storageprofile.Scope
+	finishedCount atomic.Int32
+}
+
+func (t *profiledManagerTask) FinishStorageProfile() {
+	t.finishedCount.Add(1)
+	t.scope.Finish()
+}
 
 func TestImportManager(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -82,6 +97,71 @@ func TestImportManager(t *testing.T) {
 	manager.Remove(10)
 	tasks = manager.GetBy()
 	assert.Equal(t, 1, len(tasks))
+}
+
+func TestImportManagerRemoveReleasesPendingProfileReservation(t *testing.T) {
+	params := paramtable.Get()
+	keys := []struct {
+		key   string
+		value string
+	}{
+		{params.StorageProfileCfg.Enabled.Key, params.StorageProfileCfg.Enabled.GetValue()},
+		{params.StorageProfileCfg.Level.Key, params.StorageProfileCfg.Level.GetValue()},
+		{params.StorageProfileCfg.TaskEnabled.Key, params.StorageProfileCfg.TaskEnabled.GetValue()},
+		{params.StorageProfileCfg.TaskTypes.Key, params.StorageProfileCfg.TaskTypes.GetValue()},
+		{params.StorageProfileCfg.MaxActiveScopes.Key, params.StorageProfileCfg.MaxActiveScopes.GetValue()},
+		{params.StorageProfileCfg.MaxProfiledTasks.Key, params.StorageProfileCfg.MaxProfiledTasks.GetValue()},
+	}
+	defer func() {
+		for _, item := range keys {
+			require.NoError(t, params.Save(item.key, item.value))
+		}
+	}()
+	require.NoError(t, params.Save(params.StorageProfileCfg.Enabled.Key, "true"))
+	require.NoError(t, params.Save(params.StorageProfileCfg.Level.Key, "summary"))
+	require.NoError(t, params.Save(params.StorageProfileCfg.TaskEnabled.Key, "true"))
+	require.NoError(t, params.Save(params.StorageProfileCfg.TaskTypes.Key, "import"))
+	require.NoError(t, params.Save(params.StorageProfileCfg.MaxActiveScopes.Key, "1"))
+	require.NoError(t, params.Save(params.StorageProfileCfg.MaxProfiledTasks.Key, "1"))
+
+	newScope := func(taskID string) *storageprofile.Scope {
+		return storageprofile.NewTaskScope(storageprofile.Attribution{
+			TaskID:        taskID,
+			WorkloadClass: storageprofile.WorkloadClassBackground,
+			WorkloadKind:  storageprofile.WorkloadKindImport,
+		})
+	}
+
+	firstScope := newScope("1")
+	defer firstScope.Finish()
+	require.NotNil(t, firstScope.Snapshot())
+	mockTask := NewMockTask(t)
+	mockTask.EXPECT().GetTaskID().Return(int64(1)).Twice()
+	mockTask.EXPECT().GetState().Return(datapb.ImportTaskStateV2_Pending).Once()
+	mockTask.EXPECT().Cancel().Once()
+	task := &profiledManagerTask{Task: mockTask, scope: firstScope}
+
+	manager := NewTaskManager()
+	manager.Add(task)
+	manager.Remove(1)
+	assert.Equal(t, int32(1), task.finishedCount.Load())
+
+	secondScope := newScope("2")
+	defer secondScope.Finish()
+	require.NotNil(t, secondScope.Snapshot(), "removed pending task must release the task-profile slot")
+}
+
+func TestImportManagerRemoveLeavesRunningProfileToScheduler(t *testing.T) {
+	mockTask := NewMockTask(t)
+	mockTask.EXPECT().GetTaskID().Return(int64(1)).Twice()
+	mockTask.EXPECT().GetState().Return(datapb.ImportTaskStateV2_InProgress).Once()
+	mockTask.EXPECT().Cancel().Once()
+	task := &profiledManagerTask{Task: mockTask}
+
+	manager := NewTaskManager()
+	manager.Add(task)
+	manager.Remove(1)
+	assert.Equal(t, int32(0), task.finishedCount.Load())
 }
 
 func TestImportManager_L0(t *testing.T) {

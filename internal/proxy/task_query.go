@@ -1004,6 +1004,11 @@ func (t *queryTask) PostExecute(ctx context.Context) error {
 			return true
 		})
 	}
+	sidecars := make([]*internalpb.ResultSidecars, 0, len(toReduceResults))
+	for _, result := range toReduceResults {
+		sidecars = append(sidecars, result.GetSidecars())
+	}
+	publishMergedStorageProfiles(ctx, sidecars...)
 
 	metrics.ProxyDecodeResultLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), t.getQueryLabel()).Observe(0.0)
 	tr.CtxRecord(ctx, "reduceResultStart")
