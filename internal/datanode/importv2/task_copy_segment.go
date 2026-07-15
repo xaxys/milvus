@@ -114,11 +114,12 @@ type CopySegmentTask struct {
 // Returns:
 //   - Task: Initialized CopySegmentTask in Pending state, ready for execution
 func NewCopySegmentTask(
+	parentCtx context.Context,
 	req *datapb.CopySegmentRequest,
 	manager TaskManager,
 	cm storage.ChunkManager,
 ) Task {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 
 	// Step 1: Initialize empty result structures for each target segment
 	// These will be populated during execution with binlog/index metadata
@@ -484,7 +485,7 @@ func (t *CopySegmentTask) CleanupCopiedFiles() {
 		mlog.Int("fileCount", len(files)))
 
 	// Step 3: Delete all copied files with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.ctx, 30*time.Second)
 	defer cancel()
 
 	if err := t.cm.MultiRemove(ctx, files); err != nil {

@@ -17,6 +17,7 @@
 package importv2
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -61,7 +62,7 @@ func TestNewCopySegmentTask(t *testing.T) {
 	}
 
 	t.Run("create task", func(t *testing.T) {
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		assert.NotNil(t, task)
 
 		copyTask := task.(*CopySegmentTask)
@@ -84,7 +85,7 @@ func TestNewCopySegmentTask(t *testing.T) {
 	})
 
 	t.Run("task methods", func(t *testing.T) {
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		copyTask := task.(*CopySegmentTask)
 
 		// Test GetVchannels (should return nil for CopySegmentTask)
@@ -108,7 +109,7 @@ func TestNewCopySegmentTask(t *testing.T) {
 	})
 
 	t.Run("clone task", func(t *testing.T) {
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		cloned := task.Clone()
 		assert.NotNil(t, cloned)
 
@@ -134,7 +135,7 @@ func TestCopySegmentTaskExecute(t *testing.T) {
 			Targets: []*datapb.CopySegmentTarget{},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -159,7 +160,7 @@ func TestCopySegmentTaskExecute(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -189,7 +190,7 @@ func TestCopySegmentTaskExecute(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -233,7 +234,7 @@ func TestCopySegmentTaskExecute(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -323,7 +324,7 @@ func TestCopySegmentTaskExecute(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -405,7 +406,7 @@ func TestCopySegmentTaskExecute(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -458,7 +459,7 @@ func TestCopySegmentTaskExecute(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -484,7 +485,7 @@ func TestCopySegmentTaskExecute(t *testing.T) {
 			Targets: []*datapb.CopySegmentTarget{},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 
 		// Verify task is created with empty collection and partition IDs
 		copyTask := task.(*CopySegmentTask)
@@ -508,7 +509,7 @@ func TestCopySegmentTaskGetSegmentResults(t *testing.T) {
 		},
 	}
 
-	task := NewCopySegmentTask(req, mockManager, mockCM)
+	task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 	copyTask := task.(*CopySegmentTask)
 
 	t.Run("initial segment results", func(t *testing.T) {
@@ -571,7 +572,7 @@ func TestCopySegmentTaskStateManagement(t *testing.T) {
 		},
 	}
 
-	task := NewCopySegmentTask(req, mockManager, mockCM)
+	task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 	mockManager.Add(task)
 
 	t.Run("initial state", func(t *testing.T) {
@@ -646,7 +647,7 @@ func TestCopySegmentTaskWithIndexFiles(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -704,7 +705,7 @@ func TestCopySegmentTaskWithIndexFiles(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -759,7 +760,7 @@ func TestCopySegmentTaskWithIndexFiles(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -857,7 +858,7 @@ func TestCopySegmentTaskWithIndexFiles(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -919,7 +920,7 @@ func TestCopySegmentTaskConcurrency(t *testing.T) {
 				},
 			}
 
-			task := NewCopySegmentTask(req, mockManager, mockCM)
+			task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 			mockManager.Add(task)
 			tasks = append(tasks, task)
 		}
@@ -985,7 +986,7 @@ func TestCopySegmentTaskEdgeCases(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		mockManager.Add(task)
 
 		futures := task.Execute()
@@ -1013,7 +1014,7 @@ func TestCopySegmentTaskEdgeCases(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		copyTask := task.(*CopySegmentTask)
 
 		assert.Equal(t, int64(0), copyTask.GetSlots())
@@ -1034,7 +1035,7 @@ func TestCopySegmentTaskEdgeCases(t *testing.T) {
 			},
 		}
 
-		task := NewCopySegmentTask(req, mockManager, mockCM)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, mockCM)
 		copyTask := task.(*CopySegmentTask)
 
 		// Should only have one unique partition ID
@@ -1070,7 +1071,7 @@ func TestCopySegmentTask_RecordCopiedFiles(t *testing.T) {
 	}
 
 	mockManager := NewMockTaskManager(t)
-	task := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+	task := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 
 	t.Run("record files sequentially", func(t *testing.T) {
 		files1 := []string{"10001", "10002"}
@@ -1090,7 +1091,7 @@ func TestCopySegmentTask_RecordCopiedFiles(t *testing.T) {
 	})
 
 	t.Run("record empty files", func(t *testing.T) {
-		newTask := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+		newTask := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 		newTask.recordCopiedFiles([]string{})
 
 		newTask.copiedFilesMu.Lock()
@@ -1100,7 +1101,7 @@ func TestCopySegmentTask_RecordCopiedFiles(t *testing.T) {
 	})
 
 	t.Run("concurrent recording", func(t *testing.T) {
-		newTask := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+		newTask := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 		var wg sync.WaitGroup
 
 		// Simulate 10 concurrent goroutines recording files
@@ -1141,7 +1142,7 @@ func TestCopySegmentTask_CleanupCopiedFiles(t *testing.T) {
 		}
 
 		mockManager := NewMockTaskManager(t)
-		task := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 
 		// Record some files
 		files := []string{
@@ -1179,7 +1180,7 @@ func TestCopySegmentTask_CleanupCopiedFiles(t *testing.T) {
 		}
 
 		mockManager := NewMockTaskManager(t)
-		task := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 
 		// Don't record any files
 		// MultiRemove should NOT be called
@@ -1209,7 +1210,7 @@ func TestCopySegmentTask_CleanupCopiedFiles(t *testing.T) {
 		}
 
 		mockManager := NewMockTaskManager(t)
-		task := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 
 		// Record some files
 		files := []string{"10001", "10002"}
@@ -1245,7 +1246,7 @@ func TestCopySegmentTask_CleanupCopiedFiles(t *testing.T) {
 		}
 
 		mockManager := NewMockTaskManager(t)
-		task := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 
 		// Record some files
 		files := []string{"10001", "10002"}
@@ -1289,7 +1290,7 @@ func TestCopySegmentTask_CopySingleSegment_WithCleanup(t *testing.T) {
 
 		mockManager := NewMockTaskManager(t)
 		mockManager.EXPECT().Update(mock.Anything, mock.Anything).Return()
-		task := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 
 		// Mock successful copy
 		cm.EXPECT().Copy(mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
@@ -1333,7 +1334,7 @@ func TestCopySegmentTask_CopySingleSegment_WithCleanup(t *testing.T) {
 		mockManager := NewMockTaskManager(t)
 		// Update is called twice on failure: UpdateState and UpdateReason
 		mockManager.EXPECT().Update(mock.Anything, mock.Anything, mock.Anything).Return()
-		task := NewCopySegmentTask(req, mockManager, cm).(*CopySegmentTask)
+		task := NewCopySegmentTask(context.Background(), req, mockManager, cm).(*CopySegmentTask)
 
 		// First copy succeeds, second fails
 		cm.EXPECT().Copy(mock.Anything, "files/insert_log/111/222/333/1/10001", "files/insert_log/444/555/666/1/10001").Return(nil).Maybe()

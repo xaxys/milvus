@@ -50,7 +50,8 @@ type L0PreImportTask struct {
 	cm      storage.ChunkManager
 }
 
-func NewL0PreImportTask(req *datapb.PreImportRequest,
+func NewL0PreImportTask(parentCtx context.Context,
+	req *datapb.PreImportRequest,
 	manager TaskManager,
 	cm storage.ChunkManager,
 ) Task {
@@ -59,7 +60,7 @@ func NewL0PreImportTask(req *datapb.PreImportRequest,
 			ImportFile: file,
 		}
 	})
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	return &L0PreImportTask{
 		PreImportTask: &datapb.PreImportTask{
 			JobID:        req.GetJobID(),

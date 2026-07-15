@@ -379,9 +379,9 @@ func (node *DataNode) PreImport(ctx context.Context, req *datapb.PreImportReques
 
 	var task importv2.Task
 	if importutilv2.IsL0Import(req.GetOptions()) {
-		task = importv2.NewL0PreImportTask(req, node.importTaskMgr, cm)
+		task = importv2.NewL0PreImportTask(node.ctx, req, node.importTaskMgr, cm)
 	} else {
-		task = importv2.NewPreImportTask(req, node.importTaskMgr, cm)
+		task = importv2.NewPreImportTask(node.ctx, req, node.importTaskMgr, cm)
 	}
 	node.importTaskMgr.Add(task)
 
@@ -406,9 +406,9 @@ func (node *DataNode) ImportV2(ctx context.Context, req *datapb.ImportRequest) (
 	}
 	var task importv2.Task
 	if importutilv2.IsL0Import(req.GetOptions()) {
-		task = importv2.NewL0ImportTask(req, node.importTaskMgr, node.syncMgr, cm)
+		task = importv2.NewL0ImportTask(node.ctx, req, node.importTaskMgr, node.syncMgr, cm)
 	} else {
-		task = importv2.NewImportTask(req, node.importTaskMgr, node.syncMgr, cm)
+		task = importv2.NewImportTask(node.ctx, req, node.importTaskMgr, node.syncMgr, cm)
 	}
 	node.importTaskMgr.Add(task)
 
@@ -526,7 +526,7 @@ func (node *DataNode) CopySegment(ctx context.Context, req *datapb.CopySegmentRe
 		return merr.Status(err), nil
 	}
 
-	task := importv2.NewCopySegmentTask(req, node.importTaskMgr, cm)
+	task := importv2.NewCopySegmentTask(node.ctx, req, node.importTaskMgr, cm)
 	node.importTaskMgr.Add(task)
 
 	mlog.Info(context.TODO(), "datanode added copy segment task")

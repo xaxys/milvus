@@ -55,12 +55,13 @@ type ImportTask struct {
 	metaCaches map[string]metacache.MetaCache
 }
 
-func NewImportTask(req *datapb.ImportRequest,
+func NewImportTask(parentCtx context.Context,
+	req *datapb.ImportRequest,
 	manager TaskManager,
 	syncMgr syncmgr.SyncManager,
 	cm storage.ChunkManager,
 ) Task {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	// During binlog import, even if the primary key's autoID is set to true,
 	// the primary key from the binlog should be used instead of being reassigned.
 	if importutilv2.IsBackup(req.GetOptions()) {

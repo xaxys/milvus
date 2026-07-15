@@ -443,7 +443,7 @@ func RunEmbeddingFunction(task *ImportTask, data *storage.InsertData) error {
 	mlog.Info(context.TODO(), "start to run embedding function")
 	schema := task.GetSchema()
 	allowNonBM25Outputs := common.GetCollectionAllowInsertNonBM25FunctionOutputs(schema.GetProperties())
-	if err := embedding.RunAll(context.Background(), schema, data, embedding.RunOptions{
+	if err := embedding.RunAll(task.ctx, schema, data, embedding.RunOptions{
 		ClusterID:           task.req.GetClusterID(),
 		DBName:              schema.GetDbName(),
 		AllowNonBM25Outputs: allowNonBM25Outputs,

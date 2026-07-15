@@ -53,7 +53,8 @@ type PreImportTask struct {
 	cm      storage.ChunkManager
 }
 
-func NewPreImportTask(req *datapb.PreImportRequest,
+func NewPreImportTask(parentCtx context.Context,
+	req *datapb.PreImportRequest,
 	manager TaskManager,
 	cm storage.ChunkManager,
 ) Task {
@@ -62,7 +63,7 @@ func NewPreImportTask(req *datapb.PreImportRequest,
 			ImportFile: file,
 		}
 	})
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	// During binlog import, even if the primary key's autoID is set to true,
 	// the primary key from the binlog should be used instead of being reassigned.
 	if importutilv2.IsBackup(req.GetOptions()) {

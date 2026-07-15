@@ -54,12 +54,13 @@ type L0ImportTask struct {
 	metaCaches map[string]metacache.MetaCache
 }
 
-func NewL0ImportTask(req *datapb.ImportRequest,
+func NewL0ImportTask(parentCtx context.Context,
+	req *datapb.ImportRequest,
 	manager TaskManager,
 	syncMgr syncmgr.SyncManager,
 	cm storage.ChunkManager,
 ) Task {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	// Allocator for autoIDs and logIDs.
 	alloc := allocator.NewLocalAllocator(req.GetIDRange().GetBegin(), req.GetIDRange().GetEnd())
 	task := &L0ImportTask{

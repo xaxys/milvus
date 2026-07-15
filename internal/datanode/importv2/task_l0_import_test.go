@@ -115,7 +115,7 @@ func (s *L0ImportSuite) TestL0PreImport() {
 		Schema:       s.schema,
 		ImportFiles:  []*internalpb.ImportFile{{Paths: []string{"dummy-prefix"}}},
 	}
-	task := NewL0PreImportTask(req, s.manager, s.cm)
+	task := NewL0PreImportTask(context.Background(), req, s.manager, s.cm)
 	s.manager.Add(task)
 	fu := task.Execute()
 	err := conc.AwaitAll(fu...)
@@ -170,7 +170,7 @@ func (s *L0ImportSuite) TestL0Import() {
 			End:   int64(s.delCnt),
 		},
 	}
-	task := NewL0ImportTask(req, s.manager, s.syncMgr, s.cm)
+	task := NewL0ImportTask(context.Background(), req, s.manager, s.syncMgr, s.cm)
 	s.manager.Add(task)
 	fu := task.Execute()
 	err := conc.AwaitAll(fu...)
