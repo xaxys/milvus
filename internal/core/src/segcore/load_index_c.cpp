@@ -351,6 +351,7 @@ FinishLoadIndexInfo(CLoadIndexInfo c_load_index_info,
             }
             load_index_info->schema = info_proto->field();
             load_index_info->index_size = info_proto->index_file_size();
+            load_index_info->serialized_size = info_proto->serialized_size();
             load_index_info->num_rows = info_proto->num_rows();
             auto field_schema =
                 milvus::FieldMeta::ParseFrom(load_index_info->schema);

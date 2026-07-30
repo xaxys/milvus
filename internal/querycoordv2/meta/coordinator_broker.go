@@ -337,6 +337,7 @@ func (broker *CoordinatorBroker) GetIndexInfo(ctx context.Context, collectionID 
 				CurrentIndexVersion:       info.GetCurrentIndexVersion(),
 				CurrentScalarIndexVersion: info.GetCurrentScalarIndexVersion(),
 				IndexStorePathVersion:     info.GetIndexStorePathVersion(),
+				SerializedSize:            int64(info.GetSerializedSize()),
 			})
 		}
 	}

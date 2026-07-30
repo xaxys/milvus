@@ -112,6 +112,7 @@ message FieldIndexInfo {
   int64 index_store_version = 12 [deprecated = true];
   int32 current_scalar_index_version = 13;
   index.IndexStorePathVersion index_store_path_version = 14;
+  int64 serialized_size = 15;
 }
 
 message SegmentLoadInfo {

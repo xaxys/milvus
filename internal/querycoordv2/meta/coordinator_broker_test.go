@@ -513,6 +513,8 @@ func (s *CoordinatorBrokerDataCoordSuite) TestGetIndexInfoPreservesIndexStorePat
 							BuildID:               103,
 							IndexVersion:          1,
 							IndexFilePaths:        []string{"index_v1/100/20/200/103/1/index_data"},
+							SerializedSize:        4096,
+							MemSize:               8192,
 							IndexStorePathVersion: indexpb.IndexStorePathVersion_INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED,
 						},
 					},
@@ -524,6 +526,8 @@ func (s *CoordinatorBrokerDataCoordSuite) TestGetIndexInfoPreservesIndexStorePat
 	s.Require().NoError(err)
 	s.Require().Len(infos[segmentID], 1)
 	s.Equal(indexpb.IndexStorePathVersion_INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED, infos[segmentID][0].GetIndexStorePathVersion())
+	s.Equal(int64(4096), infos[segmentID][0].GetSerializedSize())
+	s.Equal(int64(8192), infos[segmentID][0].GetIndexSize())
 	s.resetMock()
 }
 

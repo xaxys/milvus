@@ -103,6 +103,7 @@ SegmentLoadInfo::ConvertFieldIndexInfoToLoadIndexInfo(
     load_index_info.index_engine_version =
         static_cast<IndexVersion>(field_index_info->current_index_version());
     load_index_info.index_size = field_index_info->index_size();
+    load_index_info.serialized_size = field_index_info->serialized_size();
     load_index_info.num_rows = field_index_info->num_rows();
     load_index_info.schema = field_meta.ToProto();
 

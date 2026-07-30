@@ -287,6 +287,7 @@ TEST(LoadIndexCTest, FinishLoadIndexInfoPreservesIndexStorePathVersion) {
     proto.set_index_version(1);
     proto.set_index_engine_version(1);
     proto.set_index_file_size(1024);
+    proto.set_serialized_size(4096);
     proto.set_num_rows(1000);
     proto.set_index_store_path_version(
         milvus::proto::index::IndexStorePathVersion::
@@ -305,6 +306,8 @@ TEST(LoadIndexCTest, FinishLoadIndexInfoPreservesIndexStorePathVersion) {
     EXPECT_EQ(load_index_info.index_store_path_version,
               milvus::proto::index::IndexStorePathVersion::
                   INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED);
+    EXPECT_EQ(load_index_info.index_size, 1024);
+    EXPECT_EQ(load_index_info.serialized_size, 4096);
 }
 
 TEST(LoadIndexCTest, CleanLoadedIndexDoesNotRemoveSiblingGeneration) {

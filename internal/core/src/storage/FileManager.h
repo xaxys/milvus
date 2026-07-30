@@ -116,6 +116,15 @@ struct FileManagerContext {
         storage_column_mappings[field_id] = std::move(mapping);
     }
 
+    void
+    set_index_file_size_hint(const std::string& path, uint64_t exact_size) {
+        if (exact_size == 0) {
+            return;
+        }
+        index_file_size_hints[NormalizePath(boost::filesystem::path(path))] =
+            exact_size;
+    }
+
     FieldDataMeta fieldDataMeta;
     IndexMeta indexMeta;
     ChunkManagerPtr chunkManagerPtr;
@@ -125,6 +134,9 @@ struct FileManagerContext {
     std::shared_ptr<milvus_storage::api::Properties> loon_ffi_properties;
     std::string stats_base_path;
     StorageColumnMappings storage_column_mappings;
+    // Exact object-storage sizes keyed by normalized remote object path.
+    // The current load path only populates this for one packed scalar object.
+    std::unordered_map<std::string, uint64_t> index_file_size_hints;
 };
 
 #define FILEMANAGER_TRY try {
@@ -213,19 +225,34 @@ class FileManagerImpl : public milvus::FileManager {
 
     std::shared_ptr<InputStream>
     OpenInputStream(const std::string& local_full_file_path,
-                    bool is_index_file) {
+                    bool is_index_file,
+                    bool use_size_hint = true) {
         AssertInfo(fs_, "fs_ is nullptr, cannot open input stream");
-        auto local_file_name = GetFileName(local_full_file_path);
-        auto remote_file_path = is_index_file ? GetRemoteIndexObjectPrefix()
-                                              : GetRemoteTextLogPrefix();
-        remote_file_path += "/" + local_file_name;
+        auto remote_file_path =
+            ResolveRemoteInputPath(local_full_file_path, is_index_file);
         auto remote_file = fs_->OpenInputFile(remote_file_path);
         AssertInfo(remote_file.ok(),
                    "failed to open remote file, reason: {}",
                    remote_file.status().ToString());
+        auto exact_size =
+            use_size_hint
+                ? GetInputFileSizeHint(local_full_file_path, is_index_file)
+                : std::nullopt;
         return std::static_pointer_cast<milvus::InputStream>(
             std::make_shared<milvus::storage::RemoteInputStream>(
-                std::move(remote_file.ValueOrDie())));
+                std::move(remote_file.ValueOrDie()), exact_size));
+    }
+
+    std::optional<uint64_t>
+    GetInputFileSizeHint(const std::string& local_full_file_path,
+                         bool is_index_file = true) const {
+        auto remote_file_path =
+            ResolveRemoteInputPath(local_full_file_path, is_index_file);
+        auto it = index_file_size_hints_.find(remote_file_path);
+        if (it == index_file_size_hints_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
     }
 
     std::shared_ptr<OutputStream>
@@ -347,6 +374,18 @@ class FileManagerImpl : public milvus::FileManager {
     GetFileName(const std::string& filepath) {
         return boost::filesystem::path(filepath).filename().string();
     }
+
+ protected:
+    std::string
+    ResolveRemoteInputPath(const std::string& local_full_file_path,
+                           bool is_index_file) const {
+        auto remote_file_path = is_index_file ? GetRemoteIndexObjectPrefix()
+                                              : GetRemoteTextLogPrefix();
+        remote_file_path += "/" + GetFileName(local_full_file_path);
+        return NormalizePath(boost::filesystem::path(remote_file_path));
+    }
+
+    std::unordered_map<std::string, uint64_t> index_file_size_hints_;
 
     std::string
     GetLocalTempDir() const {

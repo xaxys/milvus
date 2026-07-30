@@ -58,6 +58,7 @@ MemFileManagerImpl::MemFileManagerImpl(
     plugin_context_ = fileManagerContext.plugin_context;
     stats_base_path_ = fileManagerContext.stats_base_path;
     storage_column_mappings_ = fileManagerContext.storage_column_mappings;
+    index_file_size_hints_ = fileManagerContext.index_file_size_hints;
 }
 
 bool

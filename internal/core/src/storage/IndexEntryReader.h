@@ -39,6 +39,19 @@ namespace milvus::storage {
 size_t
 DefaultEntryStreamSliceSize();
 
+// Internal marker for failures whose shape can be caused by using a stale
+// object-size hint while opening a packed index. It keeps the existing
+// UnexpectedError wire classification if it escapes, but allows the scalar
+// loader to verify the real object size before deciding whether one fallback
+// open is justified. Magic, cancellation, entry CRC and decryption failures do
+// not use this marker.
+class IndexFileSizeSensitiveError : public SegcoreError {
+ public:
+    explicit IndexFileSizeSensitiveError(const std::string& message)
+        : SegcoreError(ErrorCode::UnexpectedError, message) {
+    }
+};
+
 struct Entry {
     std::vector<uint8_t> data;
 };

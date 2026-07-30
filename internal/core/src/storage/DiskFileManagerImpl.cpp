@@ -147,6 +147,7 @@ DiskFileManagerImpl::DiskFileManagerImpl(
     loon_ffi_properties_ = fileManagerContext.loon_ffi_properties;
     stats_base_path_ = fileManagerContext.stats_base_path;
     storage_column_mappings_ = fileManagerContext.storage_column_mappings;
+    index_file_size_hints_ = fileManagerContext.index_file_size_hints;
 }
 
 DiskFileManagerImpl::~DiskFileManagerImpl() {

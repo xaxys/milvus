@@ -2120,6 +2120,50 @@ TEST_F(DiskAnnFileManagerTest, BitmapIndexV3Roundtrip) {
     }
 }
 
+TEST_F(DiskAnnFileManagerTest,
+       BitmapIndexV3SerializedSizeHintAndSingleFallback) {
+    FieldDataMeta field_data_meta = {1, 2, 3, 101};
+    IndexMeta index_meta = {3, 101, 1001, 1, "index"};
+    storage::FileManagerContext build_context(
+        field_data_meta, index_meta, cm_, fs_);
+
+    const size_t row_count = 1000;
+    std::vector<int64_t> values(row_count);
+    for (size_t i = 0; i < row_count; ++i) {
+        values[i] = static_cast<int64_t>(i % 100);
+    }
+
+    milvus::index::BitmapIndex<int64_t> build_index(build_context);
+    build_index.Build(row_count, values.data());
+    auto stats = build_index.UploadUnified({});
+    ASSERT_NE(stats, nullptr);
+    auto files = stats->GetIndexFiles();
+    ASSERT_EQ(files.size(), 1);
+    const auto exact_size = stats->GetSerializedSize();
+    ASSERT_GT(exact_size, 0);
+
+    // The exact hint exercises the no-GetSize path. Undersized and oversized
+    // hints verify that LoadUnified obtains the real size and retries the
+    // reader at most once.
+    for (uint64_t hint : {uint64_t{1},
+                          static_cast<uint64_t>(exact_size - 1),
+                          static_cast<uint64_t>(exact_size),
+                          static_cast<uint64_t>(exact_size + 1)}) {
+        SCOPED_TRACE(hint);
+        storage::FileManagerContext load_context(
+            field_data_meta, index_meta, cm_, fs_);
+        load_context.set_index_file_size_hint(files[0], hint);
+
+        milvus::index::BitmapIndex<int64_t> load_index(load_context);
+        milvus::Config load_config;
+        load_config[milvus::index::INDEX_FILES] = files;
+        load_config[milvus::index::ENABLE_MMAP] = false;
+        load_index.LoadUnified(load_config);
+
+        EXPECT_EQ(load_index.Count(), static_cast<int64_t>(row_count));
+    }
+}
+
 TEST_F(DiskAnnFileManagerTest, StringIndexMarisaV3Roundtrip) {
     FieldDataMeta filed_data_meta = {1, 2, 3, 100};
     IndexMeta index_meta = {3, 100, 1000, 1, "index"};

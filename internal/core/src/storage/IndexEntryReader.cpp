@@ -34,6 +34,7 @@
 
 #include "common/EasyAssert.h"
 #include "common/FastMem.h"
+#include "fmt/format.h"
 #include "nlohmann/json.hpp"
 #include "storage/EntryStreamUtils.h"
 #include "storage/Crc32cUtil.h"
@@ -41,6 +42,13 @@
 
 namespace milvus::storage {
 namespace {
+
+void
+AssertSizeSensitive(bool condition, const std::string& message) {
+    if (!condition) {
+        throw IndexFileSizeSensitiveError(message);
+    }
+}
 
 using SliceLoader = std::function<std::vector<uint8_t>(size_t seq)>;
 using SliceBudgetBytes = std::function<size_t(size_t seq)>;
@@ -386,6 +394,19 @@ IndexEntryReader::ValidateMagic() {
 void
 IndexEntryReader::ReadFooterAndDirectory() {
     CheckCancelled("IndexEntryReader::ReadFooterAndDirectory");
+    auto read_size_sensitive_range =
+        [this](void* data, size_t offset, size_t size) {
+            try {
+                return input_->ReadAt(data, offset, size);
+            } catch (const SegcoreError& error) {
+                // A stale oversized hint can surface either as a short read or as
+                // a provider range error. Preserve cancellation, and otherwise
+                // let the scalar loader compare the hint with one real GetSize
+                // before deciding whether a retry is justified.
+                CheckCancelled("IndexEntryReader::ReadFooterAndDirectory");
+                throw IndexFileSizeSensitiveError(error.what());
+            }
+        };
     constexpr size_t kTailBufferSize = 64 * 1024UL;
     size_t tail_size =
         std::min(static_cast<size_t>(file_size_), kTailBufferSize);
@@ -393,13 +414,13 @@ IndexEntryReader::ReadFooterAndDirectory() {
 
     std::vector<uint8_t> tail_data(tail_size);
     size_t bytes_read =
-        input_->ReadAt(tail_data.data(), tail_offset, tail_size);
+        read_size_sensitive_range(tail_data.data(), tail_offset, tail_size);
     CheckCancelled("IndexEntryReader::ReadFooterAndDirectory");
-    AssertInfo(bytes_read == tail_size, "Failed to read file tail");
+    AssertSizeSensitive(bytes_read == tail_size, "Failed to read file tail");
 
     // Parse 32-byte Footer from the last 32 bytes
-    AssertInfo(tail_size >= MILVUS_V3_FOOTER_SIZE,
-               "File too small for V3 footer");
+    AssertSizeSensitive(tail_size >= MILVUS_V3_FOOTER_SIZE,
+                        "File too small for V3 footer");
     const uint8_t* footer_ptr =
         tail_data.data() + tail_size - MILVUS_V3_FOOTER_SIZE;
 
@@ -412,14 +433,15 @@ IndexEntryReader::ReadFooterAndDirectory() {
         &meta_entry_size, footer_ptr + 24, sizeof(uint32_t));
     milvus::fastmem::FastMemcpy(&dir_size, footer_ptr + 28, sizeof(uint32_t));
 
-    AssertInfo(version == MILVUS_V3_FORMAT_VERSION,
-               "Unsupported V3 format version: {}",
-               version);
-    AssertInfo(dir_size > 0, "Directory table size is zero");
-    AssertInfo(static_cast<size_t>(dir_size) + meta_entry_size +
-                       MILVUS_V3_FOOTER_SIZE + MILVUS_V3_MAGIC_SIZE <=
-                   static_cast<size_t>(file_size_),
-               "Directory table + meta entry + footer size exceeds file size");
+    AssertSizeSensitive(
+        version == MILVUS_V3_FORMAT_VERSION,
+        fmt::format("Unsupported V3 format version: {}", version));
+    AssertSizeSensitive(dir_size > 0, "Directory table size is zero");
+    AssertSizeSensitive(
+        static_cast<size_t>(dir_size) + meta_entry_size +
+                MILVUS_V3_FOOTER_SIZE + MILVUS_V3_MAGIC_SIZE <=
+            static_cast<size_t>(file_size_),
+        "Directory table + meta entry + footer size exceeds file size");
 
     // Check if we need a second read
     size_t needed =
@@ -434,11 +456,11 @@ IndexEntryReader::ReadFooterAndDirectory() {
         std::vector<uint8_t> full_tail_data(new_tail_size);
         size_t need_more = new_tail_size - tail_size;
 
-        size_t additional_read =
-            input_->ReadAt(full_tail_data.data(), new_tail_offset, need_more);
+        size_t additional_read = read_size_sensitive_range(
+            full_tail_data.data(), new_tail_offset, need_more);
         CheckCancelled("IndexEntryReader::ReadFooterAndDirectory");
-        AssertInfo(additional_read == need_more,
-                   "Failed to read additional directory data");
+        AssertSizeSensitive(additional_read == need_more,
+                            "Failed to read additional directory data");
 
         milvus::fastmem::FastMemcpy(
             full_tail_data.data() + need_more, tail_data.data(), tail_size);
@@ -456,12 +478,12 @@ IndexEntryReader::ReadFooterAndDirectory() {
     try {
         dir_json = nlohmann::json::parse(dir_start, dir_end);
     } catch (const nlohmann::json::parse_error& e) {
-        AssertInfo(false,
-                   "Failed to parse V3 index directory table JSON: {}",
-                   e.what());
+        throw IndexFileSizeSensitiveError(fmt::format(
+            "Failed to parse V3 index directory table JSON: {}", e.what()));
     }
 
-    AssertInfo(dir_json.contains("entries"), "Directory table missing entries");
+    AssertSizeSensitive(dir_json.contains("entries"),
+                        "Directory table missing entries");
 
     if (dir_json.contains("__edek__")) {
         is_encrypted_ = true;
