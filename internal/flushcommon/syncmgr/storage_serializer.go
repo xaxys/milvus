@@ -105,8 +105,26 @@ func (s *storageV1Serializer) serializeBM25Stats(pack *SyncPack) (map[int64]*sto
 }
 
 func (s *storageV1Serializer) serializeStatslog(pack *SyncPack) (*storage.PrimaryKeyStats, *storage.Blob, error) {
+	stats, err := s.buildPrimaryKeyStats(pack)
+	if err != nil || stats == nil {
+		return stats, nil, err
+	}
+
+	blob, err := s.serializePrimaryKeyStats(stats, pack.batchRows)
+	if err != nil {
+		return nil, nil, err
+	}
+	return stats, blob, nil
+}
+
+// buildPrimaryKeyStats builds the in-memory bloom-filter statistics for one
+// sync batch without encoding them. Keeping construction separate from
+// serialization lets the StorageV3 non-L0 final-flush path add the current
+// batch directly to the compound blob without first producing a superseded
+// per-batch blob.
+func (s *storageV1Serializer) buildPrimaryKeyStats(pack *SyncPack) (*storage.PrimaryKeyStats, error) {
 	if len(pack.insertData) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	var rowNum int64
 	var pkFieldData []storage.FieldData
@@ -118,17 +136,19 @@ func (s *storageV1Serializer) serializeStatslog(pack *SyncPack) (*storage.Primar
 
 	stats, err := storage.NewPrimaryKeyStats(s.pkField.GetFieldID(), int64(s.pkField.GetDataType()), rowNum)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for _, chunkPkData := range pkFieldData {
 		stats.UpdateByMsgs(chunkPkData)
 	}
+	return stats, nil
+}
 
-	blob, err := s.inCodec.SerializePkStats(stats, pack.batchRows)
-	if err != nil {
-		return nil, nil, err
-	}
-	return stats, blob, nil
+// serializePrimaryKeyStats encodes one already-built batch statistic. V1/V2,
+// StorageV3 incremental syncs, and StorageV3 L0 final flushes keep using this
+// representation. Non-L0 StorageV3 final flushes intentionally skip it.
+func (s *storageV1Serializer) serializePrimaryKeyStats(stats *storage.PrimaryKeyStats, rowNum int64) (*storage.Blob, error) {
+	return s.inCodec.SerializePkStats(stats, rowNum)
 }
 
 func (s *storageV1Serializer) serializeMergedPkStats(pack *SyncPack) (*storage.Blob, error) {
