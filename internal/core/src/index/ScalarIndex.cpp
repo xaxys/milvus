@@ -17,7 +17,9 @@
 #include <stddef.h>
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -31,6 +33,7 @@
 #include "knowhere/dataset.h"
 #include "log/Log.h"
 #include "pb/schema.pb.h"
+#include "storage/EntryStreamUtils.h"
 #include "storage/FileManager.h"
 #include "storage/IndexEntryReader.h"
 #include "storage/IndexEntryWriter.h"
@@ -240,13 +243,14 @@ ScalarIndex<T>::LoadUnified(const Config& config, milvus::OpContext* op_ctx) {
 
     LOG_INFO("LoadUnified: loading packed index file: {}", packed_file);
 
-    // Open the file using the file manager
+    // Open the file using the file manager. If an exact serialized-size hint
+    // is available this constructor does not issue a remote GetSize/HEAD.
+    auto size_hint =
+        file_manager_->GetInputFileSizeHint(packed_file, is_index_file_);
     auto input = file_manager_->OpenInputStream(packed_file, is_index_file_);
     AssertInfo(input != nullptr,
                "failed to open input stream for packed index file: {}",
                packed_file);
-
-    size_t file_size = input->Size();
 
     auto collection_id =
         GetValueFromConfig<int64_t>(config, COLLECTION_ID).value_or(0);
@@ -257,12 +261,80 @@ ScalarIndex<T>::LoadUnified(const Config& config, milvus::OpContext* op_ctx) {
             .value_or(milvus::proto::common::LoadPriority::HIGH);
     auto cancellation_token =
         op_ctx ? op_ctx->cancellation_token : folly::CancellationToken();
-    auto reader =
-        storage::IndexEntryReader::Open(input,
-                                        file_size,
-                                        collection_id,
-                                        milvus::PriorityForLoad(load_priority),
-                                        cancellation_token);
+    auto open_reader = [&](const std::shared_ptr<milvus::InputStream>& stream,
+                           bool size_is_hint) {
+        constexpr size_t kMinimumPackedFileSize =
+            MILVUS_V3_MAGIC_SIZE + MILVUS_V3_FOOTER_SIZE;
+        if (size_is_hint && stream->Size() < kMinimumPackedFileSize) {
+            // Keep this check outside IndexEntryReader so it remains compatible
+            // with readers (including #51696) that reject undersized signed
+            // lengths before issuing any I/O.
+            throw storage::IndexFileSizeSensitiveError(fmt::format(
+                "V3 index file size {} is smaller than the minimum header and "
+                "footer size {}",
+                stream->Size(),
+                kMinimumPackedFileSize));
+        }
+        return storage::IndexEntryReader::Open(
+            stream,
+            stream->Size(),
+            collection_id,
+            milvus::PriorityForLoad(load_priority),
+            cancellation_token);
+    };
+
+    std::unique_ptr<storage::IndexEntryReader> reader;
+    try {
+        reader = open_reader(input, size_hint.has_value());
+    } catch (const storage::IndexFileSizeSensitiveError&) {
+        storage::ThrowIfCancelled(cancellation_token,
+                                  "ScalarIndex::LoadUnified size fallback");
+        if (!size_hint.has_value()) {
+            throw;
+        }
+
+        auto hinted_open_error = std::current_exception();
+
+        std::shared_ptr<milvus::InputStream> fallback_input;
+        try {
+            // Disable the hint once. RemoteInputStream obtains the real size
+            // through its existing GetSize path.
+            fallback_input = file_manager_->OpenInputStream(
+                packed_file, is_index_file_, /*use_size_hint=*/false);
+        } catch (...) {
+            // The size probe is only a recovery aid. If it cannot be opened,
+            // cancellation still has precedence over preserving the original
+            // packed-index validation failure.
+            storage::ThrowIfCancelled(cancellation_token,
+                                      "ScalarIndex::LoadUnified size fallback");
+            std::rethrow_exception(hinted_open_error);
+        }
+
+        storage::ThrowIfCancelled(cancellation_token,
+                                  "ScalarIndex::LoadUnified size fallback");
+        if (fallback_input->Size() == size_hint.value()) {
+            // The producer's size is current. This is real file corruption or
+            // another validation problem, not a stale-size case; do not retry
+            // the reader or alter the original error.
+            storage::ThrowIfCancelled(cancellation_token,
+                                      "ScalarIndex::LoadUnified size fallback");
+            std::rethrow_exception(hinted_open_error);
+        }
+
+        LOG_WARN(
+            "Packed scalar index serialized-size hint is stale, retrying once "
+            "with remote size: file={}, hinted_size={}, actual_size={}",
+            packed_file,
+            size_hint.value(),
+            fallback_input->Size());
+        try {
+            reader = open_reader(fallback_input, /*size_is_hint=*/false);
+        } catch (...) {
+            storage::ThrowIfCancelled(cancellation_token,
+                                      "ScalarIndex::LoadUnified size fallback");
+            throw;
+        }
+    }
     AssertInfo(reader != nullptr, "failed to create IndexEntryReader");
 
     LoadEntries(*reader, config);

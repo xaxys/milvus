@@ -247,17 +247,20 @@ TEST_F(SegmentLoadInfoTest, LoadIndexInfoCopyPreservesIndexStorePathVersion) {
     LoadIndexInfo original;
     original.index_store_path_version = proto::index::IndexStorePathVersion::
         INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED;
+    original.serialized_size = 4096;
 
     LoadIndexInfo copied(original);
     EXPECT_EQ(copied.index_store_path_version,
               proto::index::IndexStorePathVersion::
                   INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED);
+    EXPECT_EQ(copied.serialized_size, 4096);
 
     LoadIndexInfo assigned;
     assigned = original;
     EXPECT_EQ(assigned.index_store_path_version,
               proto::index::IndexStorePathVersion::
                   INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED);
+    EXPECT_EQ(assigned.serialized_size, 4096);
 }
 
 TEST_F(SegmentLoadInfoTest,
@@ -269,6 +272,7 @@ TEST_F(SegmentLoadInfoTest,
     index_info->set_index_version(1);
     index_info->set_current_index_version(1);
     index_info->set_index_size(1024);
+    index_info->set_serialized_size(4096);
     index_info->set_num_rows(1000);
     index_info->add_index_file_paths("index_v1/1/2/3/301/1/index_data");
     auto* index_param = index_info->add_index_params();
@@ -285,6 +289,8 @@ TEST_F(SegmentLoadInfoTest,
     EXPECT_EQ(load_index_info.index_store_path_version,
               proto::index::IndexStorePathVersion::
                   INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED);
+    EXPECT_EQ(load_index_info.index_size, 1024);
+    EXPECT_EQ(load_index_info.serialized_size, 4096);
 }
 
 TEST_F(SegmentLoadInfoTest, BuildCacheDefersFileAwareScalarResourceEstimate) {

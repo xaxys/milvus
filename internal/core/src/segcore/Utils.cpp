@@ -1582,6 +1582,18 @@ LoadIndexData(milvus::tracer::TraceContext& ctx,
     milvus::storage::FileManagerContext file_manager_context(
         field_meta, index_meta, remote_chunk_manager, fs);
     file_manager_context.set_for_loading_index(true);
+    // DataCoord reports one aggregate serialized size. It is an exact object
+    // size only for the V3 scalar layout, where exactly one packed object is
+    // loaded. Multi-file and vector layouts must keep the existing GetSize
+    // path because their aggregate size cannot describe an individual object.
+    if (!milvus::IsVectorDataType(load_index_info->field_type) &&
+        index_info.scalar_index_engine_version >= 3 &&
+        load_index_info->index_files.size() == 1 &&
+        load_index_info->serialized_size > 0) {
+        file_manager_context.set_index_file_size_hint(
+            load_index_info->index_files.front(),
+            static_cast<uint64_t>(load_index_info->serialized_size));
+    }
 
     // use cache layer to load vector/scalar index
     std::unique_ptr<milvus::cachinglayer::Translator<milvus::index::IndexBase>>

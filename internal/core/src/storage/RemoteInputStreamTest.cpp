@@ -115,12 +115,18 @@ class FailingRandomAccessFile : public arrow::io::RandomAccessFile {
 
     arrow::Result<int64_t>
     GetSize() override {
+        ++get_size_calls_;
         return static_cast<int64_t>(content_.size());
     }
 
     int
     read_calls() const {
         return read_calls_;
+    }
+
+    int
+    get_size_calls() const {
+        return get_size_calls_;
     }
 
     const std::vector<int64_t>&
@@ -159,6 +165,7 @@ class FailingRandomAccessFile : public arrow::io::RandomAccessFile {
     size_t next_seek_outcome_ = 0;
     int64_t position_ = 0;
     int read_calls_ = 0;
+    int get_size_calls_ = 0;
     bool closed_ = false;
 };
 
@@ -233,6 +240,28 @@ InternalDifferentStatus() {
 arrow::Status
 SeekResetStatus() {
     return arrow::Status::IOError("seek reset failed");
+}
+
+TEST(RemoteInputStreamTest, ExactSizeHintSkipsGetSize) {
+    auto file = std::make_shared<FailingRandomAccessFile>(
+        std::vector<ReadOutcome>{}, "abcdefghijklmnop");
+    auto* file_ptr = file.get();
+
+    RemoteInputStream stream(std::move(file), uint64_t{12});
+
+    EXPECT_EQ(stream.Size(), 12);
+    EXPECT_EQ(file_ptr->get_size_calls(), 0);
+}
+
+TEST(RemoteInputStreamTest, MissingSizeHintUsesGetSize) {
+    auto file = std::make_shared<FailingRandomAccessFile>(
+        std::vector<ReadOutcome>{}, "abcdefghijklmnop");
+    auto* file_ptr = file.get();
+
+    RemoteInputStream stream(std::move(file));
+
+    EXPECT_EQ(stream.Size(), 16);
+    EXPECT_EQ(file_ptr->get_size_calls(), 1);
 }
 
 TEST(RemoteInputStreamTest, RetriesInternalFailedFlushError) {

@@ -453,6 +453,7 @@ func TestConvertToSegcoreSegmentLoadInfo_IndexStorePathVersion(t *testing.T) {
 				BuildID:               301,
 				IndexVersion:          1,
 				IndexFilePaths:        []string{"index_v1/30/20/10/301/1/index_data"},
+				SerializedSize:        4096,
 				IndexStorePathVersion: indexpb.IndexStorePathVersion_INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED,
 			},
 		},
@@ -462,4 +463,5 @@ func TestConvertToSegcoreSegmentLoadInfo_IndexStorePathVersion(t *testing.T) {
 	assert.NotNil(t, result)
 	assert.Len(t, result.GetIndexInfos(), 1)
 	assert.Equal(t, indexpb.IndexStorePathVersion_INDEX_STORE_PATH_VERSION_COLLECTION_ROOTED, result.GetIndexInfos()[0].GetIndexStorePathVersion())
+	assert.Equal(t, int64(4096), result.GetIndexInfos()[0].GetSerializedSize())
 }

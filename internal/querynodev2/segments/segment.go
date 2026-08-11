@@ -1216,6 +1216,7 @@ func GetCLoadInfoWithFunc(ctx context.Context,
 		NumRows:                   indexInfo.GetNumRows(),
 		CurrentScalarIndexVersion: indexInfo.GetCurrentScalarIndexVersion(),
 		IndexStorePathVersion:     indexInfo.GetIndexStorePathVersion(),
+		SerializedSize:            indexInfo.GetSerializedSize(),
 	}
 
 	// 2.

@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -104,8 +106,23 @@ ReadWithRetry(const char* operation,
 }  // namespace
 
 RemoteInputStream::RemoteInputStream(
-    std::shared_ptr<arrow::io::RandomAccessFile>&& remote_file)
+    std::shared_ptr<arrow::io::RandomAccessFile>&& remote_file,
+    std::optional<uint64_t> exact_file_size)
     : remote_file_(std::move(remote_file)) {
+    if (exact_file_size.has_value()) {
+        AssertInfo(
+            exact_file_size.value() <= std::numeric_limits<size_t>::max(),
+            "Exact remote file size {} exceeds the addressable range",
+            exact_file_size.value());
+        AssertInfo(
+            exact_file_size.value() <=
+                static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+            "Exact remote file size {} exceeds the signed reader range",
+            exact_file_size.value());
+        file_size_ = static_cast<size_t>(exact_file_size.value());
+        return;
+    }
+
     auto status = remote_file_->GetSize();
     AssertInfo(status.ok(), "Failed to get size of remote file");
     file_size_ = static_cast<size_t>(status.ValueOrDie());
