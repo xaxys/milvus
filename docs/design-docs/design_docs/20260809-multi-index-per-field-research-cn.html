@@ -1,0 +1,1900 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Milvus 一列多索引架构预研</title>
+    <style>
+      :root {
+        --paper: #0b151c;
+        --panel: #101d26;
+        --card: #14232d;
+        --ink: #e5eef3;
+        --muted: #96aab6;
+        --line: #2c4351;
+        --blue: #58b8e6;
+        --blue-soft: #153449;
+        --green: #51c3aa;
+        --green-soft: #143a34;
+        --amber: #dda65e;
+        --amber-soft: #3b301d;
+        --red: #e07c78;
+        --red-soft: #402728;
+        --purple: #aa99df;
+        --purple-soft: #302a49;
+        --mono: "Noto Sans Mono CJK SC", "SFMono-Regular", Consolas, monospace;
+        --sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+      }
+
+      body {
+        overflow: hidden;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      .deck {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        grid-template-columns: 250px minmax(0, 1fr);
+      }
+
+      .nav {
+        min-width: 0;
+        border-right: 1px solid var(--line);
+        background: #0d1921;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .nav-head {
+        padding: 17px 16px 13px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .nav-head .small {
+        color: var(--blue);
+        font-family: var(--mono);
+        font-size: 10px;
+        letter-spacing: 0.12em;
+      }
+
+      .nav-head .name {
+        margin-top: 7px;
+        font-size: 16px;
+        font-weight: 750;
+      }
+
+      .nav-head .hint {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.45;
+      }
+
+      .nav-list {
+        min-height: 0;
+        overflow: auto;
+        padding: 8px;
+      }
+
+      .nav-item {
+        width: 100%;
+        display: grid;
+        grid-template-columns: 25px minmax(0, 1fr);
+        gap: 6px;
+        padding: 7px 8px;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--muted);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .nav-item:hover {
+        color: var(--ink);
+        background: var(--panel);
+      }
+
+      .nav-item.active {
+        color: var(--ink);
+        border-color: var(--blue);
+        background: var(--blue-soft);
+      }
+
+      .nav-item .num {
+        color: var(--blue);
+        font-family: var(--mono);
+        font-size: 9px;
+        padding-top: 2px;
+      }
+
+      .nav-item .label {
+        font-size: 10.5px;
+        line-height: 1.35;
+      }
+
+      .nav-foot {
+        border-top: 1px solid var(--line);
+        padding: 10px 11px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 7px;
+      }
+
+      .nav-foot button {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--ink);
+        padding: 7px;
+        cursor: pointer;
+      }
+
+      .stage {
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 12% 18%, rgba(83, 183, 232, 0.07), transparent 24%),
+          radial-gradient(circle at 88% 82%, rgba(80, 196, 170, 0.05), transparent 22%),
+          var(--paper);
+      }
+
+      .slide-wrap {
+        width: 1184px;
+        height: 760px;
+        transform-origin: center center;
+        flex: none;
+      }
+
+      .diagram {
+        width: 1184px;
+        height: 760px;
+        padding: 12px;
+        background: var(--paper);
+      }
+
+      .frame {
+        width: 100%;
+        height: 100%;
+        border: 1px solid var(--line);
+        background: #0f1b23;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .head {
+        min-height: 68px;
+        border-bottom: 1px solid var(--line);
+        padding: 13px 21px 11px;
+        display: flex;
+        align-items: baseline;
+        gap: 13px;
+      }
+
+      .head .eyebrow {
+        color: var(--blue);
+        font-family: var(--mono);
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        white-space: nowrap;
+      }
+
+      .head h1 {
+        margin: 0;
+        font-size: 21px;
+        line-height: 1.25;
+        font-weight: 760;
+      }
+
+      .head .sub {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 10px;
+        white-space: nowrap;
+      }
+
+      .body {
+        flex: 1;
+        min-height: 0;
+        padding: 17px 21px;
+        display: flex;
+        flex-direction: column;
+        gap: 11px;
+      }
+
+      .footer {
+        min-height: 32px;
+        border-top: 1px solid var(--line);
+        padding: 8px 21px;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.4;
+      }
+
+      .mono {
+        font-family: var(--mono);
+      }
+
+      .hero {
+        flex: 1;
+        display: grid;
+        grid-template-columns: 1.02fr 0.98fr;
+        gap: 16px;
+        min-height: 0;
+      }
+
+      .hero-copy {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 20px 10px;
+      }
+
+      .hero-copy .small {
+        color: var(--blue);
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.12em;
+      }
+
+      .hero-copy h2 {
+        margin: 10px 0 13px;
+        font-size: 37px;
+        line-height: 1.18;
+      }
+
+      .hero-copy p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.65;
+      }
+
+      .hero-side,
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+        min-height: 0;
+      }
+
+      .hero-side {
+        justify-content: center;
+      }
+
+      .grid-2 {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .grid-4 {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 9px;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 11px;
+        min-height: 0;
+        flex: 1;
+      }
+
+      .flow {
+        display: flex;
+        align-items: stretch;
+        gap: 7px;
+      }
+
+      .flow > .card,
+      .flow > .box {
+        flex: 1 1 0;
+      }
+
+      .arrow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 19px;
+        flex: none;
+      }
+
+      .card,
+      .box {
+        border: 1px solid var(--line);
+        background: var(--card);
+        padding: 11px 13px;
+        min-width: 0;
+      }
+
+      .card.green {
+        border-color: var(--green);
+        background: var(--green-soft);
+      }
+
+      .card.blue {
+        border-color: var(--blue);
+        background: var(--blue-soft);
+      }
+
+      .card.amber {
+        border-color: var(--amber);
+        background: var(--amber-soft);
+      }
+
+      .card.red {
+        border-color: var(--red);
+        background: var(--red-soft);
+      }
+
+      .card.purple {
+        border-color: var(--purple);
+        background: var(--purple-soft);
+      }
+
+      .card .kicker,
+      .box .name {
+        color: var(--blue);
+        font-family: var(--mono);
+        font-size: 9px;
+        letter-spacing: 0.08em;
+        margin-bottom: 5px;
+      }
+
+      .card .title {
+        font-size: 14px;
+        font-weight: 720;
+        line-height: 1.35;
+        margin-bottom: 5px;
+      }
+
+      .card .desc,
+      .box .text {
+        color: var(--muted);
+        font-size: 10.8px;
+        line-height: 1.52;
+      }
+
+      .card .desc strong,
+      .current strong,
+      .recommend strong,
+      .warn strong {
+        color: var(--ink);
+      }
+
+      .tag {
+        display: inline-block;
+        padding: 2px 7px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--muted);
+        border-radius: 3px;
+        font-family: var(--mono);
+        font-size: 9px;
+        line-height: 1.45;
+        white-space: nowrap;
+      }
+
+      .tag.green {
+        color: var(--green);
+        border-color: var(--green);
+        background: var(--green-soft);
+      }
+
+      .tag.amber {
+        color: var(--amber);
+        border-color: var(--amber);
+        background: var(--amber-soft);
+      }
+
+      .tag.red {
+        color: var(--red);
+        border-color: var(--red);
+        background: var(--red-soft);
+      }
+
+      .tag.purple {
+        color: var(--purple);
+        border-color: var(--purple);
+        background: var(--purple-soft);
+      }
+
+      .question {
+        border-left: 4px solid var(--blue);
+        background: var(--blue-soft);
+        padding: 10px 13px;
+        display: grid;
+        grid-template-columns: 130px minmax(0, 1fr);
+        gap: 12px;
+        align-items: center;
+      }
+
+      .question .label {
+        color: var(--blue);
+        font-family: var(--mono);
+        font-size: 10px;
+      }
+
+      .question .text {
+        font-size: 15px;
+        font-weight: 720;
+        line-height: 1.4;
+      }
+
+      .current {
+        border: 1px solid var(--line);
+        background: #111f28;
+        padding: 9px 12px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .recommend,
+      .warn {
+        border-left: 4px solid var(--green);
+        background: var(--green-soft);
+        padding: 8px 12px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .warn {
+        border-left-color: var(--red);
+        background: var(--red-soft);
+      }
+
+      .note {
+        color: var(--muted);
+        font-size: 9.5px;
+        line-height: 1.45;
+      }
+
+      .options {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 11px;
+        min-height: 0;
+        flex: 1;
+      }
+
+      .option {
+        border: 1px solid var(--line);
+        background: var(--card);
+        padding: 11px 13px;
+        min-width: 0;
+      }
+
+      .option.a {
+        border-color: var(--green);
+        background: var(--green-soft);
+      }
+
+      .option.b {
+        border-color: var(--amber);
+        background: var(--amber-soft);
+      }
+
+      .option .option-name {
+        font-size: 15px;
+        font-weight: 730;
+        margin-bottom: 6px;
+      }
+
+      .option .what {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.5;
+        margin-bottom: 8px;
+      }
+
+      ul {
+        margin: 0;
+        padding-left: 17px;
+        color: var(--muted);
+        font-size: 10.5px;
+        line-height: 1.55;
+      }
+
+      li + li {
+        margin-top: 3px;
+      }
+
+      .compare {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+        font-size: 10px;
+      }
+
+      .compare th,
+      .compare td {
+        border: 1px solid var(--line);
+        padding: 6px 7px;
+        text-align: left;
+        vertical-align: top;
+        line-height: 1.4;
+      }
+
+      .compare th {
+        background: #10222c;
+        color: var(--ink);
+      }
+
+      .compare td {
+        background: #111e27;
+        color: var(--muted);
+      }
+
+      .all-mode {
+        overflow: auto;
+      }
+
+      .all-mode .deck {
+        display: block;
+        height: auto;
+      }
+
+      .all-mode .nav {
+        display: none;
+      }
+
+      .all-mode .stage {
+        display: block;
+        overflow: visible;
+      }
+
+      .all-mode .slide-wrap {
+        width: 1184px;
+        height: auto;
+        margin: 0 auto 20px;
+        transform: none !important;
+      }
+
+      .all-mode .diagram {
+        display: block !important;
+      }
+
+      .render-mode {
+        width: 1184px;
+        height: 760px;
+        overflow: hidden;
+      }
+
+      .render-mode .deck {
+        display: block;
+        width: 1184px;
+        height: 760px;
+      }
+
+      .render-mode .nav {
+        display: none;
+      }
+
+      .render-mode .stage,
+      .render-mode .slide-wrap {
+        display: block;
+        width: 1184px;
+        height: 760px;
+        transform: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="deck">
+      <aside class="nav">
+        <div class="nav-head">
+          <div class="small">ARCHITECTURE PRE-RESEARCH</div>
+          <div class="name">Milvus 一列多索引</div>
+          <div class="hint">每页先交代问题和现状，再比较方案与成本<br />← → 切换页面</div>
+        </div>
+        <div class="nav-list" id="nav-list"></div>
+        <div class="nav-foot">
+          <button type="button" id="prev">← 上一页</button>
+          <button type="button" id="next">下一页 →</button>
+        </div>
+      </aside>
+
+      <main class="stage">
+        <div class="slide-wrap" id="slide-wrap">
+          <section class="diagram" id="overview" data-title="结论摘要">
+            <div class="frame">
+              <div class="body">
+                <div class="hero">
+                  <div class="hero-copy">
+                    <div class="small">MILVUS · MULTIPLE INDEXES ON ONE FIELD</div>
+                    <h2>一列多索引<br />架构预研</h2>
+                    <p>
+                      <strong>Scalar 和 Vector 分开做。</strong><br />
+                      Scalar 第一版可直接支持多个索引同时加载，并让查询自动选择一个能正确执行的索引；用户指定索引的入口也可同时保留。<br />
+                      Vector 第一版更适合“可建多个、本次 Load 每字段只选一个”，并支持查询含义和参数兼容时的在线替换。
+                    </p>
+                  </div>
+                  <div class="hero-side">
+                    <div class="card green">
+                      <div class="title">已经确认：Load 选择是临时覆盖</div>
+                      <div class="desc">只影响本次 Load；release 后回到该 collection 保存的默认索引。重启则恢复当前 Load 的选择。</div>
+                    </div>
+                    <div class="card purple">
+                      <div class="title">Vector 真正同时加载多个，不是小预留</div>
+                      <div class="desc">要把 QueryCoord、Segcore、查询计划和资源状态都改成按 indexID 工作，已经接近完整多 Vector 索引功能。</div>
+                    </div>
+                    <div class="card amber">
+                      <div class="title">在线替换分两档</div>
+                      <div class="desc">metric、打分含义和查询参数都兼容时，现有 Reopen 可做逐 segment 替换；否则无停机切换必须同时保留新旧索引。</div>
+                    </div>
+                    <div class="recommend"><strong>本报告重点：</strong>说明每个能力要改哪些组件、会碰到哪些现有机制，不用“高 / 中 / 低”代替成本上下文。</div>
+                  </div>
+                </div>
+              </div>
+              <div class="footer">这是架构预研，不进入具体类、字段、锁、writer、重试次数和调度细节。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scope" data-title="范围与已确认边界">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">范围</span><h1>本轮只定大方向；产品细节可以以后决定</h1></div>
+              <div class="body">
+                <div class="grid-3">
+                  <div class="card green">
+                    <div class="kicker">本轮要回答</div>
+                    <div class="title">整体架构是否走得通</div>
+                    <div class="desc">索引定义、Load 选择、查询选择、索引文件和运行状态分别由谁管理。</div>
+                  </div>
+                  <div class="card green">
+                    <div class="kicker">本轮要回答</div>
+                    <div class="title">不同能力的真实改动</div>
+                    <div class="desc">Scalar 多加载、Vector 只加载一个、Vector 多加载、在线替换分别会影响什么。</div>
+                  </div>
+                  <div class="card green">
+                    <div class="kicker">本轮要回答</div>
+                    <div class="title">滚动升级和启用前回滚</div>
+                    <div class="desc">代码先升级、功能后开启；Scalar 与 Vector 使用独立开关。</div>
+                  </div>
+                </div>
+                <div class="grid-3" style="flex: 1">
+                  <div class="card red">
+                    <div class="kicker">以后决定</div>
+                    <div class="title">缺索引时失败还是回退</div>
+                    <div class="desc">这是用户语义。架构只要求能准确知道缺的是哪个 indexID。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="kicker">以后决定</div>
+                    <div class="title">Import / Compaction 是否等待</div>
+                    <div class="desc">架构必须拆开每个索引的状态；具体等待哪几个索引留到实现阶段。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="kicker">以后决定</div>
+                    <div class="title">默认加载几个 Scalar 索引</div>
+                    <div class="desc">架构保存“本次 Load 的索引集合”，默认集合如何产生属于产品选择。</div>
+                  </div>
+                </div>
+                <div class="recommend"><strong>事实边界：</strong>Milvus 当前源码是权威。这里不把源码审计列成前置工作，也不要求先修正文档或注释差异。</div>
+              </div>
+              <div class="footer">不考虑功能启用后的旧版本兼容；只保证功能开启前可以回滚旧版本。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="terms" data-title="三个不同的“索引选择”">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">先统一概念</span><h1>默认索引、当前 Load 和单次查询不是同一层</h1></div>
+              <div class="body">
+                <div class="flow" style="flex: 1">
+                  <div class="card green">
+                    <div class="kicker">长期保存</div>
+                    <div class="title">Collection 默认索引</div>
+                    <div class="desc">用户不在 Load 中指定时使用。新 collection 的首个索引可初始化它；升级前已有 collection 则在功能启用后的第一次 Load 中安全初始化。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card blue">
+                    <div class="kicker">本次 Load</div>
+                    <div class="title">加载集合 + Load 默认索引</div>
+                    <div class="desc">Scalar 可以是一组 indexID；Vector 第一版每字段最多一个。release 后这层消失，回到 collection 默认值。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card purple">
+                    <div class="kicker">单次查询</div>
+                    <div class="title">查询实际使用的索引</div>
+                    <div class="desc">Scalar 可由 Milvus 按条件选择，也可由用户指定。Vector 若以后多加载，Search 必须最终落到一个明确 indexID。</div>
+                  </div>
+                </div>
+                <div class="grid-2">
+                  <div class="current"><strong>重启：</strong>QueryCoord 恢复当前 Load 的选择，继续加载同一组索引；这不是回到 collection 默认值。</div>
+                  <div class="current"><strong>Release：</strong>删除当前 Load 状态；下次 Load 未指定时，再读取 collection 默认值。</div>
+                </div>
+                <div class="warn"><strong>已有 collection：</strong>第一次 Load 若本地默认不存在且字段只有一个候选，就保存该明确 indexID；若候选不唯一，要求用户或外部平台指定。不能在功能启用前写这个新状态。</div>
+              </div>
+              <div class="footer">已确认方向：Collection 默认值和当前 Load 选择都由各查询集群自己管理，不要求 Primary / Secondary 相同。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="current" data-title="当前架构现状">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">源码现状</span><h1>“定义和构建”已经能区分多个索引；“加载和查询”仍按一个字段一个索引</h1></div>
+              <div class="body">
+                <div class="flow">
+                  <div class="box"><div class="name">定义 / 构建</div><div class="text">DataCoord 已按 indexID 管理索引定义、构建结果和每个 segment 的索引文件。</div></div>
+                  <div class="arrow">→</div>
+                  <div class="box"><div class="name">Load 入口</div><div class="text">Proxy 会把同字段索引压成一个 indexID；多个索引会互相覆盖，选择不稳定。</div></div>
+                  <div class="arrow">→</div>
+                  <div class="box"><div class="name">QueryCoord</div><div class="text">已经保存 Load 选择，但检查和下发仍会遍历 collection 的全部索引。</div></div>
+                  <div class="arrow">→</div>
+                  <div class="box"><div class="name">QueryNode / Segcore</div><div class="text">Go 层很多状态已按 indexID；普通 Scalar / Vector 运行时仍是 fieldID 对应一个索引。</div></div>
+                </div>
+                <div class="grid-3" style="flex: 1">
+                  <div class="card green">
+                    <div class="title">已有在线替换基础</div>
+                    <div class="desc">当前已有“修改并保存 Load 配置”和“Reopen segment 替换索引”两段能力，但它们尚未按用户选中的 indexID 连通。</div>
+                  </div>
+                  <div class="card amber">
+                    <div class="title">选择还没有真正连通</div>
+                    <div class="desc">QueryCoord 保存了选择，但没有据此精确过滤索引；因此现在不能可靠指定同字段的某个索引。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="title">查询仍没有 indexID</div>
+                    <div class="desc">Vector 查询计划主要携带字段和 metric；Scalar 表达式也直接取得该字段唯一索引。</div>
+                  </div>
+                </div>
+                <div class="recommend"><strong>含义：</strong>“Load 时只选一个并在线替换”不是从零开始；“同字段同时保留多个并按查询选择”则会碰到 Segcore 和查询链路的单索引前提。</div>
+              </div>
+              <div class="footer">报告中的成本判断均以这些当前行为为起点。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="target-architecture" data-title="建议的整体架构">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">整体方向</span><h1>定义、加载、查询三层分开；所有跨组件信息都使用明确 indexID</h1></div>
+              <div class="body">
+                <div class="flow" style="flex: 1">
+                  <div class="card green">
+                    <div class="kicker">DataCoord / 元数据</div>
+                    <div class="title">保存每个索引定义与构建结果</div>
+                    <div class="desc">一个字段可以有多个独立 indexID；每个 segment 的索引文件仍独立保存，不增加“索引组”。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card blue">
+                    <div class="kicker">QueryCoord</div>
+                    <div class="title">保存本次 Load 需要什么</div>
+                    <div class="desc">按字段保存索引集合和 Load 默认索引；只检查并下发这次需要的 indexID；切换还要防止旧任务覆盖新选择。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card purple">
+                    <div class="kicker">QueryNode / Segcore</div>
+                    <div class="title">保存实际加载结果</div>
+                    <div class="desc">Scalar 按 indexID 保留多个；Vector 第一版只保留一个，完整方案才按 indexID 保留多个。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card amber">
+                    <div class="kicker">Query</div>
+                    <div class="title">最后选中一个明确索引</div>
+                    <div class="desc">用户指定时传 indexID；自动模式由查询执行层选择。Vector 选择必须与 metric 一起固定。</div>
+                  </div>
+                </div>
+                <table class="compare">
+                  <thead><tr><th style="width: 24%">架构规则</th><th>原因</th></tr></thead>
+                  <tbody>
+                    <tr><td>不依赖索引列表顺序</td><td>默认值、Load 选择和查询选择都保存明确 indexID，避免重启后行为变化。</td></tr>
+                    <tr><td>期望状态与实际状态分开</td><td>QueryCoord 保存“应该加载什么”，QueryNode 上报“每个 segment 实际有什么”，才能恢复未完成切换。</td></tr>
+                    <tr><td>状态按 indexID，不只按 fieldID</td><td>否则无法知道同字段两个索引中哪个缺失、哪个正在加载、哪个可以删除。</td></tr>
+                    <tr><td>Scalar 与 Vector 开关分开</td><td>两条查询路径和运行时改动不同，可以独立上线。</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="footer">这是共同的大方向；Vector 是否真的多加载，决定 Segcore 是否也要完成多 indexID 改造。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="data-model" data-title="需要保存哪些大类数据">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">数据保存</span><h1>新增的是“选择和状态”，索引文件仍按现有 indexID 独立保存</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 22%">信息</th><th style="width: 26%">保存位置与寿命</th><th>Scalar</th><th>Vector</th></tr></thead>
+                  <tbody>
+                    <tr><td>索引定义</td><td>持久元数据；CDC 复制</td><td>同字段多个 indexID</td><td>同字段多个 indexID；metric 与索引定义绑定</td></tr>
+                    <tr><td>每个 segment 的索引文件</td><td>对象存储；每个 indexID 独立</td><td>多个文件集合</td><td>多个文件集合，空间通常随索引数量增加</td></tr>
+                    <tr><td>Collection 默认索引</td><td>每个查询集群本地持久保存</td><td>未指定 Load 时作为默认集合或默认项</td><td>未指定 Load 时每字段选一个</td></tr>
+                    <tr><td>本次 Load 索引集合</td><td>QueryCoord Load 状态；release 后删除</td><td>每字段一组 indexID</td><td>第一版每字段最多一个；完整方案是一组</td></tr>
+                    <tr><td>本次 Load 默认索引</td><td>随当前 Load 保存</td><td>未指定查询索引时的起点</td><td>未指定 Search 索引时使用</td></tr>
+                    <tr><td>每个 segment 实际状态</td><td>QueryNode 上报，QueryCoord 汇总</td><td>每个 indexID 是否已加载</td><td>当前一个或多个 indexID 的准备状态</td></tr>
+                    <tr><td>切换顺序信息</td><td>随当前 Load 选择保存，并传到最终发布索引状态的位置</td><td colspan="2">防止 A→B→A 时已经发出的旧任务晚到，把新选择覆盖回去；或者必须证明所有切换严格串行</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>默认值初始化：</strong>新 collection 可在创建首个索引时写默认值；已有 collection 只在功能启用后首次需要时初始化，且只有唯一候选才能自动写入。</div>
+                <div class="warn"><strong>不能省略实际状态：</strong>“索引定义存在”不等于“所有在线 segment 都已构建并加载这个索引”。</div>
+              </div>
+              <div class="footer">具体元数据表、proto 字段和持久化 key 不在本轮讨论。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="phase-split" data-title="Scalar 与 Vector 分开落地">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">推荐范围</span><h1>把三个能力视为三个完整功能，不要求同一期一起实现</h1></div>
+              <div class="body">
+                <div class="grid-4" style="flex: 1">
+                  <div class="card green">
+                    <div class="kicker">功能 S</div>
+                    <div class="title">Scalar 多索引</div>
+                    <div class="desc"><strong>多个同时加载。</strong>Milvus 自动选一个能正确执行的索引；查询指定索引的通路同时保留。未来再提高“选得快不快”。</div>
+                  </div>
+                  <div class="card blue">
+                    <div class="kicker">功能 V1</div>
+                    <div class="title">Vector 多定义、只加载一个</div>
+                    <div class="desc"><strong>可建多个，本次 Load 每字段选一个。</strong>查询含义和参数兼容时，可利用现有 Reopen 做在线逐步替换。</div>
+                  </div>
+                  <div class="card purple">
+                    <div class="kicker">功能 V2</div>
+                    <div class="title">Vector 多索引同时加载</div>
+                    <div class="desc"><strong>多个同时驻留，查询先用固定的 Load 默认索引。</strong>Segcore、状态和资源都按 indexID 工作。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="kicker">功能 V3</div>
+                    <div class="title">Vector 每次查询选择</div>
+                    <div class="desc"><strong>用户指定或 Milvus 动态选择。</strong>查询计划、Growing、refine 和结果路径都要携带同一选择。</div>
+                  </div>
+                </div>
+                <table class="compare">
+                  <thead><tr><th style="width: 25%">为什么可以分开</th><th>说明</th></tr></thead>
+                  <tbody>
+                    <tr><td>Scalar 候选可保持精确语义</td><td>只有 JSON path、cast、文本分析方式和二次检查规则一致的索引才能放在同一候选集合；在此前提下，不同 segment 选不同索引或扫描仍可得到一致结果。</td></tr>
+                    <tr><td>Vector 结果是近似的</td><td>不同索引会改变召回、延迟和结果稳定性；不同 metric 的分数还不能直接合并。</td></tr>
+                    <tr><td>运行时改造不同</td><td>Scalar 多加载需要多索引选择；Vector V1 可以继续每字段只保存一个 Vector 索引对象，V2 才需要彻底改成按 indexID 保存多个。</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>推荐：</strong>先把功能 S 和 V1 分别作为完整能力设计；是否做 V2，由多 Vector 同时驻留的真实需求决定。</div>
+              </div>
+              <div class="footer">这不是临时半成品：V1 完整解决“先建新索引，再切换当前索引”；V2 是额外的多驻留能力，V3 是额外的每次查询选择能力。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="policy-vs-architecture" data-title="产品语义与架构边界">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">边界澄清</span><h1>多数“等不等、失败还是回退”可以后置；但状态必须先拆对</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 27%">问题</th><th style="width: 35%">本轮必须决定的架构</th><th>以后决定的用户语义</th></tr></thead>
+                  <tbody>
+                    <tr><td>新 segment / Import / Compaction 是否等所有索引</td><td>每个 indexID 的构建与加载状态独立；不能再用“字段有索引”或“collection 全部索引”混合判断。</td><td>哪些索引阻塞数据可见、失败多久后放行。</td></tr>
+                    <tr><td>指定索引只有部分 segment 可用</td><td>QueryCoord 能知道具体缺失范围；查询计划能携带明确 indexID。</td><td>立即失败、等待、扫描原始数据或回退默认索引。</td></tr>
+                    <tr><td>Load 未指定 Scalar 索引</td><td>Load 状态能保存一组 indexID 和一个默认项。</td><td>默认加载全部、默认集合，还是只加载默认项。</td></tr>
+                    <tr><td>默认 Vector 索引改成不同 metric</td><td>metric 与 indexID 绑定；切换必须保证一次查询内可合并。</td><td>是否允许、是否要求显式确认、对客户端如何展示。</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>对你的判断：</strong>这些确实主要是产品语义，不应阻塞大架构；但当前 Milvus 的部分检查把它们绑定在“一字段一个索引”上，所以必须在架构层先拆成按 indexID 的事实状态。</div>
+                <div class="warn"><strong>本报告不替你决定：</strong>表格右侧全部标为实现阶段待定，不把某个默认行为偷偷写成架构约束。</div>
+              </div>
+              <div class="footer">后文只在某个语义会直接决定是否需要双加载、查询计划改造时，把它升级为架构决定。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scalar-goal" data-title="Scalar 第一版目标">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">SCALAR</span><h1>目标：多个索引同时加载，自动选“能正确执行”的一个，并支持用户指定</h1></div>
+              <div class="body">
+                <div class="question"><div class="label">要解决的问题</div><div class="text">同一个 Scalar 字段可同时有 BITMAP、INVERTED、STL_SORT 等索引，查询怎样找到可用路径？</div></div>
+                <div class="current"><strong>现状：</strong>表达式按 fieldID 取得唯一 Scalar 索引，再判断该索引是否适合本次操作；Milvus 没有比较同字段多个索引的公共路径。</div>
+                <div class="grid-3" style="flex: 1">
+                  <div class="card green">
+                    <div class="title">用户指定</div>
+                    <div class="desc">查询携带明确 indexID；但还要决定它绑定到整个字段，还是某一个过滤条件。具体缺失时失败还是回退，留作产品语义。</div>
+                  </div>
+                  <div class="card blue">
+                    <div class="title">用户未指定</div>
+                    <div class="desc">对每个过滤条件分别筛选候选并选一个；没有可用索引时，只有字段原始值仍可读才可以扫描。</div>
+                  </div>
+                  <div class="card amber">
+                    <div class="title">第一版不承诺最快</div>
+                    <div class="desc">现有统计不足，查询执行时机也有冲突。先保证选择稳定、结果正确，再单独建设更好的估算。</div>
+                  </div>
+                </div>
+                <div class="recommend"><strong>为什么适合第一版：</strong>只有查询语义完全相同的索引才互为候选；在此前提下，自动选择可以按过滤条件、按 segment 独立进行，不改变最终结果。</div>
+              </div>
+              <div class="footer">已确认“自动 + 指定”方向；指定索引的作用范围和原始字段值是否始终可读，仍是架构决定。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scalar-hint-scope" data-title="Scalar 指定索引的作用范围">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已确认 E · 按过滤条件</span><h1>用户指定的 indexID 绑定到某一个过滤条件</h1></div>
+              <div class="body">
+                <div class="question"><div class="label">你要决定的问题</div><div class="text">同一查询里可以有多个字段，也可以在同一字段上有多个不同条件；一个 index_name 应该控制哪一部分？</div></div>
+                <div class="current"><strong>例子：</strong><span class="mono">age &gt; 20 AND age &lt; 60 AND name LIKE "ab%"</span>。整个查询只能指定一个 Scalar 索引明显不够，因此真正可选的是“按字段”或“按条件”。</div>
+                <div class="options">
+                  <div class="option a">
+                    <div class="option-name">方案 A：按字段指定</div>
+                    <div class="what">同一个字段上的所有条件都要求使用同一个 indexID。</div>
+                    <ul>
+                      <li>API 和查询计划较简单。</li>
+                      <li>一个字段只有一个提示，容易解释。</li>
+                      <li>该索引可能支持范围条件，却不支持同字段的另一种条件。</li>
+                      <li>会限制同一字段在一条查询中使用多个索引。</li>
+                    </ul>
+                  </div>
+                  <div class="option b">
+                    <div class="option-name">方案 B：按过滤条件指定</div>
+                    <div class="what">每个过滤条件可以有自己的 indexID；没有指定的条件继续自动选择。</div>
+                    <ul>
+                      <li>表达能力完整，同一字段的不同条件可使用不同索引。</li>
+                      <li>与自动模式“每个条件选一个”保持一致。</li>
+                      <li>API、表达式解析和查询计划需要能把提示绑定到条件。</li>
+                      <li>用户写法会比按字段更明确也更长。</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="recommend"><strong>已确定：方案 B。</strong>每个过滤条件可独立指定 indexID；没有指定的条件继续自动选择。查询级单个 indexID 不进入方案。</div>
+              </div>
+              <div class="footer">缺失时失败、回退或等待仍是后续产品语义，不影响这里的绑定范围。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scalar-raw-data" data-title="Scalar 原始字段值是否始终可读">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已确认 F · 原始值可读</span><h1>Scalar 多索引启用后，原始字段值始终有独立可读路径</h1></div>
+              <div class="body">
+                <div class="current"><strong>现状：</strong>索引是否带原始值、字段数据是否保留以及 NGRAM 等索引的二次检查，很多判断仍以 fieldID 为单位。多索引后，同字段可能同时有能提供原始值和不能提供原始值的索引。</div>
+                <div class="options">
+                  <div class="option a">
+                    <div class="option-name">方案 A：保证字段原始值始终有可读路径</div>
+                    <div class="what">Scalar 多索引启用后，不依赖某个 indexID 提供原始值；扫描和二次检查始终有数据来源，但不要求全部常驻内存。</div>
+                    <ul>
+                      <li>没有候选时可以安全扫描。</li>
+                      <li>NGRAM 等需要二次检查的路径清楚。</li>
+                      <li>索引增删不会意外拿走字段数据来源。</li>
+                      <li>可能增加 mmap、远端读取或字段数据的长期资源。</li>
+                    </ul>
+                  </div>
+                  <div class="option b">
+                    <div class="option-name">方案 B：按已加载索引能力决定是否保留</div>
+                    <div class="what">如果某个索引能提供原始值，就尽量不再保留字段数据。</div>
+                    <ul>
+                      <li>有机会节省部分资源。</li>
+                      <li>必须按 indexID 跟踪谁能提供什么数据。</li>
+                      <li>索引切换、删除和自动选择都要重新验证数据来源。</li>
+                      <li>扫描或二次检查可能在查询时发现数据不可用。</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="recommend"><strong>已确定：方案 A。</strong>不要求原始字段值全部常驻内存；减少 mmap、远端读取或字段数据资源可作为独立优化。</div>
+              </div>
+              <div class="footer">这是架构和数据保存问题，不是“缺索引时回不回退”的产品语义。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scalar-cost" data-title="Scalar 多加载要改什么">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">SCALAR · 成本上下文</span><h1>成本主要在运行时多索引保存与表达式选择，不需要先建完整统计系统</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 18%">部分</th><th style="width: 28%">当前行为</th><th>需要承担的新职责</th><th style="width: 26%">与现有机制的冲突</th></tr></thead>
+                  <tbody>
+                    <tr><td>Load 入口</td><td>同字段只留下一个 indexID</td><td>接受并传递本次 Load 的 Scalar indexID 集合</td><td>不能再用 fieldID 到单值的表示</td></tr>
+                    <tr><td>QueryCoord</td><td>检查 collection 全部索引或字段是否有索引</td><td>只检查本次 Load 集合；按 indexID 汇总每个 segment 的完成情况</td><td>现有“字段级完成”无法区分同字段多个索引</td></tr>
+                    <tr><td>QueryNode / Segcore</td><td>Go 层部分状态按 indexID，普通运行时一字段一个索引</td><td>同字段按 indexID 保留多个 Scalar 索引，并可单独加载、删除、上报</td><td>当前每字段只保存一个以及直接固定索引的路径要改</td></tr>
+                    <tr><td>表达式执行</td><td>直接取得唯一索引，再决定用索引还是扫描</td><td>先列出候选，判断支持的操作，再选中一个并执行</td><td>“能否正确执行”和“是否值得使用”目前混在一起</td></tr>
+                    <tr><td>字段原始值</td><td>是否可读会受字段数据和索引是否带 raw data 影响</td><td>独立记录字段原始值是否可读，并记录每个 indexID 自己能否提供原始值</td><td>不能再把某个索引的能力当成整个字段的能力</td></tr>
+                    <tr><td>数据保存</td><td>每个 indexID 已有独立文件</td><td>继续复用，不需要新增组合文件</td><td>主要增长是对象存储、Load 时间和 QueryNode 资源</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>工作边界：</strong>需要改多索引保存、Load 状态、选择流程和特殊 Scalar 路径；不需要为了第一版新增值分布统计、全局统计或复杂查询选择系统。</div>
+              </div>
+              <div class="footer">这比“只加载多个但永远用默认索引”多一层查询选择；最重的基础仍是 Segcore 从 fieldID 单索引改为 indexID 多索引。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scalar-selection" data-title="Scalar 如何选择可用索引">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">SCALAR · 第一版</span><h1>把“结果是否正确”和“性能是否更好”拆成两个问题</h1></div>
+              <div class="body">
+                <div class="flow" style="flex: 1">
+                  <div class="card blue">
+                    <div class="kicker">1</div>
+                    <div class="title">确定候选</div>
+                    <div class="desc">先读取轻量信息：indexID、类型、字段或 JSON path、cast、文本分析方式和基本支持能力；不能为了选一个而先加载全部索引内容。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card green">
+                    <div class="kicker">2</div>
+                    <div class="title">检查能否正确执行</div>
+                    <div class="desc">检查本次条件的语义和操作是否都匹配；需要二次检查的索引只有在原始字段值可读时才算可用。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card amber">
+                    <div class="kicker">3</div>
+                    <div class="title">按稳定规则选择</div>
+                    <div class="desc">可以是明确优先顺序；规则只保证可重复和正确，不宣称最快。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card purple">
+                    <div class="kicker">4</div>
+                    <div class="title">执行或扫描</div>
+                    <div class="desc">最终只准备并固定选中的索引；没有可用候选且字段原始值可读时才走扫描。指定索引的回退规则以后定。</div>
+                  </div>
+                </div>
+                <div class="grid-3">
+                  <div class="current"><strong>可复用：</strong>现有 Scalar 索引已经有“某种操作是否适合使用”的判断，FMINDEX 等少数索引还有局部命中数量判断。</div>
+                  <div class="current"><strong>需要拆开：</strong>现有判断有时同时表达“不能正确做”和“做了可能不划算”；多索引选择后必须避免把性能建议误当成正确性限制。</div>
+                  <div class="current"><strong>冷索引边界：</strong>第一轮筛选只能使用不打开索引内容就能取得的信息；依赖内容的估算必须放在选中少量候选之后。</div>
+                </div>
+                <div class="recommend"><strong>用户指定与自动选择可以共存：</strong>查询计划需要把可选 indexID 绑定到具体过滤条件；没有指定的条件才进入自动选择。</div>
+              </div>
+              <div class="footer">具体固定顺序属于实现设计；架构只要求有稳定选择层和原始扫描候选。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scalar-estimation" data-title="预留更优选择能力">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已确认 G · 只留估算入口</span><h1>第一版只预留可选估算入口；统计数据作为独立增强</h1></div>
+              <div class="body">
+                <div class="grid-3">
+                  <div class="card green">
+                    <div class="kicker">现在就保留</div>
+                    <div class="title">支持哪些操作</div>
+                    <div class="desc">每种索引回答本次条件是否能保证正确结果。这是第一版选择的基础。</div>
+                  </div>
+                  <div class="card blue">
+                    <div class="kicker">小扩展点</div>
+                    <div class="title">可选的命中数量估算</div>
+                    <div class="desc">索引能便宜估算时返回数字，不能时返回“未知”；例如 BITMAP 的等值 / IN 较容易，范围条件可能仍需合并很多 bitmap。</div>
+                  </div>
+                  <div class="card purple">
+                    <div class="kicker">小扩展点</div>
+                    <div class="title">可选的工作量估算</div>
+                    <div class="desc">允许考虑索引大小、需要遍历的词项、是否还要读原始数据；第一版可以全部返回“未知”。</div>
+                  </div>
+                </div>
+                <table class="compare">
+                  <thead><tr><th style="width: 25%">目标</th><th style="width: 35%">还需要什么</th><th>为什么不是简单增加一个分数</th></tr></thead>
+                  <tbody>
+                    <tr><td>部分索引做局部优化</td><td>把索引内部已有的命中数、词项数接到统一入口</td><td>可逐种索引增加，不影响未知候选继续按固定规则选择</td></tr>
+                    <tr><td>可靠选择更快路径</td><td>每个 segment 的不同值数量、常见值、分布、字符串大小、索引冷热状态</td><td>同一条件在不同 segment、内存状态和前置过滤结果下成本不同</td></tr>
+                    <tr><td>比较索引与原始扫描</td><td>把扫描也作为候选，并知道前面条件已经剩多少行</td><td>只比较多个索引可能选中一个比扫描还慢的路径</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>已确定：</strong>第一版只预留“可用性 + 可选估算，允许未知”的接口形状，不提前保存完整统计。以后把更优选择作为独立增强。</div>
+              </div>
+              <div class="footer">这满足“以后可以估算”的架构边界，同时避免现在建设没有数据支撑的复杂系统。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scalar-estimation-timing" data-title="估算时机的真实冲突">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">SCALAR · 未来决策</span><h1>什么时候选择索引，会直接影响估算是否准确和查询是否需要等待</h1></div>
+              <div class="body">
+                <div class="current"><strong>当前机制：</strong>索引或原始数据通常在表达式正式执行前预取。普通 Scalar 索引往往先生成整个 segment 的结果 bitmap；原始扫描则能利用前面 AND 条件留下的 bitmap，只检查仍有效的行。</div>
+                <div class="options">
+                  <div class="option a">
+                    <div class="option-name">提前选择并预取</div>
+                    <div class="what">查询开始时按统计和规则选一个索引，提前准备数据。</div>
+                    <ul>
+                      <li>可以和其他工作并行，查询等待较少。</li>
+                      <li>不知道前置条件实际过滤结果。</li>
+                      <li>如果一百万行已经只剩十行，原始扫描可能更快。</li>
+                    </ul>
+                  </div>
+                  <div class="option b">
+                    <div class="option-name">执行到该条件时再选</div>
+                    <div class="what">看到实际剩余行数后，再比较索引与扫描。</div>
+                    <ul>
+                      <li>选择依据更准确。</li>
+                      <li>冷索引或远端数据准备会进入查询关键路径。</li>
+                      <li>需要调整当前预取安排。</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="recommend"><strong>可选折中：</strong>提前按规则准备一个索引；执行时如果剩余行很少，只在索引和原始扫描之间做第二次判断。</div>
+                <div class="warn"><strong>本轮不决定：</strong>第一版不承诺最快，因此不必现在改变预取架构；只需保证未来估算入口不被锁死在 Proxy 或 QueryCoord。</div>
+              </div>
+              <div class="footer">真正的选择应在 QueryNode / Segcore 执行侧完成，因为冷热状态和每个 segment 的数据分布都在本地。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="scalar-products" data-title="Scalar 同类产品做法">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">同类产品</span><h1>同类产品既有系统自动选择，也有用户控制路径；并非每个产品都原生同时支持</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 18%">产品</th><th style="width: 29%">怎么用多个索引</th><th style="width: 29%">怎么选择</th><th>对 Milvus 的启发</th></tr></thead>
+                  <tbody>
+                    <tr><td>PostgreSQL</td><td>同一列可有多个不同物理索引</td><td>核心以自动选择为主；显式 hint 常依赖扩展</td><td>每种索引应提供自己的估算，公共选择层再结合统计比较</td></tr>
+                    <tr><td>MySQL</td><td>同列多索引；支持可见 / 不可见索引</td><td>自动选择，也原生支持 USE / FORCE / IGNORE INDEX</td><td>自动与用户指定可以共存；但依赖采样、值分布以及内存 / 磁盘读取成本参数</td></tr>
+                    <tr><td>ClickHouse</td><td>多个 data skipping index 自动参与过滤</td><td>可要求某个索引必须被查询使用，否则报错；不等于强制只使用它</td><td>第一版按规则判断可用性且不承诺最快，是合理边界</td></tr>
+                    <tr><td>Elasticsearch</td><td>常通过有名字的 multi-field 表达不同索引方式</td><td>查询显式选择字段路径</td><td>这是多个命名字段，不是同一字段上可互换的多个物理索引</td></tr>
+                  </tbody>
+                </table>
+                <div class="grid-3" style="flex: 1">
+                  <div class="card green"><div class="title">可直接借鉴</div><div class="desc">自动选择 + 用户指定并存；每种索引自己说明支持能力和可选估算。</div></div>
+                  <div class="card amber"><div class="title">不能直接照搬</div><div class="desc">Milvus 按 segment 执行，索引还可能 mmap、冷加载或位于远端，成本信息与传统数据库不同。</div></div>
+                  <div class="card purple"><div class="title">建议边界</div><div class="desc">先做正确规则；统计和更优选择按真实基准逐步增加，不在多索引第一版一次做完。</div></div>
+                </div>
+                <div class="note">参考：PostgreSQL 索引成本估算与统计文档；MySQL 统计与索引提示文档；ClickHouse skipping index 文档。</div>
+              </div>
+              <div class="footer">调研结论支持 Scalar 第一版方案，但不支持在缺少统计时承诺“自动选到最快”。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-levels" data-title="Vector 四个能力层级">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">VECTOR</span><h1>先区分四种能力；它们不是同一个成本</h1></div>
+              <div class="body">
+                <div class="grid-4" style="flex: 1">
+                  <div class="card green">
+                    <div class="kicker">V0</div>
+                    <div class="title">可定义、构建多个</div>
+                    <div class="desc">对象存储保留多份索引文件，但 QueryNode 仍只加载一个。主要是解除元数据入口限制。</div>
+                  </div>
+                  <div class="card blue">
+                    <div class="kicker">V1</div>
+                    <div class="title">Load 时选一个</div>
+                    <div class="desc">每字段选明确 indexID；可改变已加载 collection 的选择。Segcore 仍可每字段只保存一个 Vector 索引对象。</div>
+                  </div>
+                  <div class="card purple">
+                    <div class="kicker">V2</div>
+                    <div class="title">同时加载多个</div>
+                    <div class="desc">同一个 segment 内保留多个；查询先固定使用本次 Load 的默认 indexID，不开放用户每次选择。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="kicker">V3</div>
+                    <div class="title">Search 选择索引</div>
+                    <div class="desc">用户指定或 Milvus 动态选择；查询计划、sealed、growing、refine 和结果合并都使用同一选择。</div>
+                  </div>
+                </div>
+                <table class="compare">
+                  <tbody>
+                    <tr><th style="width: 22%">V0 → V1</th><td>主要连通 Proxy、QueryCoord 与现有 Reopen，运行时仍是一个索引。</td></tr>
+                    <tr><th>V1 → V2</th><td>最重的一步：Segcore、Load 状态、增删、资源、原始向量路径都改为 indexID 多值；查询也要能明确取得固定的 Load 默认 indexID。</td></tr>
+                    <tr><th>V2 → V3</th><td>继续开放用户指定或动态选择，并修改 Growing、refine 和对外查询语义。</td></tr>
+                  </tbody>
+                </table>
+                <div class="warn"><strong>关键结论：</strong>只把 Load API 写成列表，但内部仍只支持一个，并不等于已经预留 V2；未来最重的运行时改造仍然存在。</div>
+              </div>
+              <div class="footer">后文分别说明 V1、V2、V3 的组件职责变化。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-v1-cost" data-title="Vector 只加载一个的成本">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">VECTOR · V1</span><h1>Load 每字段选择一个：改动集中，现有 Segcore 单索引结构可以保留</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 18%">部分</th><th style="width: 28%">当前行为</th><th>需要改变什么</th><th style="width: 26%">可复用 / 冲突</th></tr></thead>
+                  <tbody>
+                    <tr><td>Proxy / Load API</td><td>不能稳定选择同字段具体索引</td><td>接受 index_name，解析为稳定 indexID；未指定时读 collection 默认</td><td>去掉遍历覆盖；不增加查询期选择</td></tr>
+                    <tr><td>QueryCoord</td><td>已保存 fieldID 到 indexID，但下发全部索引</td><td>同时过滤每个 segment 的索引文件信息和 collection 级索引信息，只保留本次 Load 选择；再汇总切换进度</td><td>否则查询计划仍可能读到另一个索引的 metric 或参数</td></tr>
+                    <tr><td>QueryNode Go</td><td>很多索引状态已按 indexID</td><td>确保状态、资源和上报围绕被选中的 indexID</td><td>改动相对集中</td></tr>
+                    <tr><td>Segcore</td><td>一字段一个 Vector 索引；Reopen 可替换</td><td>继续每字段只保存一个，只接收当前选择的 indexID</td><td>现有“先加载新索引、成功后发布”可复用</td></tr>
+                    <tr><td>恢复</td><td>QueryCoord 能恢复当前 Load 配置记录，但检查路径尚不使用该选择</td><td>方案要求重启后按记录继续加载或切换；release 后回 collection 默认</td><td>需要把恢复记录与 IndexChecker 真正连通</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>完整价值：</strong>用户可先构建 B，再把已加载 collection 从 A 改到 B；不需要删除 A，也不必先 release。</div>
+                <div class="warn"><strong>限制：</strong>同一时刻每个 segment 仍只有一个 Vector 索引；Search 不能在多个已加载索引间自由选择。</div>
+              </div>
+              <div class="footer">这是 Vector 第一版的推荐基础能力，且不是未来必须丢弃的临时实现。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-v2-cost" data-title="Vector 真正多加载的成本">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">VECTOR · V2</span><h1>真正同时加载多个：Load 管理和 Segcore 都要从“字段单值”变为“indexID 集合”</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10px">
+                  <thead><tr><th style="width: 18%">部分</th><th style="width: 29%">需要承担的新职责</th><th style="width: 28%">受影响的现有机制</th><th>为什么不能只改 API</th></tr></thead>
+                  <tbody>
+                    <tr><td>Load 期望状态</td><td>持久保存每字段 indexID 列表和 Load 默认项</td><td>Load 配置比较、重启恢复、IndexChecker</td><td>单值 map 无法表达 [A, B] 和只删除 A</td></tr>
+                    <tr><td>QueryCoord</td><td>按 indexID 增加、删除、检查；把期望状态与 QueryNode 上报的实际状态比较，动态得到完成进度</td><td>当前字段级缺失判断和“全部索引”遍历</td><td>否则同字段两个索引会混成一个状态</td></tr>
+                    <tr><td>QueryNode Go</td><td>加载、卸载、lazy load、资源核算和上报都保留每个 indexID</td><td>少数明确拒绝同字段多个 Vector 索引的路径</td><td>字段存在任意索引不再等于目标索引可用</td></tr>
+                    <tr><td>Segcore 元信息</td><td>indexID 找索引信息，同时保留字段到索引集合</td><td>当前同字段后一个索引会被忽略</td><td>metric、参数和能力必须属于具体 indexID</td></tr>
+                    <tr><td>Sealed Segment</td><td>按 indexID 保存多个 Vector 索引；独立增删、准备、warmup、统计资源</td><td>LoadDiff、原始向量来源、refine、取消和回收都按 fieldID</td><td>这是整个方案最大的运行时改造</td></tr>
+                    <tr><td>固定查询默认</td><td>即使不开放用户指定，查询也必须取得本次 Load 的默认 indexID</td><td>当前查询只按 fieldID 隐式取得一个索引</td><td>同字段有 A、B 后，不能再让容器顺序决定查询用谁</td></tr>
+                    <tr><td>资源</td><td>同时计算 A+B 的内存、本地磁盘、GPU / DiskANN 资源</td><td>Reopen 当前资源检查较粗</td><td>必须真实允许新旧或多个索引同时驻留</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>结论：</strong>完成这些变化后，产品即使默认只加载一个，也已经支付了“多个 Vector 索引同时驻留”的大部分成本。</div>
+              </div>
+              <div class="footer">V2 已需要内部固定默认 indexID；V3 的剩余成本是开放用户 / 动态选择并明确 Growing、refine 的查询语义。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-reservation" data-title="“预留多 Vector 加载”有两种含义">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已确认 A · A1 主方案</span><h1>主方案只预留公共接口形状，Vector 本次 Load 每字段最多一个</h1></div>
+              <div class="body">
+                <div class="question"><div class="label">你要决定的问题</div><div class="text">是否愿意现在就改 Segcore，让 Vector 内部真正能同时保存多个索引？</div></div>
+                <div class="current"><strong>现状：</strong>Scalar 多加载本来就需要“字段到 indexID 集合”的 Load 表示，因此公共 Load 模型做成列表成本不大；但 Vector Segcore 仍是一个字段一个索引。</div>
+                <div class="options">
+                  <div class="option a">
+                    <div class="option-name">方案 A：只预留公共接口</div>
+                    <div class="what">Load 数据形状支持列表，但 Vector 第一版校验每字段最多一个；内部继续只保留一个。</div>
+                    <ul>
+                      <li>能复用 Scalar 的公共模型，当前改动较小。</li>
+                      <li>V1 是完整功能：可建多个、Load 选一个、在线换一个。</li>
+                      <li>未来做 V2 时仍需重做 Segcore 和查询链路。</li>
+                      <li>不能宣传为“运行时已预留多 Vector 加载”。</li>
+                    </ul>
+                  </div>
+                  <div class="option b">
+                    <div class="option-name">方案 B：预留真实运行能力</div>
+                    <div class="what">现在就完成 V2 底层，产品默认或文档仍推荐用户每字段只加载一个。</div>
+                    <ul>
+                      <li>以后开放用户每次查询选择，主要剩 V3 的入口和查询语义工作。</li>
+                      <li>可以支持严格在线切换和不同 metric 双加载。</li>
+                      <li>现在就承担 Segcore、资源、状态、恢复的大改。</li>
+                      <li>测试范围已经接近完整多 Vector 功能。</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="recommend"><strong>已确定：A1 为主方案。</strong>V1 是独立完整能力；A2 保留为单独预研支线，下一页给出可实现路径与真实成本。</div>
+              </div>
+              <div class="footer">A1 已确认；A2 的详细运行路径不进入主方案，但保留独立预研结论。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-a2-research" data-title="A2 可实现的预研路径">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">非主方案预研 · A2</span><h1>A2 技术上可行，但成本接近完整 V2，不属于 A1 的低成本预留</h1></div>
+              <div class="body">
+                <div class="current"><strong>边界：</strong>A2 让同字段多个 Vector 索引同时加载，但查询先使用固定 Load 默认；本页不包含用户每次 Search 选择或动态择优，它们属于 V3 和 C2。</div>
+                <div class="grid-4" style="flex: 1">
+                  <div class="card blue">
+                    <div class="kicker">1 · 状态模型</div>
+                    <div class="title">验证 [A] → [A,B] → [B]</div>
+                    <div class="desc">Load 保存 indexID 集合和固定默认；QueryCoord 按 indexID 比较期望与实际状态，分别增加、删除和恢复。</div>
+                  </div>
+                  <div class="card green">
+                    <div class="kicker">2 · Sealed 主路径</div>
+                    <div class="title">一个 segment 同时保存 A、B</div>
+                    <div class="desc">Segcore 按 indexID 保存、查询和删除；证明只删除 A 不影响 B。这是 A2 相比 A1 最大的改造。</div>
+                  </div>
+                  <div class="card amber">
+                    <div class="kicker">3 · 严格切换</div>
+                    <div class="title">新查询用 B，旧查询继续 A</div>
+                    <div class="desc">B 全部准备后改变本次 Load 的选择；等待网络、队列和执行中的 A 请求排空。Growing 按已确认 D1 处理。</div>
+                  </div>
+                  <div class="card purple">
+                    <div class="kicker">4 · 资源与恢复</div>
+                    <div class="title">测最终占用与 Load 峰值</div>
+                    <div class="desc">分别测 A+B 长期核算、临时内存、本地磁盘、GPU / DiskANN、多 segment 并行 Reopen 和重启恢复。</div>
+                  </div>
+                </div>
+                <table class="compare">
+                  <tbody>
+                    <tr><th style="width: 22%">QueryNode / Segcore</th><td>每个 indexID 独立加载、卸载、上报、核算资源，并管理 raw data / refine 能力。</td></tr>
+                    <tr><th>查询</th><td>即使没有用户指定，也必须在查询开始时固定 Load 默认 indexID，不能让各 segment 自己选择。</td></tr>
+                    <tr><th>主要风险</th><td>不是元数据，而是 Segcore 多索引状态、Growing 查询含义、旧请求排空和资源峰值。</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>预研结论：</strong>没有发现不可实现的架构障碍。若以后明确需要严格无停机切换或 Search 选择，应完整进入 A2，不能继续在 A1 上增加小补丁。</div>
+              </div>
+              <div class="footer">A1 仍是主方案；A2 作为额外能力独立评估和立项。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-online-gradual" data-title="兼容查询条件下在线逐步切换">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">VECTOR · 在线替换</span><h1>metric、打分含义和查询参数都兼容时，才可以逐 segment 在线切换</h1></div>
+              <div class="body">
+                <div class="question"><div class="label">要解决的问题</div><div class="text">Collection 已加载时，从索引 A 改为 B，能否不 release / reload？</div></div>
+                <div class="current"><strong>现状：</strong>Reopen 已能在单个 segment 上先准备 B，成功后再替换 A；失败时 A 仍可查询。但同一请求只有一份 Search 参数，例如 IVF 的 nprobe 与 HNSW 的 ef 不能互换，因此同 metric 不是充分条件。</div>
+                <div class="flow" style="flex: 1">
+                  <div class="card blue"><div class="kicker">1</div><div class="title">写入新 Load 选择与顺序</div><div class="desc">从 A 到 B 的顺序信息随 Reopen 传到 QueryNode，并在最终发布 segment 状态前检查，防止旧请求晚到。</div></div>
+                  <div class="arrow">→</div>
+                  <div class="card green"><div class="kicker">2</div><div class="title">逐 segment Reopen</div><div class="desc">只下发 B；单个 segment 保留 A，直到 B 加载成功并发布。</div></div>
+                  <div class="arrow">→</div>
+                  <div class="card amber"><div class="kicker">3</div><div class="title">汇总完成进度</div><div class="desc">QueryNode 上报实际 indexID；QueryCoord 知道还有哪些 segment 在 A。</div></div>
+                  <div class="arrow">→</div>
+                  <div class="card purple"><div class="kicker">4</div><div class="title">完成或继续重试</div><div class="desc">所有仍会接收查询的 segment 副本都到 B 后完成；中途重启按保存的目标继续。</div></div>
+                </div>
+                <div class="grid-2">
+                  <div class="recommend"><strong>资源峰值：</strong>B 已占资源时，A 因旧查询未结束还不能回收；每个正在切换的 segment 都会出现 A+B，多个 Reopen 并行会放大 collection 总峰值。</div>
+                  <div class="warn"><strong>用户可见影响：</strong>过渡期不同 segment 分别用 A、B，召回和延迟会渐变；发布新状态时新查询还可能短暂重试，deadline 很短的请求仍可能失败。</div>
+                </div>
+              </div>
+              <div class="footer">允许渐进切换的前提：metric 与打分含义一致，同一份查询参数、refine 和 raw data 能力都能在 A、B 上正确工作。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-online-atomic" data-title="严格一致切换与不同 metric">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">待确认 B · 需要你的可用性要求</span><h1>你真正要决定的是：切换期间一次 Search 能否同时遇到 A、B</h1></div>
+              <div class="body">
+                <div class="question"><div class="label">为什么影响架构</div><div class="text">允许混用可以复用现有逐 segment Reopen；要求每次 Search 统一使用 A 或 B，就必须先双加载。</div></div>
+                <div class="current"><strong>硬边界：</strong>不同 metric 的分数不能直接合并；同 metric 但查询参数、打分含义或能力不兼容时，同一请求也不能同时访问 A、B。这里需要统一的是“每次查询选 A 还是 B”，不是所有机器同一瞬间替换内存。</div>
+                <div class="options">
+                  <div class="option a">
+                    <div class="option-name">方案 A：接受逐步切换</div>
+                    <div class="what">只对 metric、打分含义、查询参数和相关能力都兼容的 A、B 做渐进切换；其他情况 release / reload。</div>
+                    <ul>
+                      <li>Segcore 继续只保留一个，复用 Reopen。</li>
+                      <li>改动集中，资源峰值只发生在正在切换的 segment。</li>
+                      <li>兼容索引过渡期的召回和延迟可能渐变。</li>
+                      <li>不兼容索引会有一次 unload / load 窗口。</li>
+                    </ul>
+                  </div>
+                  <div class="option b">
+                    <div class="option-name">方案 B：严格无停机切换</div>
+                    <div class="what">A 保持服务；B 在所有目标 segment 上准备好；新查询统一使用本次 Load 的 B，旧请求排空后再删 A。</div>
+                    <ul>
+                      <li>可用于严格一致切换，也可处理不同 metric。</li>
+                      <li>必须实现 V2，以及“查询开始时固定 indexID”的内部能力；不一定同时开放用户指定 API。</li>
+                      <li>QueryCoord 要等待所有仍服务查询的副本准备 B，再改变本次 Load 的当前选择。</li>
+                      <li>携带 A 的请求可能还在网络或队列中，需要明确排空边界；不能只看 Segcore 当前引用。</li>
+                      <li>Growing 也要同时服务携带 A、B 的查询，必须进入后文的 Growing 选择。</li>
+                      <li>切换期按 A+B 核算资源，并延迟回收 A。</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="recommend"><strong>当前建议：</strong>V1 只支持“查询含义和参数兼容”的渐进切换；其他组合第一版 release / reload。若都要求无停机，应进入 V2 和内部查询固定 indexID 的方案。</div>
+              </div>
+              <div class="footer">请确认：兼容索引的召回 / 延迟渐变是否可接受；不兼容索引是否允许 release / reload。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-alter-set" data-title="在线改变已加载索引集合">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">VECTOR · V2</span><h1>从 [A] 改成 [A,B]，再改成 [B]，本质就是完整多加载状态管理</h1></div>
+              <div class="body">
+                <div class="question"><div class="label">要解决的问题</div><div class="text">Collection 不 release，能否在线增加或删除一个已加载 Vector 索引？</div></div>
+                <div class="current"><strong>现状：</strong>Reopen 能替换一字段的单个索引，但删除和发布最终仍以 fieldID 为单位；无法安全表达“保留 B，只删除 A”。</div>
+                <div class="grid-4" style="flex: 1">
+                  <div class="card blue">
+                    <div class="title">Load 状态比较集合</div>
+                    <div class="desc">从单值比较改为集合差异：需要新增哪些 indexID，需要删除哪些。</div>
+                  </div>
+                  <div class="card green">
+                    <div class="title">先增加 B</div>
+                    <div class="desc">A 继续服务，B 在每个 segment 独立加载和上报；失败不能影响 A。</div>
+                  </div>
+                  <div class="card amber">
+                    <div class="title">改变本次 Load 的当前选择</div>
+                    <div class="desc">只有 B 达到要求后，才让新查询选择 B；不修改 collection 默认值。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="title">最后删除 A</div>
+                    <div class="desc">等携带 A 的请求从网络、队列和执行路径排空后，按 indexID 回收 A，不能误删同字段的 B。</div>
+                  </div>
+                </div>
+                <table class="compare">
+                  <tbody>
+                    <tr><th style="width: 24%">无需 drop / reload 的成本</th><td>不是增加一个 Alter API，而是完成 V2 的集合状态、Segcore 按 indexID 保存多个索引、资源核算、切换进度与查询选择。</td></tr>
+                    <tr><th>与严格切换的关系</th><td>一旦能安全完成 [A]→[A,B]→[B]，严格无停机切换的大部分底层能力已经具备。</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="footer">因此，“在线 alter loaded index 集合”不能作为 V1 上的小补丁，应归入 V2。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-query-choice" data-title="Vector 查询指定与自动选择">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已确认 C · A2 + V3 的查询规则</span><h1>进入多加载查询阶段后，未指定使用固定 Load 默认，用户可显式指定已加载索引</h1></div>
+              <div class="body">
+                <div class="current"><strong>A1 第一版边界：</strong>每字段只加载一个，真正的索引选择发生在 Load / Alter Load。Search 即使接受 index_name，也只能验证或指定当前唯一已加载索引，不能访问其他已构建但未加载的索引。</div>
+                <div class="options">
+                  <div class="option a">
+                    <div class="option-name">方案 A：固定 Load 默认 + 用户可指定</div>
+                    <div class="what">未指定时使用当前 Load 的默认 indexID；指定时使用该 indexID。</div>
+                    <ul>
+                      <li>行为稳定，易于解释和排查。</li>
+                      <li>Search 计划只需携带最终 indexID。</li>
+                      <li>不会因负载或统计变化悄悄改变召回结果。</li>
+                      <li>不自动选择理论上更快的索引。</li>
+                    </ul>
+                  </div>
+                  <div class="option b">
+                    <div class="option-name">方案 B：每次查询自动选择</div>
+                    <div class="what">Milvus 根据 query 参数、索引能力和资源状态，从已加载集合中挑一个。</div>
+                    <ul>
+                      <li>用户可以少理解索引细节。</li>
+                      <li>仍需在查询开始时固定 indexID，不能让 segment 各自随意选择。</li>
+                      <li>需要定义召回、延迟、资源之间如何取舍。</li>
+                      <li>成本估算不可靠时，行为可能难以预测。</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="recommend"><strong>已确定：C1 是以后 A2 + V3 的主查询规则。</strong>它支持稳定默认和用户指定；C2 动态选择作为独立预研支线，不改变默认策略，也不扩大 A1 第一版范围。</div>
+                <div class="warn"><strong>用户指定的边界：</strong>架构能严格检查指定 indexID；索引缺失时失败、等待还是回退，是产品语义，不在本轮决定。</div>
+              </div>
+              <div class="footer">C1 已确认；下一页只解释 C2 为什么可行、又为什么不能顺带承诺“自动选最好”。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-c2-research" data-title="C2 动态选择的成本与路径">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">非主方案预研 · C2</span><h1>C2 可复用 C1 的选择入口，但“自动选最好”需要新的统计和运行信息</h1></div>
+              <div class="body">
+                <div class="current"><strong>边界：</strong>C2 只有在 A2 已同时加载多个索引、查询链能携带明确 indexID 后才有意义。用户显式指定时不进入动态选择；信息不足时回到 C1 的 Load 默认。</div>
+                <div class="grid-3">
+                  <div class="card green">
+                    <div class="kicker">第一层 · 可行</div>
+                    <div class="title">筛出能正确执行的候选</div>
+                    <div class="desc">排除 metric / 打分含义、查询参数、加载状态、refine、raw data 或 Growing 路径不满足的索引。</div>
+                  </div>
+                  <div class="card blue">
+                    <div class="kicker">第二层 · 可渐进</div>
+                    <div class="title">按稳定规则选择</div>
+                    <div class="desc">多个候选都可用时先用固定规则；无法判断返回 unknown，并使用 Load 默认。不需要一开始承诺最快。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="kicker">第三层 · 独立大能力</div>
+                    <div class="title">估算最快或最好</div>
+                    <div class="desc">ANN 索引不只速度不同，召回也不同；必须先定义延迟、召回和资源谁更重要。</div>
+                  </div>
+                </div>
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 24%">需要的信息</th><th>为什么需要</th></tr></thead>
+                  <tbody>
+                    <tr><td>nq、topK、Search 参数、提前估算的过滤比例</td><td>同一索引在不同查询形状下成本不同；查询开始前通常拿不到各 segment 的精确过滤结果。</td></tr>
+                    <tr><td>segment 数量与大小</td><td>决定整条查询需要完成多少工作。</td></tr>
+                    <tr><td>mmap、缓存冷热、本地文件和硬件快照</td><td>静态索引定义不能代表实际延迟；这些状态分散在 QueryNode，只能先使用有延迟的汇总信息。</td></tr>
+                    <tr><td>索引类型、构建参数和离线基准</td><td>用于估算延迟与召回取舍；线上通常无法直接知道真实召回率。</td></tr>
+                  </tbody>
+                </table>
+                <div class="warn"><strong>准确度边界：</strong>第一版估算只能使用查询开始前已有的统计或状态快照。若要先得到精确过滤结果和实时节点负载，再固定 indexID，需要“先收集、再选择、再执行”的两段查询流程，属于更大的独立改造。</div>
+                <div class="recommend"><strong>可实现方向：</strong>能力检查 → 可选估算 → unknown 回到 Load 默认 → 查询开始时固定一个 indexID。所有 sealed segment 必须使用同一选择，不能各自动态挑选。</div>
+              </div>
+              <div class="footer">C1 是主方案；C2 的正确候选筛选可行，“自动选最快或最好”应作为独立查询增强。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-query-cost" data-title="Vector Search 选择要改什么">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">VECTOR · V3 成本上下文</span><h1>Search 指定索引不只是加一个参数；整条查询链都要携带同一 indexID</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 18%">部分</th><th style="width: 31%">需要改变什么</th><th>受影响的当前机制</th></tr></thead>
+                  <tbody>
+                    <tr><td>Proxy / API</td><td>Search 可选 index_name；解析并确定最终 indexID；混合查询的每个子查询独立选择</td><td>当前只有字段和 metric</td></tr>
+                    <tr><td>查询计划</td><td>携带明确 indexID 及它绑定的 metric；用户 metric 与索引定义不一致时能识别</td><td>当前计划从字段唯一索引读取 metric</td></tr>
+                    <tr><td>Sealed Segment</td><td>按 indexID 找到 Vector 索引并执行，不能只按 fieldID</td><td>当前 Vector 索引容器是一字段一个</td></tr>
+                    <tr><td>Refine / 原始向量</td><td>知道本次 Search 使用哪个 indexID、它是否支持 refine；原始向量可以来自字段数据或另一个能提供 raw data 的索引，但不能再按 fieldID 随便取</td><td>当前 refine 和原始向量来源多按字段处理</td></tr>
+                    <tr><td>Growing Segment</td><td>说明用户指定的持久索引如何作用于 growing；选择的 metric、参数或算法无法由临时索引表达时，要有另一条执行路径</td><td>当前每个 Vector 字段最多一个临时索引，不支持时直接搜索原始向量</td></tr>
+                    <tr><td>结果合并</td><td>一次查询的 sealed segment 必须使用同一明确 indexID；Growing 按单独确认的同查询含义路径执行</td><td>不同 metric 或不同打分含义的分数不能直接混合</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>在 V2 之后的增量：</strong>最重的多索引驻留已经完成，但 V3 仍是一轮完整的查询链路修改和测试，不只是开放 API。</div>
+              </div>
+              <div class="footer">如果只做 V1，Search 指定未加载索引只有“不可用”这一种结果，产品价值有限。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-metric-growing" data-title="Vector 查询选择与 Growing Segment">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已确认 D · 只严格约束 sealed</span><h1>查询选择的 indexID 严格约束 sealed；Growing 使用兼容执行路径</h1></div>
+              <div class="body">
+                <div class="current"><strong>现状：</strong>Growing Segment 每个字段最多只有一个临时 Vector 索引；未启用或不支持时搜索原始向量。查询为 sealed 选择的持久 indexID，只在 sealed segment 上有对应索引文件。</div>
+                <div class="options">
+                  <div class="option a">
+                    <div class="option-name">方案 A：查询 indexID 只严格约束 sealed</div>
+                    <div class="what">Growing 使用能保持同一查询含义的临时索引；无法表达时，在支持的 metric / 算法范围内搜索原始向量。</div>
+                    <ul>
+                      <li>不需要维护多份 Growing 索引。</li>
+                      <li>指定物理索引与 Growing 实际执行方式可能不同，但查询含义保持一致。</li>
+                      <li>Growing 查询可能明显更慢；部分 sparse 算法或参数未必能用原始数据表达。</li>
+                      <li>必须长期保留可搜索的原始向量，可能阻止现有回收并增加资源。</li>
+                    </ul>
+                  </div>
+                  <div class="option b">
+                    <div class="option-name">方案 B：Growing 也严格对应每个 indexID</div>
+                    <div class="what">为每个需要的 indexID、metric 或算法维护自己的临时索引。</div>
+                    <ul>
+                      <li>Sealed 与 Growing 的指定语义最一致。</li>
+                      <li>插入时要更新多份索引。</li>
+                      <li>CPU、内存、写入延迟都会随份数增加。</li>
+                      <li>Growing 的加载、回收和状态也要按 indexID 重做。</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="recommend"><strong>已确定：方案 A。</strong>Growing 使用兼容临时索引或原始向量；必须明确支持范围，不能承诺所有 Vector 或 sparse 算法都能保持相同查询含义。</div>
+              </div>
+              <div class="footer">只做 V1 或普通 V2 固定默认时可后置；一旦 V2 用于严格无停机切换，或开放 V3，每个查询都有 A/B 选择，都必须回答。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="vector-products" data-title="Vector 同类产品做法">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">同类产品</span><h1>成熟向量产品更常用“有名字的向量目标”，而不是自动选同字段物理索引</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 20%">产品</th><th style="width: 34%">常见做法</th><th>对本方案的启发</th></tr></thead>
+                  <tbody>
+                    <tr><td>Qdrant / Weaviate</td><td>一个对象可有多个有名字的向量；查询明确指定目标向量</td><td>名字与 metric、索引配置绑定，用户选择稳定</td></tr>
+                    <tr><td>Elasticsearch / OpenSearch</td><td>用不同 vector field 或命名目标保存不同向量 / 配置</td><td>没有发现成熟的“同字段多个物理 ANN 自动择优”语义</td></tr>
+                    <tr><td>Vespa</td><td>查询指定 tensor / nearest-neighbor 项</td><td>查询目标明确，选择发生在计划开始前</td></tr>
+                    <tr><td>pgvector</td><td>同一列可为不同距离运算建索引；SQL 运算符决定 metric，PostgreSQL 再选物理索引</td><td>metric 是查询语义的一部分；不同 metric 不能静默混用</td></tr>
+                  </tbody>
+                </table>
+                <div class="grid-3" style="flex: 1">
+                  <div class="card green"><div class="title">支持用户指定是合理的</div><div class="desc">有名字的目标是成熟、易解释的做法，尤其适合不同 metric 或不同资源特征。</div></div>
+                  <div class="card amber"><div class="title">固定默认也合理</div><div class="desc">未指定时使用 Load 默认，行为稳定；不需要一开始解决 Vector 成本估算。</div></div>
+                  <div class="card red"><div class="title">动态 auto 需谨慎</div><div class="desc">ANN 索引不仅快慢不同，召回也不同。自动改变索引可能让结果变化，不能只用“能正确执行”描述。</div></div>
+                </div>
+              </div>
+              <div class="footer">同类产品调研更支持“默认 + 显式指定”，不支持第一版承诺动态选择最佳 Vector 索引。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="resource-cost" data-title="存储与运行资源">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">资源影响</span><h1>对象存储、构建资源和 QueryNode 驻留资源要分开看</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 22%">资源</th><th style="width: 31%">多定义、只加载一个</th><th>多个同时加载</th></tr></thead>
+                  <tbody>
+                    <tr><td>对象存储</td><td>每个 segment、每个 indexID 都有独立文件；总体通常接近各索引文件之和</td><td>相同，不因是否加载而改变</td></tr>
+                    <tr><td>构建 CPU / 内存 / 时间</td><td>每个索引都要独立构建；构建并发和排队受影响</td><td>相同，主要由定义数量决定</td></tr>
+                    <tr><td>QueryNode 内存</td><td>按当前索引核算；在线切换时每个正在 Reopen 的 segment 需要同时容纳 A、B</td><td>必须按 A+B+…核算和预留；实际内存页受 mmap、lazy load 和缓存淘汰影响</td></tr>
+                    <tr><td>QueryNode 本地磁盘 / 缓存</td><td>主要保留当前索引与切换临时数据</td><td>DiskANN、mmap 和本地缓存的逻辑需求随索引数量扩大，实际占用受缓存策略影响</td></tr>
+                    <tr><td>Load 时间与峰值</td><td>只准备当前索引；多个 segment 并行 Reopen 会放大 collection 总峰值</td><td>需要准备整个加载集合；加载临时内存可能让峰值高于最终 A+B</td></tr>
+                    <tr><td>原始向量</td><td>按当前索引能力决定是否额外保留</td><td>通常不应每个索引复制一份，但必须明确哪个路径可提供 raw data / refine</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>为什么“推荐用户只加载一个”有价值：</strong>即使底层支持 V2，默认只加载一个仍能降低需要核算的内存、本地磁盘和 Load 工作量。</div>
+                <div class="warn"><strong>可复用与缺口：</strong>QueryNode 现有估算入口已经能累加多个索引信息；仍缺多索引运行状态、Reopen 的精确差量和 raw data 资源处理。</div>
+              </div>
+              <div class="footer">具体上限、资源配额和不同索引组合需要基准测试后决定，不写死在架构里。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="cdc" data-title="CDC 与多集群">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已确认 · CDC</span><h1>CDC 复制索引定义；每个集群独立决定默认索引、Load 集合和查询选择</h1></div>
+              <div class="body">
+                <div class="flow" style="flex: 1">
+                  <div class="card green">
+                    <div class="kicker">Primary</div>
+                    <div class="title">索引定义属于数据管理</div>
+                    <div class="desc">Create / Alter / Drop Index 的定义与数据变化继续沿 CDC 复制。</div>
+                  </div>
+                  <div class="arrow">CDC →</div>
+                  <div class="card blue">
+                    <div class="kicker">Secondary</div>
+                    <div class="title">收到相同索引定义</div>
+                    <div class="desc">能够独立构建或接收对应索引结果，具体沿用现有 CDC 数据路径。</div>
+                  </div>
+                  <div class="arrow">分开</div>
+                  <div class="card purple">
+                    <div class="kicker">各自 Query 集群</div>
+                    <div class="title">查询状态本地管理</div>
+                    <div class="desc"><strong>目标行为：</strong>Collection 默认、当前 Load 索引集合和查询选择由本地管理。当前 AlterLoadConfig 会复制其中的 indexID，因此必须调整复制边界。</div>
+                  </div>
+                </div>
+                <div class="grid-4">
+                  <div class="card green"><div class="title">升级顺序</div><div class="desc">先升级 Secondary，再升级 Primary，最后由 Cloud 或外部平台打开功能。</div></div>
+                  <div class="card blue"><div class="title">复制边界要调整</div><div class="desc">最简单方向是只复制索引定义，把默认值和 Load indexID 从可复制配置中拆成查询集群本地状态。</div></div>
+                  <div class="card amber"><div class="title">内核职责</div><div class="desc">检查本集群 Scalar / Vector 开关；不检查其他集群版本是否一致。</div></div>
+                  <div class="card red"><div class="title">Drop 仍会跨集群</div><div class="desc">Primary Drop A 会复制到仍在使用 A 的 Secondary；定义生命周期不能完全本地化。</div></div>
+                </div>
+                <div class="recommend"><strong>结果：</strong>各集群可以加载不同索引并在不同时间切换；Drop Index 一旦复制到 Secondary，就是权威事件，Secondary 本地查询状态必须停止引用该 indexID。</div>
+              </div>
+              <div class="footer">Scalar 和 Vector 使用独立开关；“查询选择本地化”是目标架构，与当前会复制 Load indexID 的路径存在明确冲突。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="cdc-drop" data-title="CDC Drop Index 的固定规则">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已澄清 H · 固定规则</span><h1>Secondary 收到 Drop Index 后正常执行，不重新否决 Primary 的权威 DDL</h1></div>
+              <div class="body">
+                <div class="current"><strong>当前源码：</strong>Primary Drop API 只检查 Primary 本地状态；loaded collection 上 Vector Drop 会被拒绝。消息复制到 Secondary 后不会再次调用 Drop API，回调直接把 indexID 标记删除，因此 Secondary 没有否决权。</div>
+                <div class="flow" style="flex: 1">
+                  <div class="card green">
+                    <div class="kicker">1 · 定义删除</div>
+                    <div class="title">Secondary 接受 Drop</div>
+                    <div class="desc">索引定义是权威事实。重新做本地 loaded 检查并拒绝，会让 Primary、Secondary 元数据分叉。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card blue">
+                    <div class="kicker">2 · 本地引用收敛</div>
+                    <div class="title">清理默认值与 Load 选择</div>
+                    <div class="desc">已删除 indexID 不能继续存在于 collection 默认或当前 Load 中；新查询不能再生成使用它的计划。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card amber">
+                    <div class="kicker">3 · 查询排空</div>
+                    <div class="title">旧查询结束后回收索引</div>
+                    <div class="desc">已经开始的查询可以排空；随后 QueryNode 删除实际索引对象。旧 Reopen 任务不能把它重新加载回来。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card purple">
+                    <div class="kicker">4 · 恢复</div>
+                    <div class="title">重启不恢复已删除 indexID</div>
+                    <div class="desc">QueryCoord 恢复时先与现存索引定义核对，旧 Load 状态不能把已删除索引带回来。</div>
+                  </div>
+                </div>
+                <div class="recommend"><strong>结论：</strong>你说得对，H 不应是架构二选一。外部平台可以提前切换 Secondary 来避免查询中断，但这只是可选运维动作，不是保证元数据正确的前提。</div>
+                <div class="warn"><strong>仍留到实现阶段：</strong>如果 Drop 的是当前唯一可用索引，本地进入不可查询状态还是自动切备用索引，属于产品语义。</div>
+              </div>
+              <div class="footer">固定不变量：任何默认值、Load 选择、查询计划和实际加载状态最终都不能引用已经删除的 indexID。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="rolling" data-title="滚动升级与启用前回滚">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">安全边界</span><h1>代码升级与功能启用分开；第一次写入新状态前都可以回滚</h1></div>
+              <div class="body">
+                <div class="flow" style="flex: 1">
+                  <div class="card green">
+                    <div class="kicker">1</div>
+                    <div class="title">Secondary 先滚动升级</div>
+                    <div class="desc">新代码保持 Scalar / Vector 开关关闭，仍按一字段一个索引工作。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card green">
+                    <div class="kicker">2</div>
+                    <div class="title">Primary 再滚动升级</div>
+                    <div class="desc">功能继续关闭；此时元数据中还没有同字段第二索引或多索引 Load 状态。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card amber">
+                    <div class="kicker">3</div>
+                    <div class="title">启用前可回滚</div>
+                    <div class="desc">外部平台确认需要的集群完成升级；如有问题，直接回滚代码版本。</div>
+                  </div>
+                  <div class="arrow">→</div>
+                  <div class="card red">
+                    <div class="kicker">4</div>
+                    <div class="title">分别打开功能</div>
+                    <div class="desc">同一能力先在 Secondary 打开接受新状态的开关，再在 Primary 打开；之后才允许写入对应的新索引或 Load 状态。</div>
+                  </div>
+                </div>
+                <div class="grid-4">
+                  <div class="recommend"><strong>本地保护：</strong>所有可能写入新状态的路径都检查本集群开关，包括普通 API、CDC 回调、恢复和导入元数据路径。</div>
+                  <div class="recommend"><strong>分开启用：</strong>Scalar 多加载与 Vector 多定义 / 只加载一个不必同时开放。</div>
+                  <div class="recommend"><strong>已有 collection：</strong>只在开关打开后的首次 Load 初始化本地默认；候选不唯一时必须显式指定。</div>
+                  <div class="warn"><strong>回滚边界：</strong>第一次启用并写入新状态后，不再承诺回到不能识别这些状态的旧版本。</div>
+                </div>
+              </div>
+              <div class="footer">内核不主动查询其他集群版本；升级顺序、各集群开关和首次写入时机由 Cloud 或其他外部平台负责。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="research-plan" data-title="可执行的预研方案">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">预研计划</span><h1>用四条独立验证线回答可行性和资源成本，不进入详细实现</h1></div>
+              <div class="body">
+                <div class="grid-4" style="flex: 1">
+                  <div class="card green">
+                    <div class="kicker">R1 · 共同基础</div>
+                    <div class="title">多定义与独立状态</div>
+                    <div class="desc">验证同字段多个 indexID 能独立创建、构建、恢复、删除；梳理所有仍按 fieldID 合并状态的路径。</div>
+                  </div>
+                  <div class="card blue">
+                    <div class="kicker">R2 · Scalar</div>
+                    <div class="title">多加载与正确选择</div>
+                    <div class="desc">验证多索引驻留、轻量候选信息、按条件选择、用户指定范围和原始字段可读路径；不评价“是否最快”。</div>
+                  </div>
+                  <div class="card amber">
+                    <div class="kicker">R3 · Vector V1</div>
+                    <div class="title">只加载一个时在线替换</div>
+                    <div class="desc">连通 Load 选择、Reopen、防旧任务覆盖、进度和重启恢复；测兼容索引切换时的资源峰值与查询影响。</div>
+                  </div>
+                  <div class="card purple">
+                    <div class="kicker">R4 · A2 / C2 非主方案</div>
+                    <div class="title">分别验证多加载与动态选择</div>
+                    <div class="desc">A2 验证多驻留、固定默认和严格切换；C2 验证正确候选、可选估算、unknown 回到默认，以及不同查询形状和硬件下的稳定性。</div>
+                  </div>
+                </div>
+                <table class="compare">
+                  <thead><tr><th style="width: 25%">需要输出的数据</th><th>用来做什么决定</th></tr></thead>
+                  <tbody>
+                    <tr><td>对象存储与构建时间增长</td><td>确定每增加一个 Scalar / Vector 索引的长期存储和构建负担。</td></tr>
+                    <tr><td>QueryNode 内存、本地磁盘、Load 时间</td><td>判断 Scalar 多加载是否合理，以及 Vector V2 是否值得做。</td></tr>
+                    <tr><td>兼容索引在线切换峰值与延迟</td><td>确认 V1 的渐进切换能否满足线上要求。</td></tr>
+                    <tr><td>重启、任务晚到、加载失败</td><td>验证旧任务不能覆盖新选择，以及“新索引失败时旧索引继续可用”。</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="footer">Import / Compaction 等等待语义只验证“架构可表达”，不在预研中固定默认行为。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="recommendation" data-title="当前推荐方案">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">方案收敛</span><h1>在尚未确认 Vector V2 需求前，建议采用以下大方向</h1></div>
+              <div class="body">
+                <table class="compare" style="font-size: 10.5px">
+                  <thead><tr><th style="width: 20%">范围</th><th style="width: 34%">建议方案</th><th>为什么</th></tr></thead>
+                  <tbody>
+                    <tr><td>共同数据模型</td><td>索引独立保存；collection 默认；本次 Load 索引集合与默认项；实际状态按 indexID；能防止旧切换任务覆盖新选择</td><td>同时满足 Scalar 多加载、Vector V1 和未来 V2，不依赖列表顺序</td></tr>
+                    <tr><td>Scalar 第一版</td><td>多个同时加载；每个过滤条件自动选择或显式指定；字段原始值始终有可读路径</td><td>E2、F1 已确认；同查询语义下结果精确</td></tr>
+                    <tr><td>Scalar 估算</td><td>只预留“可选估算，允许未知”的入口；不保存完整统计，不承诺最快</td><td>G1 已确认；完整估算作为独立增强</td></tr>
+                    <tr><td>Vector 第一版</td><td>可定义多个；本次 Load 每字段一个；使用明确默认；查询含义和参数兼容时可在线逐步替换</td><td>大量复用现有 Load 配置和 Reopen，Segcore 可继续只保留一个</td></tr>
+                    <tr><td>Vector 主方案</td><td>A1 第一版只在 Load / Alter Load 选择；以后进入 A2+V3 时采用 C1 固定默认 + 用户显式指定；D1 只严格约束 sealed</td><td>A2、C2 作为独立预研；C1 不表示 A1 第一版已包含 V3</td></tr>
+                    <tr><td>CDC / 升级</td><td>定义复制，查询选择改成本地状态；Secondary→Primary；Drop 是权威事件，Secondary 正常执行并清理本地引用</td><td>需要调整当前会复制 Load indexID 的边界，但不需要跨集群 Drop 协调</td></tr>
+                  </tbody>
+                </table>
+                <div class="recommend"><strong>完整性：</strong>Scalar 与 Vector V1 都是可以独立交付的完整功能；V2 是额外能力，不是要求以后补齐的临时阶段。</div>
+              </div>
+              <div class="footer">当前只剩 B 的在线切换可见行为需要确认；A2、C2 已保留可执行的非主方案预研。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="open-decisions-vector" data-title="Vector 决策状态">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">决策状态 · VECTOR</span><h1>A、C、D 已收敛；只剩 B 的在线切换行为待确认</h1></div>
+              <div class="body">
+                <div class="grid-2" style="flex: 1">
+                  <div class="card blue">
+                    <div class="kicker">已确认 A · A1 主方案</div>
+                    <div class="title">只预留公共 Load 列表</div>
+                    <div class="desc">Vector 第一版本次 Load 每字段最多一个；A2 多加载作为独立预研，不宣称 A1 已预留运行能力。</div>
+                  </div>
+                  <div class="card amber">
+                    <div class="kicker">待确认 B · 在线切换要求</div>
+                    <div class="title">兼容查询含义和参数时，是否接受 segment 逐步切换？</div>
+                    <div class="desc">接受则可复用 Reopen；要求查询统一切换则必须双加载。不兼容的索引第一版是否允许 release / reload？<br /><strong>当前建议：兼容时渐进，其他情况 release / reload。</strong></div>
+                  </div>
+                  <div class="card purple">
+                    <div class="kicker">已确认 C · A2 + V3 查询规则</div>
+                    <div class="title">固定 Load 默认 + 用户显式指定</div>
+                    <div class="desc">A1 第一版只在 Load 选择；进入多加载查询阶段后才使用 C1。C2 信息不足时回到固定默认。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="kicker">已确认 D · D1</div>
+                    <div class="title">indexID 只严格约束 sealed segment</div>
+                    <div class="desc">Growing 使用兼容临时索引或原始向量，并明确不支持的 Vector / sparse 查询范围。</div>
+                  </div>
+                </div>
+                <div class="warn"><strong>B 的本质：</strong>渐进切换时，一次 Search 可能在不同 sealed segment 上分别遇到 A、B；严格切换则要求每次 Search 全部使用 A 或全部使用 B。</div>
+              </div>
+              <div class="footer">V2 即使不开放用户指定，也必须让查询明确使用本次 Load 的固定默认 indexID。</div>
+            </div>
+          </section>
+
+          <section class="diagram" id="open-decisions-scalar-cdc" data-title="Scalar 与 CDC 已确认规则">
+            <div class="frame">
+              <div class="head"><span class="eyebrow">已确认 · SCALAR / CDC</span><h1>E、F、G 已采用推荐方案；H 取消为架构二选一</h1></div>
+              <div class="body">
+                <div class="grid-2" style="flex: 1">
+                  <div class="card blue">
+                    <div class="kicker">已确认 E · E2</div>
+                    <div class="title">indexID 按过滤条件绑定</div>
+                    <div class="desc">同一字段的不同条件可以使用不同索引；未指定的条件继续自动选择。</div>
+                  </div>
+                  <div class="card green">
+                    <div class="kicker">已确认 F · F1</div>
+                    <div class="title">字段原始值始终有可读路径</div>
+                    <div class="desc">不要求常驻内存；保证扫描和 NGRAM 等二次检查不会依赖某个索引偶然提供 raw data。</div>
+                  </div>
+                  <div class="card purple">
+                    <div class="kicker">已确认 G · G1</div>
+                    <div class="title">第一版只留可选估算入口</div>
+                    <div class="desc">允许 unknown；不新增统计生产链。统计摘要、冷热信息和更优选择作为独立增强。</div>
+                  </div>
+                  <div class="card red">
+                    <div class="kicker">已澄清 H · 固定规则</div>
+                    <div class="title">Secondary 正常执行复制来的 Drop</div>
+                    <div class="desc">不重新做本地 loaded 检查；默认值、Load 选择、查询计划和实际索引最终都停止引用已删除 indexID。</div>
+                  </div>
+                </div>
+              </div>
+              <div class="footer">默认加载几个 Scalar 索引、缺失时如何回退、哪些流程等待备用索引，继续作为实现阶段产品语义。</div>
+            </div>
+          </section>
+
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const diagrams = Array.from(document.querySelectorAll(".diagram"));
+      const navList = document.getElementById("nav-list");
+      const slideWrap = document.getElementById("slide-wrap");
+      const params = new URLSearchParams(window.location.search);
+      const renderId = params.get("diagram");
+      const allMode = params.get("all") === "1";
+      let active = 0;
+
+      diagrams.forEach(function (diagram, index) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "nav-item";
+        button.dataset.index = String(index);
+        button.innerHTML =
+          '<span class="num">' +
+          String(index + 1).padStart(2, "0") +
+          '</span><span class="label">' +
+          diagram.dataset.title +
+          "</span>";
+        button.addEventListener("click", function () {
+          show(index);
+        });
+        navList.appendChild(button);
+      });
+
+      function resize() {
+        if (renderId || allMode) return;
+        const stage = document.querySelector(".stage");
+        const scale = Math.min(stage.clientWidth / 1184, stage.clientHeight / 760, 1);
+        slideWrap.style.transform = "scale(" + scale + ")";
+      }
+
+      function show(index) {
+        active = Math.max(0, Math.min(index, diagrams.length - 1));
+        diagrams.forEach(function (diagram, i) {
+          diagram.hidden = i !== active;
+        });
+        document.querySelectorAll(".nav-item").forEach(function (item, i) {
+          item.classList.toggle("active", i === active);
+        });
+        const current = document.querySelector('.nav-item[data-index="' + active + '"]');
+        if (current) current.scrollIntoView({ block: "nearest" });
+        history.replaceState(null, "", "#" + diagrams[active].id);
+      }
+
+      if (allMode) {
+        document.body.classList.add("all-mode");
+        diagrams.forEach(function (diagram) {
+          diagram.hidden = false;
+        });
+      } else if (renderId) {
+        document.body.classList.add("render-mode");
+        diagrams.forEach(function (diagram) {
+          diagram.hidden = diagram.id !== renderId;
+        });
+        if (!document.getElementById(renderId)) {
+          document.body.innerHTML =
+            '<div style="padding:40px;color:#e37d79;font-family:sans-serif">Unknown diagram</div>';
+        }
+      } else {
+        const hashId = window.location.hash.slice(1);
+        const hashIndex = diagrams.findIndex(function (diagram) {
+          return diagram.id === hashId;
+        });
+        show(hashIndex >= 0 ? hashIndex : 0);
+        resize();
+        window.addEventListener("resize", resize);
+        document.getElementById("prev").addEventListener("click", function () {
+          show(active - 1);
+        });
+        document.getElementById("next").addEventListener("click", function () {
+          show(active + 1);
+        });
+        window.addEventListener("keydown", function (event) {
+          if (["ArrowRight", "PageDown", " "].includes(event.key)) {
+            event.preventDefault();
+            show(active + 1);
+          }
+          if (["ArrowLeft", "PageUp"].includes(event.key)) {
+            event.preventDefault();
+            show(active - 1);
+          }
+        });
+      }
+    </script>
+  </body>
+</html>
