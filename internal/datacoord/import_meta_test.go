@@ -47,6 +47,7 @@ func TestImportMeta_Restore(t *testing.T) {
 	jobs := im.GetJobBy(ctx)
 	assert.Equal(t, 1, len(jobs))
 	assert.Equal(t, int64(0), jobs[0].GetJobID())
+	assert.Equal(t, datapb.ImportJobVersion_ImportJobVersionV1, jobs[0].GetVersion())
 	tasks := im.GetTaskBy(ctx)
 	assert.Equal(t, 2, len(tasks))
 	tasks = im.GetTaskBy(ctx, WithType(PreImportTaskType))
@@ -74,6 +75,34 @@ func TestImportMeta_Restore(t *testing.T) {
 	catalog.EXPECT().ListPreImportTasks(mock.Anything).Return([]*datapb.PreImportTask{{TaskID: 1}}, nil)
 	catalog.EXPECT().ListImportTasks(mock.Anything).Return([]*datapb.ImportTaskV2{{TaskID: 2}}, nil)
 	_, err = NewImportMeta(ctx, catalog, nil, nil)
+	assert.Error(t, err)
+}
+
+func TestImportMetaRejectsUnsupportedJobVersion(t *testing.T) {
+	catalog := mocks.NewDataCoordCatalog(t)
+	catalog.EXPECT().ListPreImportTasks(mock.Anything).Return(nil, nil)
+	catalog.EXPECT().ListImportTasks(mock.Anything).Return(nil, nil)
+	catalog.EXPECT().ListImportJobs(mock.Anything).Return([]*datapb.ImportJob{{
+		JobID:   1,
+		Version: datapb.ImportJobVersion(4),
+	}}, nil)
+
+	_, err := NewImportMeta(context.Background(), catalog, nil, nil)
+	assert.Error(t, err)
+}
+
+func TestImportMetaRejectsUnsupportedJobVersionBeforeSave(t *testing.T) {
+	catalog := mocks.NewDataCoordCatalog(t)
+	catalog.EXPECT().ListPreImportTasks(mock.Anything).Return(nil, nil)
+	catalog.EXPECT().ListImportTasks(mock.Anything).Return(nil, nil)
+	catalog.EXPECT().ListImportJobs(mock.Anything).Return(nil, nil)
+
+	meta, err := NewImportMeta(context.Background(), catalog, nil, nil)
+	assert.NoError(t, err)
+	err = meta.AddJob(context.Background(), &importJob{ImportJob: &datapb.ImportJob{
+		JobID:   1,
+		Version: datapb.ImportJobVersion(4),
+	}})
 	assert.Error(t, err)
 }
 

@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/json"
 	"github.com/milvus-io/milvus/internal/metastore"
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
@@ -49,6 +50,11 @@ type ImportMeta interface {
 	GetTaskBy(ctx context.Context, filters ...ImportTaskFilter) []ImportTask
 	RemoveTask(ctx context.Context, taskID int64) error
 	TaskStatsJSON(ctx context.Context) string
+
+	EnterTerminalAndInitGC(ctx context.Context, jobID int64, actions ...UpdateJobAction) error
+	GetImportJobGCRecord(ctx context.Context, jobID int64) (*datapb.ImportJobGCRecord, error)
+	AdvanceImportJobGCState(ctx context.Context, jobID int64, from, to datapb.ImportJobGCState) error
+	DropImportJobGCRecord(ctx context.Context, jobID int64) error
 }
 
 type importTasks struct {
@@ -115,6 +121,24 @@ func NewImportMeta(ctx context.Context, catalog metastore.DataCoordCatalog, allo
 
 	tasks := newImportTasks()
 	importMeta := &importMeta{}
+	if v3Catalog, ok := catalog.(metastore.ImportV3Catalog); ok {
+		restoredReshardTasks, err := v3Catalog.ListReshardTasks(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, task := range restoredReshardTasks {
+			t := newReshardTask(task, importMeta, meta, alloc)
+			tasks.add(t)
+		}
+		restoredImportTasksV3, err := v3Catalog.ListImportTasksV3(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, task := range restoredImportTasksV3 {
+			t := newImportTaskV3(task, importMeta, meta, alloc)
+			tasks.add(t)
+		}
+	}
 
 	for _, task := range restoredPreImportTasks {
 		t := &preImportTask{
@@ -139,6 +163,19 @@ func NewImportMeta(ctx context.Context, catalog metastore.DataCoordCatalog, allo
 
 	jobs := make(map[int64]ImportJob)
 	for _, job := range restoredJobs {
+		jobVersion := job.GetVersion()
+		if jobVersion == datapb.ImportJobVersion_ImportJobVersionUnspecified {
+			jobVersion = datapb.ImportJobVersion_ImportJobVersionV1
+		}
+		if jobVersion != datapb.ImportJobVersion_ImportJobVersionV1 &&
+			jobVersion != datapb.ImportJobVersion_ImportJobVersionV3 {
+			return nil, merr.WrapErrDataIntegrityMsg(
+				"unsupported import job version %d; supported versions are %d and %d",
+				jobVersion,
+				datapb.ImportJobVersion_ImportJobVersionV1,
+				datapb.ImportJobVersion_ImportJobVersionV3)
+		}
+		job.Version = jobVersion
 		jobs[job.GetJobID()] = &importJob{
 			ImportJob: job,
 			tr:        timerecord.NewTimeRecorder("import job"),
@@ -154,6 +191,20 @@ func NewImportMeta(ctx context.Context, catalog metastore.DataCoordCatalog, allo
 func (m *importMeta) AddJob(ctx context.Context, job ImportJob) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	internalJob := job.(*importJob).ImportJob
+	jobVersion := internalJob.GetVersion()
+	if jobVersion == datapb.ImportJobVersion_ImportJobVersionUnspecified {
+		jobVersion = datapb.ImportJobVersion_ImportJobVersionV1
+	}
+	if jobVersion != datapb.ImportJobVersion_ImportJobVersionV1 &&
+		jobVersion != datapb.ImportJobVersion_ImportJobVersionV3 {
+		return merr.WrapErrDataIntegrityMsg(
+			"unsupported import job version %d; supported versions are %d and %d",
+			jobVersion,
+			datapb.ImportJobVersion_ImportJobVersionV1,
+			datapb.ImportJobVersion_ImportJobVersionV3)
+	}
+	internalJob.Version = jobVersion
 	originJob := m.jobs[job.GetJobID()]
 	if originJob != nil {
 		originJob := originJob.Clone()
@@ -236,6 +287,79 @@ func (m *importMeta) RemoveJob(ctx context.Context, jobID int64) error {
 	return nil
 }
 
+// EnterTerminalAndInitGC saves the terminal job state and initializes the GC
+// record to Quiesce. It bypasses UpdateJob's terminal no-op so the reason and
+// the GC marker are persisted together; a crash between the two writes is
+// repaired idempotently by checkGC, which recreates a missing record from the
+// job's existing cleanup deadline.
+func (m *importMeta) EnterTerminalAndInitGC(ctx context.Context, jobID int64, actions ...UpdateJobAction) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		return nil
+	}
+	updatedJob := job.Clone()
+	for _, action := range actions {
+		action(updatedJob)
+	}
+	if err := m.catalog.SaveImportJob(ctx, updatedJob.(*importJob).ImportJob); err != nil {
+		return err
+	}
+	catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+	if !ok {
+		return merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+	}
+	if err := catalog.SaveImportJobGCRecord(ctx, &datapb.ImportJobGCRecord{
+		JobId: jobID, State: datapb.ImportJobGCState_ImportJobGCStateQuiesce,
+	}); err != nil {
+		return err
+	}
+	m.jobs[jobID] = updatedJob
+	return nil
+}
+
+func (m *importMeta) GetImportJobGCRecord(ctx context.Context, jobID int64) (*datapb.ImportJobGCRecord, error) {
+	catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+	if !ok {
+		return nil, merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+	}
+	return catalog.GetImportJobGCRecord(ctx, jobID)
+}
+
+// AdvanceImportJobGCState moves the GC record from `from` to `to`. It is
+// monotonic and idempotent: reaching `to` already is a no-op, and any other
+// state than `from` is rejected so a stale writer cannot regress the record.
+func (m *importMeta) AdvanceImportJobGCState(ctx context.Context, jobID int64, from, to datapb.ImportJobGCState) error {
+	catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+	if !ok {
+		return merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+	}
+	record, err := catalog.GetImportJobGCRecord(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if record == nil {
+		record = &datapb.ImportJobGCRecord{JobId: jobID, State: datapb.ImportJobGCState_ImportJobGCStateQuiesce}
+	}
+	if record.GetState() == to {
+		return nil
+	}
+	if record.GetState() != from {
+		return merr.WrapErrImportSysFailedMsg("import job %d GC state is %s, expected %s", jobID, record.GetState(), from)
+	}
+	record.State = to
+	return catalog.SaveImportJobGCRecord(ctx, record)
+}
+
+func (m *importMeta) DropImportJobGCRecord(ctx context.Context, jobID int64) error {
+	catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+	if !ok {
+		return nil
+	}
+	return catalog.DropImportJobGCRecord(ctx, jobID)
+}
+
 func (m *importMeta) AddTask(ctx context.Context, task ImportTask) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -249,6 +373,24 @@ func (m *importMeta) AddTask(ctx context.Context, task ImportTask) error {
 	case ImportTaskType:
 		err := m.catalog.SaveImportTask(ctx, task.(*importTask).task.Load())
 		if err != nil {
+			return err
+		}
+		m.tasks.add(task)
+	case ReshardTaskType:
+		catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+		if !ok {
+			return merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+		}
+		if err := catalog.SaveReshardTask(ctx, task.(*reshardTask).task.Load()); err != nil {
+			return err
+		}
+		m.tasks.add(task)
+	case ImportTaskV3Type:
+		catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+		if !ok {
+			return merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+		}
+		if err := catalog.SaveImportTaskV3(ctx, task.(*importTaskV3).task.Load()); err != nil {
 			return err
 		}
 		m.tasks.add(task)
@@ -279,6 +421,24 @@ func (m *importMeta) UpdateTask(ctx context.Context, taskID int64, actions ...Up
 			}
 			// update memory task
 			task.(*importTask).task.Store(updatedTask.(*importTask).task.Load())
+		case ReshardTaskType:
+			catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+			if !ok {
+				return merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+			}
+			if err := catalog.SaveReshardTask(ctx, updatedTask.(*reshardTask).task.Load()); err != nil {
+				return err
+			}
+			task.(*reshardTask).task.Store(updatedTask.(*reshardTask).task.Load())
+		case ImportTaskV3Type:
+			catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+			if !ok {
+				return merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+			}
+			if err := catalog.SaveImportTaskV3(ctx, updatedTask.(*importTaskV3).task.Load()); err != nil {
+				return err
+			}
+			task.(*importTaskV3).task.Store(updatedTask.(*importTaskV3).task.Load())
 		}
 	}
 
@@ -320,6 +480,22 @@ func (m *importMeta) RemoveTask(ctx context.Context, taskID int64) error {
 		case ImportTaskType:
 			err := m.catalog.DropImportTask(ctx, taskID)
 			if err != nil {
+				return err
+			}
+		case ReshardTaskType:
+			catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+			if !ok {
+				return merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+			}
+			if err := catalog.DropReshardTask(ctx, taskID); err != nil {
+				return err
+			}
+		case ImportTaskV3Type:
+			catalog, ok := m.catalog.(metastore.ImportV3Catalog)
+			if !ok {
+				return merr.WrapErrImportSysFailedMsg("import v3 catalog is unavailable")
+			}
+			if err := catalog.DropImportTaskV3(ctx, taskID); err != nil {
 				return err
 			}
 		}

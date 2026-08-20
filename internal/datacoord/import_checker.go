@@ -122,6 +122,9 @@ func (c *importChecker) runStateMachineLoop() {
 		case <-ticker.C:
 			jobs := c.importMeta.GetJobBy(c.ctx)
 			for _, job := range jobs {
+				if job.GetVersion() == datapb.ImportJobVersion_ImportJobVersionV3 {
+					continue
+				}
 				if !funcutil.SliceSetEqual[string](job.GetVchannels(), job.GetReadyVchannels()) {
 					// wait for all channels to send signals
 					mlog.Info(c.ctx, "waiting for all channels to send signals",
@@ -164,10 +167,15 @@ func (c *importChecker) runGCLoop() {
 		case <-ticker.C:
 			jobs := c.importMeta.GetJobBy(c.ctx)
 			for _, job := range jobs {
+				if job.GetVersion() == datapb.ImportJobVersion_ImportJobVersionV3 {
+					continue
+				}
 				c.tryTimeoutJob(job)
 				c.checkGC(job)
 			}
-			jobsByColl := lo.GroupBy(jobs, func(job ImportJob) int64 {
+			jobsByColl := lo.GroupBy(lo.Filter(jobs, func(job ImportJob, _ int) bool {
+				return job.GetVersion() != datapb.ImportJobVersion_ImportJobVersionV3
+			}), func(job ImportJob) int64 {
 				return job.GetCollectionID()
 			})
 			for collID, collJobs := range jobsByColl {
@@ -186,6 +194,9 @@ func (c *importChecker) Close() {
 }
 
 func (c *importChecker) LogJobStats(jobs []ImportJob) {
+	jobs = lo.Filter(jobs, func(job ImportJob, _ int) bool {
+		return job.GetVersion() != datapb.ImportJobVersion_ImportJobVersionV3
+	})
 	byState := lo.GroupBy(jobs, func(job ImportJob) string {
 		return job.GetState().String()
 	})
@@ -288,7 +299,6 @@ func (c *importChecker) checkPendingJob(job ImportJob) {
 
 func (c *importChecker) checkPreImportingJob(job ImportJob) {
 	log := mlog.With(mlog.FieldJobID(job.GetJobID()))
-
 	preimports := c.importMeta.GetTaskBy(c.ctx, WithType(PreImportTaskType), WithJob(job.GetJobID()))
 	totalRows := int64(0)
 	for _, t := range preimports {
@@ -564,7 +574,8 @@ func (c *importChecker) tryFailingTasks(job ImportJob) {
 
 func (c *importChecker) tryTimeoutJob(job ImportJob) {
 	if job.GetState() == internalpb.ImportJobState_Failed ||
-		job.GetState() == internalpb.ImportJobState_Completed {
+		job.GetState() == internalpb.ImportJobState_Completed ||
+		job.GetState() == internalpb.ImportJobState_Committing {
 		return
 	}
 	timeoutTime := tsoutil.PhysicalTime(job.GetTimeoutTs())
@@ -593,7 +604,9 @@ func (c *importChecker) checkCollection(collectionID int64, jobs []ImportJob) {
 	}
 	if !has {
 		jobs = lo.Filter(jobs, func(job ImportJob, _ int) bool {
-			return job.GetState() != internalpb.ImportJobState_Failed && job.GetState() != internalpb.ImportJobState_Completed
+			return job.GetState() != internalpb.ImportJobState_Failed &&
+				job.GetState() != internalpb.ImportJobState_Completed &&
+				job.GetState() != internalpb.ImportJobState_Committing
 		})
 		for _, job := range jobs {
 			err = c.importMeta.UpdateJob(c.ctx, job.GetJobID(), UpdateJobState(internalpb.ImportJobState_Failed),

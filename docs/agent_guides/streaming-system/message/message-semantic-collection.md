@@ -16,10 +16,12 @@ All broadcast messages implicitly carry **SharedCluster** via the Broadcaster.
 | AlterIndex | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName |
 | DropIndex | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName |
 | CreateSnapshot | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName + ExclusiveSnapshotName |
-| DropSnapshot | Broadcast: CChannel | No | ExclusiveSnapshotName |
+| DropSnapshot | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName + ExclusiveSnapshotName |
 | RestoreSnapshot | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName + ExclusiveSnapshotName |
 | DropSnapshotsByCollection | Broadcast: CChannel | No | SharedDBName + SharedCollectionName |
-| Import | Broadcast: VChannels (no CChannel) | No | — |
+| Import | Broadcast: job data VChannels | No | SharedDBName + ExclusiveCollectionName |
+| CommitImport | Broadcast: job data VChannels | No | SharedDBName + ExclusiveCollectionName |
+| RollbackImport | Broadcast: job data VChannels | No | SharedDBName + ExclusiveCollectionName |
 | Insert | Single VChannel | No | — |
 | Delete | Single VChannel | No | — |
 | CreateSegment *(SelfControlled)* | Single VChannel | No | — |
@@ -28,7 +30,33 @@ All broadcast messages implicitly carry **SharedCluster** via the Broadcaster.
 | AlterLoadConfig | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName |
 | DropLoadConfig | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName (or ExclusiveCluster) |
 | BatchUpdateManifest | Broadcast: CChannel | No | SharedDBName + SharedCollectionName |
-| RefreshExternalCollection | Broadcast: CChannel | No | — |
+| RefreshExternalCollection | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName |
+
+## Import and external-refresh ResourceKey source of truth
+
+The entries above are the current source-code contract, not a proposed future
+lock shape:
+
+- `DataCoord.broadcastImport` starts its broadcaster through
+  `startBroadcastWithCollectionID`, which acquires
+  `SharedDBName(database) + ExclusiveCollectionName(database, collection)`.
+  Its target list is the job's data VChannels; the current producer does not
+  append the control channel.
+- `broadcastCommitImportMessage` and `broadcastRollbackImportMessage` use the
+  same helper and therefore the same two keys. Their WAL target is every data
+  VChannel in the job; the control channel is not a substitute for these
+  per-VChannel commit/rollback messages.
+- `RefreshExternalCollection` also uses `startBroadcastWithCollectionID` and
+  broadcasts on the control channel, but it still takes the same collection
+  keys. It does not use a cluster-wide key.
+- Snapshot operations are different: `DropSnapshot` takes the same DB and
+  collection keys plus `ExclusiveSnapshotName(collectionID, snapshotName)`.
+
+When changing any of these messages, update this table and the corresponding
+tests together. The implementation locations are
+`internal/datacoord/ddl_callbacks.go`, `internal/datacoord/ddl_callbacks_import.go`,
+and `internal/datacoord/services.go`; the lock implementation is in
+`internal/streamingcoord/server/broadcaster`.
 
 ## Message Descriptions
 
@@ -39,7 +67,12 @@ All broadcast messages implicitly carry **SharedCluster** via the Broadcaster.
 - **CreatePartition** / **DropPartition**: Creates or drops a partition. DropPartition implicitly flushes the partition's growing segments.
 - **CreateIndex** / **AlterIndex** / **DropIndex**: Manages indexes on a collection's field. CChannel-only.
 - **CreateSnapshot** / **DropSnapshot** / **RestoreSnapshot** / **DropSnapshotsByCollection**: Manages collection snapshots. CChannel-only.
-- **Import**: Initiates a bulk import job for a collection.
+- **Import**: Initiates a bulk import job for a collection. Old Proxies may send
+  the legacy Import broadcast RPC, but StreamingCoord forwards it to
+  `DataCoord.ImportV2`; DataCoord then creates the local broadcast with the same
+  collection ResourceKeys as the current direct path.
+- **CommitImport** / **RollbackImport**: Completes or aborts a bulk import job.
+  Both use the collection-scoped durable broadcast path.
 - **Insert** / **Delete**: DML on a single VChannel. CipherEnabled.
 - **CreateSegment** / **Flush**: WAL-generated (SelfControlled). Allocates or seals a growing segment.
 - **ManualFlush**: Seals all growing segments for a collection on a VChannel.

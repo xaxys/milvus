@@ -380,6 +380,18 @@ func buildImportTaskKey(taskID int64) string {
 	return fmt.Sprintf("%s/%d", ImportTaskPrefix, taskID)
 }
 
+func buildReshardTaskKey(taskID int64) string {
+	return fmt.Sprintf("%s/%d", ReshardTaskPrefix, taskID)
+}
+
+func buildImportTaskV3Key(taskID int64) string {
+	return fmt.Sprintf("%s/%d", ImportTaskV3Prefix, taskID)
+}
+
+func buildImportJobGCRecordKey(jobID int64) string {
+	return fmt.Sprintf("%s/%d", ImportJobGCRecordPrefix, jobID)
+}
+
 func buildPreImportTaskKey(taskID int64) string {
 	return fmt.Sprintf("%s/%d", PreImportTaskPrefix, taskID)
 }

@@ -34,6 +34,13 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
+)
+
+const (
+	importVersionUnspecified int64 = 0 // Direct requests select a version; ACK restores historical messages as V2.
+	importVersionV2          int64 = 2 // Execute with ImportTaskV2.
+	importVersionV3          int64 = 3 // Execute with ReshardTask and ImportTaskV3.
 )
 
 // importV1AckCallback handles the ack callback for import messages.
@@ -46,8 +53,8 @@ func (c *DDLCallbacks) importV1AckCallback(ctx context.Context, result message.B
 		body.Schema.DbName = body.DbName
 	}
 
-	// Process each vchannel with its own TimeTick (not deprecated MsgBase)
-	// Each vchannel gets its own import job with the corresponding TimeTick
+	// Collect ACKed data channels. ReadyVchannels is only used as a set, so its
+	// order does not participate in import routing.
 	vchannels := make([]string, 0, len(result.Results))
 	for vchannel := range result.Results {
 		if funcutil.IsControlChannel(vchannel) {
@@ -67,13 +74,15 @@ func (c *DDLCallbacks) importV1AckCallback(ctx context.Context, result message.B
 		Schema:         body.GetSchema(),
 		Files: lo.Map(body.GetFiles(), func(file *msgpb.ImportFile, _ int) *internalpb.ImportFile {
 			return &internalpb.ImportFile{
-				Id:    file.GetId(),
-				Paths: file.GetPaths(),
+				Id:                  file.GetId(),
+				Paths:               file.GetPaths(),
+				PreAllocatedAutoIds: file.GetPreAllocatedAutoIds(),
 			}
 		}),
 		Options:       funcutil.Map2KeyValuePair(body.GetOptions()),
 		DataTimestamp: result.GetMaxTimeTick(), // TODO: use per-vchannel TimeTick in future, must be supported for CDC.
 		JobID:         body.GetJobID(),
+		Version:       body.GetVersion(),
 	})
 
 	err = merr.CheckRPCCall(importResp, err)
@@ -177,18 +186,35 @@ func (s *Server) broadcastImport(ctx context.Context,
 	schema *schemapb.CollectionSchema,
 	jobID int64,
 	vchannels []string,
+	version int64,
 ) error {
 	// Convert files to msgpb format for validation
 	msgFiles := lo.Map(files, func(file *internalpb.ImportFile, _ int) *msgpb.ImportFile {
 		return &msgpb.ImportFile{
-			Id:    file.GetId(),
-			Paths: file.GetPaths(),
+			Id:                  file.GetId(),
+			Paths:               file.GetPaths(),
+			PreAllocatedAutoIds: file.GetPreAllocatedAutoIds(),
 		}
 	})
 
 	// Validate the request before broadcasting
 	if err := s.validateImportRequest(ctx, msgFiles, options); err != nil {
 		return merr.Wrap(err, "failed to validate import request")
+	}
+
+	// Freeze one literal ID range per ordinary V3 source file before the WAL
+	// message is published. V3 uses it for RowID even with an explicit PK; AutoID
+	// collections also derive the PK from the same range. V2 keeps its old rule.
+	if pkField, pkErr := typeutil.GetPrimaryFieldSchema(schema); pkErr == nil &&
+		(pkField.GetAutoID() || version == importVersionV3) &&
+		!importutilv2.IsBackup(options) && !importutilv2.IsL0Import(options) {
+		if err := assignPKRangesToFiles(ctx, s.meta.chunkManager, schema, files,
+			s.allocator.AllocN, Params.CommonCfg.ClusterID.GetAsUint64()); err != nil {
+			return merr.Wrap(err, "failed to assign per-file PK ranges")
+		}
+		for i := range files {
+			msgFiles[i].PreAllocatedAutoIds = files[i].GetPreAllocatedAutoIds()
+		}
 	}
 
 	// Get database name from collection metadata via broker
@@ -219,6 +245,7 @@ func (s *Server) broadcastImport(ctx context.Context,
 			Files:          msgFiles,
 			Schema:         schema, // TODO: should we use the schema from the collection?
 			JobID:          jobID,
+			Version:        version,
 		}).
 		WithBroadcast(vchannels).
 		MustBuildBroadcast()

@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -107,9 +108,48 @@ func listInsertLogs(ctx context.Context, cm storage.ChunkManager, insertPrefix s
 	return insertLogs, nil
 }
 
+// ExpandObjects resolves the legacy backup prefixes once during planning. The
+// returned paths are sorted and can be persisted in an Import V3 plan; workers
+// must consume that immutable list through NewExplicitReader.
+func ExpandObjects(ctx context.Context, cm storage.ChunkManager, paths []string) (map[int64][]string, []string, error) {
+	return expandObjects(ctx, cm, paths, paramtable.Get().CommonCfg.StorageReadRetryAttempts.GetAsUint())
+}
+
+func expandObjects(ctx context.Context, cm storage.ChunkManager, paths []string, retryAttempts uint) (map[int64][]string, []string, error) {
+	if len(paths) == 0 {
+		return nil, nil, merr.WrapErrImportFailed("no insert binlogs to import")
+	}
+	if len(paths) > 2 {
+		return nil, nil, merr.WrapErrImportFailedMsg("too many input paths for binlog import. Valid paths length should be one or two, but got paths:%s", paths)
+	}
+	insertLogs, err := listInsertLogs(ctx, cm, paths[0], retryAttempts)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(paths) == 1 {
+		return insertLogs, nil, nil
+	}
+
+	var deltaLogs []string
+	err = importcommon.WalkWithPrefixRetry(ctx, cm, paths[1], true, retryAttempts,
+		func() { deltaLogs = nil },
+		func(chunkInfo *storage.ChunkObjectInfo) bool {
+			deltaLogs = append(deltaLogs, chunkInfo.FilePath)
+			return true
+		})
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Strings(deltaLogs)
+	return insertLogs, deltaLogs, nil
+}
+
 func createFieldBinlogList(insertLogs map[int64][]string) []*datapb.FieldBinlog {
-	binlogFields := make([]*datapb.FieldBinlog, 0)
-	for fieldID, logs := range insertLogs {
+	fieldIDs := lo.Keys(insertLogs)
+	sort.Slice(fieldIDs, func(i, j int) bool { return fieldIDs[i] < fieldIDs[j] })
+	binlogFields := make([]*datapb.FieldBinlog, 0, len(fieldIDs))
+	for _, fieldID := range fieldIDs {
+		logs := insertLogs[fieldID]
 		binlog := &datapb.FieldBinlog{
 			FieldID: fieldID,
 			Binlogs: lo.Map(logs, func(path string, _ int) *datapb.Binlog {
@@ -125,6 +165,7 @@ func createFieldBinlogList(insertLogs map[int64][]string) []*datapb.FieldBinlog 
 
 func verify(schema *schemapb.CollectionSchema, storageVersion int64, insertLogs map[int64][]string) (map[int64][]string, *schemapb.CollectionSchema, error) {
 	// check system fields (ts and rowID)
+	countReferenceField := int64(common.RowIDField)
 	switch storageVersion {
 	case storage.StorageV1:
 		if _, ok := insertLogs[common.TimeStampField]; !ok {
@@ -134,6 +175,7 @@ func verify(schema *schemapb.CollectionSchema, storageVersion int64, insertLogs 
 			return nil, nil, merr.WrapErrImportFailed("no binlog for RowID field")
 		}
 	case storage.StorageV2, storage.StorageV3:
+		countReferenceField = storagecommon.DefaultShortColumnGroupID
 		if _, ok := insertLogs[storagecommon.DefaultShortColumnGroupID]; !ok {
 			return nil, nil, merr.WrapErrImportFailed("no binlog for system fields")
 		}
@@ -141,9 +183,9 @@ func verify(schema *schemapb.CollectionSchema, storageVersion int64, insertLogs 
 
 	// check binlog file count, must be equal for all fields
 	for fieldID, logs := range insertLogs {
-		if len(logs) != len(insertLogs[common.RowIDField]) {
+		if len(logs) != len(insertLogs[countReferenceField]) {
 			return nil, nil, merr.WrapErrImportFailedMsg("misaligned binlog count, field%d:%d, field%d:%d",
-				fieldID, len(logs), common.RowIDField, len(insertLogs[common.RowIDField]))
+				fieldID, len(logs), countReferenceField, len(insertLogs[countReferenceField]))
 		}
 	}
 

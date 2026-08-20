@@ -107,10 +107,8 @@ func (s *importInspector) inspect() {
 			switch task.GetState() {
 			case datapb.ImportTaskStateV2_Pending:
 				switch task.GetType() {
-				case PreImportTaskType:
-					s.processPendingPreImport(task)
-				case ImportTaskType:
-					s.processPendingImport(task)
+				case PreImportTaskType, ImportTaskType, ReshardTaskType, ImportTaskV3Type:
+					s.processPendingTask(task)
 				}
 			case datapb.ImportTaskStateV2_Failed:
 				s.processFailed(task)
@@ -119,11 +117,7 @@ func (s *importInspector) inspect() {
 	}
 }
 
-func (s *importInspector) processPendingPreImport(task ImportTask) {
-	s.scheduler.Enqueue(task)
-}
-
-func (s *importInspector) processPendingImport(task ImportTask) {
+func (s *importInspector) processPendingTask(task ImportTask) {
 	s.scheduler.Enqueue(task)
 }
 

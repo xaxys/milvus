@@ -5619,8 +5619,11 @@ type dataCoordConfig struct {
 	ImportInReplicatingCluster      ParamItem `refreshable:"true"`
 	EnableL0Import                  ParamItem `refreshable:"true"`
 	ImportPreAllocIDExpansionFactor ParamItem `refreshable:"true"`
+	ImportParquetFooterMaxSize      ParamItem `refreshable:"true"`
 	ImportFileNumPerSlot            ParamItem `refreshable:"true"`
 	ImportMemoryLimitPerSlot        ParamItem `refreshable:"true"`
+	ImportFragmentSize              ParamItem `refreshable:"true"`
+	FragmentMergeFanIn              ParamItem `refreshable:"true"`
 	MaxSegmentsPerCopyTask          ParamItem `refreshable:"true"`
 	CopySegmentCheckInterval        ParamItem `refreshable:"true"`
 	CopySegmentTaskRetention        ParamItem `refreshable:"true"`
@@ -6988,6 +6991,16 @@ if param targetScalarIndexVersion is not set, the default value is -1, which mea
 	}
 	p.ImportPreAllocIDExpansionFactor.Init(base.mgr)
 
+	p.ImportParquetFooterMaxSize = ParamItem{
+		Key:          "dataCoord.import.parquetFooterMaxSize",
+		Version:      "3.0.0",
+		DefaultValue: "67108864",
+		Doc: `Largest parquet footer, in bytes, that import sizing will read to obtain an exact row count.
+A file declaring a longer footer is rejected at submit. Footer size tracks row_groups * columns, so
+raise this for files written with small row groups, many columns, or untruncated string statistics.`,
+	}
+	p.ImportParquetFooterMaxSize.Init(base.mgr)
+
 	p.ImportFileNumPerSlot = ParamItem{
 		Key:          "dataCoord.import.fileNumPerSlot",
 		Version:      "2.5.15",
@@ -7011,6 +7024,32 @@ if param targetScalarIndexVersion is not set, the default value is -1, which mea
 		},
 	}
 	p.ImportMemoryLimitPerSlot.Init(base.mgr)
+
+	p.ImportFragmentSize = ParamItem{
+		Key:          "dataCoord.import.fragmentSizeInMB",
+		Version:      "3.0.0",
+		Doc:          "Target logical size in MiB for one sorted ImportTaskV3 fragment.",
+		DefaultValue: "128",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.ImportFragmentSize.Init(base.mgr)
+	if p.ImportFragmentSize.GetAsInt64() <= 0 {
+		panic("dataCoord.import.fragmentSizeInMB must be positive")
+	}
+
+	p.FragmentMergeFanIn = ParamItem{
+		Key:          "dataCoord.import.fragmentMergeFanIn",
+		Version:      "3.0.0",
+		Doc:          "Maximum direct merge fan-in used by ImportTaskV3. Values must be in [2,1024].",
+		DefaultValue: "16",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.FragmentMergeFanIn.Init(base.mgr)
+	if fanIn := p.FragmentMergeFanIn.GetAsInt(); fanIn < 2 || fanIn > 1024 {
+		panic("dataCoord.import.fragmentMergeFanIn must be in [2, 1024]")
+	}
 
 	p.MaxSegmentsPerCopyTask = ParamItem{
 		Key:          "dataCoord.import.maxSegmentsPerCopyTask",

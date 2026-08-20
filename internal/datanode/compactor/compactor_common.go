@@ -46,6 +46,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexcgopb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
@@ -54,29 +55,39 @@ import (
 
 const compactionBatchSize = 100
 
-func createTextIndex(ctx context.Context,
-	cm storage.ChunkManager,
-	plan *datapb.CompactionPlan,
-	compactionParams compaction.Params,
-	storageVersion int64,
-	collectionID int64,
-	partitionID int64,
-	segmentID int64,
-	taskID int64,
-	segment *datapb.CompactionSegment,
-) (map[int64]*datapb.TextIndexStats, error) {
+// TextIndexBuildParams carries the fields needed to build inline text-match
+// indexes for one written segment. It is shared by compaction and Import V3 so
+// the cgo build path stays in one place.
+type TextIndexBuildParams struct {
+	Schema         *schemapb.CollectionSchema
+	StorageVersion int64
+	CollectionID   int64
+	PartitionID    int64
+	SegmentID      int64
+	BuildID        int64
+	InsertLogs     []*datapb.FieldBinlog
+	Manifest       string
+	StorageConfig  *indexpb.StorageConfig
+	PluginContext  *indexcgopb.StoragePluginContext
+	ScalarVersion  int32
+	FileResources  []*internalpb.FileResourceInfo
+}
+
+// BuildTextIndex builds the inline text-match index for every EnableMatch field
+// in the schema and returns the per-field TextIndexStats.
+func BuildTextIndex(ctx context.Context, cm storage.ChunkManager, p TextIndexBuildParams) (map[int64]*datapb.TextIndexStats, error) {
 	log := mlog.With(
-		mlog.FieldCollectionID(collectionID),
-		mlog.FieldPartitionID(partitionID),
-		mlog.FieldSegmentID(segmentID),
+		mlog.FieldCollectionID(p.CollectionID),
+		mlog.FieldPartitionID(p.PartitionID),
+		mlog.FieldSegmentID(p.SegmentID),
 	)
 
-	fieldBinlogs := lo.GroupBy(segment.GetInsertLogs(), func(binlog *datapb.FieldBinlog) int64 {
+	fieldBinlogs := lo.GroupBy(p.InsertLogs, func(binlog *datapb.FieldBinlog) int64 {
 		return binlog.GetFieldID()
 	})
 
 	getInsertFiles := func(fieldID int64) ([]string, error) {
-		if storageVersion == storage.StorageV2 || storageVersion == storage.StorageV3 {
+		if p.StorageVersion == storage.StorageV2 || p.StorageVersion == storage.StorageV3 {
 			return []string{}, nil
 		}
 		binlogs, ok := fieldBinlogs[fieldID]
@@ -86,18 +97,14 @@ func createTextIndex(ctx context.Context,
 		result := make([]string, 0, len(binlogs))
 		for _, binlog := range binlogs {
 			for _, file := range binlog.GetBinlogs() {
-				result = append(result, metautil.BuildInsertLogPath(compactionParams.StorageConfig.GetRootPath(),
-					collectionID, partitionID, segmentID, fieldID, file.GetLogID()))
+				result = append(result, metautil.BuildInsertLogPath(p.StorageConfig.GetRootPath(),
+					p.CollectionID, p.PartitionID, p.SegmentID, fieldID, file.GetLogID()))
 			}
 		}
 		return result, nil
 	}
 
-	newStorageConfig, err := util.ParseStorageConfig(compactionParams.StorageConfig)
-	if err != nil {
-		return nil, err
-	}
-	pluginContext, err := hookutil.GetCPluginContext(plan.GetPluginContext(), collectionID)
+	newStorageConfig, err := util.ParseStorageConfig(p.StorageConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -110,19 +117,19 @@ func createTextIndex(ctx context.Context,
 	eg, egCtx := errgroup.WithContext(ctx)
 
 	var analyzerExtraInfo string
-	if len(plan.GetFileResources()) > 0 && fileresource.GlobalFileManager.Mode() == fileresource.RefMode {
-		err := fileresource.GlobalFileManager.Download(ctx, cm, plan.GetFileResources()...)
+	if len(p.FileResources) > 0 && fileresource.GlobalFileManager.Mode() == fileresource.RefMode {
+		err := fileresource.GlobalFileManager.Download(ctx, cm, p.FileResources...)
 		if err != nil {
 			return nil, err
 		}
-		defer fileresource.GlobalFileManager.Release(plan.GetFileResources()...)
-		analyzerExtraInfo, err = analyzer.BuildExtraResourceInfo(compactionParams.StorageConfig.GetRootPath(), plan.GetFileResources())
+		defer fileresource.GlobalFileManager.Release(p.FileResources...)
+		analyzerExtraInfo, err = analyzer.BuildExtraResourceInfo(p.StorageConfig.GetRootPath(), p.FileResources)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	for _, field := range plan.GetSchema().GetFields() {
+	for _, field := range p.Schema.GetFields() {
 		field := field
 		h := typeutil.CreateFieldSchemaHelper(field)
 		if !h.EnableMatch() {
@@ -136,10 +143,10 @@ func createTextIndex(ctx context.Context,
 				return err
 			}
 
-			statsBasePath := metautil.BuildTextIndexPrefix(compactionParams.StorageConfig.GetRootPath(),
-				plan.GetPlanID(), 0, collectionID, partitionID, segmentID, field.GetFieldID())
-			if segment.GetManifest() != "" {
-				basePath, _, err := packed.UnmarshalManifestPath(segment.GetManifest())
+			statsBasePath := metautil.BuildTextIndexPrefix(p.StorageConfig.GetRootPath(),
+				p.BuildID, 0, p.CollectionID, p.PartitionID, p.SegmentID, field.GetFieldID())
+			if p.Manifest != "" {
+				basePath, _, err := packed.UnmarshalManifestPath(p.Manifest)
 				if err != nil {
 					return merr.Wrap(err, "failed to unmarshal manifest path for text_index basePath")
 				}
@@ -147,19 +154,19 @@ func createTextIndex(ctx context.Context,
 			}
 
 			buildIndexParams := &indexcgopb.BuildIndexInfo{
-				BuildID:                   taskID,
-				CollectionID:              collectionID,
-				PartitionID:               partitionID,
-				SegmentID:                 segmentID,
+				BuildID:                   p.BuildID,
+				CollectionID:              p.CollectionID,
+				PartitionID:               p.PartitionID,
+				SegmentID:                 p.SegmentID,
 				IndexVersion:              0,
 				InsertFiles:               files,
 				FieldSchema:               field,
 				StorageConfig:             newStorageConfig,
-				CurrentScalarIndexVersion: common.ClampScalarIndexVersion(plan.GetCurrentScalarIndexVersion()),
-				StorageVersion:            storageVersion,
-				Manifest:                  segment.GetManifest(),
+				CurrentScalarIndexVersion: common.ClampScalarIndexVersion(p.ScalarVersion),
+				StorageVersion:            p.StorageVersion,
+				Manifest:                  p.Manifest,
 				StatsBasePath:             statsBasePath,
-				StoragePluginContext:      pluginContext,
+				StoragePluginContext:      p.PluginContext,
 				IndexParams: []*commonpb.KeyValuePair{
 					{Key: "index_type", Value: "INVERTED"},
 					{Key: "is_text_match", Value: "true"},
@@ -170,13 +177,13 @@ func createTextIndex(ctx context.Context,
 				buildIndexParams.AnalyzerExtraInfo = analyzerExtraInfo
 			}
 
-			if storageVersion == storage.StorageV2 || storageVersion == storage.StorageV3 {
+			if p.StorageVersion == storage.StorageV2 || p.StorageVersion == storage.StorageV3 {
 				buildIndexParams.SegmentInsertFiles = util.GetSegmentInsertFiles(
-					segment.GetInsertLogs(),
-					compactionParams.StorageConfig,
-					collectionID,
-					partitionID,
-					segmentID)
+					p.InsertLogs,
+					p.StorageConfig,
+					p.CollectionID,
+					p.PartitionID,
+					p.SegmentID)
 			}
 
 			index, err := indexcgowrapper.CreateIndex(egCtx, buildIndexParams)
@@ -202,16 +209,16 @@ func createTextIndex(ctx context.Context,
 			textIndexLogs[field.GetFieldID()] = &datapb.TextIndexStats{
 				FieldID:                   field.GetFieldID(),
 				Version:                   0,
-				BuildID:                   taskID,
+				BuildID:                   p.BuildID,
 				Files:                     statsFiles,
 				LogSize:                   totalSize,
 				MemorySize:                totalSize,
-				CurrentScalarIndexVersion: common.ClampScalarIndexVersion(plan.GetCurrentScalarIndexVersion()),
+				CurrentScalarIndexVersion: common.ClampScalarIndexVersion(p.ScalarVersion),
 			}
 			mu.Unlock()
 
 			log.Info(ctx, "field enable match, create text index done",
-				mlog.FieldSegmentID(segmentID),
+				mlog.FieldSegmentID(p.SegmentID),
 				mlog.Int64("field id", field.GetFieldID()),
 				mlog.Strings("files", statsFiles),
 			)
@@ -224,6 +231,37 @@ func createTextIndex(ctx context.Context,
 	}
 
 	return textIndexLogs, nil
+}
+
+func createTextIndex(ctx context.Context,
+	cm storage.ChunkManager,
+	plan *datapb.CompactionPlan,
+	compactionParams compaction.Params,
+	storageVersion int64,
+	collectionID int64,
+	partitionID int64,
+	segmentID int64,
+	taskID int64,
+	segment *datapb.CompactionSegment,
+) (map[int64]*datapb.TextIndexStats, error) {
+	pluginContext, err := hookutil.GetCPluginContext(plan.GetPluginContext(), collectionID)
+	if err != nil {
+		return nil, err
+	}
+	return BuildTextIndex(ctx, cm, TextIndexBuildParams{
+		Schema:         plan.GetSchema(),
+		StorageVersion: storageVersion,
+		CollectionID:   collectionID,
+		PartitionID:    partitionID,
+		SegmentID:      segmentID,
+		BuildID:        taskID,
+		InsertLogs:     segment.GetInsertLogs(),
+		Manifest:       segment.GetManifest(),
+		StorageConfig:  compactionParams.StorageConfig,
+		PluginContext:  pluginContext,
+		ScalarVersion:  plan.GetCurrentScalarIndexVersion(),
+		FileResources:  plan.GetFileResources(),
+	})
 }
 
 // Storage readers do not share compaction's schema-reconciliation contract, so filter physical fields before opening them.

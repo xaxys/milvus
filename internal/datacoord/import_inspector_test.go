@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -32,6 +33,7 @@ import (
 	task2 "github.com/milvus-io/milvus/internal/datacoord/task"
 	"github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 )
 
@@ -333,4 +335,19 @@ func (s *ImportInspectorSuite) TestReloadFromMeta() {
 
 func TestImportInspector(t *testing.T) {
 	suite.Run(t, new(ImportInspectorSuite))
+}
+
+func TestImportInspectorSchedulesV3PendingTasksWithoutJobGate(t *testing.T) {
+	ctx := context.Background()
+	importMeta := NewMockImportMeta(t)
+	scheduler := task2.NewMockGlobalScheduler(t)
+	inspector := NewImportInspector(ctx, nil, importMeta, scheduler).(*importInspector)
+	tasks := []ImportTask{
+		newReshardTask(&datapb.ReshardTask{JobId: 1, TaskId: 10, State: datapb.ImportTaskStateV2_Pending, NodeId: NullNodeID}, importMeta, nil),
+		newImportTaskV3(&datapb.ImportTaskV3{JobId: 2, TaskId: 20, State: datapb.ImportTaskStateV2_Pending, NodeId: NullNodeID}, importMeta, nil),
+	}
+	for _, task := range tasks {
+		scheduler.EXPECT().Enqueue(task).Once()
+		inspector.processPendingTask(task)
+	}
 }

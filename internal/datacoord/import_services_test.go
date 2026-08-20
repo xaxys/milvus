@@ -90,6 +90,21 @@ func (s *ImportServicesSuite) TestImportV2_InvalidTimeoutReturnsError() {
 	s.True(errors.Is(merr.Error(resp.GetStatus()), merr.ErrImportFailed))
 }
 
+func (s *ImportServicesSuite) TestImportV2_UnsupportedTaskVersionReturnsError() {
+	ctx := context.Background()
+	server := &Server{}
+	server.stateCode.Store(commonpb.StateCode_Healthy)
+
+	resp, err := server.ImportV2(ctx, &internalpb.ImportRequestInternal{
+		Options: []*commonpb.KeyValuePair{{Key: "timeout", Value: "300s"}},
+		Version: 99,
+	})
+
+	s.NoError(err)
+	s.NotNil(resp)
+	s.True(errors.Is(merr.Error(resp.GetStatus()), merr.ErrServiceInternal))
+}
+
 func (s *ImportServicesSuite) TestImportV2_L0ImportDisabledReturnsError() {
 	paramtable.Init()
 	ctx := context.Background()
@@ -694,7 +709,7 @@ func (s *ImportServicesSuite) TestCreateImportJobFromAck_AssignsFileIDs() {
 	mockHandler := NewNMockHandler(s.T())
 	mockHandler.EXPECT().GetCollection(mock.Anything, mock.Anything).Return(&collectionInfo{
 		ID:            100,
-		VChannelNames: []string{"v1"},
+		VChannelNames: []string{"v2", "v1"},
 	}, nil)
 
 	var savedJob *datapb.ImportJob
@@ -725,7 +740,7 @@ func (s *ImportServicesSuite) TestCreateImportJobFromAck_AssignsFileIDs() {
 		CollectionID:   100,
 		CollectionName: "test_collection",
 		PartitionIDs:   []int64{1},
-		ChannelNames:   []string{"v1"},
+		ChannelNames:   []string{"v1", "v2"},
 		Schema:         &schemapb.CollectionSchema{Name: "test_collection"},
 		Files: []*internalpb.ImportFile{
 			{Id: 0, Paths: []string{"/test/file1.json"}},
@@ -737,6 +752,7 @@ func (s *ImportServicesSuite) TestCreateImportJobFromAck_AssignsFileIDs() {
 		},
 		DataTimestamp: 123456789,
 		JobID:         2000,
+		Version:       importVersionV3,
 	}
 
 	resp, err := server.createImportJobFromAck(ctx, req)
@@ -747,6 +763,9 @@ func (s *ImportServicesSuite) TestCreateImportJobFromAck_AssignsFileIDs() {
 
 	// Verify file IDs were assigned correctly
 	s.NotNil(savedJob)
+	s.Equal(datapb.ImportJobVersion_ImportJobVersionV3, savedJob.GetVersion())
+	s.Equal([]string{"v2", "v1"}, savedJob.GetVchannels())
+	s.ElementsMatch([]string{"v1", "v2"}, savedJob.GetReadyVchannels())
 	files := savedJob.GetFiles()
 	s.Len(files, 3)
 	s.Equal(int64(1001), files[0].GetId()) // idStart + 0 + 1
@@ -820,6 +839,64 @@ func (s *ImportServicesSuite) TestCreateImportJobFromAck_L0ImportDisabledCreates
 	s.Contains(savedJob.GetReason(), "l0 import is disabled")
 	// Failed at creation must carry a real cleanup ts so GC can reclaim the job.
 	s.NotEqual(uint64(math.MaxUint64), savedJob.GetCleanupTs())
+}
+
+func (s *ImportServicesSuite) TestCreateImportJobFromAck_UnsupportedTaskVersionCreatesFailedJob() {
+	paramtable.Init()
+	ctx := context.Background()
+
+	var savedJob *datapb.ImportJob
+	catalog := mocks.NewDataCoordCatalog(s.T())
+	catalog.EXPECT().ListImportJobs(mock.Anything).Return(nil, nil)
+	catalog.EXPECT().ListPreImportTasks(mock.Anything).Return(nil, nil)
+	catalog.EXPECT().ListImportTasks(mock.Anything).Return(nil, nil)
+	catalog.EXPECT().SaveImportJob(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, job *datapb.ImportJob) error {
+		savedJob = job
+		return nil
+	})
+
+	importMeta, err := NewImportMeta(ctx, catalog, nil, nil)
+	s.NoError(err)
+	server := &Server{importMeta: importMeta}
+	server.stateCode.Store(commonpb.StateCode_Healthy)
+
+	resp, err := server.createImportJobFromAck(ctx, &internalpb.ImportRequestInternal{
+		CollectionID:   100,
+		CollectionName: "test_collection",
+		ChannelNames:   []string{"v1"},
+		Schema:         &schemapb.CollectionSchema{Name: "test_collection"},
+		Files:          []*internalpb.ImportFile{{Paths: []string{"/test/file.json"}}},
+		Options:        []*commonpb.KeyValuePair{{Key: "timeout", Value: "unknown-to-old-coordinator"}},
+		DataTimestamp:  123456789,
+		JobID:          2000,
+		Version:        99,
+	})
+
+	s.NoError(err)
+	s.Equal(int32(0), resp.GetStatus().GetCode())
+	s.Equal("2000", resp.GetJobID())
+	s.NotNil(savedJob)
+	s.Equal(datapb.ImportJobVersion_ImportJobVersionV1, savedJob.GetVersion())
+	s.Equal(internalpb.ImportJobState_Failed, savedJob.GetState())
+	s.Contains(savedJob.GetReason(), "unsupported import task version 99")
+	s.NotEqual(uint64(math.MaxUint64), savedJob.GetCleanupTs())
+	s.Empty(savedJob.GetFiles())
+	s.Equal([]string{"v1"}, savedJob.GetVchannels())
+}
+
+func (s *ImportServicesSuite) TestCreateImportJobFromAck_UnsupportedTaskVersionWithoutJobIDIsCorrupt() {
+	ctx := context.Background()
+	server := &Server{}
+	server.stateCode.Store(commonpb.StateCode_Healthy)
+
+	resp, err := server.createImportJobFromAck(ctx, &internalpb.ImportRequestInternal{
+		Version: 99,
+	})
+
+	s.NoError(err)
+	s.Equal(merr.Code(merr.ErrDataIntegrity), resp.GetStatus().GetCode())
+	s.Contains(resp.GetStatus().GetReason(), "has no job ID")
+	s.Empty(resp.GetJobID())
 }
 
 func (s *ImportServicesSuite) TestCreateImportJobFromAck_L0ImportEnabledCreatesPendingJob() {

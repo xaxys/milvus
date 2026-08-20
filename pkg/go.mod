@@ -22,7 +22,7 @@ require (
 	github.com/jolestar/go-commons-pool/v2 v2.1.2
 	github.com/json-iterator/go v1.1.13-0.20220915233716-71ac16282d12
 	github.com/klauspost/compress v1.18.0
-	github.com/milvus-io/milvus-proto/go-api/v3 v3.0.0-20260806081414-16b288837fbd
+	github.com/milvus-io/milvus-proto/go-api/v3 v3.0.0-20260813135008-a69057ab7b81
 	github.com/minio/minio-go/v7 v7.0.73
 	github.com/panjf2000/ants/v2 v2.11.3
 	github.com/prometheus/client_golang v1.20.5
@@ -249,5 +249,6 @@ replace (
 	github.com/expr-lang/expr => github.com/SimFG/expr v0.0.0-20250513112851-9b981e8400b9
 	github.com/go-kit/kit => github.com/go-kit/kit v0.1.0
 	github.com/ianlancetaylor/cgosymbolizer => github.com/milvus-io/cgosymbolizer v0.0.0-20260810014817-f3b338cf6824
+	github.com/milvus-io/milvus-proto/go-api/v3 => github.com/xaxys/milvus-proto/go-api/v3 v3.0.0-20260819034715-4a1e8543d103
 	github.com/tecbot/gorocksdb => github.com/milvus-io/gorocksdb v0.0.0-20220624081344-8c5f4212846b // indirect
 )

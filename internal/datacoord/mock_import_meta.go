@@ -5,6 +5,7 @@ package datacoord
 import (
 	context "context"
 
+	datapb "github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -115,6 +116,55 @@ func (_c *MockImportMeta_AddTask_Call) RunAndReturn(run func(context.Context, Im
 	return _c
 }
 
+// AdvanceImportJobGCState provides a mock function with given fields: ctx, jobID, from, to
+func (_m *MockImportMeta) AdvanceImportJobGCState(ctx context.Context, jobID int64, from datapb.ImportJobGCState, to datapb.ImportJobGCState) error {
+	ret := _m.Called(ctx, jobID, from, to)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AdvanceImportJobGCState")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, int64, datapb.ImportJobGCState, datapb.ImportJobGCState) error); ok {
+		r0 = rf(ctx, jobID, from, to)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// MockImportMeta_AdvanceImportJobGCState_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AdvanceImportJobGCState'
+type MockImportMeta_AdvanceImportJobGCState_Call struct {
+	*mock.Call
+}
+
+// AdvanceImportJobGCState is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID int64
+//   - from datapb.ImportJobGCState
+//   - to datapb.ImportJobGCState
+func (_e *MockImportMeta_Expecter) AdvanceImportJobGCState(ctx interface{}, jobID interface{}, from interface{}, to interface{}) *MockImportMeta_AdvanceImportJobGCState_Call {
+	return &MockImportMeta_AdvanceImportJobGCState_Call{Call: _e.mock.On("AdvanceImportJobGCState", ctx, jobID, from, to)}
+}
+
+func (_c *MockImportMeta_AdvanceImportJobGCState_Call) Run(run func(ctx context.Context, jobID int64, from datapb.ImportJobGCState, to datapb.ImportJobGCState)) *MockImportMeta_AdvanceImportJobGCState_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(int64), args[2].(datapb.ImportJobGCState), args[3].(datapb.ImportJobGCState))
+	})
+	return _c
+}
+
+func (_c *MockImportMeta_AdvanceImportJobGCState_Call) Return(_a0 error) *MockImportMeta_AdvanceImportJobGCState_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockImportMeta_AdvanceImportJobGCState_Call) RunAndReturn(run func(context.Context, int64, datapb.ImportJobGCState, datapb.ImportJobGCState) error) *MockImportMeta_AdvanceImportJobGCState_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CountJobBy provides a mock function with given fields: ctx, filters
 func (_m *MockImportMeta) CountJobBy(ctx context.Context, filters ...ImportJobFilter) int {
 	_va := make([]interface{}, len(filters))
@@ -172,6 +222,174 @@ func (_c *MockImportMeta_CountJobBy_Call) Return(_a0 int) *MockImportMeta_CountJ
 }
 
 func (_c *MockImportMeta_CountJobBy_Call) RunAndReturn(run func(context.Context, ...ImportJobFilter) int) *MockImportMeta_CountJobBy_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DropImportJobGCRecord provides a mock function with given fields: ctx, jobID
+func (_m *MockImportMeta) DropImportJobGCRecord(ctx context.Context, jobID int64) error {
+	ret := _m.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DropImportJobGCRecord")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, int64) error); ok {
+		r0 = rf(ctx, jobID)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// MockImportMeta_DropImportJobGCRecord_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DropImportJobGCRecord'
+type MockImportMeta_DropImportJobGCRecord_Call struct {
+	*mock.Call
+}
+
+// DropImportJobGCRecord is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID int64
+func (_e *MockImportMeta_Expecter) DropImportJobGCRecord(ctx interface{}, jobID interface{}) *MockImportMeta_DropImportJobGCRecord_Call {
+	return &MockImportMeta_DropImportJobGCRecord_Call{Call: _e.mock.On("DropImportJobGCRecord", ctx, jobID)}
+}
+
+func (_c *MockImportMeta_DropImportJobGCRecord_Call) Run(run func(ctx context.Context, jobID int64)) *MockImportMeta_DropImportJobGCRecord_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(int64))
+	})
+	return _c
+}
+
+func (_c *MockImportMeta_DropImportJobGCRecord_Call) Return(_a0 error) *MockImportMeta_DropImportJobGCRecord_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockImportMeta_DropImportJobGCRecord_Call) RunAndReturn(run func(context.Context, int64) error) *MockImportMeta_DropImportJobGCRecord_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// EnterTerminalAndInitGC provides a mock function with given fields: ctx, jobID, actions
+func (_m *MockImportMeta) EnterTerminalAndInitGC(ctx context.Context, jobID int64, actions ...UpdateJobAction) error {
+	_va := make([]interface{}, len(actions))
+	for _i := range actions {
+		_va[_i] = actions[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, jobID)
+	_ca = append(_ca, _va...)
+	ret := _m.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for EnterTerminalAndInitGC")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, int64, ...UpdateJobAction) error); ok {
+		r0 = rf(ctx, jobID, actions...)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// MockImportMeta_EnterTerminalAndInitGC_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'EnterTerminalAndInitGC'
+type MockImportMeta_EnterTerminalAndInitGC_Call struct {
+	*mock.Call
+}
+
+// EnterTerminalAndInitGC is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID int64
+//   - actions ...UpdateJobAction
+func (_e *MockImportMeta_Expecter) EnterTerminalAndInitGC(ctx interface{}, jobID interface{}, actions ...interface{}) *MockImportMeta_EnterTerminalAndInitGC_Call {
+	return &MockImportMeta_EnterTerminalAndInitGC_Call{Call: _e.mock.On("EnterTerminalAndInitGC",
+		append([]interface{}{ctx, jobID}, actions...)...)}
+}
+
+func (_c *MockImportMeta_EnterTerminalAndInitGC_Call) Run(run func(ctx context.Context, jobID int64, actions ...UpdateJobAction)) *MockImportMeta_EnterTerminalAndInitGC_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		variadicArgs := make([]UpdateJobAction, len(args)-2)
+		for i, a := range args[2:] {
+			if a != nil {
+				variadicArgs[i] = a.(UpdateJobAction)
+			}
+		}
+		run(args[0].(context.Context), args[1].(int64), variadicArgs...)
+	})
+	return _c
+}
+
+func (_c *MockImportMeta_EnterTerminalAndInitGC_Call) Return(_a0 error) *MockImportMeta_EnterTerminalAndInitGC_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockImportMeta_EnterTerminalAndInitGC_Call) RunAndReturn(run func(context.Context, int64, ...UpdateJobAction) error) *MockImportMeta_EnterTerminalAndInitGC_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetImportJobGCRecord provides a mock function with given fields: ctx, jobID
+func (_m *MockImportMeta) GetImportJobGCRecord(ctx context.Context, jobID int64) (*datapb.ImportJobGCRecord, error) {
+	ret := _m.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetImportJobGCRecord")
+	}
+
+	var r0 *datapb.ImportJobGCRecord
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, int64) (*datapb.ImportJobGCRecord, error)); ok {
+		return rf(ctx, jobID)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, int64) *datapb.ImportJobGCRecord); ok {
+		r0 = rf(ctx, jobID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*datapb.ImportJobGCRecord)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = rf(ctx, jobID)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockImportMeta_GetImportJobGCRecord_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetImportJobGCRecord'
+type MockImportMeta_GetImportJobGCRecord_Call struct {
+	*mock.Call
+}
+
+// GetImportJobGCRecord is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID int64
+func (_e *MockImportMeta_Expecter) GetImportJobGCRecord(ctx interface{}, jobID interface{}) *MockImportMeta_GetImportJobGCRecord_Call {
+	return &MockImportMeta_GetImportJobGCRecord_Call{Call: _e.mock.On("GetImportJobGCRecord", ctx, jobID)}
+}
+
+func (_c *MockImportMeta_GetImportJobGCRecord_Call) Run(run func(ctx context.Context, jobID int64)) *MockImportMeta_GetImportJobGCRecord_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(int64))
+	})
+	return _c
+}
+
+func (_c *MockImportMeta_GetImportJobGCRecord_Call) Return(_a0 *datapb.ImportJobGCRecord, _a1 error) *MockImportMeta_GetImportJobGCRecord_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockImportMeta_GetImportJobGCRecord_Call) RunAndReturn(run func(context.Context, int64) (*datapb.ImportJobGCRecord, error)) *MockImportMeta_GetImportJobGCRecord_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -17,6 +17,8 @@
 package datacoord
 
 import (
+	"google.golang.org/protobuf/proto"
+
 	"github.com/milvus-io/milvus/internal/datacoord/task"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
@@ -27,11 +29,15 @@ type TaskType int
 const (
 	PreImportTaskType TaskType = 0
 	ImportTaskType    TaskType = 1
+	ReshardTaskType   TaskType = 2
+	ImportTaskV3Type  TaskType = 3
 )
 
 var ImportTaskTypeName = map[TaskType]string{
 	0: "PreImportTask",
 	1: "ImportTask",
+	2: "ReshardTask",
+	3: "ImportTaskV3",
 }
 
 func (t TaskType) String() string {
@@ -78,6 +84,10 @@ func UpdateState(state datapb.ImportTaskStateV2) UpdateAction {
 			t.(*preImportTask).task.Load().State = state
 		case ImportTaskType:
 			t.(*importTask).task.Load().State = state
+		case ReshardTaskType:
+			t.(*reshardTask).setState(state)
+		case ImportTaskV3Type:
+			t.(*importTaskV3).setState(state)
 		}
 	}
 }
@@ -89,6 +99,10 @@ func UpdateReason(reason string) UpdateAction {
 			t.(*preImportTask).task.Load().Reason = reason
 		case ImportTaskType:
 			t.(*importTask).task.Load().Reason = reason
+		case ReshardTaskType:
+			t.(*reshardTask).task.Load().Reason = reason
+		case ImportTaskV3Type:
+			t.(*importTaskV3).task.Load().Reason = reason
 		}
 	}
 }
@@ -111,7 +125,33 @@ func UpdateNodeID(nodeID int64) UpdateAction {
 			t.(*preImportTask).task.Load().NodeID = nodeID
 		case ImportTaskType:
 			t.(*importTask).task.Load().NodeID = nodeID
+		case ReshardTaskType:
+			t.(*reshardTask).task.Load().NodeId = nodeID
+		case ImportTaskV3Type:
+			t.(*importTaskV3).task.Load().NodeId = nodeID
 		}
+	}
+}
+
+func updateReshardRun(runID int64) UpdateAction {
+	return func(t ImportTask) {
+		task := t.(*reshardTask).task.Load()
+		task.RunId = runID
+		task.NodeId = NullNodeID
+		task.State = datapb.ImportTaskStateV2_Pending
+		task.Reason = ""
+	}
+}
+
+func updateImportV3Run(runID int64, segments []int64, logRange *datapb.IDRange) UpdateAction {
+	return func(t ImportTask) {
+		task := t.(*importTaskV3).task.Load()
+		task.RunId = runID
+		task.Segments = append([]int64(nil), segments...)
+		task.LogRange = proto.Clone(logRange).(*datapb.IDRange)
+		task.NodeId = NullNodeID
+		task.State = datapb.ImportTaskStateV2_Pending
+		task.Reason = ""
 	}
 }
 

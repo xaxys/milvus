@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+package milvus.proto.data;
+
+option go_package = "github.com/milvus-io/milvus/pkg/v3/proto/datapb";
+
+// This file contains the V3 import control-plane contracts that do not depend
+// on data_coord.proto.
+import "internal.proto";
+import "schema.proto";
+
+enum ImportSourceFormat {
+  IMPORT_SOURCE_FORMAT_UNSPECIFIED = 0;
+  IMPORT_SOURCE_FORMAT_JSON = 1;
+  IMPORT_SOURCE_FORMAT_JSON_LINES = 2;
+  IMPORT_SOURCE_FORMAT_CSV = 3;
+  IMPORT_SOURCE_FORMAT_PARQUET = 4;
+  IMPORT_SOURCE_FORMAT_NUMPY = 5;
+  IMPORT_SOURCE_FORMAT_BACKUP_BINLOG = 6;
+}
+
+enum SortKeyType {
+  SORT_KEY_TYPE_UNSPECIFIED = 0;
+  SORT_KEY_TYPE_INT64 = 1;
+  SORT_KEY_TYPE_STRING = 2;
+}
+
+message SortFieldSpec {
+  int64 field_id = 1;
+  SortKeyType key_type = 2;
+}
+
+message SortSpec {
+  repeated SortFieldSpec fields = 1;
+}
+
+message ReaderOptions {
+  string separator = 1;
+  string null_key = 2;
+  uint64 start_ts = 3;
+  uint64 end_ts = 4;
+  int64 storage_version = 5;
+}
+
+message ExpandedBinlogField {
+  int64 id = 1;
+  repeated string paths = 2;
+}
+
+message SourceFileSpec {
+  int32 ordinal = 1;
+  internal.ImportFile file = 2;
+  ImportSourceFormat format = 3;
+  bool backup = 4;
+  repeated ExpandedBinlogField insert_fields = 5;
+  repeated string delta_paths = 6;
+  ReaderOptions options = 7;
+}
+
+message ReshardTaskPlan {
+  int64 collection_id = 1;
+  schema.CollectionSchema schema = 2;
+  schema.CollectionSchema temp_schema = 3;
+  repeated string vchannels = 4;
+  repeated int64 partitions = 5;
+  repeated SourceFileSpec sources = 6;
+  SortSpec sort = 7;
+  int64 fragment_size = 8;
+}
+
+message FragmentDescriptor {
+  int32 channel_index = 1;
+  int32 partition_index = 2;
+  int64 seq = 3;
+  string path = 4;
+  int64 rows = 5;
+  int64 logical_bytes = 6;
+}
+
+message ReshardManifest {
+  repeated FragmentDescriptor fragments = 1;
+}
+
+message FragmentRef {
+  string path = 1;
+  int64 row_count = 2;
+}
+
+message ColumnGroupSpec {
+  int64 id = 1;
+  repeated int64 fields = 2;
+  string format = 3;
+}
+
+message TextColumnWriteSpec {
+  int64 field_id = 1;
+  int64 inline_limit = 2;
+  int64 lob_limit = 3;
+  int64 flush_limit = 4;
+}
+
+message V2PackedIOConfig {
+  int64 buffer_size = 1;
+  int64 multipart_size = 2;
+}
+
+message WriterSpec {
+  int64 storage_version = 1;
+  int64 schema_version = 2;
+  repeated ColumnGroupSpec groups = 3;
+  string format = 4;
+  repeated TextColumnWriteSpec text = 5;
+  V2PackedIOConfig v2 = 6;
+  int64 ttl_nanos = 7;
+  int64 pk_capacity = 8;
+  repeated int64 bm25_fields = 9;
+  string bloom_type = 10;
+  double bloom_fpp = 11;
+}
+
+message SegmentPlan {
+  string vchannel = 1;
+  int64 partition_id = 2;
+  repeated FragmentRef fragments = 3;
+  int64 rows = 4;
+}
+
+// ImportTaskPlan is the only persisted Planning object for an ImportTaskV3.
+// It is self-contained so a worker needs one object read and never depends on
+// an ImportJob-side snapshot or a separately published task index.
+message ImportTaskPlan {
+  SortSpec sort = 1;
+  repeated SegmentPlan segments = 2;
+  int32 fan_in = 3;
+  WriterSpec writer = 4;
+  schema.CollectionSchema schema = 5;
+  schema.CollectionSchema temp_schema = 6;
+  uint64 data_ts = 7;
+  int64 collection_id = 8;
+  string cluster_id = 9;
+}
