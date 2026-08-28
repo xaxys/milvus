@@ -54,6 +54,8 @@ func (s *ImportInspectorSuite) SetupTest() {
 	s.collectionID = 1
 
 	s.catalog = mocks.NewDataCoordCatalog(s.T())
+	s.catalog.EXPECT().ListReshardTasks(mock.Anything).Return(nil, nil).Maybe()
+	s.catalog.EXPECT().ListImportTasksV3(mock.Anything).Return(nil, nil).Maybe()
 	s.catalog.EXPECT().ListImportJobs(mock.Anything).Return(nil, nil)
 	s.catalog.EXPECT().ListPreImportTasks(mock.Anything).Return(nil, nil)
 	s.catalog.EXPECT().ListImportTasks(mock.Anything).Return(nil, nil)
@@ -81,7 +83,7 @@ func (s *ImportInspectorSuite) SetupTest() {
 	s.importMeta, err = NewImportMeta(context.TODO(), s.catalog, s.alloc, s.meta)
 	s.NoError(err)
 	scheduler := task2.NewMockGlobalScheduler(s.T())
-	s.inspector = NewImportInspector(context.TODO(), s.meta, s.importMeta, scheduler).(*importInspector)
+	s.inspector = NewImportInspector(context.TODO(), s.meta, s.importMeta, scheduler, nil).(*importInspector)
 }
 
 func (s *ImportInspectorSuite) TestProcessPreImport() {
@@ -392,4 +394,19 @@ func (s *ImportInspectorSuite) TestSortImportTasks() {
 
 func TestImportInspector(t *testing.T) {
 	suite.Run(t, new(ImportInspectorSuite))
+}
+
+func TestImportInspectorSchedulesV3PendingTasksWithoutJobGate(t *testing.T) {
+	ctx := context.Background()
+	importMeta := NewMockImportMeta(t)
+	scheduler := task2.NewMockGlobalScheduler(t)
+	inspector := NewImportInspector(ctx, nil, importMeta, scheduler, nil).(*importInspector)
+	tasks := []ImportTask{
+		newReshardTask(&datapb.ReshardTask{JobId: 1, TaskId: 10, State: datapb.ImportTaskStateV2_Pending, NodeId: NullNodeID}, importMeta, nil, nil),
+		newImportTaskV3(&datapb.ImportTaskV3{JobId: 2, TaskId: 20, State: datapb.ImportTaskStateV2_Pending, NodeId: NullNodeID}, importMeta, nil, nil),
+	}
+	for _, task := range tasks {
+		scheduler.EXPECT().Enqueue(task).Once()
+		inspector.processPendingTask(task)
+	}
 }

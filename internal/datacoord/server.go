@@ -120,6 +120,7 @@ type Server struct {
 	importMeta       ImportMeta
 	importInspector  ImportInspector
 	importChecker    ImportChecker
+	importCheckerV3  ImportChecker
 	importJobLock    *lock.KeyLock[int64]
 
 	copySegmentMeta      CopySegmentMeta
@@ -340,9 +341,12 @@ func (s *Server) initDataCoord() error {
 
 	s.initGarbageCollection(storageCli)
 
-	s.importInspector = NewImportInspector(s.ctx, s.meta, s.importMeta, s.globalScheduler)
-
 	s.importChecker = NewImportChecker(s.ctx, s.meta, s.broker, s.allocator, s.importMeta, s.compactionInspector, s.handler, importCheckerHooks{
+		commitImport:         s.broadcastCommitImportMessage,
+		rollbackImport:       s.broadcastRollbackImportMessage,
+		isReplicatingCluster: s.isReplicatingClusterNow,
+	})
+	s.importCheckerV3 = NewImportCheckerV3(s.ctx, s.meta, s.broker, s.allocator, s.importMeta, s.compactionInspector, s.handler, s.cluster2, importCheckerHooks{
 		commitImport:         s.broadcastCommitImportMessage,
 		rollbackImport:       s.broadcastRollbackImportMessage,
 		isReplicatingCluster: s.isReplicatingClusterNow,
@@ -358,6 +362,8 @@ func (s *Server) initDataCoord() error {
 	if err != nil {
 		return err
 	}
+
+	s.importInspector = NewImportInspector(s.ctx, s.meta, s.importMeta, s.globalScheduler, s.copySegmentMeta)
 	s.copySegmentInspector = NewCopySegmentInspector(
 		s.ctx,
 		s.meta,
@@ -492,6 +498,9 @@ func (s *Server) initGarbageCollection(cli storage.ChunkManager) {
 		scanInterval:     Params.DataCoordCfg.GCScanIntervalInHour.GetAsDuration(time.Hour),
 		missingTolerance: Params.DataCoordCfg.GCMissingTolerance.GetAsDuration(time.Second),
 		dropTolerance:    Params.DataCoordCfg.GCDropTolerance.GetAsDuration(time.Second),
+		importJobAlive: func(ctx context.Context, jobID int64) bool {
+			return s.importMeta.GetJob(ctx, jobID) != nil
+		},
 	})
 }
 
@@ -726,6 +735,7 @@ func (s *Server) startServerLoop() {
 	s.globalScheduler.Start()
 	go s.importInspector.Start()
 	go s.importChecker.Start()
+	go s.importCheckerV3.Start()
 
 	// Start copy segment inspector and checker
 	go s.copySegmentInspector.Start()
@@ -1070,6 +1080,7 @@ func (s *Server) Stop() error {
 	s.globalScheduler.Stop()
 	s.importInspector.Close()
 	s.importChecker.Close()
+	s.importCheckerV3.Close()
 
 	// Stop copy segment components
 	s.copySegmentInspector.Close()

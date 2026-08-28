@@ -840,3 +840,119 @@ func TestMergeSortUnsortedInputReportsOffendingReader(t *testing.T) {
 	assert.ErrorIs(t, err, merr.ErrDataIntegrity)
 	assert.ErrorContains(t, err, "reader 1 record 1 row 1 out of order")
 }
+
+// BenchmarkMergeSortReaders reports merge sort cost across the reader counts
+// called out in the import v3 design doc (1/4/16). Each reader is a disjoint
+// ascending Int64 key space so the merge is pure k-way combine without
+// per-row predicate interference.
+func BenchmarkMergeSortReaders(b *testing.B) {
+	const rowsPerReader = 50000
+	const batchSize = 64 * 1024 * 1024
+	const stride = 1000000
+
+	schema := generateTestSchema()
+	build := func(b *testing.B, numReaders int) []RecordReader {
+		readers := make([]RecordReader, 0, numReaders)
+		for i := 0; i < numReaders; i++ {
+			// seed starts at 1 so the timestamp column is non-zero (Serialize
+			// rejects StartTimestamp == 0).
+			blobs, err := generateTestDataWithSeed(1+i*stride, rowsPerReader)
+			require.NoError(b, err)
+			readers = append(readers, newIterativeCompositeBinlogRecordReader(schema, nil, MakeBlobsReader(blobs)))
+		}
+		return readers
+	}
+
+	rw := &MockRecordWriter{
+		writefn: func(r Record) error { return nil },
+		closefn: func() error { return nil },
+	}
+
+	for _, numReaders := range []int{1, 4, 16} {
+		b.Run(fmt.Sprintf("readers_%d", numReaders), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				rr := build(b, numReaders)
+				_, err := MergeSort(batchSize, schema, rr, rw,
+					func(r Record, ri, i int) bool { return true }, []int64{common.RowIDField})
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
+// BenchmarkImportV2vsV3Sorting compares the sort cost of the two import
+// execution chains on identical input:
+//   - V3 (enableImportV3=true): one MergeSort over all per-file sources during
+//     Importing; output is already ordered, no post sort compaction.
+//   - V2 (enableImportV3=false): one Sort per source file during ImportTaskV2
+//     write, then a second MergeSort over the written segments (sort
+//     compaction) before IndexBuilding.
+// Both use the same storage.MergeSort/storage.Sort primitives, so this
+// isolates the extra pass the legacy chain pays.
+func BenchmarkImportV2vsV3Sorting(b *testing.B) {
+	const rowsPerFile = 100000
+	const numFiles = 4
+	const batchSize = 64 * 1024 * 1024
+	const stride = 1000000
+
+	schema := generateTestSchema()
+	buildBlobs := func(b *testing.B) [][]*Blob {
+		blobs := make([][]*Blob, 0, numFiles)
+		for i := 0; i < numFiles; i++ {
+			bs, err := generateTestDataWithSeed(1+i*stride, rowsPerFile)
+			require.NoError(b, err)
+			blobs = append(blobs, bs)
+		}
+		return blobs
+	}
+
+	rw := &MockRecordWriter{
+		writefn: func(r Record) error { return nil },
+		closefn: func() error { return nil },
+	}
+
+	// v2 path: one Sort per file, then one MergeSort over the file readers.
+	runV2 := func(b *testing.B, blobs [][]*Blob) {
+		for _, bs := range blobs {
+			reader := newIterativeCompositeBinlogRecordReader(schema, nil, MakeBlobsReader(bs))
+			_, _, err := Sort(batchSize, schema, []RecordReader{reader}, rw,
+				func(r Record, ri, i int) bool { return true }, []int64{common.RowIDField})
+			require.NoError(b, err)
+		}
+		readers := make([]RecordReader, 0, numFiles)
+		for _, bs := range blobs {
+			readers = append(readers, newIterativeCompositeBinlogRecordReader(schema, nil, MakeBlobsReader(bs)))
+		}
+		_, err := MergeSort(batchSize, schema, readers, rw,
+			func(r Record, ri, i int) bool { return true }, []int64{common.RowIDField})
+		require.NoError(b, err)
+	}
+
+	// v3 path: a single MergeSort over all file sources.
+	runV3 := func(b *testing.B, blobs [][]*Blob) {
+		readers := make([]RecordReader, 0, numFiles)
+		for _, bs := range blobs {
+			readers = append(readers, newIterativeCompositeBinlogRecordReader(schema, nil, MakeBlobsReader(bs)))
+		}
+		_, err := MergeSort(batchSize, schema, readers, rw,
+			func(r Record, ri, i int) bool { return true }, []int64{common.RowIDField})
+		require.NoError(b, err)
+	}
+
+	blobs := buildBlobs(b)
+	b.ResetTimer()
+
+	b.Run("v3_single_merge", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			runV3(b, blobs)
+		}
+	})
+	b.Run("v2_sort_then_merge", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			runV2(b, blobs)
+		}
+	})
+}

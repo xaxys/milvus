@@ -62,6 +62,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -4869,4 +4870,37 @@ func TestGarbageCollector_removeDroppedSegmentFiles_JSONStatsV2(t *testing.T) {
 	defer mu.Unlock()
 	assert.Contains(t, removed, expectedJSON)
 	assert.Contains(t, removed, indexFile)
+}
+
+func TestGarbageCollector_recycleUnusedImportV3Prefixes(t *testing.T) {
+	ctx := context.Background()
+	cli := storage.NewLocalChunkManager(objectstorage.RootPath(t.TempDir()))
+	gc := newGarbageCollector(nil, newMockHandler(), GcOption{
+		cli:              cli,
+		missingTolerance: 0, // freshly written objects are already past tolerance
+		importJobAlive: func(_ context.Context, jobID int64) bool {
+			return jobID == 43 // job 43 is still alive; job 42 is an orphan
+		},
+	})
+
+	orphanPath := path.Join(cli.RootPath(), metautil.BuildImportV3JobPath(42), "plans", "reshard", "10", "plan.pb")
+	livePath := path.Join(cli.RootPath(), metautil.BuildImportV3JobPath(43), "plans", "reshard", "10", "plan.pb")
+	require.NoError(t, cli.Write(ctx, orphanPath, []byte("orphan")))
+	require.NoError(t, cli.Write(ctx, livePath, []byte("live")))
+
+	// The orphan prefix is removed while the live job's prefix is kept.
+	gc.recycleUnusedImportV3Prefixes(ctx)
+	exist, err := cli.Exist(ctx, orphanPath)
+	require.NoError(t, err)
+	require.False(t, exist)
+	exist, err = cli.Exist(ctx, livePath)
+	require.NoError(t, err)
+	require.True(t, exist)
+
+	// A nil importJobAlive disables the scan entirely.
+	gc.option.importJobAlive = nil
+	gc.recycleUnusedImportV3Prefixes(ctx)
+	exist, err = cli.Exist(ctx, livePath)
+	require.NoError(t, err)
+	require.True(t, exist)
 }

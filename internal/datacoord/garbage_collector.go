@@ -61,6 +61,11 @@ type GcOption struct {
 
 	broker           broker.Broker
 	removeObjectPool *conc.Pool[struct{}]
+
+	// importJobAlive reports whether an ImportJob still exists for jobID. It is
+	// wired by the server from ImportMeta so the orphan scan never deletes an
+	// active job's import_v3/{job_id}/ prefix. nil disables the import_v3 scan.
+	importJobAlive func(ctx context.Context, jobID int64) bool
 }
 
 // garbageCollector handles garbage files in object storage
@@ -384,6 +389,7 @@ func (gc *garbageCollector) work(ctx context.Context) {
 			gc.recycleUnusedBinlogFiles(ctx)
 			gc.recycleUnusedIndexFilesV0(ctx)
 			gc.recycleUnusedIndexFilesV1(ctx)
+			gc.recycleUnusedImportV3Prefixes(ctx)
 		})
 	}()
 	go func() {
@@ -666,6 +672,75 @@ func (gc *garbageCollector) recycleUnusedBinlogFiles(ctx context.Context) {
 		gc.recycleUnusedBinLogWithChecker(ctx, task.prefix, task.label, task.segmentIDFromPath, task.checker)
 	}
 	metrics.GarbageCollectorRunCount.WithLabelValues(paramtable.GetStringNodeID()).Add(1)
+}
+
+// recycleUnusedImportV3Prefixes removes import_v3/{job_id}/ prefixes that have
+// no live ImportJob in the catalog and whose newest object is older than the
+// orphan tolerance. It runs on the orphan scan cadence
+// (dataCoord.gc.scanInterval, default 7 days); importJobAlive is optional and
+// when nil the scan is skipped entirely. The import subsystem itself removes a
+// terminal job's prefix in deleteImportJob; this scan only covers abnormal
+// leftovers (crashed/aborted creations, late old-run writers after GC).
+func (gc *garbageCollector) recycleUnusedImportV3Prefixes(ctx context.Context) {
+	if gc.option.cli == nil || gc.option.importJobAlive == nil {
+		return
+	}
+	root := path.Join(gc.option.cli.RootPath(), metautil.ImportV3RootPath) + "/"
+	paths, modTimes, err := storage.ListAllChunkWithPrefix(ctx, gc.option.cli, root, true)
+	if err != nil {
+		mlog.Warn(ctx, "failed to list import v3 orphan prefixes", mlog.Err(err))
+		return
+	}
+	type jobInfo struct {
+		newest time.Time
+	}
+	jobs := make(map[int64]*jobInfo)
+	for i, path := range paths {
+		// Chunk managers do not agree on path shape: RemoteChunkManager returns
+		// bucket-relative object keys (import_v3/{job}/...), while LocalChunkManager
+		// returns absolute filesystem paths rooted above the storage root. Locate
+		// the root component anywhere in the path instead of assuming a fixed prefix.
+		marker := metautil.ImportV3RootPath + "/"
+		idx := strings.Index(path, marker)
+		if idx < 0 {
+			continue
+		}
+		rel := path[idx+len(marker):]
+		parts := strings.SplitN(rel, "/", 2)
+		if len(parts) == 0 || parts[0] == "" {
+			continue
+		}
+		jobID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		info := jobs[jobID]
+		if info == nil {
+			info = &jobInfo{newest: modTimes[i]}
+			jobs[jobID] = info
+		} else if modTimes[i].After(info.newest) {
+			info.newest = modTimes[i]
+		}
+	}
+	for jobID, info := range jobs {
+		if gc.option.importJobAlive(ctx, jobID) {
+			continue
+		}
+		// Only delete when nothing has been written to the prefix for at least
+		// missingTolerance: a job that just lost its catalog record but is still
+		// being written by a late worker must not have its fragments removed.
+		if time.Since(info.newest) <= gc.option.missingTolerance {
+			continue
+		}
+		prefix := path.Join(gc.option.cli.RootPath(), metautil.BuildImportV3JobPath(jobID)) + "/"
+		if err := gc.option.cli.RemoveWithPrefix(ctx, prefix); err != nil {
+			mlog.Warn(ctx, "remove orphan import v3 prefix failed",
+				mlog.Int64("jobID", jobID), mlog.Err(err))
+			continue
+		}
+		mlog.Info(ctx, "removed orphan import v3 prefix",
+			mlog.Int64("jobID", jobID), mlog.String("prefix", prefix))
+	}
 }
 
 // recycleUnusedBinLogWithChecker scans the prefix and checks the path with checker.
