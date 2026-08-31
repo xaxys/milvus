@@ -43,6 +43,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 )
 
@@ -426,6 +427,14 @@ func (t *importTaskV3) QueryTaskOnWorker(cluster session.Cluster) {
 
 func (t *importTaskV3) prepareRetry(cluster session.Cluster) {
 	p := t.task.Load()
+	// RunId is the durable attempt counter: it starts at 1 and grows by one on
+	// every retry. Each retry allocates a fresh segment and log-ID range, so a
+	// permanent failure must fail terminally once the budget is exhausted.
+	maxRetry := paramtable.Get().DataCoordCfg.ImportV3MaxTaskRetry.GetAsInt64()
+	if p.GetRunId()-1 >= maxRetry {
+		t.fail(fmt.Sprintf("import v3 task exhausted the retry budget %d", maxRetry))
+		return
+	}
 	job := t.importMeta.GetJob(context.TODO(), p.GetJobId())
 	if job == nil || (job.GetState() != internalpb.ImportJobState_Planning && job.GetState() != internalpb.ImportJobState_Importing) {
 		t.fail(fmt.Sprintf("import v3 task cannot retry: job %d is unavailable or terminal", p.GetJobId()))

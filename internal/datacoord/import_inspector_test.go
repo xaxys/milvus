@@ -268,7 +268,7 @@ func (s *ImportInspectorSuite) TestReloadFromMeta() {
 	s.catalog.EXPECT().ListImportJobs(mock.Anything).Return(nil, nil)
 	s.catalog.EXPECT().ListPreImportTasks(mock.Anything).Return(nil, nil)
 	s.catalog.EXPECT().ListImportTasks(mock.Anything).Return(nil, nil)
-	s.inspector.reloadFromMeta()
+	s.inspector.Reload()
 
 	// Test case 2: Jobs with in-progress tasks
 	jobProto := &datapb.ImportJob{
@@ -331,7 +331,7 @@ func (s *ImportInspectorSuite) TestReloadFromMeta() {
 
 	// Mock scheduler expectations
 	s.inspector.scheduler.(*task2.MockGlobalScheduler).EXPECT().Enqueue(mock.Anything).Times(2)
-	s.inspector.reloadFromMeta()
+	s.inspector.Reload()
 }
 
 func (s *ImportInspectorSuite) TestIgnoreOrphanTasks() {
@@ -365,7 +365,7 @@ func (s *ImportInspectorSuite) TestIgnoreOrphanTasks() {
 	}))
 
 	// Orphan tasks are skipped just as they were when the inspector iterated jobs first.
-	s.inspector.reloadFromMeta()
+	s.inspector.Reload()
 	s.inspector.inspect()
 	s.Equal(commonpb.SegmentState_Importing, s.meta.GetSegment(context.TODO(), 10).GetState())
 }

@@ -1124,21 +1124,26 @@ func (gc *garbageCollector) removeDroppedSegmentFiles(ctx context.Context, clone
 	// V3 segment data lives under the manifest base path. Segment index files still
 	// live under index file prefixes and must be deleted from recorded file keys.
 	if cloned.GetStorageVersion() == storage.StorageV3 {
-		basePath, _, err := packed.UnmarshalManifestPath(cloned.GetManifestPath())
-		if err != nil {
-			log.Warn(ctx, "GC V3 segment failed to parse manifest path",
-				mlog.String("manifestPath", cloned.GetManifestPath()),
-				mlog.Err(err))
-			return err
-		}
-		log.Info(ctx, "GC V3 segment start, removing basePath...",
-			mlog.String("basePath", basePath),
-			mlog.Int("indexFiles", len(indexFiles)))
-		if err := gc.option.cli.RemoveWithPrefix(ctx, basePath); err != nil {
-			log.Warn(ctx, "GC V3 segment remove basePath failed",
+		// An empty ManifestPath means the segment was allocated but never
+		// accepted (import retry, failure, or cleanup), so there are no data
+		// files to remove; proceed to the meta drop instead of erroring.
+		if cloned.GetManifestPath() != "" {
+			basePath, _, err := packed.UnmarshalManifestPath(cloned.GetManifestPath())
+			if err != nil {
+				log.Warn(ctx, "GC V3 segment failed to parse manifest path",
+					mlog.String("manifestPath", cloned.GetManifestPath()),
+					mlog.Err(err))
+				return err
+			}
+			log.Info(ctx, "GC V3 segment start, removing basePath...",
 				mlog.String("basePath", basePath),
-				mlog.Err(err))
-			return err
+				mlog.Int("indexFiles", len(indexFiles)))
+			if err := gc.option.cli.RemoveWithPrefix(ctx, basePath); err != nil {
+				log.Warn(ctx, "GC V3 segment remove basePath failed",
+					mlog.String("basePath", basePath),
+					mlog.Err(err))
+				return err
+			}
 		}
 		if len(indexFiles) == 0 {
 			log.Info(ctx, "GC V3 segment files done")

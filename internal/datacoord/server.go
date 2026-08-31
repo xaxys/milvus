@@ -424,6 +424,11 @@ func (s *Server) Start() error {
 
 func (s *Server) startDataCoord() {
 	s.startTaskScheduler()
+	// Reconcile orphan import segments and re-enqueue in-flight import tasks
+	// before the checkers start and before the state turns Healthy: the scan
+	// must not race producers that persist a segment before its owner record
+	// (snapshot restore pre-registration, V2 import segment allocation).
+	s.importInspector.Reload()
 	s.startServerLoop()
 	s.afterStart()
 	s.UpdateStateCode(commonpb.StateCode_Healthy)

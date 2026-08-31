@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -103,6 +104,22 @@ func validateImportResults(results []*datapb.SegmentResult, segmentCount int) er
 // keeps the existing V2 marker-last recovery shape: a crash between segment
 // batches and the task marker simply replays the same worker result.
 func applyImportResults(ctx context.Context, meta *meta, collectionID int64, schemaVersion int32, segmentIDs []int64, sorted, namespaceSorted bool, results []*datapb.SegmentResult) error {
+	for _, result := range results {
+		if result == nil || result.GetManifestPath() != "" {
+			continue
+		}
+		// The StorageV2 writer reports FieldBinlogs by LogPath with no LogID,
+		// while the catalog only persists LogID-only entries. Compress before
+		// validation so the replay check compares the same shape that is
+		// persisted (mirroring the V2 import path).
+		statslogs := []*datapb.FieldBinlog(nil)
+		if result.GetPkLog() != nil {
+			statslogs = []*datapb.FieldBinlog{result.GetPkLog()}
+		}
+		if err := binlog.CompressBinLogs(result.GetInsertLogs(), statslogs, result.GetBm25Logs()); err != nil {
+			return err
+		}
+	}
 	operators := make([]UpdateOperator, 0, len(results)*9)
 	for index, result := range results {
 		segmentID := segmentIDs[index]

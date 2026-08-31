@@ -2713,6 +2713,40 @@ func TestGarbageCollector_recycleDroppedSegments_RecyclesSegmentIndexMeta(t *tes
 	mu.Unlock()
 }
 
+// TestGarbageCollector_recycleDroppedSegments_StorageV3WithoutManifest pins that
+// a StorageV3 segment dropped before any manifest was written (import retry,
+// failure, or cleanup) is removed from meta instead of erroring forever on the
+// empty manifest path.
+func TestGarbageCollector_recycleDroppedSegments_StorageV3WithoutManifest(t *testing.T) {
+	ctx := context.Background()
+	m, err := newMemoryMeta(t)
+	require.NoError(t, err)
+	const segID = int64(1001)
+	segment := &SegmentInfo{
+		SegmentInfo: &datapb.SegmentInfo{
+			ID:             segID,
+			CollectionID:   100,
+			PartitionID:    10,
+			InsertChannel:  "ch1",
+			State:          commonpb.SegmentState_Dropped,
+			DroppedAt:      uint64(time.Now().Add(-time.Hour).UnixNano()),
+			StorageVersion: storage.StorageV3,
+		},
+	}
+	require.NoError(t, m.AddSegment(ctx, segment))
+
+	cm := mocks.NewChunkManager(t)
+	cm.EXPECT().RootPath().Return("root").Maybe()
+	gc := newGarbageCollector(m, newMockHandler(), GcOption{
+		cli:           cm,
+		dropTolerance: 0,
+	})
+
+	gc.recycleDroppedSegments(ctx, nil)
+
+	assert.Nil(t, m.GetSegment(ctx, segID))
+}
+
 func TestGarbageCollector_recycleDroppedSegments_FileDeleteFailureKeepsMeta(t *testing.T) {
 	ctx := context.Background()
 	m, segment, _, _ := setupDroppedSegmentWithIndexForGC(t)

@@ -41,6 +41,30 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 )
 
+// TestQuiesceImportJobKeepsTasksDuringRetention pins that unbound task records
+// survive until cleanupTs passes: they back the terminal job's row accounting
+// (getImportRowsInfo) during the retention window, like V2 GC.
+func TestQuiesceImportJobKeepsTasksDuringRetention(t *testing.T) {
+	ctx := context.Background()
+	importMeta := NewMockImportMeta(t)
+	checker := &importCheckerV3{ctx: ctx, importMeta: importMeta}
+	log := mlog.With(mlog.FieldJobID(int64(1)))
+
+	task := newImportTaskV3(&datapb.ImportTaskV3{
+		JobId: 1, TaskId: 10, State: datapb.ImportTaskStateV2_Completed, NodeId: NullNodeID, SegmentId: 100, Rows: 42,
+	}, importMeta, nil, nil)
+
+	job := &importJob{ImportJob: &datapb.ImportJob{JobID: 1, State: internalpb.ImportJobState_Completed,
+		CleanupTs: tsoutil.ComposeTSByTime(time.Now().Add(time.Hour))}}
+	importMeta.EXPECT().GetTaskByJob(mock.Anything, int64(1)).Return([]ImportTask{task}).Once()
+	require.False(t, checker.quiesceImportJob(job, log))
+
+	job.ImportJob.CleanupTs = tsoutil.ComposeTSByTime(time.Now().Add(-time.Hour))
+	importMeta.EXPECT().GetTaskByJob(mock.Anything, int64(1)).Return([]ImportTask{task}).Once()
+	importMeta.EXPECT().RemoveTask(mock.Anything, int64(10)).Return(nil).Once()
+	require.True(t, checker.quiesceImportJob(job, log))
+}
+
 func TestCleanupPreparingV3ImportTasksIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	importMeta := NewMockImportMeta(t)

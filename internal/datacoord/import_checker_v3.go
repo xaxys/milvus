@@ -531,8 +531,9 @@ func (c *importCheckerV3) checkGC(job ImportJob) {
 
 	// GC phases are derived from durable facts on every tick; no separate GC
 	// record exists. Quiesce makes progress as soon as the job is terminal and
-	// keeps retrying version-aware Drops. Delete only starts once cleanupTs has
-	// passed and every task is unbound/removed.
+	// keeps retrying version-aware Drops; task removal inside it waits for
+	// cleanupTs. Delete only starts once cleanupTs has passed and every task
+	// is unbound/removed.
 	if !c.quiesceImportJob(job, log) {
 		return
 	}
@@ -546,8 +547,10 @@ func (c *importCheckerV3) checkGC(job ImportJob) {
 }
 
 // quiesceImportJob drops still-bound V3 tasks and removes tasks that are no
-// longer pinned to a node. It reports true only when every task of the job is
-// already unbound and removed from catalog.
+// longer pinned to a node. Removal only starts once cleanupTs has passed so
+// the task records keep backing the job's row accounting during the retention
+// window. It reports true only when every task of the job is already unbound
+// and removed from catalog.
 func (c *importCheckerV3) quiesceImportJob(job ImportJob, log *mlog.Logger) bool {
 	tasks := c.importMeta.GetTaskByJob(c.ctx, job.GetJobID())
 	ready := true
@@ -579,6 +582,13 @@ func (c *importCheckerV3) quiesceImportJob(job ImportJob, log *mlog.Logger) bool
 					continue
 				}
 			}
+		}
+		// Task records back the job's row accounting (getImportRowsInfo sums
+		// them), so they must survive the retention window like V2 GC does;
+		// dropping their worker binding above is still safe to do early.
+		if !time.Now().After(tsoutil.PhysicalTime(job.GetCleanupTs())) {
+			ready = false
+			continue
 		}
 		if err := c.importMeta.RemoveTask(c.ctx, task.GetTaskID()); err != nil {
 			log.Warn(c.ctx, "remove task failed during GC", WrapTaskLog(task, mlog.Err(err))...)

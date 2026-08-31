@@ -34,6 +34,7 @@ const (
 )
 
 type ImportInspector interface {
+	Reload()
 	Start()
 	Close()
 }
@@ -62,7 +63,6 @@ func NewImportInspector(ctx context.Context, meta *meta, importMeta ImportMeta, 
 }
 
 func (s *importInspector) Start() {
-	s.reloadFromMeta()
 	mlog.Info(s.ctx, "start import inspector")
 	ticker := time.NewTicker(Params.DataCoordCfg.ImportScheduleInterval.GetAsDuration(time.Second))
 	defer ticker.Stop()
@@ -92,11 +92,16 @@ func sortImportTasks(tasks []ImportTask) {
 	})
 }
 
-func (s *importInspector) reloadFromMeta() {
-	// Reconcile before enqueuing in-progress tasks. The scheduler is already
-	// running, and a queued task can race into prepareRetry and allocate a new
-	// segment while the reconciler is still scanning; cleaning first keeps the
-	// startup scan consistent with the task table it observes.
+// Reload performs the one-shot startup reconciliation and re-enqueue. The
+// server runs it synchronously before the checkers start and before the state
+// turns Healthy, so the orphan scan cannot race producers that persist a
+// segment before its owner record (snapshot restore pre-registration and V2
+// import segment allocation).
+func (s *importInspector) Reload() {
+	// Reconcile before enqueuing in-progress tasks: a queued task can race
+	// into prepareRetry and allocate a new segment while the reconciler is
+	// still scanning; cleaning first keeps the startup scan consistent with
+	// the task table it observes.
 	s.reconcileOrphanImportSegments()
 	tasks := s.importMeta.GetTaskBy(s.ctx, WithStates(datapb.ImportTaskStateV2_InProgress))
 	sortImportTasks(tasks)

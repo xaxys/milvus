@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 )
 
@@ -52,6 +53,39 @@ func TestApplyImportResultToPreallocatedSegment(t *testing.T) {
 	require.True(t, segment.GetIsImporting())
 	require.False(t, segment.GetIsInvisible())
 	require.Equal(t, int64(10), segment.GetNumOfRows())
+}
+
+// TestApplyImportResultsCompressesStorageV2Binlogs pins that StorageV2 writer
+// results (LogPath set, LogID zero) are compressed before persistence; the
+// catalog rejects zero LogIDs and stored LogPaths, so without compression the
+// update below would fail.
+func TestApplyImportResultsCompressesStorageV2Binlogs(t *testing.T) {
+	ctx := context.Background()
+	meta, err := newMemoryMeta(t)
+	require.NoError(t, err)
+	_, err = addImportSegment(ctx, meta, 100, 1, 10, 2, 3, "v0", datapb.SegmentLevel_L1, storage.StorageV2, 4)
+	require.NoError(t, err)
+
+	results := []*datapb.SegmentResult{{
+		Rows:       10,
+		Statistics: &datapb.Statistics{TimestampFrom: 1, TimestampTo: 100},
+		InsertLogs: []*datapb.FieldBinlog{{FieldID: 0, Binlogs: []*datapb.Binlog{{
+			LogPath: "files/insert_log/2/3/100/0/555", EntriesNum: 10,
+		}}}},
+		PkLog: &datapb.FieldBinlog{FieldID: 100, Binlogs: []*datapb.Binlog{{
+			LogPath: "files/stats_log/2/3/100/100/666", EntriesNum: 10,
+		}}},
+	}}
+	require.NoError(t, applyImportResults(ctx, meta, 2, 4, []int64{100}, true, false, results))
+
+	segment := meta.GetSegment(ctx, 100)
+	require.Equal(t, commonpb.SegmentState_Flushed, segment.GetState())
+	require.Len(t, segment.GetBinlogs(), 1)
+	require.Equal(t, int64(555), segment.GetBinlogs()[0].GetBinlogs()[0].GetLogID())
+	require.Empty(t, segment.GetBinlogs()[0].GetBinlogs()[0].GetLogPath())
+	require.Len(t, segment.GetStatslogs(), 1)
+	require.Equal(t, int64(666), segment.GetStatslogs()[0].GetBinlogs()[0].GetLogID())
+	require.Empty(t, segment.GetStatslogs()[0].GetBinlogs()[0].GetLogPath())
 }
 
 func TestValidateReshardManifest(t *testing.T) {

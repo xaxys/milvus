@@ -5787,6 +5787,7 @@ type dataCoordConfig struct {
 	ImportInReplicatingCluster      ParamItem `refreshable:"true"`
 	EnableImportV3                  ParamItem `refreshable:"true"`
 	EnableL0Import                  ParamItem `refreshable:"true"`
+	ImportV3MaxTaskRetry            ParamItem `refreshable:"true"`
 	ImportPreAllocIDExpansionFactor ParamItem `refreshable:"true"`
 	ImportParquetFooterMaxSize      ParamItem `refreshable:"true"`
 	ImportFileNumPerSlot            ParamItem `refreshable:"true"`
@@ -7165,6 +7166,18 @@ if param targetScalarIndexVersion is not set, the default value is -1, which mea
 		Export:       true,
 	}
 	p.EnableL0Import.Init(base.mgr)
+
+	p.ImportV3MaxTaskRetry = ParamItem{
+		Key:     "dataCoord.import.importV3MaxTaskRetry",
+		Version: "3.0.0",
+		Doc: "Maximum retries of a failed ImportTaskV3 run before the task fails terminally. " +
+			"Each retry allocates a fresh segment and log-ID range, so a permanent failure " +
+			"(e.g. unwritable storage) must not retry forever.",
+		DefaultValue: "10",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.ImportV3MaxTaskRetry.Init(base.mgr)
 
 	p.ImportPreAllocIDExpansionFactor = ParamItem{
 		Key:          "dataCoord.import.preAllocateIDExpansionFactor",
