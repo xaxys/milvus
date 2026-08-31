@@ -361,6 +361,80 @@ func bulkAppendFlatValues[T constraints.Integer | constraints.Float](flat []T, l
 	}
 }
 
+func checkFloatListValueType(field *schemapb.FieldSchema, valueReader arrow.Array) error {
+	switch valueReader.DataType().ID() {
+	case arrow.FLOAT32, arrow.FLOAT64:
+		return nil
+	default:
+		return WrapTypeErr(field, valueReader.DataType().Name())
+	}
+}
+
+func appendFloatListRangeAsFloat32(field *schemapb.FieldSchema, valueReader arrow.Array, flat []float32, start, end int64) ([]float32, error) {
+	switch valueReader := valueReader.(type) {
+	case *array.Float32:
+		if valueReader.NullN() == 0 {
+			return append(flat, valueReader.Float32Values()[start:end]...), nil
+		}
+		for j := start; j < end; j++ {
+			if valueReader.IsNull(int(j)) {
+				return flat, WrapNullElementErr(field)
+			}
+			flat = append(flat, valueReader.Value(int(j)))
+		}
+		return flat, nil
+	case *array.Float64:
+		for j := start; j < end; j++ {
+			if valueReader.IsNull(int(j)) {
+				return flat, WrapNullElementErr(field)
+			}
+			flat = append(flat, float32(valueReader.Value(int(j))))
+		}
+		return flat, nil
+	default:
+		return flat, WrapTypeErr(field, valueReader.DataType().Name())
+	}
+}
+
+func appendFlatFloatListLikeDataAsFloat32(field *schemapb.FieldSchema, listReader *listLikeArray, flat []float32) ([]float32, error) {
+	valueReader := listReader.ListValues()
+	if err := checkFloatListValueType(field, valueReader); err != nil {
+		return flat, err
+	}
+	for i := 0; i < listReader.Len(); i++ {
+		start, end := listReader.ValueOffsets(i)
+		var err error
+		if flat, err = appendFloatListRangeAsFloat32(field, valueReader, flat, start, end); err != nil {
+			return flat, err
+		}
+	}
+	return flat, nil
+}
+
+func appendFlatNullableFloatListLikeDataAsFloat32(field *schemapb.FieldSchema, listReader *listLikeArray, flat []float32, validData []bool) ([]float32, []bool, error) {
+	valueReader := listReader.ListValues()
+	if err := checkFloatListValueType(field, valueReader); err != nil {
+		return flat, validData, err
+	}
+	_, fixedSize := listReader.FixedSize()
+	for i := 0; i < listReader.Len(); i++ {
+		start, end := listReader.ValueOffsets(i)
+		valid := start != end
+		if fixedSize {
+			valid = !listReader.IsNull(i)
+		}
+		validData = append(validData, valid)
+		if !valid {
+			continue
+		}
+		var err error
+		if flat, err = appendFloatListRangeAsFloat32(field, valueReader, flat, start, end); err != nil {
+			return flat, validData, err
+		}
+	}
+	return flat, validData, nil
+}
+
 func readBoolListLikeData(field *schemapb.FieldSchema, listReader *listLikeArray, outputArray func(arr []bool, valid bool)) error {
 	valueReader := listReader.ListValues()
 	boolReader, ok := valueReader.(*array.Boolean)

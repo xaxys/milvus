@@ -23,7 +23,6 @@ import (
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/array"
 	"github.com/apache/arrow/go/v17/parquet/pqarrow"
-	"github.com/samber/lo"
 	"golang.org/x/exp/constraints"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
@@ -1575,30 +1574,6 @@ func isFP16BF16FloatArrowType(dataType arrow.DataType) bool {
 	}
 }
 
-func readFloatListLikeDataAsFloat32(field *schemapb.FieldSchema, listReader *listLikeArray, outputArray func(arr []float32, valid bool)) error {
-	valueReader := listReader.ListValues()
-	switch valueReader.DataType().ID() {
-	case arrow.FLOAT32:
-		float32Reader := valueReader.(*array.Float32)
-		return getListLikeArrayData(listReader, func(i int) (float32, error) {
-			if float32Reader.IsNull(i) {
-				return 0, WrapNullElementErr(field)
-			}
-			return float32Reader.Value(i), nil
-		}, outputArray)
-	case arrow.FLOAT64:
-		float64Reader := valueReader.(*array.Float64)
-		return getListLikeArrayData(listReader, func(i int) (float32, error) {
-			if float64Reader.IsNull(i) {
-				return 0, WrapNullElementErr(field)
-			}
-			return float32(float64Reader.Value(i)), nil
-		}, outputArray)
-	default:
-		return WrapTypeErr(field, valueReader.DataType().Name())
-	}
-}
-
 func ReadFP16BF16FloatVectorData(pcr *FieldReader, count int64) (any, error) {
 	chunked, err := pcr.columnReader.NextBatch(count)
 	if err != nil {
@@ -1616,13 +1591,11 @@ func ReadFP16BF16FloatVectorData(pcr *FieldReader, count int64) (any, error) {
 		if err = checkListLikeVectorAlignedWithExpected(listReader, int32(pcr.dim)); err != nil {
 			return nil, merr.WrapErrImportFailedMsg("length of vector is not aligned: %s, data type: %s", err.Error(), pcr.field.GetDataType().String())
 		}
-		floatRows := make([][]float32, 0, int(count))
-		if err = readFloatListLikeDataAsFloat32(pcr.field, listReader, func(arr []float32, valid bool) {
-			floatRows = append(floatRows, arr)
-		}); err != nil {
+		floatFlat := make([]float32, 0, listReader.Len()*pcr.dim)
+		if floatFlat, err = appendFlatFloatListLikeDataAsFloat32(pcr.field, listReader, floatFlat); err != nil {
 			return nil, err
 		}
-		converted, err := typeutil.ConvertFloat32ToFP16BF16Bytes(lo.Flatten(floatRows), pcr.field.GetDataType())
+		converted, err := typeutil.ConvertFloat32ToFP16BF16Bytes(floatFlat, pcr.field.GetDataType())
 		if err != nil {
 			return nil, err
 		}
@@ -1654,16 +1627,11 @@ func ReadNullableFP16BF16FloatVectorData(pcr *FieldReader, count int64) (any, []
 		if err = checkNullableListLikeVectorAlignedWithExpected(listReader, int32(pcr.dim)); err != nil {
 			return nil, nil, merr.WrapErrImportFailedMsg("length of vector is not aligned: %s, data type: %s", err.Error(), pcr.field.GetDataType().String())
 		}
-		floatRows := make([][]float32, 0, int(count))
-		if err = readFloatListLikeDataAsFloat32(pcr.field, listReader, func(arr []float32, valid bool) {
-			validData = append(validData, valid)
-			if valid {
-				floatRows = append(floatRows, arr)
-			}
-		}); err != nil {
+		floatFlat := make([]float32, 0, listReader.Len()*pcr.dim)
+		if floatFlat, validData, err = appendFlatNullableFloatListLikeDataAsFloat32(pcr.field, listReader, floatFlat, validData); err != nil {
 			return nil, nil, err
 		}
-		converted, err := typeutil.ConvertFloat32ToFP16BF16Bytes(lo.Flatten(floatRows), pcr.field.GetDataType())
+		converted, err := typeutil.ConvertFloat32ToFP16BF16Bytes(floatFlat, pcr.field.GetDataType())
 		if err != nil {
 			return nil, nil, err
 		}
