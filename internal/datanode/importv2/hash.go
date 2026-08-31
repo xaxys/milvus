@@ -28,13 +28,13 @@ import (
 
 type HashedData [][]*storage.InsertData // [vchannelIndex][partitionIndex]*storage.InsertData
 
-func newHashedData(schema *schemapb.CollectionSchema, channelNum, partitionNum int) (HashedData, error) {
+func newHashedData(schema *schemapb.CollectionSchema, channelNum, partitionNum, rowsHint int) (HashedData, error) {
 	var err error
 	res := make(HashedData, channelNum)
 	for i := 0; i < channelNum; i++ {
 		res[i] = make([]*storage.InsertData, partitionNum)
 		for j := 0; j < partitionNum; j++ {
-			res[i][j], err = storage.NewInsertDataWithFunctionOutputField(schema)
+			res[i][j], err = storage.NewInsertDataWithCap(schema, rowsHint, true)
 			if err != nil {
 				return nil, err
 			}
@@ -72,7 +72,8 @@ func HashDataBySchema(schema *schemapb.CollectionSchema, vchannels []string, par
 	f1 := hashByVChannel(int64(channelNum), pkField)
 	f2 := hashByPartition(int64(partitionNum), partKeyField)
 
-	res, err := newHashedData(schema, channelNum, partitionNum)
+	rowsHint := (rows.GetRowNum() + channelNum*partitionNum - 1) / (channelNum * partitionNum)
+	res, err := newHashedData(schema, channelNum, partitionNum, rowsHint)
 	if err != nil {
 		return nil, err
 	}

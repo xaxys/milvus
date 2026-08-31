@@ -45,9 +45,10 @@ type reader struct {
 	path string
 	r    *file.Reader
 
-	fileSize   *atomic.Int64
-	bufferSize int
-	count      int64
+	fileSize      *atomic.Int64
+	bufferSize    int
+	count         int64
+	rowsPerBuffer int
 
 	frs map[int64]*FieldReader // fieldID -> FieldReader
 }
@@ -76,6 +77,11 @@ func NewReader(ctx context.Context, cm storage.ChunkManager, schema *schemapb.Co
 	mlog.Info(ctx, "parquet file info", mlog.Int("row group num", r.NumRowGroups()),
 		mlog.Int64("num rows", r.NumRows()))
 
+	sizePerRecord, err := typeutil.EstimateMaxSizePerRecord(schema)
+	if err != nil {
+		r.Close()
+		return nil, err
+	}
 	count, err := common.EstimateReadCountPerBatch(bufferSize, schema)
 	if err != nil {
 		r.Close()
@@ -97,21 +103,22 @@ func NewReader(ctx context.Context, cm storage.ChunkManager, schema *schemapb.Co
 		return nil, err
 	}
 	return &reader{
-		ctx:        ctx,
-		cm:         cm,
-		cmr:        retryableReader,
-		schema:     schema,
-		fileSize:   atomic.NewInt64(0),
-		path:       path,
-		r:          r,
-		bufferSize: bufferSize,
-		count:      count,
-		frs:        crs,
+		ctx:           ctx,
+		cm:            cm,
+		cmr:           retryableReader,
+		schema:        schema,
+		fileSize:      atomic.NewInt64(0),
+		path:          path,
+		r:             r,
+		bufferSize:    bufferSize,
+		count:         count,
+		rowsPerBuffer: bufferSize / sizePerRecord,
+		frs:           crs,
 	}, nil
 }
 
 func (r *reader) Read() (*storage.InsertData, error) {
-	insertData, err := storage.NewInsertDataWithFunctionOutputField(r.schema)
+	insertData, err := storage.NewInsertDataWithCap(r.schema, r.rowsPerBuffer, true)
 	if err != nil {
 		return nil, err
 	}

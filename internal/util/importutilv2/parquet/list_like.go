@@ -196,59 +196,168 @@ func expectedVectorListLength(dim int, dataType schemapb.DataType) (int32, error
 	}
 }
 
-func readIntegerOrFloatListLikeData[T constraints.Integer | constraints.Float](field *schemapb.FieldSchema, listReader *listLikeArray, outputArray func(arr []T, valid bool)) error {
-	valueReader := listReader.ListValues()
+func integerOrFloatElementGetter[T constraints.Integer | constraints.Float](field *schemapb.FieldSchema, valueReader arrow.Array) (func(int) (T, error), error) {
 	switch valueReader.DataType().ID() {
 	case arrow.INT8:
 		int8Reader := valueReader.(*array.Int8)
-		return getListLikeArrayData(listReader, func(i int) (T, error) {
+		return func(i int) (T, error) {
 			if int8Reader.IsNull(i) {
 				return 0, WrapNullElementErr(field)
 			}
 			return T(int8Reader.Value(i)), nil
-		}, outputArray)
+		}, nil
 	case arrow.INT16:
 		int16Reader := valueReader.(*array.Int16)
-		return getListLikeArrayData(listReader, func(i int) (T, error) {
+		return func(i int) (T, error) {
 			if int16Reader.IsNull(i) {
 				return 0, WrapNullElementErr(field)
 			}
 			return T(int16Reader.Value(i)), nil
-		}, outputArray)
+		}, nil
 	case arrow.INT32:
 		int32Reader := valueReader.(*array.Int32)
-		return getListLikeArrayData(listReader, func(i int) (T, error) {
+		return func(i int) (T, error) {
 			if int32Reader.IsNull(i) {
 				return 0, WrapNullElementErr(field)
 			}
 			return T(int32Reader.Value(i)), nil
-		}, outputArray)
+		}, nil
 	case arrow.INT64:
 		int64Reader := valueReader.(*array.Int64)
-		return getListLikeArrayData(listReader, func(i int) (T, error) {
+		return func(i int) (T, error) {
 			if int64Reader.IsNull(i) {
 				return 0, WrapNullElementErr(field)
 			}
 			return T(int64Reader.Value(i)), nil
-		}, outputArray)
+		}, nil
 	case arrow.FLOAT32:
 		float32Reader := valueReader.(*array.Float32)
-		return getListLikeArrayData(listReader, func(i int) (T, error) {
+		return func(i int) (T, error) {
 			if float32Reader.IsNull(i) {
 				return 0, WrapNullElementErr(field)
 			}
 			return T(float32Reader.Value(i)), nil
-		}, outputArray)
+		}, nil
 	case arrow.FLOAT64:
 		float64Reader := valueReader.(*array.Float64)
-		return getListLikeArrayData(listReader, func(i int) (T, error) {
+		return func(i int) (T, error) {
 			if float64Reader.IsNull(i) {
 				return 0, WrapNullElementErr(field)
 			}
 			return T(float64Reader.Value(i)), nil
-		}, outputArray)
+		}, nil
 	default:
-		return WrapTypeErr(field, valueReader.DataType().Name())
+		return nil, WrapTypeErr(field, valueReader.DataType().Name())
+	}
+}
+
+func readIntegerOrFloatListLikeData[T constraints.Integer | constraints.Float](field *schemapb.FieldSchema, listReader *listLikeArray, outputArray func(arr []T, valid bool)) error {
+	getElement, err := integerOrFloatElementGetter[T](field, listReader.ListValues())
+	if err != nil {
+		return err
+	}
+	return getListLikeArrayData(listReader, getElement, outputArray)
+}
+
+// appendFlatIntegerOrFloatListLike appends the elements of every list row to
+// flat in row order, without allocating a slice per row.
+func appendFlatIntegerOrFloatListLike[T constraints.Integer | constraints.Float](field *schemapb.FieldSchema, listReader *listLikeArray, flat []T) ([]T, error) {
+	valueReader := listReader.ListValues()
+	if valueReader.NullN() == 0 {
+		if grown, ok := bulkAppendFlatValues(flat, listReader, valueReader); ok {
+			return grown, nil
+		}
+	}
+	getElement, err := integerOrFloatElementGetter[T](field, valueReader)
+	if err != nil {
+		return flat, err
+	}
+	for i := 0; i < listReader.Len(); i++ {
+		start, end := listReader.ValueOffsets(i)
+		for j := start; j < end; j++ {
+			elementVal, err := getElement(int(j))
+			if err != nil {
+				return flat, err
+			}
+			flat = append(flat, elementVal)
+		}
+	}
+	return flat, nil
+}
+
+// bulkAppendFlatValues copies list values into flat in bulk when the arrow
+// element type matches T exactly, and reports ok=false otherwise.
+func bulkAppendFlatValues[T constraints.Integer | constraints.Float](flat []T, listReader *listLikeArray, valueReader arrow.Array) ([]T, bool) {
+	rows := listReader.Len()
+	switch valueReader := valueReader.(type) {
+	case *array.Int8:
+		dst, ok := any(&flat).(*[]int8)
+		if !ok {
+			return flat, false
+		}
+		values := valueReader.Int8Values()
+		for i := 0; i < rows; i++ {
+			start, end := listReader.ValueOffsets(i)
+			*dst = append(*dst, values[start:end]...)
+		}
+		return any(*dst).([]T), true
+	case *array.Int16:
+		dst, ok := any(&flat).(*[]int16)
+		if !ok {
+			return flat, false
+		}
+		values := valueReader.Int16Values()
+		for i := 0; i < rows; i++ {
+			start, end := listReader.ValueOffsets(i)
+			*dst = append(*dst, values[start:end]...)
+		}
+		return any(*dst).([]T), true
+	case *array.Int32:
+		dst, ok := any(&flat).(*[]int32)
+		if !ok {
+			return flat, false
+		}
+		values := valueReader.Int32Values()
+		for i := 0; i < rows; i++ {
+			start, end := listReader.ValueOffsets(i)
+			*dst = append(*dst, values[start:end]...)
+		}
+		return any(*dst).([]T), true
+	case *array.Int64:
+		dst, ok := any(&flat).(*[]int64)
+		if !ok {
+			return flat, false
+		}
+		values := valueReader.Int64Values()
+		for i := 0; i < rows; i++ {
+			start, end := listReader.ValueOffsets(i)
+			*dst = append(*dst, values[start:end]...)
+		}
+		return any(*dst).([]T), true
+	case *array.Float32:
+		dst, ok := any(&flat).(*[]float32)
+		if !ok {
+			return flat, false
+		}
+		values := valueReader.Float32Values()
+		for i := 0; i < rows; i++ {
+			start, end := listReader.ValueOffsets(i)
+			*dst = append(*dst, values[start:end]...)
+		}
+		return any(*dst).([]T), true
+	case *array.Float64:
+		dst, ok := any(&flat).(*[]float64)
+		if !ok {
+			return flat, false
+		}
+		values := valueReader.Float64Values()
+		for i := 0; i < rows; i++ {
+			start, end := listReader.ValueOffsets(i)
+			*dst = append(*dst, values[start:end]...)
+		}
+		return any(*dst).([]T), true
+	default:
+		return flat, false
 	}
 }
 

@@ -23,7 +23,7 @@ func TestNewHashedData(t *testing.T) {
 		},
 	}
 
-	got, err := newHashedData(schema, 2, 2)
+	got, err := newHashedData(schema, 2, 2, 0)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(got))
 	for i := 0; i < 2; i++ {

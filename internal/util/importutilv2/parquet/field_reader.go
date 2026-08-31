@@ -211,15 +211,14 @@ func (c *FieldReader) Next(count int64) (any, any, error) {
 		if c.field.GetNullable() {
 			return ReadNullableFloatVectorData(c, count)
 		}
-		arrayData, err := ReadIntegerOrFloatArrayData[float32](c, count)
+		data, err := ReadIntegerOrFloatFlatData[float32](c, count)
 		if err != nil {
 			return nil, nil, err
 		}
-		if arrayData == nil {
+		if data == nil {
 			return nil, nil, nil
 		}
-		vectors := lo.Flatten(arrayData.([][]float32))
-		return vectors, nil, typeutil.VerifyFloats32(vectors)
+		return data, nil, typeutil.VerifyFloats32(data)
 	case schemapb.DataType_SparseFloatVector:
 		if c.field.GetNullable() {
 			return ReadNullableSparseFloatVectorData(c, count)
@@ -230,15 +229,14 @@ func (c *FieldReader) Next(count int64) (any, any, error) {
 		if c.field.GetNullable() {
 			return ReadNullableInt8VectorData(c, count)
 		}
-		arrayData, err := ReadIntegerOrFloatArrayData[int8](c, count)
+		data, err := ReadIntegerOrFloatFlatData[int8](c, count)
 		if err != nil {
 			return nil, nil, err
 		}
-		if arrayData == nil {
+		if data == nil {
 			return nil, nil, nil
 		}
-		vectors := lo.Flatten(arrayData.([][]int8))
-		return vectors, nil, nil
+		return data, nil, nil
 	case schemapb.DataType_Array:
 		// array has not supported default_value
 		if c.field.GetNullable() {
@@ -1428,6 +1426,39 @@ func ReadIntegerOrFloatArrayData[T constraints.Integer | constraints.Float](pcr 
 		if err = readIntegerOrFloatListLikeData(pcr.field, listReader, func(arr []T, valid bool) {
 			data = append(data, arr)
 		}); err != nil {
+			return nil, err
+		}
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	return data, nil
+}
+
+// ReadIntegerOrFloatFlatData reads list-like vector columns directly into one
+// flat slice, avoiding the per-row slices and the flatten pass.
+func ReadIntegerOrFloatFlatData[T constraints.Integer | constraints.Float](pcr *FieldReader, count int64) ([]T, error) {
+	chunked, err := pcr.columnReader.NextBatch(count)
+	if err != nil {
+		return nil, err
+	}
+	data := make([]T, 0, int(count)*pcr.dim)
+
+	for _, chunk := range chunked.Chunks() {
+		if chunk.NullN() > 0 {
+			return nil, WrapNullRowErr(pcr.field)
+		}
+		listReader, err := newListLikeArray(chunk, pcr.field)
+		if err != nil {
+			return nil, err
+		}
+		dataType := pcr.field.GetDataType()
+		if typeutil.IsVectorType(dataType) {
+			if err = checkListLikeVectorAligned(listReader, pcr.dim, dataType); err != nil {
+				return nil, merr.WrapErrImportFailedMsg("length of vector is not aligned: %s, data type: %s", err.Error(), dataType.String())
+			}
+		}
+		if data, err = appendFlatIntegerOrFloatListLike(pcr.field, listReader, data); err != nil {
 			return nil, err
 		}
 	}
