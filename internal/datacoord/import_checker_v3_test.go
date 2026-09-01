@@ -37,6 +37,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 )
@@ -165,16 +166,17 @@ func TestCreateImportV3TaskPublishesPendingAfterSegments(t *testing.T) {
 
 	err = checker.createImportV3Task(
 		job,
-		&datapb.SortSpec{},
-		&schemapb.CollectionSchema{},
-		&schemapb.CollectionSchema{},
 		&datapb.WriterSpec{StorageVersion: 1, SchemaVersion: 3},
 		10, 100,
 		v3ImportTaskSpec{channel: "v0", partitionID: 4, fragments: []*datapb.FragmentRef{{Path: "f0", RowCount: 1}}, rows: 5},
-		false,
 	)
 	require.NoError(t, err)
 	require.Equal(t, datapb.ImportTaskStateV2_Pending, task.GetState())
+	p := task.task.Load()
+	require.Equal(t, "v0", p.GetVchannel())
+	require.Equal(t, int64(4), p.GetPartitionId())
+	require.Len(t, p.GetFragments(), 1)
+	require.Equal(t, "f0", p.GetFragments()[0].GetPath())
 	segment := meta.GetSegment(ctx, 100)
 	require.True(t, segment.GetIsImporting())
 	require.False(t, segment.GetIsInvisible())
@@ -244,13 +246,9 @@ func TestCreateImportV3TaskRejectsMissingDataTs(t *testing.T) {
 	job := &importJob{ImportJob: &datapb.ImportJob{JobID: 1, CollectionID: 2}}
 	err := checker.createImportV3Task(
 		job,
-		&datapb.SortSpec{},
-		&schemapb.CollectionSchema{},
-		&schemapb.CollectionSchema{},
 		&datapb.WriterSpec{},
 		10, 100,
 		v3ImportTaskSpec{channel: "v0", partitionID: 4},
-		false,
 	)
 	require.Error(t, err)
 }
@@ -295,14 +293,87 @@ func TestMissingV3ImportTaskSpecs(t *testing.T) {
 		{sourceID: 1, channelIndex: 0, partitionIndex: 0, seq: 2, path: "f2", rows: 100, bytes: 4},
 		{sourceID: 1, channelIndex: 0, partitionIndex: 0, seq: 3, path: "f3", rows: 100, bytes: 4},
 	}
-	existing := []*datapb.ImportTaskPlan{{
-		Fragments: []*datapb.FragmentRef{{Path: "f1", RowCount: 1}},
-	}}
+	existing := []*datapb.FragmentRef{{Path: "f1", RowCount: 1}}
 	missing, err := missingV3ImportTaskSpecs(fragments, existing, []string{"v0"}, []int64{10}, 10)
 	require.NoError(t, err)
 	require.Len(t, missing, 1)
 	require.Equal(t, []string{"f2", "f3"}, []string{missing[0].fragments[0].GetPath(), missing[0].fragments[1].GetPath()})
 	require.Equal(t, int64(200), missing[0].rows)
+}
+
+func TestLoadExistingImportV3Fragments(t *testing.T) {
+	ctx := context.Background()
+	importMeta := NewMockImportMeta(t)
+	checker := &importCheckerV3{ctx: ctx, importMeta: importMeta}
+	job := &importJob{ImportJob: &datapb.ImportJob{JobID: 1, CollectionID: 2}}
+	task := newImportTaskV3(&datapb.ImportTaskV3{
+		JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_Pending,
+		SegmentId: 100, Vchannel: "v0", PartitionId: 4,
+		Fragments: []*datapb.FragmentRef{{Path: "f0", RowCount: 5}},
+	}, importMeta, nil, nil)
+	importMeta.EXPECT().GetTaskByJob(mock.Anything, mock.Anything, mock.Anything).Return([]ImportTask{task}).Once()
+
+	fragments, err := checker.loadExistingImportV3Fragments(job)
+	require.NoError(t, err)
+	require.Len(t, fragments, 1)
+	require.Equal(t, "f0", fragments[0].GetPath())
+}
+
+func TestLoadExistingImportV3FragmentsRejectsIncompleteTask(t *testing.T) {
+	ctx := context.Background()
+	importMeta := NewMockImportMeta(t)
+	checker := &importCheckerV3{ctx: ctx, importMeta: importMeta}
+	job := &importJob{ImportJob: &datapb.ImportJob{JobID: 1, CollectionID: 2}}
+	task := newImportTaskV3(&datapb.ImportTaskV3{
+		JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_Pending, SegmentId: 100,
+	}, importMeta, nil, nil)
+	importMeta.EXPECT().GetTaskByJob(mock.Anything, mock.Anything, mock.Anything).Return([]ImportTask{task}).Once()
+
+	_, err := checker.loadExistingImportV3Fragments(job)
+	require.Error(t, err)
+}
+
+func TestValidateImportV3StorageVersion(t *testing.T) {
+	textSchema := &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+		{FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+		{FieldID: 101, DataType: schemapb.DataType_Text},
+	}}
+	plainSchema := &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+		{FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+	}}
+	paramtable.Get().Save("common.storage.useLoonFFI", "false")
+	defer paramtable.Get().Reset("common.storage.useLoonFFI")
+	require.Error(t, validateImportV3StorageVersion(textSchema))
+	require.NoError(t, validateImportV3StorageVersion(plainSchema))
+	paramtable.Get().Save("common.storage.useLoonFFI", "true")
+	require.NoError(t, validateImportV3StorageVersion(textSchema))
+}
+
+func TestBuildImportV3TaskPlanDerivesExecutionInput(t *testing.T) {
+	schema := &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+		{FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+	}}
+	job := &importJob{ImportJob: &datapb.ImportJob{JobID: 1, CollectionID: 2, Schema: schema, DataTs: 7}}
+	task := &datapb.ImportTaskV3{
+		JobId: 1, TaskId: 10, CollectionId: 2, Vchannel: "v0", PartitionId: 4, Rows: 5,
+		Fragments: []*datapb.FragmentRef{{Path: "f0", RowCount: 5}},
+	}
+	plan, err := buildImportV3TaskPlan(job, task)
+	require.NoError(t, err)
+	require.Equal(t, "v0", plan.GetVchannel())
+	require.Equal(t, int64(4), plan.GetPartitionId())
+	require.Equal(t, int64(5), plan.GetRows())
+	require.Equal(t, uint64(7), plan.GetDataTs())
+	require.Equal(t, int64(2), plan.GetCollectionId())
+	require.Equal(t, int64(5), plan.GetWriter().GetPkCapacity())
+	require.NotEmpty(t, plan.GetSort().GetFields())
+	require.NotNil(t, plan.GetSchema())
+	require.NotNil(t, plan.GetTempSchema())
+	require.False(t, plan.GetBackup())
+
+	task.Rows = 0
+	_, err = buildImportV3TaskPlan(job, task)
+	require.Error(t, err)
 }
 
 func TestIsTerminalImportV3Err(t *testing.T) {

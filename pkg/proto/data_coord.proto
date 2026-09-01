@@ -10,6 +10,7 @@ import "milvus.proto";
 import "schema.proto";
 import "msg.proto";
 import "index_coord.proto";
+import "import_v3.proto";
 
 // TODO: import google/protobuf/empty.proto
 message Empty {}
@@ -1519,6 +1520,10 @@ message ReshardTask {
   int64 slot = 8;
 }
 
+// ImportTaskV3 persists only the per-segment ownership that Planning recovery
+// cannot re-derive: the fragment set this task covers plus its bucket. Every
+// other execution input is re-derived from the ImportJob and current config
+// when the task is dispatched, and travels inside ImportTaskV3Request.
 message ImportTaskV3 {
   int64 job_id = 1;
   int64 task_id = 2;
@@ -1531,6 +1536,9 @@ message ImportTaskV3 {
   IDRange log_range = 9;
   int64 slot = 10;
   int64 rows = 11;
+  repeated FragmentRef fragments = 12;
+  string vchannel = 13;
+  int64 partition_id = 14;
 }
 
 message ReshardTaskRequest {
@@ -1551,6 +1559,7 @@ message ImportTaskV3Request {
   int64 slot = 6;
   index.StorageConfig storage_config = 7;
   repeated common.KeyValuePair plugin_context = 8;
+  ImportTaskPlan plan = 9;
 }
 
 message SegmentResult {

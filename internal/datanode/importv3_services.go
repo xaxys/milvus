@@ -655,19 +655,10 @@ func (node *DataNode) executeImportTaskV3(ctx context.Context, req *datapb.Impor
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if req == nil || req.GetRunId() != runID || req.GetStorageConfig() == nil || req.GetSlot() <= 0 {
+	if req == nil || req.GetRunId() != runID || req.GetStorageConfig() == nil || req.GetSlot() <= 0 || req.GetPlan() == nil {
 		return nil, merr.WrapErrImportSysFailedMsg("invalid or incomplete ImportTaskV3 request")
 	}
-	plan, err := node.readImportTaskPlan(ctx, req.GetStorageConfig(), req.GetJobId(), req.GetTaskId())
-	if err != nil {
-		return nil, err
-	}
-	if plan.GetFanIn() < 2 || plan.GetFanIn() > 1024 {
-		return nil, merr.WrapErrImportSysFailedMsg("ImportTaskV3 plan merge fan-in is invalid: %d", plan.GetFanIn())
-	}
-	if plan.GetCollectionId() == 0 || plan.GetSchema() == nil || plan.GetTempSchema() == nil || plan.GetWriter() == nil || req.GetSegmentId() <= 0 {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 plan/output segment is incomplete")
-	}
+	plan := req.GetPlan()
 	pluginContext, err := hookutil.GetCPluginContext(req.GetPluginContext(), plan.GetCollectionId())
 	if err != nil {
 		return nil, err
@@ -690,26 +681,14 @@ func executeImportPlan(ctx context.Context, cm storage.ChunkManager, req *datapb
 	defer span.End()
 	temporarySchema := plan.GetTempSchema()
 	targetSchema := plan.GetSchema()
-	if err := validateImportV3Schemas(temporarySchema, targetSchema); err != nil {
-		return nil, err
-	}
 	sortFields, err := importv3.SortFields(plan.GetSort(), temporarySchema)
 	if err != nil {
 		return nil, err
 	}
-	if plan.GetCollectionId() == 0 || plan.GetVchannel() == "" || plan.GetPartitionId() == 0 || len(plan.GetFragments()) == 0 {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 plan segment is incomplete")
-	}
-	if req.GetSegmentId() <= 0 {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 physical segment ID is invalid: %d", req.GetSegmentId())
-	}
-	if req.GetLogRange() == nil || req.GetLogRange().GetEnd() <= req.GetLogRange().GetBegin() {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 log ID range is empty")
-	}
 	logAllocator := allocator.NewLocalAllocator(req.GetLogRange().GetBegin(), req.GetLogRange().GetEnd())
 	writerSpec := plan.GetWriter()
 	segmentID := req.GetSegmentId()
-	writerOptions, err := buildImportV3WriterOptions(req.GetStorageConfig(), plan.GetCollectionId(), plan.GetPartitionId(), plan.GetRows(), targetSchema, writerSpec, pluginContext)
+	writerOptions, err := buildImportV3WriterOptions(req.GetStorageConfig(), plan.GetCollectionId(), plan.GetPartitionId(), targetSchema, writerSpec, pluginContext)
 	if err != nil {
 		return nil, err
 	}
@@ -770,59 +749,7 @@ func executeImportPlan(ctx context.Context, cm storage.ChunkManager, req *datapb
 	return []*datapb.SegmentResult{segmentResult}, nil
 }
 
-func validateImportV3Schemas(temporary, target *schemapb.CollectionSchema) error {
-	if temporary == nil || target == nil {
-		return merr.WrapErrDataIntegrityMsg("ImportTaskV3 plan schema is nil")
-	}
-	temporaryFields := make(map[int64]*schemapb.FieldSchema)
-	for _, field := range typeutil.GetAllFieldSchemas(temporary) {
-		temporaryFields[field.GetFieldID()] = field
-	}
-	targetFields := make(map[int64]*schemapb.FieldSchema)
-	for _, field := range typeutil.GetAllFieldSchemas(target) {
-		targetFields[field.GetFieldID()] = field
-	}
-	for _, systemField := range []int64{common.RowIDField, common.TimeStampField} {
-		field := targetFields[systemField]
-		if field == nil || field.GetDataType() != schemapb.DataType_Int64 {
-			return merr.WrapErrDataIntegrityMsg("ImportTaskV3 target schema is missing int64 system field %d", systemField)
-		}
-	}
-	if field := temporaryFields[common.RowIDField]; field == nil || field.GetDataType() != schemapb.DataType_Int64 {
-		return merr.WrapErrDataIntegrityMsg("ImportTaskV3 temporary schema is missing RowID")
-	}
-	for fieldID, sourceField := range temporaryFields {
-		targetField := targetFields[fieldID]
-		if targetField == nil {
-			return merr.WrapErrDataIntegrityMsg("ImportTaskV3 temporary field %d is missing in target schema", fieldID)
-		}
-		if targetField.GetDataType() != sourceField.GetDataType() &&
-			!(targetField.GetDataType() == schemapb.DataType_Text && sourceField.GetDataType() == schemapb.DataType_VarChar) {
-			return merr.WrapErrDataIntegrityMsg("ImportTaskV3 temporary field %d is incompatible with target schema", fieldID)
-		}
-	}
-	return nil
-}
-
-func buildImportV3WriterOptions(storageConfig *indexpb.StorageConfig, collectionID, partitionID, plannedRows int64, targetSchema *schemapb.CollectionSchema, spec *datapb.WriterSpec, pluginContext *indexcgopb.StoragePluginContext) ([]storage.RwOption, error) {
-	if spec == nil {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 WriterSpec is nil")
-	}
-	if spec.GetStorageVersion() != storage.StorageV2 && spec.GetStorageVersion() != storage.StorageV3 {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 WriterSpec storage version is unsupported: %d", spec.GetStorageVersion())
-	}
-	if spec.GetSchemaVersion() != int64(targetSchema.GetVersion()) {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 WriterSpec schema version mismatch: spec=%d plan=%d", spec.GetSchemaVersion(), targetSchema.GetVersion())
-	}
-	if spec.GetPkCapacity() <= 0 {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 WriterSpec PK stats capacity must be positive")
-	}
-	if plannedRows <= 0 {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 planned rows must be positive")
-	}
-	if spec.GetPkCapacity() < plannedRows {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 WriterSpec PK stats capacity is smaller than planned rows: capacity=%d rows=%d", spec.GetPkCapacity(), plannedRows)
-	}
+func buildImportV3WriterOptions(storageConfig *indexpb.StorageConfig, collectionID, partitionID int64, targetSchema *schemapb.CollectionSchema, spec *datapb.WriterSpec, pluginContext *indexcgopb.StoragePluginContext) ([]storage.RwOption, error) {
 	bfType := bloomfilter.BFTypeFromString(spec.GetBloomType())
 	if (bfType != bloomfilter.BasicBF && bfType != bloomfilter.BlockedBF) || spec.GetBloomFpp() <= 0 || spec.GetBloomFpp() >= 1 {
 		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 WriterSpec Bloom filter config is invalid")
@@ -856,9 +783,6 @@ func buildImportV3WriterOptions(storageConfig *indexpb.StorageConfig, collection
 		}),
 	}
 	if len(spec.GetText()) > 0 {
-		if spec.GetStorageVersion() != storage.StorageV3 {
-			return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 TEXT columns require StorageV3")
-		}
 		partitionBase := path.Join(storageConfig.GetRootPath(), common.SegmentInsertLogPath, strconv.FormatInt(collectionID, 10), strconv.FormatInt(partitionID, 10))
 		textConfigs := make([]packed.TextColumnConfig, 0, len(spec.GetText()))
 		for _, text := range spec.GetText() {
@@ -871,9 +795,6 @@ func buildImportV3WriterOptions(storageConfig *indexpb.StorageConfig, collection
 			})
 		}
 		options = append(options, storage.WithTextColumnConfigs(textConfigs))
-	}
-	if spec.GetStorageVersion() == storage.StorageV3 && len(groups) == 0 {
-		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 StorageV3 WriterSpec has no column groups")
 	}
 	return options, nil
 }
@@ -1021,23 +942,6 @@ func (node *DataNode) readReshardTaskPlan(ctx context.Context, cfg *indexpb.Stor
 	plan := &datapb.ReshardTaskPlan{}
 	if err := proto.Unmarshal(payload, plan); err != nil {
 		return nil, merr.WrapErrDataIntegrityMsg("decode ReshardTask plan %s: %s", planPath, err.Error())
-	}
-	return plan, nil
-}
-
-func (node *DataNode) readImportTaskPlan(ctx context.Context, cfg *indexpb.StorageConfig, jobID, taskID int64) (*datapb.ImportTaskPlan, error) {
-	cm, err := node.storageFactory.NewChunkManager(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	planPath := path.Join(cm.RootPath(), metautil.BuildImportV3ImportPlanPath(jobID, taskID))
-	payload, err := cm.Read(ctx, planPath)
-	if err != nil {
-		return nil, err
-	}
-	plan := &datapb.ImportTaskPlan{}
-	if err := proto.Unmarshal(payload, plan); err != nil {
-		return nil, merr.WrapErrDataIntegrityMsg("decode ImportTaskV3 plan %s: %s", planPath, err.Error())
 	}
 	return plan, nil
 }

@@ -1076,9 +1076,13 @@ func (c *importCheckerV3) cleanupPreparingV3ImportTasks(job ImportJob) error {
 	return nil
 }
 
-func (c *importCheckerV3) loadExistingImportV3Tasks(job ImportJob) ([]*datapb.ImportTaskPlan, error) {
+// loadExistingImportV3Fragments returns the fragment refs already owned by the
+// job's persisted ImportTaskV3 records. Fragment ownership is the only
+// planning fact kept on the task record; it is what Planning recovery needs
+// to fill missing coverage without re-assigning fragments.
+func (c *importCheckerV3) loadExistingImportV3Fragments(job ImportJob) ([]*datapb.FragmentRef, error) {
 	tasks := c.importMeta.GetTaskByJob(c.ctx, job.GetJobID(), WithType(ImportTaskV3Type))
-	existing := make([]*datapb.ImportTaskPlan, 0, len(tasks))
+	existing := make([]*datapb.FragmentRef, 0)
 	for _, generic := range tasks {
 		task, ok := generic.(*importTaskV3)
 		if !ok {
@@ -1094,17 +1098,13 @@ func (c *importCheckerV3) loadExistingImportV3Tasks(job ImportJob) ([]*datapb.Im
 		if p.GetSegmentId() == 0 {
 			return nil, merr.WrapErrDataIntegrityMsg("import v3 task %d has no segment", p.GetTaskId())
 		}
-		plan := &datapb.ImportTaskPlan{}
-		if err := loadImportV3Proto(c.ctx, c.meta.chunkManager, metautil.BuildImportV3ImportPlanPath(job.GetJobID(), p.GetTaskId()), plan); err != nil {
-			return nil, err
+		if p.GetCollectionId() != job.GetCollectionID() {
+			return nil, merr.WrapErrDataIntegrityMsg("import v3 task identity mismatch")
 		}
-		if plan.GetCollectionId() != job.GetCollectionID() {
-			return nil, merr.WrapErrDataIntegrityMsg("import v3 task plan identity mismatch")
+		if p.GetVchannel() == "" || p.GetPartitionId() == 0 || len(p.GetFragments()) == 0 {
+			return nil, merr.WrapErrDataIntegrityMsg("import v3 task segment is incomplete")
 		}
-		if plan.GetVchannel() == "" || plan.GetPartitionId() == 0 || len(plan.GetFragments()) == 0 {
-			return nil, merr.WrapErrDataIntegrityMsg("import v3 task plan segment is incomplete")
-		}
-		existing = append(existing, plan)
+		existing = append(existing, p.GetFragments()...)
 	}
 	return existing, nil
 }
@@ -1113,15 +1113,19 @@ func (c *importCheckerV3) planV3Job(job ImportJob) error {
 	if _, err := validateImportV3Schema(c.meta, job.GetCollectionID(), job.GetSchema()); err != nil {
 		return err
 	}
+	if err := validateImportV3StorageVersion(job.GetSchema()); err != nil {
+		return err
+	}
 	if err := c.cleanupPreparingV3ImportTasks(job); err != nil {
 		return err
 	}
-	existingTasks, err := c.loadExistingImportV3Tasks(job)
+	existingFragments, err := c.loadExistingImportV3Fragments(job)
 	if err != nil {
 		return err
 	}
-	sortSpec, err := getDefaultSortSpec(job.GetSchema())
-	if err != nil {
+	// Planning only validates the sort spec; dispatch re-derives it from the
+	// frozen job schema.
+	if _, err := getDefaultSortSpec(job.GetSchema()); err != nil {
 		return err
 	}
 	reshards := c.importMeta.GetTaskByJob(c.ctx, job.GetJobID(), WithType(ReshardTaskType))
@@ -1166,8 +1170,6 @@ func (c *importCheckerV3) planV3Job(job ImportJob) error {
 		return a.seq < b.seq
 	})
 	targetSchema := typeutil.AppendSystemFields(job.GetSchema())
-	backup := importutilv2.IsBackup(job.GetOptions())
-	temporarySchema := buildImportV3TempSchema(job.GetSchema(), backup)
 	target := getExpectedSegmentSize(c.meta, job.GetCollectionID(), job.GetSchema())
 	var totalFragmentBytes int64
 	for _, f := range fragments {
@@ -1178,48 +1180,14 @@ func (c *importCheckerV3) planV3Job(job ImportJob) error {
 	}
 	segmentPlans := buildV3SegmentPlans(fragments, job.GetVchannels(), job.GetPartitionIDs(), target)
 	if len(segmentPlans) == 0 {
-		if len(existingTasks) > 0 {
+		if len(existingFragments) > 0 {
 			return merr.WrapErrDataIntegrityMsg("import v3 planning has tasks but no segment plan")
 		}
 		return c.importMeta.UpdateJob(c.ctx, job.GetJobID(), UpdateJobState(internalpb.ImportJobState_IndexBuilding))
 	}
-	ttl, ttlErr := common.GetCollectionTTL(job.GetSchema().GetProperties())
-	if ttlErr != nil {
-		return ttlErr
-	}
-	writerFormat := Params.DataNodeCfg.StorageFormat.GetValue()
-	writerSpec := &datapb.WriterSpec{
-		StorageVersion: importStorageVersion(false),
-		SchemaVersion:  int64(targetSchema.GetVersion()),
-		Format:         writerFormat,
-		V2:             &datapb.V2PackedIOConfig{BufferSize: packed.DefaultWriteBufferSize, MultipartSize: packed.DefaultMultiPartUploadSize},
-		TtlNanos:       ttl.Nanoseconds(),
-		// PkCapacity is set per task in createImportV3Task: after crash recovery
-		// the missing-task packing may produce more rows than any full-set
-		// segment plan, so a round-wide maximum can under-size the bloom filter
-		// for recovered tasks.
-		BloomType: Params.CommonCfg.BloomFilterType.GetValue(),
-		BloomFpp:  Params.CommonCfg.MaxBloomFalsePositive.GetAsFloat(),
-	}
-	for _, function := range targetSchema.GetFunctions() {
-		if function.GetType() == schemapb.FunctionType_BM25 {
-			writerSpec.Bm25Fields = append(writerSpec.Bm25Fields, function.GetOutputFieldIds()...)
-		}
-	}
-	sort.Slice(writerSpec.Bm25Fields, func(i, j int) bool { return writerSpec.Bm25Fields[i] < writerSpec.Bm25Fields[j] })
-	for _, field := range typeutil.GetAllFieldSchemas(targetSchema) {
-		if field.GetDataType() == schemapb.DataType_Text {
-			writerSpec.Text = append(writerSpec.Text, &datapb.TextColumnWriteSpec{
-				FieldId: field.GetFieldID(), InlineLimit: Params.DataNodeCfg.TextInlineThreshold.GetAsInt64(),
-				LobLimit: Params.DataNodeCfg.TextMaxLobFileBytes.GetAsInt64(), FlushLimit: Params.DataNodeCfg.TextFlushThresholdBytes.GetAsInt64(),
-			})
-		}
-	}
-	columnGroups := storagecommon.SplitColumns(typeutil.GetAllFieldSchemas(targetSchema), map[int64]storagecommon.ColumnStats{}, storagecommon.DefaultPolicies()...)
-	columnGroups = storagecommon.FillColumnGroupFormats(columnGroups, writerFormat)
-	writerSpec.Groups = make([]*datapb.ColumnGroupSpec, 0, len(columnGroups))
-	for _, group := range columnGroups {
-		writerSpec.Groups = append(writerSpec.Groups, &datapb.ColumnGroupSpec{Id: group.GroupID, Fields: append([]int64(nil), group.Fields...), Format: group.Format})
+	writerSpec, err := buildImportV3WriterSpec(targetSchema)
+	if err != nil {
+		return err
 	}
 	taskSpecs := segmentPlans
 	requestedDiskSize, err := CheckDiskQuotaV3(c.ctx, job, c.meta, c.importMeta, totalFragmentBytes)
@@ -1228,10 +1196,10 @@ func (c *importCheckerV3) planV3Job(job ImportJob) error {
 	}
 
 	missing := make([]v3ImportTaskSpec, 0, len(taskSpecs))
-	if len(existingTasks) == 0 {
+	if len(existingFragments) == 0 {
 		missing = taskSpecs
 	} else {
-		missing, err = missingV3ImportTaskSpecs(fragments, existingTasks, job.GetVchannels(), job.GetPartitionIDs(), target)
+		missing, err = missingV3ImportTaskSpecs(fragments, existingFragments, job.GetVchannels(), job.GetPartitionIDs(), target)
 		if err != nil {
 			return err
 		}
@@ -1246,7 +1214,7 @@ func (c *importCheckerV3) planV3Job(job ImportJob) error {
 			return err
 		}
 		for i, spec := range missing {
-			if err := c.createImportV3Task(job, sortSpec, targetSchema, temporarySchema, writerSpec, taskStart+int64(i), segmentStart+int64(i), spec, backup); err != nil {
+			if err := c.createImportV3Task(job, writerSpec, taskStart+int64(i), segmentStart+int64(i), spec); err != nil {
 				return err
 			}
 		}
@@ -1299,7 +1267,7 @@ func buildV3SegmentPlans(fragments []v3PlanningFragment, vchannels []string, par
 // ready task.
 func missingV3ImportTaskSpecs(
 	fragments []v3PlanningFragment,
-	existing []*datapb.ImportTaskPlan,
+	existing []*datapb.FragmentRef,
 	vchannels []string,
 	partitionIDs []int64,
 	target int64,
@@ -1309,17 +1277,15 @@ func missingV3ImportTaskSpecs(
 		fullKeys[v3FragmentRefKey(f.path, f.rows)] = struct{}{}
 	}
 	covered := make(map[string]struct{}, len(fragments))
-	for _, plan := range existing {
-		for _, ref := range plan.GetFragments() {
-			key := v3FragmentRefKey(ref.GetPath(), ref.GetRowCount())
-			if _, ok := fullKeys[key]; !ok {
-				return nil, merr.WrapErrDataIntegrityMsg("import v3 task plan references fragment outside current planning input: %s", ref.GetPath())
-			}
-			if _, ok := covered[key]; ok {
-				return nil, merr.WrapErrDataIntegrityMsg("import v3 task plans contain duplicate fragment: %s", ref.GetPath())
-			}
-			covered[key] = struct{}{}
+	for _, ref := range existing {
+		key := v3FragmentRefKey(ref.GetPath(), ref.GetRowCount())
+		if _, ok := fullKeys[key]; !ok {
+			return nil, merr.WrapErrDataIntegrityMsg("import v3 task references fragment outside current planning input: %s", ref.GetPath())
 		}
+		if _, ok := covered[key]; ok {
+			return nil, merr.WrapErrDataIntegrityMsg("import v3 tasks contain duplicate fragment: %s", ref.GetPath())
+		}
+		covered[key] = struct{}{}
 	}
 	missingFragments := make([]v3PlanningFragment, 0, len(fragments)-len(covered))
 	for _, f := range fragments {
@@ -1335,18 +1301,15 @@ func missingV3ImportTaskSpecs(
 
 func (c *importCheckerV3) createImportV3Task(
 	job ImportJob,
-	sortSpec *datapb.SortSpec,
-	targetSchema, temporarySchema *schemapb.CollectionSchema,
 	writerSpec *datapb.WriterSpec,
 	taskID, segmentID int64,
 	spec v3ImportTaskSpec,
-	backup bool,
 ) error {
 	if job.GetDataTs() == 0 {
-		// DataTs is part of the frozen ImportTaskPlan and the formal writer's row
-		// timestamps. Allocating a timestamp here and discarding it only advances
-		// the allocator; the plan would still carry zero and corrupt TTL/commit
-		// fencing, so fail the planning step instead.
+		// DataTs drives the formal writer's row timestamps. Allocating log IDs
+		// here and discarding them only advances the allocator; dispatch would
+		// still carry zero and corrupt TTL/commit fencing, so fail the planning
+		// step instead.
 		return merr.WrapErrImportSysFailedMsg("import v3 job %d has no data timestamp", job.GetJobID())
 	}
 	perSegment := int64(1 + len(writerSpec.GetBm25Fields()))
@@ -1361,33 +1324,20 @@ func (c *importCheckerV3) createImportV3Task(
 		return err
 	}
 	fanIn := effectiveImportV3FanIn(Params.DataCoordCfg.FragmentMergeFanIn.GetAsInt(), len(spec.fragments))
-	writer := proto.Clone(writerSpec).(*datapb.WriterSpec)
-	writer.PkCapacity = max(spec.rows, 1)
-	plan := &datapb.ImportTaskPlan{
-		Sort:         proto.Clone(sortSpec).(*datapb.SortSpec),
-		Vchannel:     spec.channel,
-		PartitionId:  spec.partitionID,
-		Fragments:    append([]*datapb.FragmentRef(nil), spec.fragments...),
-		Rows:         spec.rows,
-		FanIn:        int32(fanIn),
-		Writer:       writer,
-		Schema:       proto.Clone(targetSchema).(*schemapb.CollectionSchema),
-		TempSchema:   proto.Clone(temporarySchema).(*schemapb.CollectionSchema),
-		DataTs:       job.GetDataTs(),
-		CollectionId: job.GetCollectionID(),
-		ClusterId:    Params.CommonCfg.ClusterPrefix.GetValue(),
-		Backup:       backup,
-	}
-	if err := writeImportV3Proto(c.ctx, c.meta.chunkManager, metautil.BuildImportV3ImportPlanPath(job.GetJobID(), taskID), plan); err != nil {
-		return err
-	}
 	slot := calculateV3ImportTaskSlot(
 		Params.DataNodeCfg.ImportBaseBufferSize.GetAsInt64(),
 		packed.DefaultWriteBufferSize,
 		Params.DataCoordCfg.ImportMemoryLimitPerSlot.GetAsInt64(),
 		fanIn,
 	)
-	task := newImportTaskV3(&datapb.ImportTaskV3{JobId: job.GetJobID(), TaskId: taskID, CollectionId: job.GetCollectionID(), State: datapb.ImportTaskStateV2_None, RunId: 1, NodeId: NullNodeID, SegmentId: segmentID, LogRange: &datapb.IDRange{Begin: logBegin, End: logEnd}, Slot: slot, Rows: spec.rows}, c.importMeta, c.meta, c.alloc)
+	task := newImportTaskV3(&datapb.ImportTaskV3{
+		JobId: job.GetJobID(), TaskId: taskID, CollectionId: job.GetCollectionID(),
+		State: datapb.ImportTaskStateV2_None, RunId: 1, NodeId: NullNodeID,
+		SegmentId: segmentID, LogRange: &datapb.IDRange{Begin: logBegin, End: logEnd},
+		Slot: slot, Rows: spec.rows,
+		Fragments: append([]*datapb.FragmentRef(nil), spec.fragments...),
+		Vchannel: spec.channel, PartitionId: spec.partitionID,
+	}, c.importMeta, c.meta, c.alloc)
 	if err := c.importMeta.AddTask(c.ctx, task); err != nil {
 		return err
 	}
@@ -1395,4 +1345,100 @@ func (c *importCheckerV3) createImportV3Task(
 		return err
 	}
 	return c.importMeta.UpdateTask(c.ctx, taskID, UpdateState(datapb.ImportTaskStateV2_Pending))
+}
+
+// validateImportV3StorageVersion fails planning for a TEXT collection when the
+// current storage version cannot write TEXT LOB columns. DataCoord derives the
+// storage version at planning and again at dispatch; a flipped config between
+// the two simply fails the task at dispatch.
+func validateImportV3StorageVersion(schema *schemapb.CollectionSchema) error {
+	if importStorageVersion(false) == storage.StorageV3 {
+		return nil
+	}
+	for _, field := range typeutil.GetAllFieldSchemas(schema) {
+		if field.GetDataType() == schemapb.DataType_Text {
+			return merr.WrapErrImportSysFailedMsg("import v3 TEXT columns require common.storage.useLoonFFI")
+		}
+	}
+	return nil
+}
+
+// buildImportV3WriterSpec derives the writer parameters from the frozen target
+// schema and current configuration. Planning uses it for the log-ID budget and
+// segment record; dispatch embeds a fresh copy in the CreateTask request.
+func buildImportV3WriterSpec(targetSchema *schemapb.CollectionSchema) (*datapb.WriterSpec, error) {
+	ttl, err := common.GetCollectionTTL(targetSchema.GetProperties())
+	if err != nil {
+		return nil, err
+	}
+	writerFormat := Params.DataNodeCfg.StorageFormat.GetValue()
+	writerSpec := &datapb.WriterSpec{
+		StorageVersion: importStorageVersion(false),
+		SchemaVersion:  int64(targetSchema.GetVersion()),
+		Format:         writerFormat,
+		V2:             &datapb.V2PackedIOConfig{BufferSize: packed.DefaultWriteBufferSize, MultipartSize: packed.DefaultMultiPartUploadSize},
+		TtlNanos:       ttl.Nanoseconds(),
+		BloomType:      Params.CommonCfg.BloomFilterType.GetValue(),
+		BloomFpp:       Params.CommonCfg.MaxBloomFalsePositive.GetAsFloat(),
+	}
+	for _, function := range targetSchema.GetFunctions() {
+		if function.GetType() == schemapb.FunctionType_BM25 {
+			writerSpec.Bm25Fields = append(writerSpec.Bm25Fields, function.GetOutputFieldIds()...)
+		}
+	}
+	sort.Slice(writerSpec.Bm25Fields, func(i, j int) bool { return writerSpec.Bm25Fields[i] < writerSpec.Bm25Fields[j] })
+	for _, field := range typeutil.GetAllFieldSchemas(targetSchema) {
+		if field.GetDataType() == schemapb.DataType_Text {
+			writerSpec.Text = append(writerSpec.Text, &datapb.TextColumnWriteSpec{
+				FieldId: field.GetFieldID(), InlineLimit: Params.DataNodeCfg.TextInlineThreshold.GetAsInt64(),
+				LobLimit: Params.DataNodeCfg.TextMaxLobFileBytes.GetAsInt64(), FlushLimit: Params.DataNodeCfg.TextFlushThresholdBytes.GetAsInt64(),
+			})
+		}
+	}
+	columnGroups := storagecommon.SplitColumns(typeutil.GetAllFieldSchemas(targetSchema), map[int64]storagecommon.ColumnStats{}, storagecommon.DefaultPolicies()...)
+	columnGroups = storagecommon.FillColumnGroupFormats(columnGroups, writerFormat)
+	writerSpec.Groups = make([]*datapb.ColumnGroupSpec, 0, len(columnGroups))
+	for _, group := range columnGroups {
+		writerSpec.Groups = append(writerSpec.Groups, &datapb.ColumnGroupSpec{Id: group.GroupID, Fields: append([]int64(nil), group.Fields...), Format: group.Format})
+	}
+	return writerSpec, nil
+}
+
+// buildImportV3TaskPlan re-derives the complete execution input of one
+// ImportTaskV3 at dispatch time from durable records and current
+// configuration. Only fragment ownership lives on the task record; no
+// planning object is written to object storage for import tasks.
+func buildImportV3TaskPlan(job ImportJob, p *datapb.ImportTaskV3) (*datapb.ImportTaskPlan, error) {
+	if p.GetRows() <= 0 {
+		return nil, merr.WrapErrImportSysFailedMsg("import v3 task %d has no planned rows", p.GetTaskId())
+	}
+	sortSpec, err := getDefaultSortSpec(job.GetSchema())
+	if err != nil {
+		return nil, err
+	}
+	backup := importutilv2.IsBackup(job.GetOptions())
+	targetSchema := typeutil.AppendSystemFields(job.GetSchema())
+	if err := validateImportV3StorageVersion(targetSchema); err != nil {
+		return nil, err
+	}
+	writerSpec, err := buildImportV3WriterSpec(targetSchema)
+	if err != nil {
+		return nil, err
+	}
+	writerSpec.PkCapacity = max(p.GetRows(), 1)
+	return &datapb.ImportTaskPlan{
+		Sort:         sortSpec,
+		Vchannel:     p.GetVchannel(),
+		PartitionId:  p.GetPartitionId(),
+		Fragments:    p.GetFragments(),
+		Rows:         p.GetRows(),
+		FanIn:        int32(effectiveImportV3FanIn(Params.DataCoordCfg.FragmentMergeFanIn.GetAsInt(), len(p.GetFragments()))),
+		Writer:       writerSpec,
+		Schema:       targetSchema,
+		TempSchema:   buildImportV3TempSchema(job.GetSchema(), backup),
+		DataTs:       job.GetDataTs(),
+		CollectionId: job.GetCollectionID(),
+		ClusterId:    Params.CommonCfg.ClusterPrefix.GetValue(),
+		Backup:       backup,
+	}, nil
 }

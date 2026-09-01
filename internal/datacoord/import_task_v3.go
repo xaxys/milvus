@@ -330,11 +330,17 @@ func (t *importTaskV3) CreateTaskOnWorker(nodeID int64, cluster session.Cluster)
 		t.fail(fmt.Sprintf("import v3 task cannot start: job %d is in state %s", p.GetJobId(), job.GetState()))
 		return
 	}
+	plan, err := buildImportV3TaskPlan(job, p)
+	if err != nil {
+		t.fail(err.Error())
+		return
+	}
 	req := &datapb.ImportTaskV3Request{
 		JobId: p.GetJobId(), TaskId: p.GetTaskId(), RunId: p.GetRunId(), SegmentId: p.GetSegmentId(),
 		LogRange: p.GetLogRange(), Slot: p.GetSlot(),
 		StorageConfig: createStorageConfig(),
 		PluginContext: GetReadPluginContext(job.GetOptions()),
+		Plan:          plan,
 	}
 	WrapPluginContext(t.GetCollectionID(), job.GetSchema().GetProperties(), req)
 	// PrepareRun: persist Running/node before the uncertain Create RPC, so a crash
@@ -343,7 +349,7 @@ func (t *importTaskV3) CreateTaskOnWorker(nodeID int64, cluster session.Cluster)
 		mlog.Warn(context.TODO(), "persist import v3 task running state failed", WrapTaskLog(t, mlog.Err(err))...)
 		return
 	}
-	err := cluster.CreateImportV3(nodeID, req, t.GetCollectionID())
+	err = cluster.CreateImportV3(nodeID, req, t.GetCollectionID())
 	if err != nil {
 		mlog.Warn(context.TODO(), "create import v3 task failed", WrapTaskLog(t, mlog.Err(err))...)
 		if errors.Is(err, merr.ErrNodeNotFound) || !isTerminalImportV3Err(err) {
