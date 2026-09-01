@@ -118,13 +118,13 @@ func TestCleanupPreparingV3ImportTasksKeepsReadyTask(t *testing.T) {
 	require.NoError(t, checker.cleanupPreparingV3ImportTasks(job))
 }
 
-func TestCleanupPreparingV3ImportTaskDropsOwnedSegment(t *testing.T) {
+// Segments are registered only at acceptance, so a None task interrupted
+// between AddTask and the Pending marker owns no segment: cleanup removes the
+// task record and nothing else.
+func TestCleanupPreparingV3ImportTaskRemovesUnregisteredTask(t *testing.T) {
 	ctx := context.Background()
 	meta, err := newMemoryMeta(t)
 	require.NoError(t, err)
-	segment, err := addImportSegment(ctx, meta, 100, 1, 10, 2, 3, "v0", datapb.SegmentLevel_L1, 1, 4)
-	require.NoError(t, err)
-	require.Equal(t, commonpb.SegmentState_Importing, segment.GetState())
 	importMeta := NewMockImportMeta(t)
 	checker := &importCheckerV3{ctx: ctx, meta: meta, importMeta: importMeta}
 	job := &importJob{ImportJob: &datapb.ImportJob{JobID: 1}}
@@ -135,10 +135,13 @@ func TestCleanupPreparingV3ImportTaskDropsOwnedSegment(t *testing.T) {
 	importMeta.EXPECT().RemoveTask(mock.Anything, int64(10)).Return(nil).Once()
 
 	require.NoError(t, checker.cleanupPreparingV3ImportTasks(job))
-	require.Equal(t, commonpb.SegmentState_Dropped, meta.GetSegment(ctx, 100).GetState())
+	require.Nil(t, meta.GetSegment(ctx, 100))
 }
 
-func TestCreateImportV3TaskPublishesPendingAfterSegments(t *testing.T) {
+// Planning registers only the task record; the segment is built at result
+// acceptance. The task must carry every property needed to reconstruct the
+// SegmentInfo deterministically (bucket, log range, fragments, rows).
+func TestCreateImportV3TaskRegistersTaskOnly(t *testing.T) {
 	ctx := context.Background()
 	meta, err := newMemoryMeta(t)
 	require.NoError(t, err)
@@ -157,7 +160,6 @@ func TestCreateImportV3TaskPublishesPendingAfterSegments(t *testing.T) {
 		require.Nil(t, meta.GetSegment(ctx, 100))
 	}).Return(nil).Once()
 	update := importMeta.EXPECT().UpdateTask(mock.Anything, int64(10), mock.Anything).Run(func(_ context.Context, _ int64, actions ...UpdateAction) {
-		require.NotNil(t, meta.GetSegment(ctx, 100))
 		for _, action := range actions {
 			action(task)
 		}
@@ -175,12 +177,13 @@ func TestCreateImportV3TaskPublishesPendingAfterSegments(t *testing.T) {
 	p := task.task.Load()
 	require.Equal(t, "v0", p.GetVchannel())
 	require.Equal(t, int64(4), p.GetPartitionId())
+	require.Equal(t, int64(100), p.GetSegmentId())
+	require.Equal(t, int64(5), p.GetRows())
+	require.NotNil(t, p.GetLogRange())
 	require.Len(t, p.GetFragments(), 1)
 	require.Equal(t, "f0", p.GetFragments()[0].GetPath())
-	segment := meta.GetSegment(ctx, 100)
-	require.True(t, segment.GetIsImporting())
-	require.False(t, segment.GetIsInvisible())
-	require.Equal(t, int32(3), segment.GetSchemaVersion())
+	// No segment exists before acceptance.
+	require.Nil(t, meta.GetSegment(ctx, 100))
 }
 
 func TestCreateReshardTasksKeepsExistingAndAddsMissingSources(t *testing.T) {

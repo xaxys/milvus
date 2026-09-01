@@ -112,14 +112,17 @@ func (s *importInspector) Reload() {
 	}
 }
 
-// reconcileOrphanImportSegments drops Importing segments that no import task
-// references. createImportV3Task and importTaskV3.prepareRetry persist a new
-// segment before the task is repointed to it, so a DataCoord crash between the
-// two catalog writes leaves an IsImporting segment with no owner; the import
-// terminal GC only drops task.SegmentId and the generic GC only collects
-// Dropped segments, so without this pass such segments would leak forever. Every
-// legitimate Importing segment is referenced by some task (the planner's None
-// tasks are created with their segment id), so an unreferenced one is a leak.
+// reconcileOrphanImportSegments drops IsImporting segments that no import task
+// references. Producers that register a segment before its owner record is
+// durable can leave such orphans across a crash: V2 import preallocation and
+// snapshot-restore pre-registration persist the segment first, and import V3
+// registers a segment at result acceptance, so a crash between acceptance and
+// the task Completed marker followed by a retry repoint (or the task record
+// outliving its retention) strands the accepted segment. The import terminal
+// GC only drops task.SegmentId and the generic GC only collects Dropped
+// segments, so without this pass such segments would leak forever. Every
+// legitimate IsImporting segment is referenced by some task or copy job, so an
+// unreferenced one is a leak.
 func (s *importInspector) reconcileOrphanImportSegments() {
 	referenced := make(map[int64]struct{})
 	if s.copyMeta != nil {
@@ -172,7 +175,7 @@ func (s *importInspector) reconcileOrphanImportSegments() {
 		return
 	}
 	mlog.Warn(s.ctx, "reconcile orphan import segments on restart", mlog.Int64s("segmentIDs", orphanIDs))
-	if err := s.meta.UpdateSegmentsInfo(s.ctx, dropImportV3Segments(orphanIDs, false)); err != nil {
+	if err := s.meta.UpdateSegmentsInfo(s.ctx, dropImportV3Segments(orphanIDs)); err != nil {
 		mlog.Warn(s.ctx, "failed to drop orphan import segments", mlog.Int64s("segmentIDs", orphanIDs), mlog.Err(err))
 	}
 }

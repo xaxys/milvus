@@ -18,6 +18,7 @@ package datacoord
 
 import (
 	"context"
+	"math"
 	"path"
 	"slices"
 	"time"
@@ -25,8 +26,10 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
@@ -94,16 +97,23 @@ func validateImportResults(results []*datapb.SegmentResult, segmentCount int) er
 			if result.GetStatistics() == nil || result.GetStatistics().GetTimestampFrom() > result.GetStatistics().GetTimestampTo() {
 				return merr.WrapErrDataIntegrityMsg("non-empty import segment result at index %d has invalid statistics", index)
 			}
+			if result.GetManifestPath() == "" && len(result.GetInsertLogs()) == 0 {
+				return merr.WrapErrDataIntegrityMsg("non-empty import segment result at index %d has no output", index)
+			}
 		}
 	}
 	return nil
 }
 
-// applyImportResults updates all preallocated segments first. The caller
-// persists the task Completed marker only after this function succeeds, which
-// keeps the existing V2 marker-last recovery shape: a crash between segment
-// batches and the task marker simply replays the same worker result.
-func applyImportResults(ctx context.Context, meta *meta, collectionID int64, schemaVersion int32, segmentIDs []int64, sorted, namespaceSorted bool, results []*datapb.SegmentResult) error {
+// applyImportResults registers the task's output segment at acceptance. No
+// segment exists before this point: the accepted SegmentInfo is built
+// deterministically from the frozen task record and the worker result. A
+// replayed result (a crash between this write and the task Completed marker)
+// must match the already-registered segment exactly. The caller persists the
+// task Completed marker only after this function succeeds, which keeps the
+// marker-last recovery shape: a crash between the two writes simply replays
+// the same worker result.
+func applyImportResults(ctx context.Context, meta *meta, collectionID int64, schemaVersion int32, task *datapb.ImportTaskV3, sorted, namespaceSorted bool, results []*datapb.SegmentResult) error {
 	for _, result := range results {
 		if result == nil || result.GetManifestPath() != "" {
 			continue
@@ -120,48 +130,70 @@ func applyImportResults(ctx context.Context, meta *meta, collectionID int64, sch
 			return err
 		}
 	}
-	operators := make([]UpdateOperator, 0, len(results)*9)
-	for index, result := range results {
-		segmentID := segmentIDs[index]
-		operators = append(operators, validateImportResultSegmentOperator(collectionID, segmentID, result, sorted, namespaceSorted))
+	for _, result := range results {
 		if result.GetRows() == 0 {
-			// Keep a zero-row segment Importing until the worker task is
-			// dropped/unbound, then remove it through the normal import cleanup.
+			// A zero-row result produces no segment; there is nothing to load,
+			// index, or clean up.
 			continue
 		}
-		segmentOps := make([]UpdateOperator, 0, 8)
-		if result.GetManifestPath() != "" {
-			// Storage V3 segment: the manifest is the source of truth for files.
-			// SegmentInfo only persists the accepted manifest path, statistics and
-			// positions; FieldBinlog arrays are intentionally not persisted.
-			segmentOps = append(segmentOps,
-				UpdateManifest(segmentID, result.GetManifestPath()),
-				UpdateSegmentStats(segmentID, result.GetStatistics()),
-				UpdateImportedRows(segmentID, result.GetRows()),
-				UpdateImportSegmentPosition(segmentID, result.GetStatistics().GetTimestampFrom(), result.GetStatistics().GetTimestampTo()),
-				updateImportResultProjectionOperator(segmentID, result, sorted, namespaceSorted),
-				UpdateStatusOperator(segmentID, commonpb.SegmentState_Flushed),
-				updateImportV3SchemaVersion(segmentID, schemaVersion),
-			)
-		} else {
-			statslogs := []*datapb.FieldBinlog(nil)
-			if result.GetPkLog() != nil {
-				statslogs = []*datapb.FieldBinlog{result.GetPkLog()}
+		segmentID := task.GetSegmentId()
+		existing := meta.GetSegment(ctx, segmentID)
+		if existing != nil {
+			if existing.GetCollectionID() != collectionID || existing.GetState() != commonpb.SegmentState_Flushed ||
+				!existing.GetIsImporting() || !acceptedImportSegmentMatches(existing, result, sorted, namespaceSorted) {
+				return merr.WrapErrDataIntegrityMsg("replayed import v3 result conflicts with segment %d", segmentID)
 			}
-			segmentOps = append(segmentOps,
-				UpdateBinlogsOperator(segmentID, result.GetInsertLogs(), statslogs, nil, result.GetBm25Logs()),
-				UpdateManifest(segmentID, result.GetManifestPath()),
-				UpdateSegmentStats(segmentID, result.GetStatistics()),
-				UpdateImportedRows(segmentID, result.GetRows()),
-				UpdateImportSegmentPosition(segmentID, result.GetStatistics().GetTimestampFrom(), result.GetStatistics().GetTimestampTo()),
-				updateImportResultProjectionOperator(segmentID, result, sorted, namespaceSorted),
-				UpdateStatusOperator(segmentID, commonpb.SegmentState_Flushed),
-				updateImportV3SchemaVersion(segmentID, schemaVersion),
-			)
+			continue
 		}
-		operators = append(operators, segmentOps...)
+		if err := meta.AddSegment(ctx, buildImportV3Segment(collectionID, schemaVersion, task, sorted, namespaceSorted, result)); err != nil {
+			return err
+		}
+		mlog.Info(ctx, "import v3 segment accepted",
+			mlog.Int64("segmentID", segmentID),
+			mlog.Int64("rows", result.GetRows()),
+			mlog.String("vchannel", task.GetVchannel()))
 	}
-	return meta.UpdateSegmentsInfo(ctx, operators...)
+	return nil
+}
+
+// buildImportV3Segment constructs the accepted SegmentInfo deterministically
+// from the frozen task record and the worker result. The segment is born
+// Flushed and keeps IsImporting=true until the commit fence clears it, the
+// same visibility contract as the V2 import path.
+func buildImportV3Segment(collectionID int64, schemaVersion int32, task *datapb.ImportTaskV3, sorted, namespaceSorted bool, result *datapb.SegmentResult) *SegmentInfo {
+	stats := result.GetStatistics()
+	info := &datapb.SegmentInfo{
+		ID:                  task.GetSegmentId(),
+		CollectionID:        collectionID,
+		PartitionID:         task.GetPartitionId(),
+		InsertChannel:       task.GetVchannel(),
+		NumOfRows:           result.GetRows(),
+		MaxRowNum:           result.GetRows(),
+		State:               commonpb.SegmentState_Flushed,
+		LastExpireTime:      math.MaxUint64,
+		Level:               datapb.SegmentLevel_L1,
+		IsImporting:         true,
+		StorageVersion:      storage.StorageV3,
+		SchemaVersion:       schemaVersion,
+		ManifestPath:        result.GetManifestPath(),
+		Stats:               stats,
+		StartPosition:       &msgpb.MsgPosition{ChannelName: task.GetVchannel(), Timestamp: stats.GetTimestampFrom()},
+		DmlPosition:         &msgpb.MsgPosition{ChannelName: task.GetVchannel(), Timestamp: stats.GetTimestampTo()},
+		IsSorted:            sorted,
+		IsSortedByNamespace: namespaceSorted,
+		ExpirQuantiles:      append([]int64(nil), result.GetExpirationQuantiles()...),
+	}
+	if result.GetManifestPath() == "" {
+		// StorageV2 writer output: file lists cross the RPC boundary instead of
+		// a manifest.
+		info.StorageVersion = storage.StorageV2
+		info.Binlogs = result.GetInsertLogs()
+		if result.GetPkLog() != nil {
+			info.Statslogs = []*datapb.FieldBinlog{result.GetPkLog()}
+		}
+		info.Bm25Statslogs = result.GetBm25Logs()
+	}
+	return NewSegmentInfo(info)
 }
 
 func updateImportV3SchemaVersion(segmentID int64, schemaVersion int32) UpdateOperator {
@@ -171,72 +203,6 @@ func updateImportV3SchemaVersion(segmentID int64, schemaVersion int32) UpdateOpe
 			return pack.fail(merr.WrapErrDataIntegrityMsg("import v3 segment %d is missing", segmentID))
 		}
 		segment.SchemaVersion = schemaVersion
-		return true
-	}
-}
-
-func importV3SegmentStatsNonZero(stats *datapb.Statistics) bool {
-	if stats == nil {
-		return false
-	}
-	return stats.GetInsertBinlogSize() != 0 ||
-		stats.GetStatsBinlogSize() != 0 ||
-		stats.GetDeltaBinlogSize() != 0 ||
-		stats.GetDeleteNumRows() != 0 ||
-		stats.GetInsertBinlogCount() != 0 ||
-		stats.GetDeltaBinlogCount() != 0 ||
-		len(stats.GetTimestampQuantiles()) > 0 ||
-		stats.GetTimestampFrom() != 0 ||
-		stats.GetTimestampTo() != 0 ||
-		stats.GetDeltaTimestampFrom() != 0 ||
-		stats.GetDeltaTimestampTo() != 0 ||
-		len(stats.GetNullCounts()) > 0
-}
-
-func validateImportResultSegmentOperator(collectionID, segmentID int64, result *datapb.SegmentResult, sorted, namespaceSorted bool) UpdateOperator {
-	return func(pack *updateSegmentPack) bool {
-		segment := pack.Get(segmentID)
-		if segment == nil {
-			return pack.fail(merr.WrapErrDataIntegrityMsg("import v3 segment %d is missing", segmentID))
-		}
-		if segment.GetCollectionID() != collectionID {
-			return pack.fail(merr.WrapErrDataIntegrityMsg("import v3 collection mismatch for segment %d", segmentID))
-		}
-		if !segment.GetIsImporting() {
-			return pack.fail(merr.WrapErrDataIntegrityMsg("import v3 segment %d is not importing", segmentID))
-		}
-		if result.GetRows() == 0 {
-			if segment.GetState() != commonpb.SegmentState_Importing || segment.GetNumOfRows() != 0 {
-				return pack.fail(merr.WrapErrDataIntegrityMsg("zero-row import v3 segment %d has conflicting progress", segmentID))
-			}
-			return true
-		}
-		switch segment.GetState() {
-		case commonpb.SegmentState_Importing:
-			if segment.GetNumOfRows() != 0 || segment.GetManifestPath() != "" || importV3SegmentStatsNonZero(segment.GetStats()) ||
-				len(segment.GetBinlogs()) > 0 || len(segment.GetStatslogs()) > 0 || len(segment.GetBm25Statslogs()) > 0 {
-				return pack.fail(merr.WrapErrDataIntegrityMsg("import v3 segment %d contains unaccepted output", segmentID))
-			}
-		case commonpb.SegmentState_Flushed:
-			if !acceptedImportSegmentMatches(segment, result, sorted, namespaceSorted) {
-				return pack.fail(merr.WrapErrDataIntegrityMsg("replayed import v3 result conflicts with segment %d", segmentID))
-			}
-		default:
-			return pack.fail(merr.WrapErrDataIntegrityMsg("import v3 segment %d has invalid state %s", segmentID, segment.GetState()))
-		}
-		return true
-	}
-}
-
-func updateImportResultProjectionOperator(segmentID int64, result *datapb.SegmentResult, sorted, namespaceSorted bool) UpdateOperator {
-	return func(pack *updateSegmentPack) bool {
-		segment := pack.Get(segmentID)
-		if segment == nil {
-			return pack.fail(merr.WrapErrDataIntegrityMsg("import v3 segment %d is missing", segmentID))
-		}
-		segment.IsSorted = sorted
-		segment.IsSortedByNamespace = namespaceSorted
-		segment.ExpirQuantiles = append([]int64(nil), result.GetExpirationQuantiles()...)
 		return true
 	}
 }
@@ -262,14 +228,13 @@ func acceptedImportSegmentMatches(segment *SegmentInfo, result *datapb.SegmentRe
 	return true
 }
 
-func dropImportV3Segments(segmentIDs []int64, zeroOnly bool) UpdateOperator {
+func dropImportV3Segments(segmentIDs []int64) UpdateOperator {
 	return func(pack *updateSegmentPack) bool {
 		updated := false
 		for _, segmentID := range segmentIDs {
 			segment := pack.Get(segmentID)
 			if segment == nil || !segment.GetIsImporting() ||
-				segment.GetState() == commonpb.SegmentState_Dropped ||
-				(zeroOnly && (segment.GetState() != commonpb.SegmentState_Importing || segment.GetNumOfRows() != 0)) {
+				segment.GetState() == commonpb.SegmentState_Dropped {
 				continue
 			}
 			updateSegStateAndPrepareMetrics(segment, commonpb.SegmentState_Dropped, pack.metricMutation)

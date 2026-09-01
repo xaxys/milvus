@@ -19,6 +19,7 @@ package datacoord
 import (
 	"context"
 	"math"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,8 @@ import (
 	"github.com/milvus-io/milvus/internal/distributed/streaming"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	snapshotstorage "github.com/milvus-io/milvus/internal/snapshotio/storage"
+	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster"
 	"github.com/milvus-io/milvus/internal/util/hookutil"
 	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
@@ -48,6 +51,8 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -1668,7 +1673,16 @@ func (sm *snapshotManager) createRestoreJob(
 
 		// Pre-register target segment in meta. NewSegmentInfo eagerly
 		// populates Stats so concurrent RLock readers don't race on a
-		// lazy init.
+		// lazy init. StorageV3 targets carry a parseable ManifestPath from
+		// registration: the copy writes them under the canonical target base
+		// path, and a drop before the copy result is applied must still leave
+		// dropped-segment GC a prefix it can reclaim.
+		var manifestPath string
+		if segDesc.GetStorageVersion() >= storage.StorageV3 {
+			k := metautil.JoinIDPath(targetCollection, targetPartitionID, targetSegmentID)
+			basePath := path.Join(paramtable.Get().MinioCfg.RootPath.GetValue(), common.SegmentInsertLogPath, k)
+			manifestPath = packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+		}
 		newSegment := NewSegmentInfo(&datapb.SegmentInfo{
 			ID:                  targetSegmentID,
 			CollectionID:        targetCollection,
@@ -1686,6 +1700,7 @@ func (sm *snapshotManager) createRestoreJob(
 			IsSorted:            segDesc.GetIsSorted(),
 			CommitTimestamp:     segDesc.GetCommitTimestamp(),
 			IsImporting:         true,
+			ManifestPath:        manifestPath,
 		})
 		targetSegments[targetSegmentID] = newSegment
 	}

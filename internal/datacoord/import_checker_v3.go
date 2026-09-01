@@ -571,12 +571,16 @@ func (c *importCheckerV3) quiesceImportJob(job ImportJob, log *mlog.Logger) bool
 			continue
 		}
 		if job.GetState() == internalpb.ImportJobState_Failed && task.GetType() == ImportTaskV3Type {
+			// A failed job never commits: any segment a task accepted before the
+			// failure is still IsImporting and must be dropped so the generic GC
+			// reclaims its files. Incomplete tasks registered nothing and are
+			// skipped by the operator.
 			segmentIDs := []int64(nil)
 			if segmentID := task.(*importTaskV3).task.Load().GetSegmentId(); segmentID != 0 {
 				segmentIDs = append(segmentIDs, segmentID)
 			}
 			if len(segmentIDs) > 0 {
-				if err := c.meta.UpdateSegmentsInfo(c.ctx, dropImportV3Segments(segmentIDs, false)); err != nil {
+				if err := c.meta.UpdateSegmentsInfo(c.ctx, dropImportV3Segments(segmentIDs)); err != nil {
 					log.Warn(c.ctx, "drop import v3 segments during failed job GC", WrapTaskLog(task, mlog.Err(err))...)
 					ready = false
 					continue
@@ -1053,11 +1057,9 @@ func (c *importCheckerV3) cleanupPreparingV3ImportTasks(job ImportJob) error {
 		if task.GetState() != datapb.ImportTaskStateV2_None {
 			continue
 		}
-		if segmentID := task.task.Load().GetSegmentId(); segmentID != 0 {
-			if err := c.meta.UpdateSegmentsInfo(c.ctx, dropImportV3Segments([]int64{segmentID}, false)); err != nil {
-				return err
-			}
-		}
+		// A None task was interrupted between AddTask and the Pending marker.
+		// Segments are registered only at acceptance, so there is nothing to
+		// drop; removing the record is the whole cleanup.
 		if err := c.importMeta.RemoveTask(c.ctx, task.GetTaskID()); err != nil {
 			return err
 		}
@@ -1319,6 +1321,11 @@ func (c *importCheckerV3) createImportV3Task(
 		Params.DataCoordCfg.ImportMemoryLimitPerSlot.GetAsInt64(),
 		fanIn,
 	)
+	// The task record is the only durable state before acceptance: it carries
+	// every segment property (ID, bucket, log range, fragments) needed to build
+	// the SegmentInfo deterministically when the worker result is accepted. No
+	// segment is registered here, so a job that fails before acceptance leaves
+	// no Importing segments behind.
 	task := newImportTaskV3(&datapb.ImportTaskV3{
 		JobId: job.GetJobID(), TaskId: taskID, CollectionId: job.GetCollectionID(),
 		State: datapb.ImportTaskStateV2_None, RunId: 1, NodeId: NullNodeID,
@@ -1328,9 +1335,6 @@ func (c *importCheckerV3) createImportV3Task(
 		Vchannel:  spec.channel, PartitionId: spec.partitionID,
 	}, c.importMeta, c.meta, c.alloc)
 	if err := c.importMeta.AddTask(c.ctx, task); err != nil {
-		return err
-	}
-	if _, err := addImportSegment(c.ctx, c.meta, segmentID, job.GetJobID(), taskID, job.GetCollectionID(), spec.partitionID, spec.channel, datapb.SegmentLevel_L1, writerSpec.GetStorageVersion(), int32(writerSpec.GetSchemaVersion())); err != nil {
 		return err
 	}
 	return c.importMeta.UpdateTask(c.ctx, taskID, UpdateState(datapb.ImportTaskStateV2_Pending))

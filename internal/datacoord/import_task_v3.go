@@ -26,6 +26,7 @@ package datacoord
 import (
 	"context"
 	"fmt"
+	"path"
 	"strconv"
 	"time"
 
@@ -36,12 +37,14 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	"github.com/milvus-io/milvus/internal/json"
+	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/taskcommon"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 )
@@ -447,64 +450,58 @@ func (t *importTaskV3) prepareRetry(cluster session.Cluster) {
 		t.fail("import v3 retry resources are unavailable")
 		return
 	}
-	type segmentIdentity struct {
-		partitionID, storageVersion int64
-		schemaVersion               int32
-		vchannel                    string
-	}
-	oldSegmentID := p.GetSegmentId()
-	oldSegment := t.meta.GetSegment(context.TODO(), oldSegmentID)
-	if oldSegment == nil {
-		t.fail("import v3 retry segment is missing")
-		return
-	}
-	identity := segmentIdentity{
-		partitionID: oldSegment.GetPartitionID(), vchannel: oldSegment.GetInsertChannel(),
-		schemaVersion: oldSegment.GetSchemaVersion(), storageVersion: oldSegment.GetStorageVersion(),
-	}
 	if t.GetNodeID() != NullNodeID {
 		_ = cluster.DropImportV3(t.GetNodeID(), &datapb.DropImportTaskV3Request{JobId: p.GetJobId(), TaskId: p.GetTaskId(), RunId: p.GetRunId()})
 	}
-	// job is already fetched and validated non-nil by the guard at the top of
-	// prepareRetry; the drop above does not change it.
-	newSegment, err := AllocImportSegment(context.TODO(), t.alloc, t.meta,
-		p.GetJobId(), p.GetTaskId(), p.GetCollectionId(), identity.partitionID,
-		identity.vchannel, job.GetDataTs(), datapb.SegmentLevel_L1, identity.storageVersion, identity.schemaVersion)
+	oldSegmentID := p.GetSegmentId()
+	newSegmentID, err := t.alloc.AllocID(context.TODO())
 	if err != nil {
 		t.fail(err.Error())
 		return
 	}
-	newSegmentID := newSegment.GetID()
 	// The existing log range is fixed for a plan. A retried run gets a fresh
-	// range so a late old writer cannot reuse current segment log IDs.
+	// range so a late old writer cannot reuse current segment log IDs; the fresh
+	// segment ID likewise isolates the new run's object paths from any late
+	// writer of the superseded run.
 	begin, end, err := t.alloc.AllocN(p.GetLogRange().GetEnd() - p.GetLogRange().GetBegin())
 	if err != nil {
-		_ = t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{newSegmentID}, false))
 		t.fail(err.Error())
 		return
 	}
 	newRun := p.GetRunId() + 1
-	// Repoint the task to the new run/segment BEFORE dropping the old segment.
-	// The task record and the segment records are separate catalog writes, so no
-	// ordering can make create+drop+repoint atomic; this order ensures a crash
-	// leaves the task referencing the LIVE new segment (recoverable by the normal
-	// retry path) and only the superseded old segment is orphaned. Dropping the
-	// old segment first instead left the new segment ownerless and left the task
-	// pointing at a Dropped old segment, which a late Completed result would turn
-	// into a job failure. The orphaned old segment is reclaimed by the restart
-	// reconciliation in importInspector.reloadFromMeta.
 	if err := t.importMeta.UpdateTask(context.TODO(), t.GetTaskID(), UpdateRunID(newRun), UpdateSegmentIDs([]int64{newSegmentID}), UpdateLogRange(&datapb.IDRange{Begin: begin, End: end}), UpdateNodeID(NullNodeID), UpdateState(datapb.ImportTaskStateV2_Pending), UpdateReason("")); err != nil {
-		_ = t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{newSegmentID}, false))
 		t.fail(err.Error())
 		return
 	}
-	// Best-effort drop of the superseded old segment; on failure it is reclaimed
-	// by the restart reconciliation instead of failing the retried job.
-	if oldSegmentID != 0 {
-		if err := t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{oldSegmentID}, false)); err != nil {
-			mlog.Warn(context.TODO(), "failed to drop old import v3 retry segment, will be reclaimed on restart",
+	t.cleanupSupersededRun(oldSegmentID, p)
+}
+
+// cleanupSupersededRun reclaims the output of a superseded run after the task
+// record already points at the new run. An accepted run owns a registered
+// segment: drop it and let the normal dropped-segment GC remove its files. A
+// run that never reached acceptance has no meta record: remove its unregistered
+// output prefix directly. Both steps are best-effort; leftovers are still
+// reclaimable by the orphan file scan (unregistered files once they age past
+// the tolerance) or the restart reconciliation (registered segments).
+func (t *importTaskV3) cleanupSupersededRun(oldSegmentID int64, p *datapb.ImportTaskV3) {
+	if oldSegmentID == 0 || t.meta == nil {
+		return
+	}
+	ctx := context.TODO()
+	if t.meta.GetSegment(ctx, oldSegmentID) != nil {
+		if err := t.meta.UpdateSegmentsInfo(ctx, dropImportV3Segments([]int64{oldSegmentID})); err != nil {
+			mlog.Warn(ctx, "failed to drop superseded import v3 segment, will be reclaimed on restart",
 				mlog.Int64("segmentID", oldSegmentID), mlog.Err(err))
 		}
+		return
+	}
+	if t.meta.chunkManager == nil {
+		return
+	}
+	basePath := path.Join(t.meta.chunkManager.RootPath(), common.SegmentInsertLogPath, metautil.JoinIDPath(p.GetCollectionId(), p.GetPartitionId(), oldSegmentID))
+	if err := t.meta.chunkManager.RemoveWithPrefix(ctx, basePath); err != nil {
+		mlog.Warn(ctx, "failed to remove superseded import v3 run output, orphan scan will reclaim it",
+			mlog.Int64("segmentID", oldSegmentID), mlog.Err(err))
 	}
 }
 
@@ -525,7 +522,7 @@ func (t *importTaskV3) acceptResult(results []*datapb.SegmentResult) error {
 		return err
 	}
 	namespaceSorted := job.GetSchema().GetEnableNamespace()
-	return applyImportResults(context.TODO(), t.meta, p.GetCollectionId(), schemaVersion, []int64{p.GetSegmentId()}, !namespaceSorted, namespaceSorted, results)
+	return applyImportResults(context.TODO(), t.meta, p.GetCollectionId(), schemaVersion, p, !namespaceSorted, namespaceSorted, results)
 }
 
 func (t *importTaskV3) DropTaskOnWorker(cluster session.Cluster) {
@@ -536,13 +533,10 @@ func (t *importTaskV3) DropTaskOnWorker(cluster session.Cluster) {
 			return
 		}
 	}
-	if t.meta != nil && p.GetSegmentId() != 0 {
-		zeroOnly := t.GetState() == datapb.ImportTaskStateV2_Completed
-		if err := t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{p.GetSegmentId()}, zeroOnly)); err != nil {
-			mlog.Warn(context.TODO(), "drop import v3 segments failed", WrapTaskLog(t, mlog.Err(err))...)
-			return
-		}
-	}
+	// No segment cleanup here: segments are registered only at acceptance, so a
+	// completed task's segment is formal data (dropping it is the failed-job GC
+	// path's job, not the worker-drop path's) and an incomplete task never
+	// created one.
 	_ = t.importMeta.UpdateTask(context.TODO(), t.GetTaskID(), UpdateNodeID(NullNodeID))
 }
 func (t *importTaskV3) fail(reason string) {
