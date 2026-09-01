@@ -1518,6 +1518,10 @@ message ReshardTask {
   int64 run_id = 6;
   int64 node_id = 7;
   int64 slot = 8;
+  // The ImportFile IDs this task covers. Source ownership is the only
+  // planning fact Pending recovery needs; every other execution input is
+  // re-derived from the ImportJob when the task is dispatched.
+  repeated int64 source_ids = 9;
 }
 
 // ImportTaskV3 persists only the per-segment ownership that Planning recovery
@@ -1548,6 +1552,7 @@ message ReshardTaskRequest {
   int64 slot = 4;
   index.StorageConfig storage_config = 5;
   repeated common.KeyValuePair plugin_context = 6;
+  ReshardTaskPlan plan = 7;
 }
 
 message ImportTaskV3Request {

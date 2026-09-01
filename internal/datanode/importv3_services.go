@@ -148,13 +148,10 @@ func (node *DataNode) executeReshardTask(ctx context.Context, req *datapb.Reshar
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if req == nil || req.GetRunId() != runID || req.GetStorageConfig() == nil || req.GetSlot() <= 0 {
+	if req == nil || req.GetRunId() != runID || req.GetStorageConfig() == nil || req.GetSlot() <= 0 || req.GetPlan() == nil {
 		return merr.WrapErrImportSysFailedMsg("invalid or incomplete ReshardTask request")
 	}
-	plan, err := node.readReshardTaskPlan(ctx, req.GetStorageConfig(), req.GetJobId(), req.GetTaskId())
-	if err != nil {
-		return err
-	}
+	plan := req.GetPlan()
 	cm, err := node.storageFactory.NewChunkManager(ctx, req.GetStorageConfig())
 	if err != nil {
 		return err
@@ -188,10 +185,6 @@ func executeReshardPlan(ctx context.Context, cm storage.ChunkManager, req *datap
 		))
 	defer span.End()
 	temporarySchema := plan.GetTempSchema()
-	if plan.GetSchema() == nil || temporarySchema == nil ||
-		len(plan.GetVchannels()) == 0 || len(plan.GetPartitions()) == 0 || len(plan.GetSources()) == 0 {
-		return merr.WrapErrDataIntegrityMsg("invalid ReshardTask plan")
-	}
 	sortFields, err := importv3.SortFields(plan.GetSort(), temporarySchema)
 	if err != nil {
 		return err
@@ -199,9 +192,6 @@ func executeReshardPlan(ctx context.Context, cm storage.ChunkManager, req *datap
 	bufferSize := paramtable.Get().DataNodeCfg.ImportBaseBufferSize.GetAsInt64()
 	maxFileSize := int64(paramtable.Get().DataNodeCfg.MaxImportFileSizeInGB.GetAsFloat() * 1024 * 1024 * 1024)
 	fragmentTarget := plan.GetFragmentSize()
-	if fragmentTarget <= 0 {
-		fragmentTarget = 128 * 1024 * 1024
-	}
 	slot := req.GetSlot()
 	if slot <= 0 {
 		slot = 1
@@ -927,23 +917,6 @@ func newImportV3IntermediateFactory(req *datapb.ImportTaskV3Request, segmentInde
 		}
 		return writer, commit, nil
 	}
-}
-
-func (node *DataNode) readReshardTaskPlan(ctx context.Context, cfg *indexpb.StorageConfig, jobID, taskID int64) (*datapb.ReshardTaskPlan, error) {
-	cm, err := node.storageFactory.NewChunkManager(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	planPath := path.Join(cm.RootPath(), metautil.BuildImportReshardPlanPath(jobID, taskID))
-	payload, err := cm.Read(ctx, planPath)
-	if err != nil {
-		return nil, err
-	}
-	plan := &datapb.ReshardTaskPlan{}
-	if err := proto.Unmarshal(payload, plan); err != nil {
-		return nil, merr.WrapErrDataIntegrityMsg("decode ReshardTask plan %s: %s", planPath, err.Error())
-	}
-	return plan, nil
 }
 
 func importV3TaskCommonState(state importv3.State) taskcommon.State {

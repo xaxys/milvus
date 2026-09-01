@@ -657,18 +657,6 @@ func (c *importCheckerV3) deleteImportJob(job ImportJob, log *mlog.Logger) {
 // ready tasks, fills the missing logical tasks, and then advances the job
 // state without depending on map iteration.
 
-func writeImportV3Proto(ctx context.Context, cm storage.ChunkManager, objectPath string, msg proto.Message) error {
-	payload, err := proto.Marshal(msg)
-	if err != nil {
-		return merr.WrapErrSerializationFailed(err, "marshal import v3 object")
-	}
-	fullPath := path.Join(cm.RootPath(), objectPath)
-	if err := cm.Write(ctx, fullPath, payload); err != nil {
-		return merr.Wrap(err, "write import v3 object")
-	}
-	return nil
-}
-
 func calculateV3Slots(workingSet, memoryPerSlot int64) int64 {
 	if memoryPerSlot <= 0 {
 		// A zero or negative slot size is a configuration error. Keep the slot
@@ -713,8 +701,9 @@ func effectiveImportV3FanIn(configured, fragmentCount int) int {
 
 func (c *importCheckerV3) createReshardTasks(job ImportJob) error {
 	files := job.GetFiles()
-	sortSpec, err := getDefaultSortSpec(job.GetSchema())
-	if err != nil {
+	// Planning only validates the sort spec; dispatch re-derives it from the
+	// frozen job schema.
+	if _, err := getDefaultSortSpec(job.GetSchema()); err != nil {
 		return err
 	}
 	covered, err := c.loadReshardSourceIDs(job)
@@ -737,7 +726,7 @@ func (c *importCheckerV3) createReshardTasks(job ImportJob) error {
 			return err
 		}
 		for i, sources := range missing {
-			if err := c.createReshardTask(job, sortSpec, start+int64(i), sources); err != nil {
+			if err := c.createReshardTask(job, start+int64(i), sources); err != nil {
 				return err
 			}
 		}
@@ -750,42 +739,23 @@ func (c *importCheckerV3) createReshardTasks(job ImportJob) error {
 	return nil
 }
 
-func (c *importCheckerV3) createReshardTask(job ImportJob, sortSpec *datapb.SortSpec, taskID int64, sources []reshardSource) error {
-	specs := make([]*datapb.SourceFileSpec, 0, len(sources))
+func (c *importCheckerV3) createReshardTask(job ImportJob, taskID int64, sources []reshardSource) error {
+	sourceIDs := make([]int64, 0, len(sources))
 	for _, source := range sources {
-		spec, err := c.buildV3SourceFileSpec(job, source)
-		if err != nil {
-			return err
-		}
-		specs = append(specs, spec)
+		sourceIDs = append(sourceIDs, source.file.GetId())
 	}
 	fragmentSize := Params.DataCoordCfg.ImportFragmentSize.GetAsInt64() * 1024 * 1024
-	backup := importutilv2.IsBackup(job.GetOptions())
-	plan := &datapb.ReshardTaskPlan{
-		CollectionId: job.GetCollectionID(),
-		Schema:       proto.Clone(job.GetSchema()).(*schemapb.CollectionSchema),
-		TempSchema:   buildImportV3TempSchema(job.GetSchema(), backup),
-		Vchannels:    append([]string(nil), job.GetVchannels()...),
-		Partitions:   append([]int64(nil), job.GetPartitionIDs()...),
-		Sort:         proto.Clone(sortSpec).(*datapb.SortSpec),
-		FragmentSize: fragmentSize,
-		Sources:      specs,
-		Backup:       backup,
-	}
-	if err := writeImportV3Proto(c.ctx, c.meta.chunkManager, metautil.BuildImportReshardPlanPath(job.GetJobID(), taskID), plan); err != nil {
-		return err
-	}
 	slot := calculateReshardTaskSlot(
 		Params.DataNodeCfg.ImportBaseBufferSize.GetAsInt64(),
 		fragmentSize,
 		packed.DefaultWriteBufferSize,
 		Params.DataCoordCfg.ImportMemoryLimitPerSlot.GetAsInt64(),
 	)
-	task := newReshardTask(&datapb.ReshardTask{JobId: job.GetJobID(), TaskId: taskID, CollectionId: job.GetCollectionID(), State: datapb.ImportTaskStateV2_Pending, RunId: 1, NodeId: NullNodeID, Slot: slot}, c.importMeta, c.meta, c.alloc)
+	task := newReshardTask(&datapb.ReshardTask{JobId: job.GetJobID(), TaskId: taskID, CollectionId: job.GetCollectionID(), State: datapb.ImportTaskStateV2_Pending, RunId: 1, NodeId: NullNodeID, Slot: slot, SourceIds: sourceIDs}, c.importMeta, c.meta, c.alloc)
 	return c.importMeta.AddTask(c.ctx, task)
 }
 
-func (c *importCheckerV3) buildV3SourceFileSpec(job ImportJob, source reshardSource) (*datapb.SourceFileSpec, error) {
+func buildV3SourceFileSpec(job ImportJob, source reshardSource) (*datapb.SourceFileSpec, error) {
 	var fileType datapb.ImportFileType
 	var err error
 	if importutilv2.IsBackup(job.GetOptions()) {
@@ -829,6 +799,45 @@ func (c *importCheckerV3) buildV3SourceFileSpec(job ImportJob, source reshardSou
 	return spec, nil
 }
 
+// buildReshardTaskPlan re-derives the complete execution input of one
+// ReshardTask at dispatch time from the frozen ImportJob, the task's source
+// ownership and current configuration. No planning object is written to
+// object storage for reshard tasks.
+func buildReshardTaskPlan(job ImportJob, p *datapb.ReshardTask) (*datapb.ReshardTaskPlan, error) {
+	sortSpec, err := getDefaultSortSpec(job.GetSchema())
+	if err != nil {
+		return nil, err
+	}
+	backup := importutilv2.IsBackup(job.GetOptions())
+	jobFiles := make(map[int64]*internalpb.ImportFile, len(job.GetFiles()))
+	for _, file := range job.GetFiles() {
+		jobFiles[file.GetId()] = file
+	}
+	specs := make([]*datapb.SourceFileSpec, 0, len(p.GetSourceIds()))
+	for _, fileID := range p.GetSourceIds() {
+		file := jobFiles[fileID]
+		if file == nil {
+			return nil, merr.WrapErrDataIntegrityMsg("import v3 reshard task %d references source %d outside the job", p.GetTaskId(), fileID)
+		}
+		spec, err := buildV3SourceFileSpec(job, reshardSource{file: file})
+		if err != nil {
+			return nil, err
+		}
+		specs = append(specs, spec)
+	}
+	return &datapb.ReshardTaskPlan{
+		CollectionId: job.GetCollectionID(),
+		Schema:       job.GetSchema(),
+		TempSchema:   buildImportV3TempSchema(job.GetSchema(), backup),
+		Vchannels:    append([]string(nil), job.GetVchannels()...),
+		Partitions:   append([]int64(nil), job.GetPartitionIDs()...),
+		Sort:         sortSpec,
+		FragmentSize: Params.DataCoordCfg.ImportFragmentSize.GetAsInt64() * 1024 * 1024,
+		Sources:      specs,
+		Backup:       backup,
+	}, nil
+}
+
 func (c *importCheckerV3) loadReshardSourceIDs(job ImportJob) (map[int64]struct{}, error) {
 	tasks := c.importMeta.GetTaskByJob(c.ctx, job.GetJobID(), WithType(ReshardTaskType))
 	jobFiles := make(map[int64]struct{}, len(job.GetFiles()))
@@ -845,21 +854,13 @@ func (c *importCheckerV3) loadReshardSourceIDs(job ImportJob) (map[int64]struct{
 			return nil, merr.WrapErrImportSysFailedMsg("import v3 reshard task %d failed: %s", task.GetTaskID(), task.GetReason())
 		}
 		p := task.task.Load()
-		plan := &datapb.ReshardTaskPlan{}
-		if err := loadImportV3Proto(c.ctx, c.meta.chunkManager, metautil.BuildImportReshardPlanPath(job.GetJobID(), p.GetTaskId()), plan); err != nil {
-			return nil, err
+		if p.GetCollectionId() != job.GetCollectionID() {
+			return nil, merr.WrapErrDataIntegrityMsg("import v3 reshard task identity mismatch")
 		}
-		if plan.GetCollectionId() != job.GetCollectionID() {
-			return nil, merr.WrapErrDataIntegrityMsg("import v3 reshard task plan identity mismatch")
+		if len(p.GetSourceIds()) == 0 {
+			return nil, merr.WrapErrDataIntegrityMsg("import v3 reshard task has no source")
 		}
-		if len(plan.GetSources()) == 0 {
-			return nil, merr.WrapErrDataIntegrityMsg("import v3 reshard task plan has no source")
-		}
-		for _, source := range plan.GetSources() {
-			if source == nil || source.GetFile() == nil {
-				return nil, merr.WrapErrDataIntegrityMsg("import v3 reshard task plan has a nil source")
-			}
-			fileID := source.GetFile().GetId()
+		for _, fileID := range p.GetSourceIds() {
 			if _, ok := jobFiles[fileID]; !ok {
 				return nil, merr.WrapErrDataIntegrityMsg("import v3 reshard task contains source %d outside the job", fileID)
 			}
@@ -1005,18 +1006,6 @@ type v3PlanningFragment struct {
 	path           string
 	rows           int64
 	bytes          int64
-}
-
-func loadImportV3Proto(ctx context.Context, cm storage.ChunkManager, objectPath string, target proto.Message) error {
-	fullPath := path.Join(cm.RootPath(), objectPath)
-	data, err := cm.Read(ctx, fullPath)
-	if err != nil {
-		return merr.Wrap(err, "read import v3 planning object")
-	}
-	if err := proto.Unmarshal(data, target); err != nil {
-		return merr.WrapErrDataIntegrity(err, "unmarshal import v3 planning object")
-	}
-	return nil
 }
 
 func (c *importCheckerV3) summarizeReshardResults(job ImportJob) (bool, int64, error) {

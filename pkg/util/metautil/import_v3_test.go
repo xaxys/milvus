@@ -23,6 +23,5 @@ import (
 )
 
 func TestImportV3Paths(t *testing.T) {
-	assert.Equal(t, "import_v3/1/plans/reshard/2/plan.pb", BuildImportReshardPlanPath(1, 2))
 	assert.Equal(t, "import_v3/1/reshard/2/manifests/3.pb", BuildImportReshardResultPath(1, 2, 3))
 }

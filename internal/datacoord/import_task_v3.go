@@ -113,10 +113,16 @@ func (t *reshardTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) 
 		t.fail(fmt.Sprintf("reshard task cannot start: job %d is in state %s", p.GetJobId(), job.GetState()))
 		return
 	}
+	plan, err := buildReshardTaskPlan(job, p)
+	if err != nil {
+		t.fail(err.Error())
+		return
+	}
 	req := &datapb.ReshardTaskRequest{
 		JobId: p.GetJobId(), TaskId: p.GetTaskId(), RunId: p.GetRunId(),
 		Slot: p.GetSlot(), StorageConfig: createStorageConfig(),
 		PluginContext: GetReadPluginContext(job.GetOptions()),
+		Plan:          plan,
 	}
 	WrapPluginContext(t.GetCollectionID(), job.GetSchema().GetProperties(), req)
 	// PrepareRun: persist the intended run/node before the uncertain Create RPC.
@@ -127,7 +133,7 @@ func (t *reshardTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) 
 		mlog.Warn(context.TODO(), "persist reshard task running state failed", WrapTaskLog(t, mlog.Err(err))...)
 		return
 	}
-	err := cluster.CreateReshard(nodeID, req, t.GetCollectionID())
+	err = cluster.CreateReshard(nodeID, req, t.GetCollectionID())
 	if err != nil {
 		mlog.Warn(context.TODO(), "create reshard task failed", WrapTaskLog(t, mlog.Err(err))...)
 		if errors.Is(err, merr.ErrNodeNotFound) || !isTerminalImportV3Err(err) {

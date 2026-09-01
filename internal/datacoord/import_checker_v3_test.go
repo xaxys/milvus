@@ -197,22 +197,14 @@ func TestCreateReshardTasksKeepsExistingAndAddsMissingSources(t *testing.T) {
 		JobID: 1, CollectionID: 2, Schema: schema, Vchannels: []string{"v0"}, PartitionIDs: []int64{3},
 		Files: []*internalpb.ImportFile{{Id: 1, Paths: []string{"existing.json"}}, {Id: 2, Paths: []string{missingPath}}},
 	}, tr: timerecord.NewTimeRecorder("import job")}
-	existingPlan := &datapb.ReshardTaskPlan{
-		CollectionId: 2,
-		Sources:      []*datapb.SourceFileSpec{{File: job.GetFiles()[0]}},
-	}
-	require.NoError(t, writeImportV3Proto(ctx, cm, metautil.BuildImportReshardPlanPath(1, 10), existingPlan))
 	existing := newReshardTask(&datapb.ReshardTask{
-		JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_InProgress,
+		JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_InProgress, SourceIds: []int64{1},
 	}, importMeta, checker.meta, alloc)
 	importMeta.EXPECT().GetTaskByJob(mock.Anything, mock.Anything, mock.Anything).Return([]ImportTask{existing}).Once()
 	importMeta.EXPECT().AddTask(mock.Anything, mock.Anything).Run(func(_ context.Context, added ImportTask) {
-		plan := &datapb.ReshardTaskPlan{}
 		p := added.(*reshardTask).task.Load()
 		require.Equal(t, int64(3), p.GetSlot())
-		require.NoError(t, loadImportV3Proto(ctx, cm, metautil.BuildImportReshardPlanPath(1, p.GetTaskId()), plan))
-		require.Len(t, plan.GetSources(), 1)
-		require.Equal(t, int64(2), plan.GetSources()[0].GetFile().GetId())
+		require.Equal(t, []int64{2}, p.GetSourceIds())
 	}).Return(nil).Once()
 	importMeta.EXPECT().UpdateJob(mock.Anything, int64(1), mock.Anything).Return(nil).Once()
 
@@ -229,16 +221,38 @@ func TestCreateReshardTasksRetriesJobStateWhenSourcesCovered(t *testing.T) {
 		Schema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{{FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true}}},
 		Files:  []*internalpb.ImportFile{{Id: 1, Paths: []string{"existing.json"}}},
 	}, tr: timerecord.NewTimeRecorder("import job")}
-	plan := &datapb.ReshardTaskPlan{
-		CollectionId: 2,
-		Sources:      []*datapb.SourceFileSpec{{File: job.GetFiles()[0]}},
-	}
-	require.NoError(t, writeImportV3Proto(ctx, cm, metautil.BuildImportReshardPlanPath(1, 10), plan))
-	task := newReshardTask(&datapb.ReshardTask{JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_Completed}, importMeta, checker.meta, nil)
+	task := newReshardTask(&datapb.ReshardTask{JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_Completed, SourceIds: []int64{1}}, importMeta, checker.meta, nil)
 	importMeta.EXPECT().GetTaskByJob(mock.Anything, mock.Anything, mock.Anything).Return([]ImportTask{task}).Once()
 	importMeta.EXPECT().UpdateJob(mock.Anything, int64(1), mock.Anything).Return(nil).Once()
 
 	require.NoError(t, checker.createReshardTasks(job))
+}
+
+func TestBuildReshardTaskPlanDerivesExecutionInput(t *testing.T) {
+	schema := &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+		{FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+	}}
+	job := &importJob{ImportJob: &datapb.ImportJob{
+		JobID: 1, CollectionID: 2, Schema: schema, Vchannels: []string{"v0"}, PartitionIDs: []int64{3},
+		Files: []*internalpb.ImportFile{{Id: 1, Paths: []string{"a.json"}}, {Id: 2, Paths: []string{"b.json"}}},
+	}}
+	task := &datapb.ReshardTask{JobId: 1, TaskId: 10, CollectionId: 2, SourceIds: []int64{2}}
+	plan, err := buildReshardTaskPlan(job, task)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), plan.GetCollectionId())
+	require.Len(t, plan.GetSources(), 1)
+	require.Equal(t, int64(2), plan.GetSources()[0].GetFile().GetId())
+	require.Equal(t, []string{"v0"}, plan.GetVchannels())
+	require.Equal(t, []int64{3}, plan.GetPartitions())
+	require.NotNil(t, plan.GetSchema())
+	require.NotNil(t, plan.GetTempSchema())
+	require.NotEmpty(t, plan.GetSort().GetFields())
+	require.False(t, plan.GetBackup())
+	require.Greater(t, plan.GetFragmentSize(), int64(0))
+
+	task.SourceIds = []int64{9}
+	_, err = buildReshardTaskPlan(job, task)
+	require.Error(t, err)
 }
 
 func TestCreateImportV3TaskRejectsMissingDataTs(t *testing.T) {
@@ -473,7 +487,7 @@ func TestImportCheckerV3CheckGCDeletesPastCleanup(t *testing.T) {
 		CleanupTs: tsoutil.ComposeTSByTime(time.Now().Add(-time.Hour)),
 	}}
 
-	planPath := path.Join(cm.RootPath(), metautil.BuildImportV3JobPath(1), "plans", "reshard", "10", "plan.pb")
+	planPath := path.Join(cm.RootPath(), metautil.BuildImportReshardResultPath(1, 10, 1))
 	require.NoError(t, cm.Write(ctx, planPath, []byte("plan")))
 	// Quiesce sees no tasks; delete runs RemoveWithPrefix then RemoveJob.
 	importMeta.EXPECT().GetTaskByJob(mock.Anything, mock.Anything).Return(nil).Twice()
@@ -501,7 +515,7 @@ func TestImportCheckerV3RollbackGateBlocksDelete(t *testing.T) {
 	}
 	checker.hooks.isReplicatingCluster = func(ctx context.Context) (bool, error) { return true, nil }
 
-	planPath := path.Join(cm.RootPath(), metautil.BuildImportV3JobPath(1), "plans", "reshard", "10", "plan.pb")
+	planPath := path.Join(cm.RootPath(), metautil.BuildImportReshardResultPath(1, 10, 1))
 	require.NoError(t, cm.Write(ctx, planPath, []byte("plan")))
 
 	// Rollback broadcast fails transiently: keep the job, no delete this tick.

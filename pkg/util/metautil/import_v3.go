@@ -16,10 +16,6 @@ func BuildImportV3JobPath(jobID int64) string {
 	return path.Join(ImportV3RootPath, JoinIDPath(jobID))
 }
 
-func BuildImportReshardPlanPath(jobID, taskID int64) string {
-	return path.Join(BuildImportV3JobPath(jobID), "plans", "reshard", JoinIDPath(taskID), "plan.pb")
-}
-
 func BuildImportReshardOutputPath(jobID, taskID int64) string {
 	return path.Join(BuildImportV3JobPath(jobID), "reshard", JoinIDPath(taskID))
 }
