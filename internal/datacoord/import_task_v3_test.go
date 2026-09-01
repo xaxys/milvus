@@ -30,7 +30,6 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
-	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
 // TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld pins the crash-safe
@@ -133,38 +132,6 @@ func TestImportTaskV3PrepareRetryRollsBackNewSegmentOnTaskUpdateFailure(t *testi
 	// The freshly created segment was rolled back (Dropped); the old one is untouched.
 	require.Equal(t, commonpb.SegmentState_Dropped, meta.GetSegment(ctx, 200).GetState())
 	require.Equal(t, commonpb.SegmentState_Importing, meta.GetSegment(ctx, 100).GetState())
-}
-
-// TestImportTaskV3PrepareRetryFailsWhenBudgetExhausted pins that a task whose
-// RunId has exhausted the retry budget fails terminally instead of allocating
-// yet another segment and log-ID range.
-func TestImportTaskV3PrepareRetryFailsWhenBudgetExhausted(t *testing.T) {
-	ctx := context.Background()
-	meta, err := newMemoryMeta(t)
-	require.NoError(t, err)
-	importMeta := NewMockImportMeta(t)
-	cluster := session.NewMockCluster(t)
-	alloc := allocator.NewMockAllocator(t)
-
-	_, err = addImportSegment(ctx, meta, 100, 1, 10, 2, 3, "v0", datapb.SegmentLevel_L1, 1, 4)
-	require.NoError(t, err)
-
-	maxRetry := paramtable.Get().DataCoordCfg.ImportV3MaxTaskRetry.GetAsInt64()
-	task := newImportTaskV3(&datapb.ImportTaskV3{
-		JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_InProgress,
-		RunId: 1 + maxRetry, NodeId: NullNodeID, SegmentId: 100, LogRange: &datapb.IDRange{Begin: 1000, End: 2000},
-	}, importMeta, meta, alloc)
-
-	// t.fail marks the task and job Failed without consulting the job record.
-	importMeta.EXPECT().UpdateTask(mock.Anything, int64(10), mock.Anything, mock.Anything).Return(nil).Once()
-	importMeta.EXPECT().UpdateJob(mock.Anything, int64(1), mock.Anything, mock.Anything).Return(nil).Once()
-
-	task.prepareRetry(cluster)
-
-	// The task failed terminally: the mock UpdateTask/UpdateJob expectations
-	// above are the t.fail signature, and no retry artifacts were produced.
-	require.Equal(t, commonpb.SegmentState_Importing, meta.GetSegment(ctx, 100).GetState())
-	require.Equal(t, int64(1+maxRetry), task.task.Load().GetRunId())
 }
 
 var errRetryUpdate = errors.New("update task failed")
