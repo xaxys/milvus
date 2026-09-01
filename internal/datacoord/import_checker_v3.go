@@ -1325,7 +1325,7 @@ func (c *importCheckerV3) createImportV3Task(
 		SegmentId: segmentID, LogRange: &datapb.IDRange{Begin: logBegin, End: logEnd},
 		Slot: slot, Rows: spec.rows,
 		Fragments: append([]*datapb.FragmentRef(nil), spec.fragments...),
-		Vchannel: spec.channel, PartitionId: spec.partitionID,
+		Vchannel:  spec.channel, PartitionId: spec.partitionID,
 	}, c.importMeta, c.meta, c.alloc)
 	if err := c.importMeta.AddTask(c.ctx, task); err != nil {
 		return err
@@ -1427,7 +1427,6 @@ func buildImportV3TaskPlan(job ImportJob, p *datapb.ImportTaskV3) (*datapb.Impor
 		TempSchema:   buildImportV3TempSchema(job.GetSchema(), backup),
 		DataTs:       job.GetDataTs(),
 		CollectionId: job.GetCollectionID(),
-		ClusterId:    Params.CommonCfg.ClusterPrefix.GetValue(),
 		Backup:       backup,
 	}, nil
 }

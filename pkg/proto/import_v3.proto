@@ -121,7 +121,6 @@ message ImportTaskPlan {
   schema.CollectionSchema temp_schema = 9;
   uint64 data_ts = 10;
   int64 collection_id = 11;
-  string cluster_id = 12;
   // Whether the job restores backup/binlog files. Fragments of a backup job
   // already carry every function output column; ordinary fragments carry them
   // because Reshard computed them.
