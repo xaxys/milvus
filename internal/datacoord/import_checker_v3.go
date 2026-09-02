@@ -38,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
 	importbinlog "github.com/milvus-io/milvus/internal/util/importutilv2/binlog"
+	importparquet "github.com/milvus-io/milvus/internal/util/importutilv2/parquet"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -671,8 +672,14 @@ func calculateV3Slots(workingSet, memoryPerSlot int64) int64 {
 	return max((workingSet+memoryPerSlot-1)/memoryPerSlot, 1)
 }
 
-func calculateReshardTaskSlot(readBuffer, fragmentTarget, writerBuffer, memoryPerSlot int64) int64 {
-	workingSet := 3*readBuffer + 2*fragmentTarget + writerBuffer
+// calculateReshardTaskSlot sizes a reshard task's working set from the same
+// physical components the reader actually holds: the fixed parquet read
+// buffered stream (charged once, sources are read sequentially), the in-flight
+// source/normalized/routed batches, the resident bucket plus its Sort
+// materialization, and the packed writer buffer. No churn/GC multiplier is
+// applied; that headroom is still being measured.
+func calculateReshardTaskSlot(parquetReadBuffer, readBuffer, fragmentTarget, writerBuffer, memoryPerSlot int64) int64 {
+	workingSet := parquetReadBuffer + 3*readBuffer + 2*fragmentTarget + writerBuffer
 	return calculateV3Slots(workingSet, memoryPerSlot)
 }
 
@@ -750,6 +757,7 @@ func (c *importCheckerV3) createReshardTask(job ImportJob, taskID int64, sources
 	}
 	fragmentSize := Params.DataCoordCfg.ImportFragmentSize.GetAsInt64() * 1024 * 1024
 	slot := calculateReshardTaskSlot(
+		importparquet.TotalReadBufferSize,
 		Params.DataNodeCfg.ImportBaseBufferSize.GetAsInt64(),
 		fragmentSize,
 		packed.DefaultWriteBufferSize,

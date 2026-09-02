@@ -34,7 +34,11 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
-const totalReadBufferSize = int64(64 * 1024 * 1024)
+// TotalReadBufferSize is the fixed in-memory buffered-stream budget a parquet
+// reader holds for the whole read phase, split evenly across columns. The
+// import slot estimate charges it once per task because reshard reads its
+// sources sequentially with one reader at a time.
+const TotalReadBufferSize = int64(64 * 1024 * 1024)
 
 type reader struct {
 	ctx    context.Context
@@ -64,7 +68,7 @@ func NewReader(ctx context.Context, cm storage.ChunkManager, schema *schemapb.Co
 	// Each ColumnReader consumes ReaderProperties.BufferSize memory independently.
 	// Therefore, the bufferSize should be divided by the number of columns
 	// to ensure total memory usage stays within the intended limit.
-	columnReaderBufferSize := totalReadBufferSize / int64(len(allFields))
+	columnReaderBufferSize := TotalReadBufferSize / int64(len(allFields))
 
 	r, err := file.NewParquetReader(retryableReader, file.WithReadProps(&parquet.ReaderProperties{
 		BufferSize:            columnReaderBufferSize,

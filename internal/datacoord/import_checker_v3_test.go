@@ -87,7 +87,10 @@ func TestCleanupPreparingV3ImportTasksIsIdempotent(t *testing.T) {
 func TestCalculateV3TaskSlots(t *testing.T) {
 	const mib = int64(1024 * 1024)
 
-	require.Equal(t, int64(3), calculateReshardTaskSlot(16*mib, 128*mib, 32*mib, 160*mib))
+	require.Equal(t, int64(3), calculateReshardTaskSlot(64*mib, 16*mib, 128*mib, 32*mib, 160*mib))
+	// With the parquet read buffer charged, a 340 MiB per-slot limit no longer
+	// fits the 400 MiB working set, even though the old 336 MiB sum did.
+	require.Equal(t, int64(2), calculateReshardTaskSlot(64*mib, 16*mib, 128*mib, 32*mib, 340*mib))
 	require.Equal(t, int64(4), calculateV3ImportTaskSlot(16*mib, 32*mib, 160*mib, 16))
 	require.Equal(t, int64(1), calculateV3Slots(1, 160*mib))
 	require.Equal(t, int64(2), calculateV3Slots(160*mib+1, 160*mib))
