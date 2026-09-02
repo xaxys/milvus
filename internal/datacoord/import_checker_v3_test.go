@@ -261,6 +261,46 @@ func TestBuildReshardTaskPlanDerivesExecutionInput(t *testing.T) {
 	require.Error(t, err)
 }
 
+// fragmentSizeInMB is refreshable but validated only at startup; a hot refresh
+// to an invalid value must fail plan building loudly instead of reaching the
+// DataNode as a zero fragment target (which would flush every non-empty bucket
+// after every batch).
+func TestBuildReshardTaskPlanRejectsInvalidFragmentSize(t *testing.T) {
+	liveKey := paramtable.Get().DataCoordCfg.ImportFragmentSize.Key
+	schema := &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+		{FieldID: 100, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+	}}
+	job := &importJob{ImportJob: &datapb.ImportJob{
+		JobID: 1, CollectionID: 2, Schema: schema, Vchannels: []string{"v0"}, PartitionIDs: []int64{3},
+		Files: []*internalpb.ImportFile{{Id: 1, Paths: []string{"a.json"}}},
+	}}
+	task := &datapb.ReshardTask{JobId: 1, TaskId: 10, CollectionId: 2, SourceIds: []int64{1}}
+	for _, invalid := range []string{"0", "", "not-a-number", "-4"} {
+		paramtable.Get().Save(liveKey, invalid)
+		_, err := buildReshardTaskPlan(job, task)
+		require.Error(t, err, "value=%q", invalid)
+		require.Contains(t, err.Error(), "fragmentSizeInMB")
+	}
+	paramtable.Get().Reset(liveKey)
+}
+
+// createReshardTask must reject an invalid live fragment size with a terminal
+// error so the checker fails the job instead of reserving a bogus slot.
+func TestCreateReshardTaskRejectsInvalidFragmentSize(t *testing.T) {
+	liveKey := paramtable.Get().DataCoordCfg.ImportFragmentSize.Key
+	paramtable.Get().Save(liveKey, "0")
+	defer paramtable.Get().Reset(liveKey)
+
+	importMeta := NewMockImportMeta(t)
+	checker := &importCheckerV3{ctx: context.Background(), importMeta: importMeta}
+	job := &importJob{ImportJob: &datapb.ImportJob{JobID: 1, CollectionID: 2}}
+
+	err := checker.createReshardTask(job, 10, []reshardSource{{file: &internalpb.ImportFile{Id: 1}, size: 1}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "fragmentSizeInMB")
+	require.True(t, isTerminalImportV3Err(err))
+}
+
 func TestCreateImportV3TaskRejectsMissingDataTs(t *testing.T) {
 	checker := &importCheckerV3{ctx: context.Background()}
 	job := &importJob{ImportJob: &datapb.ImportJob{JobID: 1, CollectionID: 2}}

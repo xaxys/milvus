@@ -192,6 +192,12 @@ func executeReshardPlan(ctx context.Context, cm storage.ChunkManager, req *datap
 	bufferSize := paramtable.Get().DataNodeCfg.ImportBaseBufferSize.GetAsInt64()
 	maxFileSize := int64(paramtable.Get().DataNodeCfg.MaxImportFileSizeInGB.GetAsFloat() * 1024 * 1024 * 1024)
 	fragmentTarget := plan.GetFragmentSize()
+	// Contract: DataCoord validates a positive fragment size at plan build time.
+	// A non-positive target would flush every non-empty bucket after every batch
+	// (fragment count = batches x buckets), so fail loudly at the boundary too.
+	if fragmentTarget <= 0 {
+		return merr.WrapErrImportSysFailedMsg("invalid ReshardTask fragment size %d", fragmentTarget)
+	}
 	slot := req.GetSlot()
 	if slot <= 0 {
 		slot = 1

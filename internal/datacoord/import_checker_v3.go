@@ -755,7 +755,10 @@ func (c *importCheckerV3) createReshardTask(job ImportJob, taskID int64, sources
 	for _, source := range sources {
 		sourceIDs = append(sourceIDs, source.file.GetId())
 	}
-	fragmentSize := Params.DataCoordCfg.ImportFragmentSize.GetAsInt64() * 1024 * 1024
+	fragmentSize, err := importFragmentSizeBytes()
+	if err != nil {
+		return err
+	}
 	slot := calculateReshardTaskSlot(
 		importparquet.TotalReadBufferSize,
 		Params.DataNodeCfg.ImportBaseBufferSize.GetAsInt64(),
@@ -837,6 +840,10 @@ func buildReshardTaskPlan(job ImportJob, p *datapb.ReshardTask) (*datapb.Reshard
 		}
 		specs = append(specs, spec)
 	}
+	fragmentSize, err := importFragmentSizeBytes()
+	if err != nil {
+		return nil, err
+	}
 	return &datapb.ReshardTaskPlan{
 		CollectionId: job.GetCollectionID(),
 		Schema:       job.GetSchema(),
@@ -844,10 +851,25 @@ func buildReshardTaskPlan(job ImportJob, p *datapb.ReshardTask) (*datapb.Reshard
 		Vchannels:    append([]string(nil), job.GetVchannels()...),
 		Partitions:   append([]int64(nil), job.GetPartitionIDs()...),
 		Sort:         sortSpec,
-		FragmentSize: Params.DataCoordCfg.ImportFragmentSize.GetAsInt64() * 1024 * 1024,
+		FragmentSize: fragmentSize,
 		Sources:      specs,
 		Backup:       backup,
 	}, nil
+}
+
+// importFragmentSizeBytes resolves the live fragment size config in bytes. The
+// parameter is refreshable but only validated once at startup, so a hot
+// refresh to an empty, non-numeric or non-positive value must fail the consumer
+// loudly instead of reaching the DataNode as a zero fragment target (which
+// would flush every non-empty bucket after every batch).
+func importFragmentSizeBytes() (int64, error) {
+	sizeInMB := Params.DataCoordCfg.ImportFragmentSize.GetAsInt64()
+	if sizeInMB <= 0 {
+		return 0, merr.WrapErrImportSysFailedMsg(
+			"dataCoord.import.fragmentSizeInMB must be positive, got %q",
+			Params.DataCoordCfg.ImportFragmentSize.GetValue())
+	}
+	return sizeInMB * 1024 * 1024, nil
 }
 
 func (c *importCheckerV3) loadReshardSourceIDs(job ImportJob) (map[int64]struct{}, error) {
