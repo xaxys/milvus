@@ -72,7 +72,13 @@ func HashDataBySchema(schema *schemapb.CollectionSchema, vchannels []string, par
 	f1 := hashByVChannel(int64(channelNum), pkField)
 	f2 := hashByPartition(int64(partitionNum), partKeyField)
 
-	rowsHint := (rows.GetRowNum() + channelNum*partitionNum - 1) / (channelNum * partitionNum)
+	// Floor, not ceil: when buckets outnumber rows, ceiling forces one full row
+	// of capacity into every bucket and reserves numBuckets x rowSize per batch
+	// regardless of the batch size — an OOM hazard for high-dim vectors on
+	// partition-key collections with many partitions. Floor keeps the total
+	// reservation bounded by the batch row count and lets sparse buckets grow
+	// on demand.
+	rowsHint := rows.GetRowNum() / (channelNum * partitionNum)
 	res, err := newHashedData(schema, channelNum, partitionNum, rowsHint)
 	if err != nil {
 		return nil, err
