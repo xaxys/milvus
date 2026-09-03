@@ -324,9 +324,11 @@ func (c *importCheckerV3) checkImportingJob(job ImportJob) {
 	log := mlog.With(mlog.FieldJobID(job.GetJobID()))
 	currentSchemaVersion, err := validateImportV3Schema(c.meta, job.GetCollectionID(), job.GetSchema())
 	if err != nil {
-		log.Warn(c.ctx, "import v3 schema changed incompatibly before index build", mlog.Err(err))
-		if updateErr := c.importMeta.UpdateJob(c.ctx, job.GetJobID(), UpdateJobState(internalpb.ImportJobState_Failed), UpdateJobReason(err.Error())); updateErr != nil {
-			log.Warn(c.ctx, "failed to update job state to Failed", mlog.Err(updateErr))
+		log.Warn(c.ctx, "import v3 schema validation failed", mlog.Err(err))
+		if isTerminalImportV3Err(err) {
+			if updateErr := c.importMeta.UpdateJob(c.ctx, job.GetJobID(), UpdateJobState(internalpb.ImportJobState_Failed), UpdateJobReason(err.Error())); updateErr != nil {
+				log.Warn(c.ctx, "failed to update job state to Failed", mlog.Err(updateErr))
+			}
 		}
 		return
 	}
@@ -1320,6 +1322,23 @@ func missingV3ImportTaskSpecs(
 	return buildV3SegmentPlans(missingFragments, vchannels, partitionIDs, target), nil
 }
 
+// importV3LogRangeWidth returns the number of log IDs one imported segment
+// consumes under the given writer spec: one manifest plus one log per BM25
+// field, and for StorageV2 one packed binlog per column group. Every (re)alloc
+// of a task's LogRange must size it from the same spec the dispatch plan
+// carries, so a hot-flipped storage version cannot exhaust a range that was
+// sized for the old version.
+func importV3LogRangeWidth(writerSpec *datapb.WriterSpec) (int64, error) {
+	perSegment := int64(1 + len(writerSpec.GetBm25Fields()))
+	if writerSpec.GetStorageVersion() == storage.StorageV2 {
+		perSegment += int64(len(writerSpec.GetGroups()))
+	}
+	if perSegment <= 0 || perSegment > math.MaxUint32 {
+		return 0, merr.WrapErrImportSysFailedMsg("import v3 log id budget is invalid")
+	}
+	return perSegment, nil
+}
+
 func (c *importCheckerV3) createImportV3Task(
 	job ImportJob,
 	writerSpec *datapb.WriterSpec,
@@ -1333,12 +1352,9 @@ func (c *importCheckerV3) createImportV3Task(
 		// step instead.
 		return merr.WrapErrImportSysFailedMsg("import v3 job %d has no data timestamp", job.GetJobID())
 	}
-	perSegment := int64(1 + len(writerSpec.GetBm25Fields()))
-	if writerSpec.GetStorageVersion() == storage.StorageV2 {
-		perSegment += int64(len(writerSpec.GetGroups()))
-	}
-	if perSegment <= 0 || perSegment > math.MaxUint32 {
-		return merr.WrapErrImportSysFailedMsg("import v3 log id budget is invalid")
+	perSegment, err := importV3LogRangeWidth(writerSpec)
+	if err != nil {
+		return err
 	}
 	logBegin, logEnd, err := c.alloc.AllocN(perSegment)
 	if err != nil {

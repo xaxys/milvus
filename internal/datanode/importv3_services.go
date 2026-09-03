@@ -684,7 +684,12 @@ func executeImportPlan(ctx context.Context, cm storage.ChunkManager, req *datapb
 	logAllocator := allocator.NewLocalAllocator(req.GetLogRange().GetBegin(), req.GetLogRange().GetEnd())
 	writerSpec := plan.GetWriter()
 	segmentID := req.GetSegmentId()
-	writerOptions, err := buildImportV3WriterOptions(req.GetStorageConfig(), plan.GetCollectionId(), plan.GetPartitionId(), targetSchema, writerSpec, pluginContext)
+	// The final segment writer must encrypt with the target collection's zone,
+	// never the read/source context (which for a backup import is the source
+	// cluster's zone). Passing no plugin context lets the writer derive the
+	// target zone from the schema properties, matching the V2 import path. The
+	// read paths below keep pluginContext so backup fragments decrypt correctly.
+	writerOptions, err := buildImportV3WriterOptions(req.GetStorageConfig(), plan.GetCollectionId(), plan.GetPartitionId(), targetSchema, writerSpec)
 	if err != nil {
 		return nil, err
 	}
@@ -745,7 +750,12 @@ func executeImportPlan(ctx context.Context, cm storage.ChunkManager, req *datapb
 	return []*datapb.SegmentResult{segmentResult}, nil
 }
 
-func buildImportV3WriterOptions(storageConfig *indexpb.StorageConfig, collectionID, partitionID int64, targetSchema *schemapb.CollectionSchema, spec *datapb.WriterSpec, pluginContext *indexcgopb.StoragePluginContext) ([]storage.RwOption, error) {
+// buildImportV3WriterOptions builds the options for the final segment writer.
+// It deliberately takes no plugin context: the writer must encrypt with the
+// target collection's encryption zone, which the writer derives from the schema
+// properties (see storage.NewBinlogRecordWriter). Feeding the read/source
+// context here would encrypt target data with a foreign zone's key.
+func buildImportV3WriterOptions(storageConfig *indexpb.StorageConfig, collectionID, partitionID int64, targetSchema *schemapb.CollectionSchema, spec *datapb.WriterSpec) ([]storage.RwOption, error) {
 	bfType := bloomfilter.BFTypeFromString(spec.GetBloomType())
 	if (bfType != bloomfilter.BasicBF && bfType != bloomfilter.BlockedBF) || spec.GetBloomFpp() <= 0 || spec.GetBloomFpp() >= 1 {
 		return nil, merr.WrapErrDataIntegrityMsg("ImportTaskV3 WriterSpec Bloom filter config is invalid")
@@ -772,7 +782,6 @@ func buildImportV3WriterOptions(storageConfig *indexpb.StorageConfig, collection
 		storage.WithMultiPartUploadSize(multipartSize),
 		storage.WithColumnGroups(groups),
 		storage.WithStorageConfig(storageConfig),
-		storage.WithPluginContext(pluginContext),
 		storage.WithWriterFormat(spec.GetFormat()),
 		storage.WithPkStatsConfig(storage.PkStatsConfig{
 			Capacity: spec.GetPkCapacity(), BloomFilterType: spec.GetBloomType(), MaxBloomFalsePositive: spec.GetBloomFpp(),

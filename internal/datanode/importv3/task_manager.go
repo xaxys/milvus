@@ -11,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 
+	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -122,7 +123,11 @@ func (m *TaskManager) Add(taskID, runID, slot int64, execute Run) error {
 				t.state = StateRetry
 				t.reason = ctx.Err().Error()
 			} else {
-				if errors.Is(err, packed.ErrLoonTransient) || merr.IsRetryableErr(err) {
+				// ID exhaustion means the pre-allocated LogRange was sized for a
+				// different storage version than the dispatch plan used (a
+				// hot-flipped useLoonFFI). It is retried, not failed: DataCoord's
+				// prepareRetry re-derives the width from the current version.
+				if errors.Is(err, packed.ErrLoonTransient) || allocator.IsIDExhausted(err) || merr.IsRetryableErr(err) {
 					t.state = StateRetry
 				} else {
 					t.state = StateFailed

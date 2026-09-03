@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	"github.com/milvus-io/milvus/internal/metastore/mocks"
@@ -55,7 +56,7 @@ func TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld(t *testing.T) {
 	require.Equal(t, commonpb.SegmentState_Importing, oldSeg.GetState())
 
 	job := &importJob{ImportJob: &datapb.ImportJob{
-		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1,
+		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1, Schema: retryTestSchema,
 	}}
 	task := newImportTaskV3(&datapb.ImportTaskV3{
 		JobId: 1, TaskId: 10, CollectionId: 2, PartitionId: 3, Vchannel: "v0",
@@ -66,7 +67,7 @@ func TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld(t *testing.T) {
 	importMeta.EXPECT().GetJob(mock.Anything, int64(1)).Return(job).Once()
 	cluster.EXPECT().DropImportV3(int64(5), mock.Anything).Return(nil).Once()
 	alloc.EXPECT().AllocID(mock.Anything).Return(int64(200), nil).Once()
-	alloc.EXPECT().AllocN(int64(1000)).Return(int64(5000), int64(6000), nil).Once()
+	alloc.EXPECT().AllocN(mock.Anything).Return(int64(5000), int64(6000), nil).Once()
 
 	var repointBeforeDrop bool
 	importMeta.EXPECT().UpdateTask(mock.Anything, int64(10),
@@ -114,7 +115,7 @@ func TestImportTaskV3PrepareRetryUnacceptedRunRemovesBasePath(t *testing.T) {
 	alloc := allocator.NewMockAllocator(t)
 
 	job := &importJob{ImportJob: &datapb.ImportJob{
-		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1,
+		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1, Schema: retryTestSchema,
 	}}
 	task := newImportTaskV3(&datapb.ImportTaskV3{
 		JobId: 1, TaskId: 10, CollectionId: 2, PartitionId: 3, Vchannel: "v0",
@@ -128,7 +129,7 @@ func TestImportTaskV3PrepareRetryUnacceptedRunRemovesBasePath(t *testing.T) {
 
 	importMeta.EXPECT().GetJob(mock.Anything, int64(1)).Return(job).Once()
 	alloc.EXPECT().AllocID(mock.Anything).Return(int64(200), nil).Once()
-	alloc.EXPECT().AllocN(int64(1000)).Return(int64(5000), int64(6000), nil).Once()
+	alloc.EXPECT().AllocN(mock.Anything).Return(int64(5000), int64(6000), nil).Once()
 	importMeta.EXPECT().UpdateTask(mock.Anything, int64(10),
 		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(nil).Once()
@@ -157,7 +158,7 @@ func TestImportTaskV3PrepareRetryFailsJobOnTaskUpdateFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	job := &importJob{ImportJob: &datapb.ImportJob{
-		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1,
+		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1, Schema: retryTestSchema,
 	}}
 	task := newImportTaskV3(&datapb.ImportTaskV3{
 		JobId: 1, TaskId: 10, CollectionId: 2, PartitionId: 3, Vchannel: "v0",
@@ -167,7 +168,7 @@ func TestImportTaskV3PrepareRetryFailsJobOnTaskUpdateFailure(t *testing.T) {
 
 	importMeta.EXPECT().GetJob(mock.Anything, int64(1)).Return(job).Once()
 	alloc.EXPECT().AllocID(mock.Anything).Return(int64(200), nil).Once()
-	alloc.EXPECT().AllocN(int64(1000)).Return(int64(5000), int64(6000), nil).Once()
+	alloc.EXPECT().AllocN(mock.Anything).Return(int64(5000), int64(6000), nil).Once()
 	importMeta.EXPECT().UpdateTask(mock.Anything, int64(10),
 		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(errRetryUpdate).Once()
@@ -183,6 +184,15 @@ func TestImportTaskV3PrepareRetryFailsJobOnTaskUpdateFailure(t *testing.T) {
 }
 
 var errRetryUpdate = errors.New("update task failed")
+
+// retryTestSchema gives prepareRetry's LogRange-width re-derivation
+// (buildImportV3WriterSpec) a valid target schema; production jobs always
+// carry one, but the retry tests construct minimal jobs.
+var retryTestSchema = &schemapb.CollectionSchema{
+	Fields: []*schemapb.FieldSchema{
+		{FieldID: 100, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+	},
+}
 
 func TestReconcileOrphanImportSegments(t *testing.T) {
 	ctx := context.Background()

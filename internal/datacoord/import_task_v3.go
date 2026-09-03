@@ -47,6 +47,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 type reshardTask struct {
@@ -459,11 +460,23 @@ func (t *importTaskV3) prepareRetry(cluster session.Cluster) {
 		t.fail(err.Error())
 		return
 	}
-	// The existing log range is fixed for a plan. A retried run gets a fresh
-	// range so a late old writer cannot reuse current segment log IDs; the fresh
-	// segment ID likewise isolates the new run's object paths from any late
-	// writer of the superseded run.
-	begin, end, err := t.alloc.AllocN(p.GetLogRange().GetEnd() - p.GetLogRange().GetBegin())
+	// A retried run gets a fresh range so a late old writer cannot reuse current
+	// segment log IDs; the fresh segment ID likewise isolates the new run's
+	// object paths from any late writer of the superseded run. The width is
+	// re-derived from the current storage version rather than copied from the
+	// superseded range, so a hot-flipped useLoonFFI cannot exhaust a range that
+	// was sized for the old version.
+	writerSpec, err := buildImportV3WriterSpec(typeutil.AppendSystemFields(job.GetSchema()))
+	if err != nil {
+		t.fail(err.Error())
+		return
+	}
+	width, err := importV3LogRangeWidth(writerSpec)
+	if err != nil {
+		t.fail(err.Error())
+		return
+	}
+	begin, end, err := t.alloc.AllocN(width)
 	if err != nil {
 		t.fail(err.Error())
 		return
