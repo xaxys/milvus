@@ -66,14 +66,6 @@ type GcOption struct {
 	// wired by the server from ImportMeta so the orphan scan never deletes an
 	// active job's import_v3/{job_id}/ prefix. nil disables the import_v3 scan.
 	importJobAlive func(ctx context.Context, jobID int64) bool
-
-	// importV3SegmentIDs reports the segment IDs referenced by persisted
-	// ImportTaskV3 records. Import V3 registers a segment only at result
-	// acceptance, so an in-progress task's output files are unregistered and
-	// would otherwise look like orphans to the file scan; while the task
-	// record references the segment ID, those files are owned and must be
-	// skipped. nil disables the exemption.
-	importV3SegmentIDs func(ctx context.Context) map[int64]struct{}
 }
 
 // garbageCollector handles garbage files in object storage
@@ -779,27 +771,6 @@ func (gc *garbageCollector) recycleUnusedBinLogWithChecker(ctx context.Context, 
 		return snapshotMeta.IsSegmentGCBlocked(collectionID, segmentID)
 	}
 
-	// Import V3 registers a segment only at result acceptance, so an
-	// in-progress task's output files are unregistered. Exempt files whose
-	// segment ID is referenced by a persisted ImportTaskV3 record. The set is
-	// read at most once per scan pass; staleness is one-directional and safe:
-	// a task created after the read can only have written files younger than
-	// this pass, which the missingTolerance age check above already protects,
-	// and a task record removed after the read merely delays reclamation of
-	// truly abandoned files to the next pass.
-	var importV3OwnedOnce sync.Once
-	var importV3OwnedIDs map[int64]struct{}
-	isImportV3Owned := func(segmentID int64) bool {
-		if gc.option.importV3SegmentIDs == nil {
-			return false
-		}
-		importV3OwnedOnce.Do(func() {
-			importV3OwnedIDs = gc.option.importV3SegmentIDs(ctx)
-		})
-		_, ok := importV3OwnedIDs[segmentID]
-		return ok
-	}
-
 	futures := make([]*conc.Future[struct{}], 0)
 	err := gc.option.cli.WalkWithPrefix(ctx, prefix, true, func(chunkInfo *storage.ChunkObjectInfo) bool {
 		total++
@@ -849,17 +820,6 @@ func (gc *garbageCollector) recycleUnusedBinLogWithChecker(ctx context.Context, 
 
 		// Skip V3 segments — orphan files managed by loon
 		if segment != nil && segment.GetStorageVersion() == storage.StorageV3 {
-			valid++
-			return true
-		}
-
-		// Import V3 ownership exemption: an ImportTaskV3 registers its segment
-		// only at result acceptance, so in-progress output files are
-		// unregistered. While the task record references the segment ID,
-		// absence from segment meta does not mean unowned. This check sits on
-		// the common path because both the binlog-shaped parse above and the
-		// V3 fallback can surface an import segment ID.
-		if segment == nil && isImportV3Owned(segmentID) {
 			valid++
 			return true
 		}

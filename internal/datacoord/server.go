@@ -506,20 +506,6 @@ func (s *Server) initGarbageCollection(cli storage.ChunkManager) {
 		importJobAlive: func(ctx context.Context, jobID int64) bool {
 			return s.importMeta.GetJob(ctx, jobID) != nil
 		},
-		importV3SegmentIDs: func(ctx context.Context) map[int64]struct{} {
-			tasks := s.importMeta.GetTaskBy(ctx, WithType(ImportTaskV3Type))
-			ids := make(map[int64]struct{}, len(tasks))
-			for _, task := range tasks {
-				v3Task, ok := task.(*importTaskV3)
-				if !ok {
-					continue
-				}
-				if segmentID := v3Task.task.Load().GetSegmentId(); segmentID != 0 {
-					ids[segmentID] = struct{}{}
-				}
-			}
-			return ids
-		},
 	})
 }
 
