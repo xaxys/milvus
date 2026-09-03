@@ -271,6 +271,63 @@ func Test_garbageCollector_scan(t *testing.T) {
 	cleanupOSS(cli, bucketName, rootPath)
 }
 
+// Test_garbageCollector_importingSegmentStatsKept pins that a stats file under
+// an Importing segment is retained even though its log ID is not registered in
+// Statslogs yet. Import V3 pre-registers the segment at task creation but
+// persists Statslogs only at acceptance, while the PK stats file is already
+// written under stats_log/ and the task may retry indefinitely.
+func Test_garbageCollector_importingSegmentStatsKept(t *testing.T) {
+	rootPath := paramtable.Get().MinioCfg.RootPath.GetValue()
+	newGC := func(meta *meta, cli *storage.RemoteChunkManager) *garbageCollector {
+		return newGarbageCollector(meta, newMockHandler(), GcOption{
+			cli:              cli,
+			enabled:          true,
+			checkInterval:    time.Minute * 30,
+			scanInterval:     time.Hour * 7 * 24,
+			missingTolerance: 0,
+			dropTolerance:    time.Hour * 24,
+		})
+	}
+
+	t.Run("importing segment keeps unregistered stats", func(t *testing.T) {
+		bucketName := `datacoord-ut` + strings.ToLower(funcutil.RandomString(8))
+		cli, _, stats, _, _, err := initUtOSSEnv(bucketName, rootPath, 1)
+		require.NoError(t, err)
+
+		meta, err := newMemoryMeta(t)
+		require.NoError(t, err)
+		segment := buildSegment(1, 10, 100, "ch")
+		segment.State = commonpb.SegmentState_Importing
+		segment.IsImporting = true
+		require.NoError(t, meta.AddSegment(context.TODO(), segment))
+
+		gc := newGC(meta, cli)
+		gc.recycleUnusedBinlogFiles(context.TODO())
+		validateMinioPrefixElements(t, cli, bucketName, path.Join(rootPath, common.SegmentStatslogPath), stats)
+		gc.close()
+		cleanupOSS(cli, bucketName, rootPath)
+	})
+
+	t.Run("flushed segment without stats registration still collected", func(t *testing.T) {
+		bucketName := `datacoord-ut` + strings.ToLower(funcutil.RandomString(8))
+		cli, _, stats, _, _, err := initUtOSSEnv(bucketName, rootPath, 1)
+		require.NoError(t, err)
+		require.Len(t, stats, 1)
+
+		meta, err := newMemoryMeta(t)
+		require.NoError(t, err)
+		segment := buildSegment(1, 10, 100, "ch")
+		segment.State = commonpb.SegmentState_Flushed
+		require.NoError(t, meta.AddSegment(context.TODO(), segment))
+
+		gc := newGC(meta, cli)
+		gc.recycleUnusedBinlogFiles(context.TODO())
+		validateMinioPrefixElements(t, cli, bucketName, path.Join(rootPath, common.SegmentStatslogPath), []string{})
+		gc.close()
+		cleanupOSS(cli, bucketName, rootPath)
+	})
+}
+
 // initialize unit test sso env
 func initUtOSSEnv(bucket, root string, n int) (mcm *storage.RemoteChunkManager, inserts []string, stats []string, delta []string, other []string, err error) {
 	paramtable.Init()

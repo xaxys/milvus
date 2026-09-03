@@ -197,9 +197,21 @@ type FieldData interface {
 }
 
 // NewFieldData creates an empty FieldData whose cap is expressed in rows;
-// vector columns scale it by their per-row element count.
+// vector columns scale it by their per-row element count, except nullable
+// columns, which reserve only cap: a nullable column missing from the source
+// only appends ValidData (see AppendNullableDefaultFieldsData), so a
+// dim-scaled Data reservation would stay invisible to GetMemorySize and never
+// trigger spill.
 func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema, cap int) (FieldData, error) {
 	typeParams := fieldSchema.GetTypeParams()
+	// nullableDataCap keeps the master row-count reservation for nullable
+	// vector columns; non-nullable columns keep the dim-scaled reservation.
+	nullableDataCap := func(scaled int) int {
+		if fieldSchema.GetNullable() {
+			return cap
+		}
+		return scaled
+	}
 	switch dataType {
 	case schemapb.DataType_Float16Vector:
 		dim, err := GetDimFromParams(typeParams)
@@ -207,7 +219,7 @@ func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema,
 			return nil, err
 		}
 		data := &Float16VectorFieldData{
-			Data:     make([]byte, 0, cap*dim*2),
+			Data:     make([]byte, 0, nullableDataCap(cap*dim*2)),
 			Dim:      dim,
 			Nullable: fieldSchema.GetNullable(),
 		}
@@ -221,7 +233,7 @@ func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema,
 			return nil, err
 		}
 		data := &BFloat16VectorFieldData{
-			Data:     make([]byte, 0, cap*dim*2),
+			Data:     make([]byte, 0, nullableDataCap(cap*dim*2)),
 			Dim:      dim,
 			Nullable: fieldSchema.GetNullable(),
 		}
@@ -235,7 +247,7 @@ func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema,
 			return nil, err
 		}
 		data := &FloatVectorFieldData{
-			Data:     make([]float32, 0, cap*dim),
+			Data:     make([]float32, 0, nullableDataCap(cap*dim)),
 			Dim:      dim,
 			Nullable: fieldSchema.GetNullable(),
 		}
@@ -249,7 +261,7 @@ func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema,
 			return nil, err
 		}
 		data := &BinaryVectorFieldData{
-			Data:     make([]byte, 0, cap*dim/8),
+			Data:     make([]byte, 0, nullableDataCap(cap*dim/8)),
 			Dim:      dim,
 			Nullable: fieldSchema.GetNullable(),
 		}
@@ -271,7 +283,7 @@ func NewFieldData(dataType schemapb.DataType, fieldSchema *schemapb.FieldSchema,
 			return nil, err
 		}
 		data := &Int8VectorFieldData{
-			Data:     make([]int8, 0, cap*dim),
+			Data:     make([]int8, 0, nullableDataCap(cap*dim)),
 			Dim:      dim,
 			Nullable: fieldSchema.GetNullable(),
 		}

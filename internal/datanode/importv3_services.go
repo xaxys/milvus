@@ -230,6 +230,9 @@ func executeReshardPlan(ctx context.Context, cm storage.ChunkManager, req *datap
 	flushBucket := func(b *reshardBucket) error {
 		groups := splitReshardBucketForSort(b, effectiveFragmentInput)
 		for _, group := range groups {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			descriptor, err := writeReshardFragment(ctx, req, plan, temporarySchema, b.vchannelOrdinal, b.partitionOrdinal, group, fragmentSeq, bufferSize, sortFields, pluginContext)
 			if err != nil {
 				return err
@@ -323,6 +326,10 @@ func executeReshardPlan(ctx context.Context, cm storage.ChunkManager, req *datap
 
 		var idOffset int64
 		for {
+			if err := ctx.Err(); err != nil {
+				reader.Close()
+				return err
+			}
 			batch, readErr := reader.Read()
 			if readErr == io.EOF {
 				break
@@ -370,7 +377,7 @@ func executeReshardPlan(ctx context.Context, cm storage.ChunkManager, req *datap
 							return err
 						}
 						residentBytes -= freed
-					} else if residentBytes > memoryBudget {
+					} else if residentBytes > reshardSpillThreshold(memoryBudget, effectiveFragmentInput, bufferSize) {
 						spilled, err := spillLargest()
 						if err != nil {
 							reader.Close()
@@ -395,6 +402,9 @@ func executeReshardPlan(ctx context.Context, cm storage.ChunkManager, req *datap
 		return keys[i].partitionOrdinal < keys[j].partitionOrdinal
 	})
 	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		b := buckets[key]
 		if b.rows == 0 && len(b.spillChunks) == 0 {
 			continue
@@ -511,6 +521,14 @@ func effectiveReshardFragmentInput(memoryBudget, fragmentTarget, bufferSize int6
 		return 1
 	}
 	return min(fragmentTarget, safe)
+}
+
+// reshardSpillThreshold is the resident-byte level that spills the largest
+// bucket to local Arrow IPC files. Flushing one bucket materializes up to
+// effectiveFragmentInput bytes a second time through the Sort input copy, so
+// spill early enough that the copy still fits inside memoryBudget.
+func reshardSpillThreshold(memoryBudget, effectiveFragmentInput, bufferSize int64) int64 {
+	return memoryBudget - effectiveFragmentInput - 3*bufferSize
 }
 
 // splitReshardBucketForSort packs spill chunks and the in-memory tail into

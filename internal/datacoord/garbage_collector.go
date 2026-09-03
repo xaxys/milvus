@@ -607,12 +607,23 @@ func (gc *garbageCollector) recycleUnusedBinlogFiles(ctx context.Context) {
 		{
 			prefix: path.Join(gc.option.cli.RootPath(), common.SegmentStatslogPath),
 			checker: func(objectInfo *storage.ChunkObjectInfo, segment *SegmentInfo) bool {
+				if segment == nil {
+					return false
+				}
+				// Import V3 pre-registers the segment as Importing but persists
+				// Statslogs only at acceptance; the PK stats file already sits
+				// under stats_log/ while the task retries. Keep it until the
+				// segment leaves Importing, or acceptance would persist a log
+				// ID whose file was already recycled.
+				if segment.GetIsImporting() {
+					return true
+				}
 				logID, err := binlog.GetLogIDFromBingLogPath(objectInfo.FilePath)
 				if err != nil {
 					log.Warn(ctx, "garbageCollector find dirty stats log", mlog.String("filePath", objectInfo.FilePath), mlog.Err(err))
 					return false
 				}
-				return segment != nil && segment.IsStatsLogExists(logID)
+				return segment.IsStatsLogExists(logID)
 			},
 			segmentIDFromPath: storage.ParseSegmentIDByBinlog,
 			label:             metrics.StatFileLabel,

@@ -328,3 +328,10 @@ func TestImportV3FinalWriterBackupRejectsBadTimestampColumn(t *testing.T) {
 		require.ErrorContains(t, err, "backup timestamp rows mismatch")
 	})
 }
+
+func TestReshardSpillThreshold(t *testing.T) {
+	// budget 640MB, fragment input 256MB, 3x16MB read buffers.
+	require.Equal(t, int64(640<<20-256<<20-3*(16<<20)), reshardSpillThreshold(640<<20, 256<<20, 16<<20))
+	// Degenerate budget leaves no room: spill on any resident bytes.
+	require.LessOrEqual(t, reshardSpillThreshold(16<<20, 64<<20, 16<<20), int64(0))
+}
