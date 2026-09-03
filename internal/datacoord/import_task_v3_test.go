@@ -18,7 +18,6 @@ package datacoord
 
 import (
 	"context"
-	"path"
 	"testing"
 
 	"github.com/cockroachdb/errors"
@@ -30,18 +29,15 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	"github.com/milvus-io/milvus/internal/metastore/mocks"
-	"github.com/milvus-io/milvus/internal/storage"
-	"github.com/milvus-io/milvus/pkg/v3/common"
-	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
-	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 )
 
 // TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld pins the crash-safe
-// ordering of prepareRetry: the task is repointed to the fresh segment ID
-// BEFORE the superseded run is cleaned up, and retry no longer registers the
-// new segment (it is built only at acceptance).
+// ordering of prepareRetry: the task is repointed to the new segment BEFORE the
+// old segment is dropped, so a crash between the two catalog writes leaves the
+// task referencing a live segment and only the superseded old segment orphaned
+// (reclaimed by importInspector.reconcileOrphanImportSegments on restart).
 func TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld(t *testing.T) {
 	ctx := context.Background()
 	meta, err := newMemoryMeta(t)
@@ -50,7 +46,6 @@ func TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld(t *testing.T) {
 	cluster := session.NewMockCluster(t)
 	alloc := allocator.NewMockAllocator(t)
 
-	// An accepted run leaves a registered IsImporting segment behind.
 	oldSeg, err := addImportSegment(ctx, meta, 100, 1, 10, 2, 3, "v0", datapb.SegmentLevel_L1, 1, 4)
 	require.NoError(t, err)
 	require.Equal(t, commonpb.SegmentState_Importing, oldSeg.GetState())
@@ -59,8 +54,7 @@ func TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld(t *testing.T) {
 		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1, Schema: retryTestSchema,
 	}}
 	task := newImportTaskV3(&datapb.ImportTaskV3{
-		JobId: 1, TaskId: 10, CollectionId: 2, PartitionId: 3, Vchannel: "v0",
-		State: datapb.ImportTaskStateV2_InProgress,
+		JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_InProgress,
 		RunId: 1, NodeId: 5, SegmentId: 100, LogRange: &datapb.IDRange{Begin: 1000, End: 2000},
 	}, importMeta, meta, alloc)
 
@@ -91,8 +85,9 @@ func TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld(t *testing.T) {
 
 	require.True(t, repointBeforeDrop)
 	require.Equal(t, commonpb.SegmentState_Dropped, meta.GetSegment(ctx, 100).GetState())
-	// The retry never registers the new segment; it is created at acceptance.
-	require.Nil(t, meta.GetSegment(ctx, 200))
+	newSeg := meta.GetSegment(ctx, 200)
+	require.NotNil(t, newSeg)
+	require.Equal(t, commonpb.SegmentState_Importing, newSeg.GetState())
 	require.Equal(t, int64(2), task.task.Load().GetRunId())
 	require.Equal(t, int64(200), task.task.Load().GetSegmentId())
 	require.Equal(t, int64(5000), task.task.Load().GetLogRange().GetBegin())
@@ -101,52 +96,10 @@ func TestImportTaskV3PrepareRetryRepointsBeforeDroppingOld(t *testing.T) {
 	require.Equal(t, int64(NullNodeID), task.task.Load().GetNodeId())
 }
 
-// TestImportTaskV3PrepareRetryUnacceptedRunRemovesBasePath pins that retrying a
-// run that never reached acceptance (no registered segment) removes its
-// unregistered output prefix directly instead of leaking it until the orphan
-// scan ages it out.
-func TestImportTaskV3PrepareRetryUnacceptedRunRemovesBasePath(t *testing.T) {
-	ctx := context.Background()
-	meta, err := newMemoryMeta(t)
-	require.NoError(t, err)
-	meta.chunkManager = storage.NewLocalChunkManager(objectstorage.RootPath(t.TempDir()))
-	importMeta := NewMockImportMeta(t)
-	cluster := session.NewMockCluster(t)
-	alloc := allocator.NewMockAllocator(t)
-
-	job := &importJob{ImportJob: &datapb.ImportJob{
-		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1, Schema: retryTestSchema,
-	}}
-	task := newImportTaskV3(&datapb.ImportTaskV3{
-		JobId: 1, TaskId: 10, CollectionId: 2, PartitionId: 3, Vchannel: "v0",
-		State: datapb.ImportTaskStateV2_InProgress,
-		RunId: 1, NodeId: NullNodeID, SegmentId: 100, LogRange: &datapb.IDRange{Begin: 1000, End: 2000},
-	}, importMeta, meta, alloc)
-
-	// Seed a file under the superseded run's base path.
-	basePath := path.Join(meta.chunkManager.RootPath(), common.SegmentInsertLogPath, metautil.JoinIDPath(2, 3, 100))
-	require.NoError(t, meta.chunkManager.Write(ctx, path.Join(basePath, "_data", "f.parquet"), []byte("x")))
-
-	importMeta.EXPECT().GetJob(mock.Anything, int64(1)).Return(job).Once()
-	alloc.EXPECT().AllocID(mock.Anything).Return(int64(200), nil).Once()
-	alloc.EXPECT().AllocN(mock.Anything).Return(int64(5000), int64(6000), nil).Once()
-	importMeta.EXPECT().UpdateTask(mock.Anything, int64(10),
-		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
-	).Return(nil).Once()
-
-	task.prepareRetry(cluster)
-
-	exist, err := meta.chunkManager.Exist(ctx, path.Join(basePath, "_data", "f.parquet"))
-	require.NoError(t, err)
-	require.False(t, exist)
-	require.Nil(t, meta.GetSegment(ctx, 100))
-	require.Nil(t, meta.GetSegment(ctx, 200))
-}
-
-// TestImportTaskV3PrepareRetryFailsJobOnTaskUpdateFailure pins that a failed
-// repoint fails the job and leaves the old segment untouched; nothing is
-// registered before the repoint, so there is no new segment to roll back.
-func TestImportTaskV3PrepareRetryFailsJobOnTaskUpdateFailure(t *testing.T) {
+// TestImportTaskV3PrepareRetryRollsBackNewSegmentOnTaskUpdateFailure pins that a
+// failed repoint drops the freshly created segment and fails the job instead of
+// leaving an ownerless Importing segment.
+func TestImportTaskV3PrepareRetryRollsBackNewSegmentOnTaskUpdateFailure(t *testing.T) {
 	ctx := context.Background()
 	meta, err := newMemoryMeta(t)
 	require.NoError(t, err)
@@ -161,8 +114,7 @@ func TestImportTaskV3PrepareRetryFailsJobOnTaskUpdateFailure(t *testing.T) {
 		JobID: 1, CollectionID: 2, State: internalpb.ImportJobState_Importing, DataTs: 1, Schema: retryTestSchema,
 	}}
 	task := newImportTaskV3(&datapb.ImportTaskV3{
-		JobId: 1, TaskId: 10, CollectionId: 2, PartitionId: 3, Vchannel: "v0",
-		State: datapb.ImportTaskStateV2_InProgress,
+		JobId: 1, TaskId: 10, CollectionId: 2, State: datapb.ImportTaskStateV2_InProgress,
 		RunId: 1, NodeId: NullNodeID, SegmentId: 100, LogRange: &datapb.IDRange{Begin: 1000, End: 2000},
 	}, importMeta, meta, alloc)
 
@@ -178,9 +130,9 @@ func TestImportTaskV3PrepareRetryFailsJobOnTaskUpdateFailure(t *testing.T) {
 
 	task.prepareRetry(cluster)
 
-	// The old segment is untouched and the new one was never registered.
+	// The freshly created segment was rolled back (Dropped); the old one is untouched.
+	require.Equal(t, commonpb.SegmentState_Dropped, meta.GetSegment(ctx, 200).GetState())
 	require.Equal(t, commonpb.SegmentState_Importing, meta.GetSegment(ctx, 100).GetState())
-	require.Nil(t, meta.GetSegment(ctx, 200))
 }
 
 var errRetryUpdate = errors.New("update task failed")

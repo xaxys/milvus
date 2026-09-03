@@ -33,7 +33,6 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/session"
 	"github.com/milvus-io/milvus/internal/storage"
-	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -43,7 +42,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
-	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
@@ -280,18 +278,6 @@ func addImportSegment(
 	storageVersion int64,
 	schemaVersion int32,
 ) (*SegmentInfo, error) {
-	// StorageV3 segment data lives under the manifest base path, and dropped-segment
-	// GC deletes that whole prefix. A preallocated segment must therefore carry a
-	// parseable ManifestPath from the moment it is registered; otherwise a drop
-	// before any data is written (import retry, failure, or cleanup) leaves GC with
-	// an empty manifest path to parse and it errors instead of reclaiming the meta.
-	// Derive the base path exactly like the growing-segment allocator does.
-	var manifestPath string
-	if storageVersion == storage.StorageV3 {
-		k := metautil.JoinIDPath(collectionID, partitionID, id)
-		basePath := path.Join(paramtable.Get().MinioCfg.RootPath.GetValue(), common.SegmentInsertLogPath, k)
-		manifestPath = packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
-	}
 	segmentInfo := &datapb.SegmentInfo{
 		ID:             id,
 		CollectionID:   collectionID,
@@ -304,7 +290,6 @@ func addImportSegment(
 		LastExpireTime: math.MaxUint64,
 		StorageVersion: storageVersion,
 		SchemaVersion:  schemaVersion,
-		ManifestPath:   manifestPath,
 	}
 	segmentInfo.IsImporting = true
 	segment := NewSegmentInfo(segmentInfo)

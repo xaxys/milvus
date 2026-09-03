@@ -41,14 +41,11 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/mocks"
 	mocks2 "github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/storage"
-	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
-	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
-	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
@@ -479,31 +476,6 @@ func TestImportUtil_L0ImportUsesStorageV2WhenLoonFFIEnabled(t *testing.T) {
 	assert.NoError(t, err)
 	assert.EqualValues(t, storage.StorageV2, importReq.GetStorageVersion())
 	assert.False(t, importReq.GetUseLoonFfi())
-}
-
-// TestImportUtil_AddImportSegmentPrefillsV3Manifest pins that a preallocated
-// StorageV3 segment registers with a parseable manifest base path derived the
-// same way as growing segments, so a drop before any data is written still lets
-// GC reclaim the prefix instead of erroring on an empty manifest path.
-func TestImportUtil_AddImportSegmentPrefillsV3Manifest(t *testing.T) {
-	ctx := context.Background()
-	meta, err := newMemoryMeta(t)
-	require.NoError(t, err)
-
-	segment, err := addImportSegment(ctx, meta, 100, 1, 10, 2, 3, "v0", datapb.SegmentLevel_L1, storage.StorageV3, 4)
-	require.NoError(t, err)
-	require.NotEmpty(t, segment.GetManifestPath())
-
-	basePath, version, err := packed.UnmarshalManifestPath(segment.GetManifestPath())
-	require.NoError(t, err)
-	require.Equal(t, packed.ManifestEarliest, version)
-	expectedSuffix := path.Join(common.SegmentInsertLogPath, metautil.JoinIDPath(2, 3, 100))
-	require.True(t, strings.HasSuffix(basePath, expectedSuffix), "basePath=%s suffix=%s", basePath, expectedSuffix)
-
-	// Non-V3 segments keep an empty manifest path.
-	segmentV2, err := addImportSegment(ctx, meta, 101, 1, 10, 2, 3, "v0", datapb.SegmentLevel_L1, storage.StorageV2, 4)
-	require.NoError(t, err)
-	require.Empty(t, segmentV2.GetManifestPath())
 }
 
 func TestImportUtil_RegroupImportFiles(t *testing.T) {

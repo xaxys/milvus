@@ -2713,12 +2713,11 @@ func TestGarbageCollector_recycleDroppedSegments_RecyclesSegmentIndexMeta(t *tes
 	mu.Unlock()
 }
 
-// TestGarbageCollector_recycleDroppedSegments_StorageV3CorruptManifest pins that
-// a StorageV3 segment whose manifest path cannot be parsed (meta corruption;
-// every registration path now fills ManifestPath before the segment becomes
-// visible) keeps its meta for the next GC cycle instead of being dropped after
-// skipping the file removal.
-func TestGarbageCollector_recycleDroppedSegments_StorageV3CorruptManifest(t *testing.T) {
+// TestGarbageCollector_recycleDroppedSegments_StorageV3WithoutManifest pins that
+// a StorageV3 segment dropped before any manifest was written (import retry,
+// failure, or cleanup) is removed from meta instead of erroring forever on the
+// empty manifest path.
+func TestGarbageCollector_recycleDroppedSegments_StorageV3WithoutManifest(t *testing.T) {
 	ctx := context.Background()
 	m, err := newMemoryMeta(t)
 	require.NoError(t, err)
@@ -2732,7 +2731,6 @@ func TestGarbageCollector_recycleDroppedSegments_StorageV3CorruptManifest(t *tes
 			State:          commonpb.SegmentState_Dropped,
 			DroppedAt:      uint64(time.Now().Add(-time.Hour).UnixNano()),
 			StorageVersion: storage.StorageV3,
-			ManifestPath:   "not-a-manifest-json",
 		},
 	}
 	require.NoError(t, m.AddSegment(ctx, segment))
@@ -2746,7 +2744,7 @@ func TestGarbageCollector_recycleDroppedSegments_StorageV3CorruptManifest(t *tes
 
 	gc.recycleDroppedSegments(ctx, nil)
 
-	assert.NotNil(t, m.GetSegment(ctx, segID))
+	assert.Nil(t, m.GetSegment(ctx, segID))
 }
 
 func TestGarbageCollector_recycleDroppedSegments_FileDeleteFailureKeepsMeta(t *testing.T) {
