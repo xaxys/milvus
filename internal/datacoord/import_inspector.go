@@ -172,7 +172,7 @@ func (s *importInspector) reconcileOrphanImportSegments() {
 		return
 	}
 	mlog.Warn(s.ctx, "reconcile orphan import segments on restart", mlog.Int64s("segmentIDs", orphanIDs))
-	if err := s.meta.UpdateSegmentsInfo(s.ctx, dropImportV3Segments(orphanIDs, false)); err != nil {
+	if err := s.meta.UpdateSegmentsInfo(s.ctx, dropImportV3Segments(orphanIDs)); err != nil {
 		mlog.Warn(s.ctx, "failed to drop orphan import segments", mlog.Int64s("segmentIDs", orphanIDs), mlog.Err(err))
 	}
 }

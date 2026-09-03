@@ -55,6 +55,27 @@ func TestApplyImportResultToPreallocatedSegment(t *testing.T) {
 	require.Equal(t, int64(10), segment.GetNumOfRows())
 }
 
+// TestApplyImportResultsZeroRowDropsPlaceholderAtAcceptance pins that a
+// zero-row result drops the preallocated placeholder at acceptance instead of
+// leaving it Importing for worker-drop cleanup, and that replaying the same
+// result (crash between acceptance and the task Completed marker) is a no-op.
+func TestApplyImportResultsZeroRowDropsPlaceholderAtAcceptance(t *testing.T) {
+	ctx := context.Background()
+	meta, err := newMemoryMeta(t)
+	require.NoError(t, err)
+	_, err = addImportSegment(ctx, meta, 100, 1, 10, 2, 3, "v0", datapb.SegmentLevel_L1, 1, 4)
+	require.NoError(t, err)
+	require.Equal(t, commonpb.SegmentState_Importing, meta.GetSegment(ctx, 100).GetState())
+
+	results := []*datapb.SegmentResult{{Rows: 0}}
+	require.NoError(t, applyImportResults(ctx, meta, 2, 4, []int64{100}, true, false, results))
+	require.Equal(t, commonpb.SegmentState_Dropped, meta.GetSegment(ctx, 100).GetState())
+
+	// Replay: already-Dropped passes validation and the drop is skipped.
+	require.NoError(t, applyImportResults(ctx, meta, 2, 4, []int64{100}, true, false, results))
+	require.Equal(t, commonpb.SegmentState_Dropped, meta.GetSegment(ctx, 100).GetState())
+}
+
 // TestApplyImportResultsCompressesStorageV2Binlogs pins that StorageV2 writer
 // results (LogPath set, LogID zero) are compressed before persistence; the
 // catalog rejects zero LogIDs and stored LogPaths, so without compression the

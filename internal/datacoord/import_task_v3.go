@@ -494,7 +494,7 @@ func (t *importTaskV3) prepareRetry(cluster session.Cluster) {
 	}
 	begin, end, err := t.alloc.AllocN(width)
 	if err != nil {
-		_ = t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{newSegmentID}, false))
+		_ = t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{newSegmentID}))
 		t.fail(err.Error())
 		return
 	}
@@ -509,14 +509,14 @@ func (t *importTaskV3) prepareRetry(cluster session.Cluster) {
 	// into a job failure. The orphaned old segment is reclaimed by the restart
 	// reconciliation in importInspector.reloadFromMeta.
 	if err := t.importMeta.UpdateTask(context.TODO(), t.GetTaskID(), UpdateRunID(newRun), UpdateSegmentIDs([]int64{newSegmentID}), UpdateLogRange(&datapb.IDRange{Begin: begin, End: end}), UpdateNodeID(NullNodeID), UpdateState(datapb.ImportTaskStateV2_Pending), UpdateReason("")); err != nil {
-		_ = t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{newSegmentID}, false))
+		_ = t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{newSegmentID}))
 		t.fail(err.Error())
 		return
 	}
 	// Best-effort drop of the superseded old segment; on failure it is reclaimed
 	// by the restart reconciliation instead of failing the retried job.
 	if oldSegmentID != 0 {
-		if err := t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{oldSegmentID}, false)); err != nil {
+		if err := t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{oldSegmentID})); err != nil {
 			mlog.Warn(context.TODO(), "failed to drop old import v3 retry segment, will be reclaimed on restart",
 				mlog.Int64("segmentID", oldSegmentID), mlog.Err(err))
 		}
@@ -551,13 +551,10 @@ func (t *importTaskV3) DropTaskOnWorker(cluster session.Cluster) {
 			return
 		}
 	}
-	if t.meta != nil && p.GetSegmentId() != 0 {
-		zeroOnly := t.GetState() == datapb.ImportTaskStateV2_Completed
-		if err := t.meta.UpdateSegmentsInfo(context.TODO(), dropImportV3Segments([]int64{p.GetSegmentId()}, zeroOnly)); err != nil {
-			mlog.Warn(context.TODO(), "drop import v3 segments failed", WrapTaskLog(t, mlog.Err(err))...)
-			return
-		}
-	}
+	// No segment cleanup here: zero-row placeholders are dropped at acceptance,
+	// and a failed task's preallocated segment is dropped by the failed-job GC
+	// after this drop unbinds the worker. A completed task's accepted segment is
+	// formal data owned by the commit path.
 	_ = t.importMeta.UpdateTask(context.TODO(), t.GetTaskID(), UpdateNodeID(NullNodeID))
 }
 func (t *importTaskV3) fail(reason string) {

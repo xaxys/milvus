@@ -579,7 +579,7 @@ func (c *importCheckerV3) quiesceImportJob(job ImportJob, log *mlog.Logger) bool
 				segmentIDs = append(segmentIDs, segmentID)
 			}
 			if len(segmentIDs) > 0 {
-				if err := c.meta.UpdateSegmentsInfo(c.ctx, dropImportV3Segments(segmentIDs, false)); err != nil {
+				if err := c.meta.UpdateSegmentsInfo(c.ctx, dropImportV3Segments(segmentIDs)); err != nil {
 					log.Warn(c.ctx, "drop import v3 segments during failed job GC", WrapTaskLog(task, mlog.Err(err))...)
 					ready = false
 					continue
@@ -1086,7 +1086,7 @@ func (c *importCheckerV3) cleanupPreparingV3ImportTasks(job ImportJob) error {
 			continue
 		}
 		if segmentID := task.task.Load().GetSegmentId(); segmentID != 0 {
-			if err := c.meta.UpdateSegmentsInfo(c.ctx, dropImportV3Segments([]int64{segmentID}, false)); err != nil {
+			if err := c.meta.UpdateSegmentsInfo(c.ctx, dropImportV3Segments([]int64{segmentID})); err != nil {
 				return err
 			}
 		}

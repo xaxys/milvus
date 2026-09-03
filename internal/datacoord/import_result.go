@@ -125,8 +125,11 @@ func applyImportResults(ctx context.Context, meta *meta, collectionID int64, sch
 		segmentID := segmentIDs[index]
 		operators = append(operators, validateImportResultSegmentOperator(collectionID, segmentID, result, sorted, namespaceSorted))
 		if result.GetRows() == 0 {
-			// Keep a zero-row segment Importing until the worker task is
-			// dropped/unbound, then remove it through the normal import cleanup.
+			// A zero-row result leaves the preallocated placeholder with nothing
+			// to load, index, or commit: drop it at acceptance. The drop is
+			// idempotent for replays (already-Dropped segments are skipped), so
+			// the marker-last crash recovery keeps working unchanged.
+			operators = append(operators, dropImportV3Segments([]int64{segmentID}))
 			continue
 		}
 		segmentOps := make([]UpdateOperator, 0, 8)
@@ -206,7 +209,15 @@ func validateImportResultSegmentOperator(collectionID, segmentID int64, result *
 			return pack.fail(merr.WrapErrDataIntegrityMsg("import v3 segment %d is not importing", segmentID))
 		}
 		if result.GetRows() == 0 {
-			if segment.GetState() != commonpb.SegmentState_Importing || segment.GetNumOfRows() != 0 {
+			switch segment.GetState() {
+			case commonpb.SegmentState_Importing:
+				if segment.GetNumOfRows() != 0 {
+					return pack.fail(merr.WrapErrDataIntegrityMsg("zero-row import v3 segment %d has conflicting progress", segmentID))
+				}
+			case commonpb.SegmentState_Dropped:
+				// Replayed acceptance: the placeholder was already dropped by the
+				// first acceptance; the drop below is a no-op.
+			default:
 				return pack.fail(merr.WrapErrDataIntegrityMsg("zero-row import v3 segment %d has conflicting progress", segmentID))
 			}
 			return true
@@ -262,14 +273,18 @@ func acceptedImportSegmentMatches(segment *SegmentInfo, result *datapb.SegmentRe
 	return true
 }
 
-func dropImportV3Segments(segmentIDs []int64, zeroOnly bool) UpdateOperator {
+// dropImportV3Segments marks IsImporting segments Dropped. Callers scope it:
+// acceptance drops zero-row placeholders, retry drops the superseded
+// preallocated segment, failed-job GC drops what the job accepted but never
+// committed. Once the commit fence clears IsImporting, no caller drops the
+// segment through this operator.
+func dropImportV3Segments(segmentIDs []int64) UpdateOperator {
 	return func(pack *updateSegmentPack) bool {
 		updated := false
 		for _, segmentID := range segmentIDs {
 			segment := pack.Get(segmentID)
 			if segment == nil || !segment.GetIsImporting() ||
-				segment.GetState() == commonpb.SegmentState_Dropped ||
-				(zeroOnly && (segment.GetState() != commonpb.SegmentState_Importing || segment.GetNumOfRows() != 0)) {
+				segment.GetState() == commonpb.SegmentState_Dropped {
 				continue
 			}
 			updateSegStateAndPrepareMetrics(segment, commonpb.SegmentState_Dropped, pack.metricMutation)
