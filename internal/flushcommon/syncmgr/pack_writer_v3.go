@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"path"
 	"strconv"
+	"strings"
 
 	"github.com/cockroachdb/errors"
+	"github.com/google/uuid"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/allocator"
@@ -65,12 +67,13 @@ type BulkPackWriterV3 struct {
 	// drift after Phase 2's commit updates manifestPath.
 	initialManifestPath string
 
-	// statsBlobSize tracks THIS SYNC's newly-written bloom-filter / BM25 blob
-	// bytes — the per-sync delta the StatisticsCollector accumulates, NOT the
-	// cumulative footprint. The merged PK/BM25 blob is written only at flush and
-	// per-sync batch blobs use unique keys, so the sum of these per-sync deltas
-	// over the segment's life equals the manifest's final cumulative memory_size.
-	// Reset at the top of Write and fed into the StatisticsCollector Digest.
+	// statsBlobSize tracks the correction this sync applies to the cumulative
+	// manifest-visible bloom-filter / BM25 footprint. Normally it is just this
+	// sync's delta. After recovery from a pre-Statistics DataNode it also carries
+	// the missing prior-manifest baseline. A non-L0 final flush replaces the
+	// bloom entry's prior batch files with one compound file, so its bloom delta
+	// is compoundSize-existingBloomSize and may be negative. Reset at the top of
+	// Write and fed into the cumulative StatisticsCollector Digest.
 	statsBlobSize int64
 }
 
@@ -104,10 +107,82 @@ func perBatchStatPaths(paths []string) []string {
 	return out
 }
 
-// loadPriorPkStats reads the per-batch bloom-filter blobs already persisted for
-// this segment and deserializes them into PrimaryKeyStats. paths come from the
-// StatsResolver over the pre-commit manifest, so they cover every prior sync's
-// batch blob and are chunkManager-readable as-is. Returns nil when empty.
+// bloomMergeSourcePaths returns the committed bloom blobs that represent all
+// rows before the current sync, without double-counting them.
+//
+// A pre-H22 final manifest may contain both the complete per-batch set and a
+// compound blob; use the batch set there to avoid counting the same rows twice.
+// A compound-only manifest is the layout emitted by H22; deserializing that
+// list yields the same prior per-batch PrimaryKeyStats needed to build a new
+// compound if a later final flush is ever scheduled for the segment.
+//
+// There is no metadata that can distinguish the valid pre-H22 mixed layout
+// from an invalid "H22 compound, then a later incremental batch" layout. The
+// write path therefore rejects incremental/L0 batch writes when an existing
+// compound path is present; this helper relies on that segment-lifecycle
+// invariant.
+func bloomMergeSourcePaths(paths []string) []string {
+	batchPaths := perBatchStatPaths(paths)
+	if len(batchPaths) > 0 {
+		return batchPaths
+	}
+	for _, p := range paths {
+		if _, logidx := path.Split(p); logidx == storage.CompoundStatsType.LogIdx() {
+			return []string{p}
+		}
+	}
+	return nil
+}
+
+func hasCompoundStatPath(paths []string) bool {
+	for _, p := range paths {
+		if _, logidx := path.Split(p); logidx == storage.CompoundStatsType.LogIdx() {
+			return true
+		}
+	}
+	return false
+}
+
+func compoundStatPath(paths []string) string {
+	for _, p := range paths {
+		if _, logidx := path.Split(p); logidx == storage.CompoundStatsType.LogIdx() {
+			return p
+		}
+	}
+	return ""
+}
+
+// newCompoundBloomPath gives every final writer its own object key. The final
+// component stays "1" so existing readers still recognize the compound stats
+// format, while the unique parent prevents a late writer (for example, one
+// left running across a channel handoff) from overwriting another writer's
+// manifest-visible bloom object.
+func newCompoundBloomPath(basePath string, fieldID int64) string {
+	return path.Join(
+		basePath,
+		fmt.Sprintf("_stats/bloom_filter.%d", fieldID),
+		"compound-"+uuid.NewString(),
+		storage.CompoundStatsType.LogIdx(),
+	)
+}
+
+func isIsolatedCompoundBloomPath(compoundPath string) bool {
+	if path.Base(compoundPath) != storage.CompoundStatsType.LogIdx() {
+		return false
+	}
+	dirName := path.Base(path.Dir(compoundPath))
+	const prefix = "compound-"
+	if !strings.HasPrefix(dirName, prefix) {
+		return false
+	}
+	_, err := uuid.Parse(strings.TrimPrefix(dirName, prefix))
+	return err == nil
+}
+
+// loadPriorPkStats reads the bloom-filter source selected from the pre-commit
+// manifest and expands it into per-batch PrimaryKeyStats. The source is either
+// the complete per-batch path set or one compound-only blob. Returns nil when
+// empty.
 func (bw *BulkPackWriterV3) loadPriorPkStats(ctx context.Context, paths []string) ([]*storage.PrimaryKeyStats, error) {
 	if len(paths) == 0 {
 		return nil, nil
@@ -181,6 +256,9 @@ func (bw *BulkPackWriterV3) Write(ctx context.Context, pack *SyncPack) (
 		err = parseErr
 		return
 	}
+	if err = bw.recoverStatsBlobSizeBaseline(pack); err != nil {
+		return
+	}
 
 	// Phase 1: write files. Each helper returns its contribution to the
 	// final ManifestUpdates instead of mutating shared state.
@@ -236,7 +314,7 @@ func (bw *BulkPackWriterV3) Write(ctx context.Context, pack *SyncPack) (
 		return
 	}
 
-	digested := len(inserts) > 0 || bw.statsBlobSize > 0 || len(deltas.GetBinlogs()) > 0
+	digested := len(inserts) > 0 || bw.statsBlobSize != 0 || len(deltas.GetBinlogs()) > 0
 
 	manifest = bw.manifestPath
 	size = bw.sizeWritten
@@ -495,11 +573,43 @@ func (bw *BulkPackWriterV3) hasExistingManifest() bool {
 	return version != packed.ManifestEarliest
 }
 
+// recoverStatsBlobSizeBaseline repairs the one supported recovery case where
+// the manifest already contains V3 bloom/BM25 objects but the recovered
+// collector reports no usable footprint. This happens during a rolling upgrade
+// from a pre-Statistics DataNode: V3 has no stats-log arrays, so DataCoord's
+// legacy array fallback persists StatsBinlogSize=0 even though the manifest is
+// not empty.
+//
+// The repair is kept in statsBlobSize instead of mutating the live collector.
+// finalizeStats folds it into the prepared clone, which SyncTask installs only
+// after DataCoord acknowledges the same committed manifest. Reading before any
+// object writes also makes a manifest failure side-effect free.
+func (bw *BulkPackWriterV3) recoverStatsBlobSizeBaseline(pack *SyncPack) error {
+	if !bw.hasExistingManifest() {
+		return nil
+	}
+	segment, ok := bw.metaCache.GetSegmentByID(pack.segmentID)
+	if !ok {
+		return merr.WrapErrSegmentNotFound(pack.segmentID)
+	}
+	if stats := segment.Statistics().Publish(); stats != nil && stats.GetStatsBinlogSize() > 0 {
+		return nil
+	}
+
+	manifestSize, err := packed.StatsBinlogSizeFromManifest(bw.initialManifestPath, bw.storageConfig)
+	if err != nil {
+		return merr.Wrap(err, "failed to recover stats footprint from prior manifest")
+	}
+	bw.statsBlobSize = manifestSize
+	return nil
+}
+
 // writeStats writes bloom filter stat blobs under basePath/_stats and
 // returns the resulting StatEntry list. The caller folds the entries into
 // a ManifestUpdates that commits atomically with inserts / delta / bm25.
 func (bw *BulkPackWriterV3) writeStats(ctx context.Context, pack *SyncPack, basePath string) ([]packed.StatEntry, error) {
-	if len(pack.insertData) == 0 {
+	finalCompound := pack.isFlush && pack.level != datapb.SegmentLevel_L0
+	if len(pack.insertData) == 0 && !finalCompound {
 		return nil, nil
 	}
 
@@ -507,7 +617,7 @@ func (bw *BulkPackWriterV3) writeStats(ctx context.Context, pack *SyncPack, base
 	if err != nil {
 		return nil, err
 	}
-	singlePKStats, batchStatsBlob, err := serializer.serializeStatslog(pack)
+	singlePKStats, err := serializer.buildPrimaryKeyStats(pack)
 	if err != nil {
 		return nil, err
 	}
@@ -516,17 +626,19 @@ func (bw *BulkPackWriterV3) writeStats(ctx context.Context, pack *SyncPack, base
 
 	var files []string
 	var existingMemorySize int64
-	// newBlobBytes is only the bloom blob bytes WRITTEN this sync (the per-batch
-	// blob, plus the merged compound blob at flush) — fed to the collector as
-	// this sync's delta. It is distinct from memorySize, which the manifest
-	// StatEntry pins to the compound file the resolver actually loads.
-	var newBlobBytes int64
+	// footprintDelta is this sync's change to the manifest-visible bloom
+	// footprint. Incremental/L0 writes append one batch blob. A non-L0 final
+	// flush replaces every prior path with one compound path, so the delta is
+	// compoundSize-existingMemorySize rather than the number of bytes written.
+	var footprintDelta int64
 
 	// Preserve existing bloom filter files from previous batches.
 	// loon_transaction_update_stat uses replace semantics, so we must
 	// merge previously written files into the new entry.
 	statKey := fmt.Sprintf("bloom_filter.%d", pkFieldID)
 	var priorBloomPaths []string
+	var existingHasCompound bool
+	var existingCompoundPath string
 	if bw.hasExistingManifest() {
 		// A transient manifest read failure must NOT be swallowed: under loon
 		// replace semantics the committed StatEntry would then drop the prior
@@ -538,11 +650,12 @@ func (bw *BulkPackWriterV3) writeStats(ctx context.Context, pack *SyncPack, base
 			return nil, merr.Wrap(err, "failed to read prior bloom stats from manifest")
 		}
 		if existing, ok := existingStats[statKey]; ok && len(existing.Paths) > 0 {
-			// These are the prior syncs' per-batch bloom paths (already absolute,
-			// chunkManager-readable). Reused by the flush merge below so we don't
-			// re-read the manifest via a StatsResolver. Exclude any compound blob
-			// from an earlier flush so the merge rebuilds it from per-batch blobs.
-			priorBloomPaths = perBatchStatPaths(existing.Paths)
+			// Select a complete, non-duplicated history source from the committed
+			// paths. Mixed layouts use their per-batch set; compound-only layouts
+			// expand the compound back into its original per-batch stats.
+			priorBloomPaths = bloomMergeSourcePaths(existing.Paths)
+			existingHasCompound = hasCompoundStatPath(existing.Paths)
+			existingCompoundPath = compoundStatPath(existing.Paths)
 			files = append(files, existing.Paths...)
 			if memStr, ok := existing.Metadata["memory_size"]; ok {
 				existingMem, _ := strconv.ParseInt(memStr, 10, 64)
@@ -551,7 +664,68 @@ func (bw *BulkPackWriterV3) writeStats(ctx context.Context, pack *SyncPack, base
 		}
 	}
 
-	// Write batch stats blob via filesystem FFI.
+	// A non-L0 final flush writes only the compound object. It is built from
+	// stats referenced by the exact committed manifest version passed to this
+	// writer plus the current in-memory batch stats. No batch log ID is
+	// allocated, no batch blob is encoded, and the replacement manifest entry
+	// registers only the compound path.
+	if finalCompound {
+		// A repeated empty final over an already isolated compound is a no-op.
+		// Legacy compound-only manifests still use the shared direct "/1" key;
+		// rewrite those once so a late handoff writer can no longer mutate the
+		// object referenced by this manifest.
+		if singlePKStats == nil && len(files) == 1 && isIsolatedCompoundBloomPath(existingCompoundPath) {
+			return nil, nil
+		}
+
+		priorStats, err := bw.loadPriorPkStats(ctx, priorBloomPaths)
+		if err != nil {
+			return nil, err
+		}
+		mergedStats := priorStats
+		if singlePKStats != nil {
+			mergedStats = append(mergedStats, singlePKStats)
+		}
+		if len(mergedStats) == 0 {
+			return nil, nil
+		}
+		segment, ok := bw.metaCache.GetSegmentByID(pack.segmentID)
+		if !ok {
+			return nil, merr.WrapErrSegmentNotFound(pack.segmentID)
+		}
+		mergedStatsBlob, err := serializer.serializeMergedPkStatsList(mergedStats, segment.NumOfRows())
+		if err != nil {
+			return nil, err
+		}
+		mergedFullPath := newCompoundBloomPath(basePath, pkFieldID)
+		if err := packed.WriteFile(bw.storageConfig, mergedFullPath, mergedStatsBlob.Value); err != nil {
+			return nil, err
+		}
+		compoundSize := int64(len(mergedStatsBlob.Value))
+		bw.sizeWritten += compoundSize
+		bw.statsBlobSize += compoundSize - existingMemorySize
+
+		return []packed.StatEntry{{
+			Key:      statKey,
+			Files:    []string{mergedFullPath},
+			Metadata: map[string]string{"memory_size": strconv.FormatInt(compoundSize, 10)},
+		}}, nil
+	}
+
+	// Incremental syncs and L0 final flushes preserve the per-batch format.
+	// A compound path means this segment has already crossed its non-L0 final
+	// boundary (or carries the legacy final layout). Appending a batch after that
+	// point would create an ambiguous compound+batch manifest in which the
+	// resolver returns the old compound and hides the new batch.
+	if existingHasCompound {
+		return nil, merr.WrapErrDataIntegrityMsg(
+			"segment %d cannot append batch bloom stats after compound stats were committed",
+			pack.segmentID)
+	}
+	batchStatsBlob, err := serializer.serializePrimaryKeyStats(singlePKStats, pack.batchRows)
+	if err != nil {
+		return nil, err
+	}
 	id, err := bw.allocator.AllocOne()
 	if err != nil {
 		return nil, err
@@ -561,44 +735,15 @@ func (bw *BulkPackWriterV3) writeStats(ctx context.Context, pack *SyncPack, base
 	if err := packed.WriteFile(bw.storageConfig, fullPath, batchStatsBlob.Value); err != nil {
 		return nil, err
 	}
-	bw.sizeWritten += int64(len(batchStatsBlob.Value))
-	memorySize := existingMemorySize + int64(len(batchStatsBlob.Value))
-	newBlobBytes += int64(len(batchStatsBlob.Value))
+	batchSize := int64(len(batchStatsBlob.Value))
+	bw.sizeWritten += batchSize
+	memorySize := existingMemorySize + batchSize
+	footprintDelta += batchSize
 	files = append(files, fullPath)
 
-	// Write merged stats on flush. Build the merged blob from the per-batch
-	// bloom blobs already persisted in the pre-commit manifest (priorBloomPaths,
-	// read once above) plus this flush batch's singlePKStats — no metaCache
-	// history is consulted, so nothing needs to have been rolled in.
-	if pack.isFlush && pack.level != datapb.SegmentLevel_L0 {
-		priorStats, err := bw.loadPriorPkStats(ctx, priorBloomPaths)
-		if err != nil {
-			return nil, err
-		}
-		segment, ok := bw.metaCache.GetSegmentByID(pack.segmentID)
-		if !ok {
-			return nil, merr.WrapErrSegmentNotFound(pack.segmentID)
-		}
-		mergedStatsBlob, err := serializer.serializeMergedPkStatsList(append(priorStats, singlePKStats), segment.NumOfRows())
-		if err != nil {
-			return nil, err
-		}
-		mergedRelPath := fmt.Sprintf("_stats/bloom_filter.%d/%d", pkFieldID, int64(storage.CompoundStatsType))
-		mergedFullPath := path.Join(basePath, mergedRelPath)
-		if err := packed.WriteFile(bw.storageConfig, mergedFullPath, mergedStatsBlob.Value); err != nil {
-			return nil, err
-		}
-		bw.sizeWritten += int64(len(mergedStatsBlob.Value))
-		// The resolver loads only the compound bloom-filter file when it is
-		// present, so memory_size must match that selected file.
-		memorySize = int64(len(mergedStatsBlob.Value))
-		newBlobBytes += int64(len(mergedStatsBlob.Value))
-		files = append(files, mergedFullPath)
-	}
-
-	// Feed the collector only THIS SYNC's newly-written blob bytes; memorySize
-	// stays cumulative for the manifest StatEntry below.
-	bw.statsBlobSize += newBlobBytes
+	// Feed the collector this sync's manifest-footprint change; memorySize stays
+	// cumulative for the manifest StatEntry below.
+	bw.statsBlobSize += footprintDelta
 
 	return []packed.StatEntry{{
 		Key:      statKey,
