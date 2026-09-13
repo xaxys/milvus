@@ -27,9 +27,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/shirou/gopsutil/v4/disk"
 	"go.uber.org/atomic"
 
+	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/config"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/fips"
@@ -87,6 +89,11 @@ type ComponentParam struct {
 	ServiceParam
 	once      sync.Once
 	baseTable *BaseTable
+
+	// versionGates drives the version-gated config items (e.g. write-before
+	// function materialization). It is created and started by the MixCoord
+	// role after the role has been set; see StartVersionGateSwitcher.
+	versionGates *confirmator
 
 	CommonCfg       commonConfig
 	QuotaConfig     quotaConfig
@@ -193,6 +200,83 @@ func (p *ComponentParam) init(bt *BaseTable) {
 	p.StreamingNodeGrpcClientCfg.Init("streamingNode", bt)
 
 	p.IntegrationTestCfg.init(bt)
+}
+
+// versionGateItems returns every version-gated config item of the param table.
+// Gate registration follows paramtable initialization: a single confirmator
+// (a paramtable-level capability) drives all of them together.
+func (p *ComponentParam) versionGateItems() []*ParamItem {
+	return []*ParamItem{
+		&p.FunctionCfg.EnableWriteBeforeMaterialization,
+	}
+}
+
+// startVersionGateSwitcherOnce guards the one-shot global version-gate
+// switcher: only the MixCoord role calls StartVersionGateSwitcher, but the
+// once keeps the driving logic idempotent however it is reached.
+var startVersionGateSwitcherOnce sync.Once
+
+// StartVersionGateSwitcher drives every version-gated config item of the
+// process, exactly once. It is only called by the MixCoord role (the single
+// coordinator per cluster) after the role has been set; other roles observe
+// the flipped config value through the regular config refresh. Embedded-etcd
+// deployments are single-process (service_param.go enforces "embedded etcd
+// can not be used under distributed mode"): the local process is the whole
+// cluster, so when the local version already satisfies a gate there is
+// nothing to coordinate across nodes — resolve the gate directly and skip the
+// confirmator (there is no usable etcd client anyway). Otherwise the cluster
+// confirmator is created and started; it runs in the background and stops
+// itself once every gate is resolved. It is a no-op when remote config is
+// skipped (e.g. tests) or there is no usable etcd.
+func StartVersionGateSwitcher() {
+	startVersionGateSwitcherOnce.Do(func() {
+		Get().startVersionGates()
+	})
+}
+
+// startVersionGates implements StartVersionGateSwitcher on a param table.
+func (p *ComponentParam) startVersionGates() {
+	if p == nil || p.baseTable == nil || p.baseTable.config.skipRemote {
+		return
+	}
+	if p.EtcdCfg.UseEmbedEtcd.GetAsBool() {
+		for _, item := range p.versionGateItems() {
+			if item == nil || item.VersionGateSwitcher == nil {
+				continue
+			}
+			gv, err := semver.Parse(item.VersionGateSwitcher.GateVersion)
+			if err != nil {
+				// Validate() at Init already rejected malformed versions; on any
+				// residual parse issue keep the gate unresolved (PreSwitchValue).
+				continue
+			}
+			if common.Version.GE(gv) {
+				item.VersionGateSwitcher.localSatisfied = true
+				// GetAs* accessors short-circuit on the value cache, which is
+				// keyed by config key only and is blind to the runtime
+				// localSatisfied hint, so evict the cached entry to make the
+				// resolved value observable immediately.
+				p.baseTable.mgr.EvictCachedValue(item.Key)
+				mlog.Info(context.TODO(), "version gate: embedded-etcd deployment, local version satisfies the gate",
+					mlog.String("key", item.Key), mlog.String("localVersion", common.Version.String()),
+					mlog.String("gateVersion", item.VersionGateSwitcher.GateVersion))
+			}
+		}
+		return
+	}
+	// The confirmator shares the etcd client created for the config etcd
+	// source: when remote config is disabled or there is no usable etcd, no
+	// client exists and there is nothing to confirm against.
+	if p.baseTable.etcdClient == nil {
+		return
+	}
+	vg, err := recoverConfirmator(p.baseTable.etcdClient,
+		p.EtcdCfg.MetaRootPath.GetValue(), p.EtcdCfg.RootPath.GetValue(), p.versionGateItems())
+	if err != nil {
+		mlog.Warn(context.TODO(), "recover version gate confirmator failed", mlog.Err(err))
+		return
+	}
+	p.versionGates = vg
 }
 
 func (p *ComponentParam) GetComponentConfigurations(componentName string, sub string) map[string]string {
@@ -6071,11 +6155,15 @@ type dataCoordConfig struct {
 	MaxImportJobNum                 ParamItem `refreshable:"true"`
 	WaitForIndex                    ParamItem `refreshable:"true"`
 	ImportInReplicatingCluster      ParamItem `refreshable:"true"`
+	EnableImportV3                  ParamItem `refreshable:"true"`
 	EnableL0Import                  ParamItem `refreshable:"true"`
 	ImportPreAllocIDExpansionFactor ParamItem `refreshable:"true"`
 	ImportParquetFooterMaxSize      ParamItem `refreshable:"true"`
 	ImportFileNumPerSlot            ParamItem `refreshable:"true"`
 	ImportMemoryLimitPerSlot        ParamItem `refreshable:"true"`
+	ImportFragmentSize              ParamItem `refreshable:"true"`
+	FragmentMergeFanIn              ParamItem `refreshable:"true"`
+	ReshardResidentBucketCap        ParamItem `refreshable:"true"`
 	MaxSegmentsPerCopyTask          ParamItem `refreshable:"true"`
 	CopySegmentCheckInterval        ParamItem `refreshable:"true"`
 	CopySegmentTaskRetention        ParamItem `refreshable:"true"`
@@ -7438,6 +7526,19 @@ and can lower this freely; 10800 was the default before idempotency keys existed
 	}
 	p.ImportInReplicatingCluster.Init(base.mgr)
 
+	p.EnableImportV3 = ParamItem{
+		Key:     "dataCoord.import.enableImportV3",
+		Version: "3.0.0",
+		Doc: "One-way rollout gate for creating ImportTaskV3 jobs from new ordinary or backup import requests. " +
+			"Keep disabled until all DataNodes and all DataCoords that may become active support Import V3. " +
+			"The gate only selects the version for new requests; persisted WAL messages and jobs always resume " +
+			"with their stored version. Disabling the gate again after activation is unsupported.",
+		DefaultValue: "false",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.EnableImportV3.Init(base.mgr)
+
 	p.EnableL0Import = ParamItem{
 		Key:     "dataCoord.import.enableL0Import",
 		Version: "2.7.0",
@@ -7493,6 +7594,45 @@ raise this for files written with small row groups, many columns, or untruncated
 		},
 	}
 	p.ImportMemoryLimitPerSlot.Init(base.mgr)
+
+	p.ImportFragmentSize = ParamItem{
+		Key:          "dataCoord.import.fragmentSizeInMB",
+		Version:      "3.0.0",
+		Doc:          "Target logical size in MiB for one sorted ImportTaskV3 fragment.",
+		DefaultValue: "128",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.ImportFragmentSize.Init(base.mgr)
+	if p.ImportFragmentSize.GetAsInt64() <= 0 {
+		panic("dataCoord.import.fragmentSizeInMB must be positive")
+	}
+
+	p.FragmentMergeFanIn = ParamItem{
+		Key:          "dataCoord.import.fragmentMergeFanIn",
+		Version:      "3.0.0",
+		Doc:          "Maximum direct merge fan-in used by ImportTaskV3. Values must be in [2,1024].",
+		DefaultValue: "16",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.FragmentMergeFanIn.Init(base.mgr)
+	if fanIn := p.FragmentMergeFanIn.GetAsInt(); fanIn < 2 || fanIn > 1024 {
+		panic("dataCoord.import.fragmentMergeFanIn must be in [2, 1024]")
+	}
+
+	p.ReshardResidentBucketCap = ParamItem{
+		Key:          "dataCoord.import.reshardResidentBucketCap",
+		Version:      "3.0.0",
+		Doc:          "Number of (vchannel, partition) buckets whose full in-flight working set (cap x fragmentSizeInMB) the ImportTaskV3 reshard slot estimate keeps memory-resident as a ceiling, so a job with at most this many buckets can reshard without local spill on an idle node. The DataNode's dynamic memory probe may still spill below this ceiling when the real process memory is tight. Jobs with more buckets spill the excess; the cap also bounds per-task slot demand so the task stays schedulable on small nodes.",
+		DefaultValue: "16",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.ReshardResidentBucketCap.Init(base.mgr)
+	if cap := p.ReshardResidentBucketCap.GetAsInt64(); cap < 1 {
+		panic("dataCoord.import.reshardResidentBucketCap must be at least 1")
+	}
 
 	p.MaxSegmentsPerCopyTask = ParamItem{
 		Key:          "dataCoord.import.maxSegmentsPerCopyTask",
