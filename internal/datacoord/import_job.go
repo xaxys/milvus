@@ -120,6 +120,21 @@ func UpdateJobCompleteTime(completeTime string) UpdateJobAction {
 	}
 }
 
+// UpdateJobPKRanges applies the per-file exact PK ranges allocated after preimport
+// and marks the job as carrying exact ranges. The marker tightens downstream
+// validation (AssembleImportRequest's != guard) and enables the cross-cluster
+// divergence check in checkPreImportingJob. Ranges are keyed by position: the caller
+// guarantees len(ranges) == len(job.GetFiles()), so ranges[i] belongs to Files[i].
+func UpdateJobPKRanges(ranges []*commonpb.IDRange) UpdateJobAction {
+	return func(job ImportJob) {
+		j := job.(*importJob)
+		for i, r := range ranges {
+			j.Files[i].PreAllocatedAutoIds = r
+		}
+		j.PkRangesExact = true
+	}
+}
+
 type ImportJob interface {
 	GetJobID() int64
 	GetCollectionID() int64
@@ -137,6 +152,7 @@ type ImportJob interface {
 	GetCreateTime() string
 	GetCompleteTime() string
 	GetFiles() []*internalpb.ImportFile
+	GetPkRangesExact() bool
 	GetOptions() []*commonpb.KeyValuePair
 	GetAutoCommit() bool
 	GetTR() *timerecord.TimeRecorder

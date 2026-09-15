@@ -70,7 +70,10 @@ Each cluster reads the import files from its own object storage. Make sure the
 files you import exist in **both** the primary's and the standby's object
 storage: upload them to both, or use object storage that both clusters can read.
 If the files are missing on the standby, the replicated import fails there with
-an object-not-found error.
+an object-not-found error. The files must also be identical on both sides: for
+a collection with autoID enabled, if a file's row count differs between the
+primary and the standby, the import job fails on the diverging side instead of
+silently assigning different primary keys on each cluster.
 
 The example uses the REST-based import helpers from `pymilvus.bulk_writer`.
 The `url` values are the same Milvus addresses you use for other API calls.
@@ -186,3 +189,10 @@ Set it to `true` on both the primary and the standby. See
 
 In a replicating cluster, only `auto_commit=false` (2PC) imports are accepted.
 Set `options={"auto_commit": "false"}` on the import request.
+
+### Do the primary and standby need to run the same Milvus version?
+
+For CDC import, yes. Both clusters must run a version that includes the
+two-phase import ID range (`ImportIDRange`) mechanism. Mixed-version pairs are
+not supported: an older standby would silently assign different autoID primary
+keys than the primary, leaving the two clusters with divergent data.

@@ -372,13 +372,30 @@ func AssembleImportRequest(task ImportTask, job ImportJob, meta *meta, alloc all
 		return fileStat.GetImportFile()
 	})
 
-	// The PK reservation was sized at broadcast from an upper bound; pre-import has
-	// since produced the exact row count. Compare them here, before any segment is
-	// written, instead of letting pkCursor.take trip mid-import on the datanode.
+	// The PK reservation must fit the file's exact row count. Compare them here, before any
+	// segment is written, instead of letting pkCursor.take trip mid-import on the datanode.
+	//
+	// For an exact-range job (two-phase ImportIDRange), the reservation was sized from the
+	// same exact post-preimport count that produced TotalRows, so it must match exactly: any
+	// inequality is a cross-cluster divergence or a stamping bug that a retry can never fix.
+	// Legacy upper-bound jobs keep the looser > check — their ranges carry the old expansion
+	// factor, so the exact count is normally smaller than the reservation and only an
+	// overrun (rows > reserved) is fatal.
 	for _, fileStat := range task.GetFileStats() {
 		f := fileStat.GetImportFile()
 		r := f.GetPreAllocatedAutoIds()
 		reserved := r.GetEnd() - r.GetBegin()
+		if job.GetPkRangesExact() {
+			if fileStat.GetTotalRows() != reserved {
+				// Marked so the scheduler can tell this apart from the retriable
+				// failures AssembleImportRequest also returns. The merr code stays
+				// ErrImportSysFailed; markers.Mark only adds the sentinel to the chain.
+				return nil, merr.Mark(merr.WrapErrImportSysFailedMsg(
+					"file %v row count does not match the exactly reserved PK range: %d rows, %d ids reserved",
+					f.GetPaths(), fileStat.GetTotalRows(), reserved), ErrPKRangeTooSmall)
+			}
+			continue
+		}
 		if reserved > 0 && fileStat.GetTotalRows() > reserved {
 			// Marked so the scheduler can tell this apart from the retriable
 			// failures AssembleImportRequest also returns. The merr code stays
@@ -598,7 +615,8 @@ func getIndexBuildingProgress(ctx context.Context, jobID int64, importMeta Impor
 // GetJobProgress calculates the importing job progress.
 // The weight of each status is as follows:
 // 10%: Pending
-// 30%: PreImporting
+// 30%: PreImporting (AssigningIDRange shares this bucket: preimport is done,
+// the job is waiting for the ImportIDRange broadcast)
 // 30%: Importing
 // 10%: Stats
 // 10%: IndexBuilding
@@ -618,6 +636,13 @@ func GetJobProgress(ctx context.Context, jobID int64,
 		return int64(progress * 10), internalpb.ImportJobState_Pending, 0, 0, ""
 
 	case internalpb.ImportJobState_PreImporting:
+		progress := getPreImportingProgress(ctx, jobID, importMeta)
+		return 10 + int64(progress*30), internalpb.ImportJobState_Importing, 0, 0, ""
+
+	case internalpb.ImportJobState_AssigningIDRange:
+		// Preimport is complete; the job is waiting for the ImportIDRange broadcast
+		// (on a secondary, replication lag). Same progress bucket as end-of-preimport
+		// (40), reported as Importing so the v1 API keeps showing ImportStarted.
 		progress := getPreImportingProgress(ctx, jobID, importMeta)
 		return 10 + int64(progress*30), internalpb.ImportJobState_Importing, 0, 0, ""
 

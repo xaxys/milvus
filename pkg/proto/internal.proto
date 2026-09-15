@@ -397,6 +397,10 @@ enum ImportJobState {
   Sorting = 7;
   Uncommitted = 8;
   Committing  = 9;
+  // Preimport is complete; waiting for the exact per-file autoID PK ranges to be
+  // broadcast via the ImportIDRange WAL message and applied by its ack callback.
+  // On a CDC secondary this wait equals replication lag.
+  AssigningIDRange = 10;
 }
 
 message ImportFile {

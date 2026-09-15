@@ -20,6 +20,7 @@ All broadcast messages implicitly carry **SharedCluster** via the Broadcaster.
 | RestoreSnapshot | Broadcast: CChannel | No | SharedDBName + ExclusiveCollectionName + ExclusiveSnapshotName |
 | DropSnapshotsByCollection | Broadcast: CChannel | No | SharedDBName + SharedCollectionName |
 | Import | Broadcast: VChannels (no CChannel) | No | SharedDBName + ExclusiveCollectionName |
+| ImportIDRange | Broadcast: VChannels (no CChannel) | No | SharedDBName + ExclusiveCollectionName |
 | Insert | Single VChannel | No | — |
 | Delete | Single VChannel | No | — |
 | CreateSegment *(SelfControlled)* | Single VChannel | No | — |
@@ -42,6 +43,7 @@ All broadcast messages implicitly carry **SharedCluster** via the Broadcaster.
 - **CreateIndex** / **AlterIndex** / **DropIndex**: Manages indexes on a collection's field. CChannel-only.
 - **CreateSnapshot** / **DropSnapshot** / **RestoreSnapshot** / **DropSnapshotsByCollection**: Manages collection snapshots. CChannel-only.
 - **Import**: Initiates a bulk import job for a collection.
+- **ImportIDRange**: Assigns the exact per-file autoID PK ranges to an in-progress import job after preimport produced exact row counts; replicated so primary and secondary derive identical autoID primary keys. Consumed only by the DataCoord ack callback (flusher no-op).
 - **Insert** / **Delete**: DML on a single VChannel. CipherEnabled.
 - **CreateSegment** / **Flush**: WAL-generated (SelfControlled). Allocates or seals a growing segment.
 - **ManualFlush**: Seals all growing segments for a collection on a VChannel.
@@ -83,6 +85,14 @@ CreateSegment → Insert* → (Flush | ManualFlush | DropPartition | DropCollect
 
 - **CreateSegment** must precede any Insert referencing that segment.
 - Any message with flush semantics (Flush, ManualFlush, DropPartition, DropCollection, TruncateCollection, FlushAll) seals the segment. No Insert may reference it afterward.
+
+### Import Lifecycle
+
+```
+Import → ImportIDRange → (CommitImport | RollbackImport)
+```
+
+- For the same job, **Import** must precede **ImportIDRange**, which must precede **CommitImport** or **RollbackImport**. All are broadcast to the job's data VChannels, so per-PChannel WAL order enforces the sequence.
 
 ### Exclusive Lock Rule
 

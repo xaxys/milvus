@@ -70,6 +70,7 @@ enum MessageType {
     RollbackImport               = 46;
     AlterRLSMetadata             = 47;
     DropRLSMetadata              = 48;
+    ImportIDRange                = 49;
 
     // AlterWAL is used to alter the wal configuration to the current cluster.
     AlterWAL             = 700;
@@ -698,6 +699,25 @@ message RollbackImportMessageHeader {
 // RollbackImportMessageBody is the body of rollback import message.
 // Empty - all info is in header.
 message RollbackImportMessageBody {}
+
+// ImportIDRangeMessageHeader is the header of the import id range message.
+message ImportIDRangeMessageHeader {
+    int64 collection_id = 1;
+    int64 job_id        = 2;
+}
+
+// ImportIDRangeMessageBody carries the per-file PK ranges allocated from the
+// exact post-preimport row counts, aligned by file index with ImportMsg.Files.
+message ImportIDRangeMessageBody {
+    repeated FileIDRange file_ranges = 1;
+}
+
+// FileIDRange is the reserved autoID/rowID range of a single import file.
+message FileIDRange {
+    int64 file_index        = 1; // position in ImportMsg.Files / job.Files order
+    int64 row_count         = 2; // exact row count from the primary's preimport
+    common.IDRange id_range = 3; // reserved autoID/rowID range, sized exactly row_count
+}
 
 // CacheExpirations is the cache expirations of proxy collection meta cache.
 message CacheExpirations {

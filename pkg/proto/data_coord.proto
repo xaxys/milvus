@@ -1489,6 +1489,11 @@ message ImportJob {
   uint64 data_ts = 18;
   repeated string committed_vchannels = 19;
   bool            auto_commit         = 20;
+  // Set when per-file PK ranges came from an ImportIDRange broadcast
+  // (exact row-count sizing), enabling strict row-count equality validation.
+  // Absent for legacy jobs whose ranges were upper bounds allocated at
+  // broadcast time.
+  bool pk_ranges_exact = 21;
 }
 
 enum ImportTaskStateV2 {

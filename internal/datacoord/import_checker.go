@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/broker"
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster"
@@ -35,7 +36,9 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/replicateutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 type ImportChecker interface {
@@ -58,6 +61,17 @@ type importCheckerHooks struct {
 	// during shutdown) and the caller must not make an irreversible GC decision. nil hook
 	// is treated as "not replicating" (GC self-heal disabled).
 	isReplicatingCluster func(ctx context.Context) (bool, error)
+	// replicationRole reports this cluster's live replication role and whether it is
+	// replicating at all. A non-nil error means the role is indeterminate and the caller
+	// must NOT allocate (a secondary that allocated would diverge from the primary's
+	// authoritative range). nil hook is treated as "not replicating → primary" so tests
+	// that inject only assignImportIDRange proceed to allocate/broadcast.
+	replicationRole func(ctx context.Context) (role replicateutil.Role, replicating bool, err error)
+	// assignImportIDRange allocates the exact per-file PK ranges and broadcasts the
+	// ImportIDRange WAL message. Required in production for autoID (non-backup, non-L0)
+	// imports; a nil value disables the two-phase range assignment and is only valid in
+	// tests that do not exercise the PreImporting range gate.
+	assignImportIDRange func(ctx context.Context, job ImportJob, fileRows []int64) error
 }
 
 type importChecker struct {
@@ -70,6 +84,12 @@ type importChecker struct {
 	handler    Handler
 
 	hooks importCheckerHooks
+
+	// pkRangeWaitLogged throttles the "waiting for ImportIDRange" logs so a stalled
+	// secondary does not emit one every state-machine tick (~2s). Keyed by jobID; only
+	// ever touched from the single state-machine goroutine (checkAssigningIDRangeJob
+	// via ensurePKRanges), so no lock is needed.
+	pkRangeWaitLogged map[int64]time.Time
 
 	closeOnce sync.Once
 	closeChan chan struct{}
@@ -94,6 +114,8 @@ func NewImportChecker(ctx context.Context,
 		handler:    handler,
 		hooks:      hooks,
 		closeChan:  make(chan struct{}),
+
+		pkRangeWaitLogged: make(map[int64]time.Time),
 	}
 }
 
@@ -135,6 +157,8 @@ func (c *importChecker) runStateMachineLoop() {
 					c.checkPendingJob(job)
 				case internalpb.ImportJobState_PreImporting:
 					c.checkPreImportingJob(job)
+				case internalpb.ImportJobState_AssigningIDRange:
+					c.checkAssigningIDRangeJob(job)
 				case internalpb.ImportJobState_Importing:
 					c.checkImportingJob(job)
 				case internalpb.ImportJobState_Sorting:
@@ -312,6 +336,11 @@ func (c *importChecker) checkPreImportingJob(job ImportJob) {
 		metrics.ImportJobLatency.WithLabelValues(metrics.ImportStagePreImport).Observe(float64(preImportDuration.Milliseconds()))
 		log.Info(c.ctx, "import job preimport done", mlog.String("state", state.String()), mlog.Duration("jobTimeCost/preimport", preImportDuration))
 	}
+	// The PreImport stage span ends here: every exit below records it, including the
+	// PreImporting → AssigningIDRange transition. The wait inside AssigningIDRange is
+	// intentionally not given its own ImportStage metric label; the AssigningIDRange →
+	// Importing transition only advances the TimeRecorder (see checkAssigningIDRangeJob)
+	// so the wait is attributed to neither stage.
 
 	if totalRows == 0 {
 		if job.GetAutoCommit() {
@@ -326,10 +355,95 @@ func (c *importChecker) checkPreImportingJob(job ImportJob) {
 		return
 	}
 
+	// Two-phase autoID PK-range gate: an autoID import (not backup, not L0) must carry the
+	// exact per-file PK ranges in its job meta before any Import task is created. If
+	// preimport is done but the ranges are not present yet, move to AssigningIDRange —
+	// the primary broadcasts (and the secondary waits for) the ImportIDRange message
+	// there. The gate is symmetric across clusters, so the arrival order of "all
+	// preimport completed" and "ranges applied" does not matter. Jobs whose ranges are
+	// not needed or already set (legacy ImportMsg-carried ranges, non-autoID, backup,
+	// L0) never enter AssigningIDRange and fall through to the tail below.
+	if c.needsPKRanges(job) && !c.pkRangesSet(job) {
+		updateJobState(internalpb.ImportJobState_AssigningIDRange)
+		return
+	}
+
+	c.finishRangedPreimport(job, preimports, updateJobState)
+}
+
+// checkAssigningIDRangeJob drives a job waiting for its exact per-file autoID PK ranges
+// (entered from checkPreImportingJob when preimport completed before the ranges were
+// applied). Restart recovery is state-agnostic: a job persisted in AssigningIDRange is
+// picked up here by the state-machine switch. The job stays in AssigningIDRange,
+// bounded by its timeoutTs (see tryTimeoutJob), until the ImportIDRange ack callback
+// applies the ranges.
+func (c *importChecker) checkAssigningIDRangeJob(job ImportJob) {
+	preimports := c.importMeta.GetTaskByJob(c.ctx, job.GetJobID(), WithType(PreImportTaskType))
+	for _, t := range preimports {
+		if t.GetState() != datapb.ImportTaskStateV2_Completed {
+			// Preimport must be fully completed before Import tasks are created;
+			// without this, the tail below would regroup only a subset of files.
+			return
+		}
+	}
+
+	if !c.pkRangesSet(job) {
+		c.ensurePKRanges(job, preimports)
+		return
+	}
+
+	// Ranges applied: run the standard tail. The transition only advances the
+	// TimeRecorder past the wait — it must NOT emit another PreImport stage metric,
+	// that span already ended at the PreImporting → AssigningIDRange transition.
+	log := mlog.With(mlog.FieldJobID(job.GetJobID()))
+	updateJobState := func(state internalpb.ImportJobState, actions ...UpdateJobAction) {
+		actions = append(actions, UpdateJobState(state))
+		err := c.importMeta.UpdateJob(c.ctx, job.GetJobID(), actions...)
+		if err != nil {
+			log.Warn(c.ctx, "failed to update job state to Importing", mlog.Err(err))
+			return
+		}
+		waitDuration := job.GetTR().RecordSpan()
+		log.Info(c.ctx, "import job id range assigned", mlog.String("state", state.String()), mlog.Duration("jobTimeCost/assigningIDRange", waitDuration))
+	}
+	c.finishRangedPreimport(job, preimports, updateJobState)
+}
+
+// finishRangedPreimport runs the post-gate tail shared by checkPreImportingJob (jobs whose
+// ranges were already set without the new state: legacy ImportMsg-carried ranges,
+// non-autoID, backup, L0) and checkAssigningIDRangeJob (exact-range jobs whose
+// ImportIDRange broadcast has been applied): exact-marker divergence validation first,
+// then lacks/disk-quota/regroup/NewImportTasks → Importing. The caller supplies
+// updateJobState so each entry state records its own stage span.
+func (c *importChecker) finishRangedPreimport(job ImportJob, preimports []ImportTask, updateJobState func(state internalpb.ImportJobState, actions ...UpdateJobAction)) {
+	log := mlog.With(mlog.FieldJobID(job.GetJobID()))
+
+	// Post-gate validation for exact-range jobs: the local exact row count must equal the
+	// reserved range size for every file, checked before any segment is written. A mismatch
+	// means the file content differs between the cluster that allocated the range and this
+	// one — the precondition CDC import already requires operators to guarantee — so fail
+	// loudly on the diverging side instead of silently assigning divergent PKs.
+	if job.GetPkRangesExact() {
+		if fileID, localRows, reserved, ok := c.validateExactPKRanges(job, preimports); !ok {
+			log.Warn(c.ctx, "ImportIDRange divergence: local row count differs from the reserved exact PK range; failing import — files must be identical across clusters",
+				mlog.Int64("fileID", fileID), mlog.Int64("localRows", localRows), mlog.Int64("reserved", reserved))
+			updateJobState(internalpb.ImportJobState_Failed, UpdateJobReason(fmt.Sprintf(
+				"import file %d row count %d does not match the exactly reserved PK range size %d (cross-cluster file divergence)",
+				fileID, localRows, reserved)))
+			return
+		}
+	}
+
 	lacks := c.getLackFilesForImports(job)
 	if len(lacks) == 0 {
 		return
 	}
+
+	// Stamp the authoritative per-file ranges onto the task fileStats about to be regrouped
+	// into Import tasks, so they persist inside ImportTaskV2 meta and flow through
+	// AssembleImportRequest into the datanode's pkCursor. Harmless no-op when already equal
+	// (legacy jobs carried the range on the ImportMsg).
+	c.stampPKRangesOntoStats(job, lacks)
 
 	requestSize, err := CheckDiskQuota(c.ctx, job, c.meta, c.importMeta)
 	if err != nil {
@@ -356,6 +470,196 @@ func (c *importChecker) checkPreImportingJob(job ImportJob) {
 	}
 
 	updateJobState(internalpb.ImportJobState_Importing, UpdateRequestedDiskSize(requestSize))
+}
+
+// needsPKRanges reports whether the job requires per-file autoID PK ranges: its primary
+// key is autoID and it is neither a backup (which keeps embedded PKs) nor an L0 import
+// (which carries no autoID PK). This is the same predicate the removed broadcast-time
+// sizing path used, evaluated here from the persisted job meta. A schema without a
+// resolvable primary key is left to normal validation (no ranges).
+func (c *importChecker) needsPKRanges(job ImportJob) bool {
+	pkField, err := typeutil.GetPrimaryFieldSchema(job.GetSchema())
+	if err != nil {
+		return false
+	}
+	return pkField.GetAutoID() &&
+		!importutilv2.IsBackup(job.GetOptions()) &&
+		!importutilv2.IsL0Import(job.GetOptions())
+}
+
+// pkRangesSet reports whether every job file already carries a reserved PK range.
+func (c *importChecker) pkRangesSet(job ImportJob) bool {
+	return jobPKRangesSet(job)
+}
+
+// jobPKRangesSet reports whether every job file has a non-nil reserved PK range. It is a
+// nil check, NOT End>Begin: a zero-row file legitimately carries an empty (Begin==End)
+// range that still counts as set.
+func jobPKRangesSet(job ImportJob) bool {
+	for _, f := range job.GetFiles() {
+		if f.GetPreAllocatedAutoIds() == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// ensurePKRanges triggers (primary / non-replicating cluster) or waits for (secondary) the
+// ImportIDRange broadcast that populates the job's per-file PK ranges. Called from the
+// AssigningIDRange state when the ranges are unset; the job stays in AssigningIDRange
+// either way, bounded by its timeoutTs.
+func (c *importChecker) ensurePKRanges(job ImportJob, preimports []ImportTask) {
+	log := mlog.With(mlog.FieldJobID(job.GetJobID()))
+
+	// Bound the whole ensure step. The broadcast blocks on the ctx-insensitive resource-key
+	// lock and on per-vchannel WAL appends; under the server-lifetime c.ctx a stalled WAL or
+	// unavailable streamingnode would park the state-machine loop. Same pattern as checkGC:
+	// a timeout is just another transient status → retry next tick.
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	defer cancel()
+
+	// Decide the replication role. A nil hook means the feature is disabled (tests): treat
+	// as a non-replicating primary and proceed to allocate/broadcast. An indeterminate
+	// (error) role must NOT allocate — a secondary that allocated would diverge from the
+	// primary's authoritative range — so wait and retry next tick.
+	var role replicateutil.Role
+	replicating := false
+	if c.hooks.replicationRole != nil {
+		r, rep, err := c.hooks.replicationRole(ctx)
+		if err != nil {
+			log.Warn(ctx, "cannot determine replication role before ImportIDRange broadcast, will retry next tick", mlog.Err(err))
+			return
+		}
+		role, replicating = r, rep
+	}
+
+	if replicating && role == replicateutil.RoleSecondary {
+		// Secondary: the primary broadcasts ImportIDRange and it is replicated here; that
+		// ack callback applies the ranges. Do NOT allocate locally (it would diverge from
+		// the primary's authoritative range). Rate-limit the log so a stalled secondary
+		// does not spam every ~2s tick.
+		c.logPKRangeWaitThrottled(job, "waiting for replicated ImportIDRange")
+		return
+	}
+
+	if c.hooks.assignImportIDRange == nil {
+		log.Error(ctx, "assignImportIDRange hook is nil but autoID import requires PK ranges; this is a programming error")
+		return
+	}
+
+	// Build the exact per-file row counts, aligned with job.GetFiles() order, from the
+	// completed preimport stats. A missing stat is an internal error (preimport is fully
+	// completed before the gate); retry next tick.
+	fileRows, ok := c.exactFileRows(job, preimports)
+	if !ok {
+		return
+	}
+
+	log.Info(ctx, "triggering ImportIDRange broadcast",
+		mlog.Int("fileCount", len(job.GetFiles())), mlog.Int64("totalRows", lo.Sum(fileRows)))
+
+	if err := c.hooks.assignImportIDRange(ctx, job, fileRows); err != nil {
+		if errors.Is(err, broadcaster.ErrNotPrimary) {
+			// Stale role during switchover: this cluster thought it was primary but the
+			// broadcaster rejected the append. Treat as "wait" — the real primary broadcasts
+			// the authoritative range and it is replicated here. Retry next tick.
+			log.Info(ctx, "role flipped to standby while importing, waiting for replicated ImportIDRange")
+		} else {
+			log.Warn(ctx, "ImportIDRange broadcast failed, will retry next tick", mlog.Err(err))
+		}
+		return
+	}
+}
+
+// exactFileRows returns the exact per-file row counts aligned with job.GetFiles() order,
+// summed from the completed preimport task stats by fileID. A file with no stat is an
+// internal error — preimport is fully completed before the gate — and ok=false tells the
+// caller to retry next tick.
+func (c *importChecker) exactFileRows(job ImportJob, preimports []ImportTask) ([]int64, bool) {
+	log := mlog.With(mlog.FieldJobID(job.GetJobID()))
+	rowsByFile := make(map[int64]int64)
+	for _, t := range preimports {
+		for _, stat := range t.GetFileStats() {
+			rowsByFile[stat.GetImportFile().GetId()] += stat.GetTotalRows()
+		}
+	}
+	files := job.GetFiles()
+	fileRows := make([]int64, len(files))
+	for i, f := range files {
+		rows, ok := rowsByFile[f.GetId()]
+		if !ok {
+			log.Warn(c.ctx, "preimport stats missing for an import file, will retry next tick", mlog.Int64("fileID", f.GetId()))
+			return nil, false
+		}
+		fileRows[i] = rows
+	}
+	return fileRows, true
+}
+
+// validateExactPKRanges checks each file's local exact row count against the reserved PK
+// range size for an exact-range job. It returns the first divergence (fileID, localRows,
+// reserved) with ok=false; ok=true means every file matches its reservation exactly.
+func (c *importChecker) validateExactPKRanges(job ImportJob, preimports []ImportTask) (fileID, localRows, reserved int64, ok bool) {
+	reservedByFile := make(map[int64]*commonpb.IDRange, len(job.GetFiles()))
+	for _, f := range job.GetFiles() {
+		reservedByFile[f.GetId()] = f.GetPreAllocatedAutoIds()
+	}
+	for _, t := range preimports {
+		for _, stat := range t.GetFileStats() {
+			id := stat.GetImportFile().GetId()
+			r := reservedByFile[id]
+			size := r.GetEnd() - r.GetBegin()
+			if stat.GetTotalRows() != size {
+				return id, stat.GetTotalRows(), size, false
+			}
+		}
+	}
+	return 0, 0, 0, true
+}
+
+// stampPKRangesOntoStats copies the job's authoritative per-file PK ranges onto the task
+// fileStats (by fileID) so they persist into ImportTaskV2 meta and flow through
+// AssembleImportRequest. An already-equal range is left untouched (idempotent), so this is
+// a harmless no-op for legacy jobs that carried the range on the ImportMsg.
+func (c *importChecker) stampPKRangesOntoStats(job ImportJob, lacks []*datapb.ImportFileStats) {
+	rangeByFile := make(map[int64]*commonpb.IDRange, len(job.GetFiles()))
+	for _, f := range job.GetFiles() {
+		if r := f.GetPreAllocatedAutoIds(); r != nil {
+			rangeByFile[f.GetId()] = r
+		}
+	}
+	for _, stat := range lacks {
+		importFile := stat.GetImportFile()
+		if importFile == nil {
+			continue
+		}
+		r, ok := rangeByFile[importFile.GetId()]
+		if !ok {
+			continue
+		}
+		cur := importFile.GetPreAllocatedAutoIds()
+		if cur.GetBegin() == r.GetBegin() && cur.GetEnd() == r.GetEnd() {
+			continue
+		}
+		importFile.PreAllocatedAutoIds = r
+	}
+}
+
+// importIDRangeWaitLogInterval throttles repeated "waiting for ImportIDRange" logs.
+const importIDRangeWaitLogInterval = 30 * time.Second
+
+// logPKRangeWaitThrottled logs a waiting-for-range state at Info at most once per
+// importIDRangeWaitLogInterval per job, and at Debug in between, so a stalled secondary
+// does not emit an Info line on every ~2s state-machine tick. Called only from the single
+// state-machine goroutine, so the throttle map needs no lock.
+func (c *importChecker) logPKRangeWaitThrottled(job ImportJob, msg string) {
+	now := time.Now()
+	if last, seen := c.pkRangeWaitLogged[job.GetJobID()]; seen && now.Sub(last) < importIDRangeWaitLogInterval {
+		mlog.Debug(c.ctx, msg, mlog.FieldJobID(job.GetJobID()))
+		return
+	}
+	c.pkRangeWaitLogged[job.GetJobID()] = now
+	mlog.Info(c.ctx, msg, mlog.FieldJobID(job.GetJobID()))
 }
 
 func (c *importChecker) checkImportingJob(job ImportJob) {

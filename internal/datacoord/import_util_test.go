@@ -1499,3 +1499,86 @@ func TestErrPKRangeTooSmall_IsDistinguishableAndKeepsItsCode(t *testing.T) {
 	assert.False(t, merr.IsNonRetryableErr(terminal))
 	assert.False(t, merr.IsNonRetryableErr(transient))
 }
+
+// Two-phase exact-range jobs (PkRangesExact marker set by the ImportIDRange ack
+// callback) tighten the reservation guard from > to !=: the reservation was
+// sized from the same exact post-preimport count that produced TotalRows, so
+// any inequality is a divergence a retry can never fix. Legacy upper-bound jobs
+// (no marker) keep the old semantics: rows < reserved is normal (expansion
+// factor), only an overrun is fatal.
+func TestImportUtil_AssembleExactRangeMarkerGuard(t *testing.T) {
+	const reservedBegin, reservedEnd = int64(5000), int64(5100) // 100 ids reserved
+	cases := []struct {
+		name        string
+		exact       bool
+		rows        int64
+		wantErr     bool
+		errContains string
+	}{
+		{"exact marker, rows == reserved", true, 100, false, ""},
+		{"exact marker, rows < reserved", true, 99, true, "99 rows, 100 ids reserved"},
+		{"exact marker, rows > reserved", true, 101, true, "101 rows, 100 ids reserved"},
+		{"legacy, rows < reserved", false, 99, false, ""},
+		{"legacy, rows == reserved", false, 100, false, ""},
+		{"legacy, rows > reserved", false, 101, true, "101 rows, 100 ids reserved"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var job ImportJob = &importJob{
+				ImportJob: &datapb.ImportJob{
+					JobID: 0, CollectionID: 1, PartitionIDs: []int64{2}, Vchannels: []string{"v0"},
+					PkRangesExact: tc.exact,
+				},
+			}
+			importMeta := NewMockImportMeta(t)
+			importMeta.EXPECT().GetJob(mock.Anything, mock.Anything).Return(job).Maybe()
+
+			importTaskProto := &datapb.ImportTaskV2{
+				JobID:        0,
+				TaskID:       4,
+				CollectionID: 1,
+				// No segments, so the guard is reached without a meta to look them up in.
+				FileStats: []*datapb.ImportFileStats{
+					{
+						ImportFile: &internalpb.ImportFile{
+							Id:                  1,
+							Paths:               []string{"f1"},
+							PreAllocatedAutoIds: &commonpb.IDRange{Begin: reservedBegin, End: reservedEnd},
+						},
+						TotalRows: tc.rows,
+					},
+				},
+			}
+			var task ImportTask = &importTask{importMeta: importMeta}
+			task.(*importTask).task.Store(importTaskProto)
+
+			alloc := allocator.NewMockAllocator(t)
+			alloc.EXPECT().AllocN(mock.Anything).RunAndReturn(func(n int64) (int64, int64, error) {
+				return 1, 1 + n, nil
+			}).Maybe()
+			alloc.EXPECT().AllocTimestamp(mock.Anything).Return(800, nil).Maybe()
+
+			req, err := AssembleImportRequest(task, job, nil, alloc)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, req)
+				// The sentinel must survive so the scheduler fails the job instead
+				// of retrying a number that will never change (both guards).
+				assert.True(t, errors.Is(err, ErrPKRangeTooSmall))
+				assert.ErrorIs(t, err, merr.ErrImportSysFailed)
+				assert.Contains(t, err.Error(), tc.errContains)
+				if tc.exact {
+					assert.Contains(t, err.Error(), "does not match the exactly reserved PK range")
+				} else {
+					assert.Contains(t, err.Error(), "reserved PK range too small")
+				}
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, req)
+			// The reserved range flows through to the datanode request unchanged.
+			assert.Equal(t, reservedBegin, req.GetFiles()[0].GetPreAllocatedAutoIds().GetBegin())
+			assert.Equal(t, reservedEnd, req.GetFiles()[0].GetPreAllocatedAutoIds().GetEnd())
+		})
+	}
+}

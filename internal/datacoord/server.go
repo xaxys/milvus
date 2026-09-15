@@ -347,6 +347,8 @@ func (s *Server) initDataCoord() error {
 		commitImport:         s.broadcastCommitImportMessage,
 		rollbackImport:       s.broadcastRollbackImportMessage,
 		isReplicatingCluster: s.isReplicatingClusterNow,
+		replicationRole:      s.replicationRole,
+		assignImportIDRange:  s.assignAndBroadcastImportIDRange,
 	})
 
 	// init file resource observer

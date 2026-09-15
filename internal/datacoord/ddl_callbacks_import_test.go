@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -50,6 +51,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 )
 
 // ================================
@@ -1268,4 +1270,400 @@ func TestJobIDFromDuplicatedBroadcast_RejectsADifferentCollection(t *testing.T) 
 	_, err := jobIDFromDuplicatedBroadcast(msg, 101)
 	assert.Error(t, err)
 	assert.True(t, errors.Is(err, merr.ErrServiceInternal))
+}
+
+// --------------------------------
+// importIDRangeAckCallback Tests
+// --------------------------------
+
+// buildImportIDRangeBroadcastResult constructs a BroadcastResult for an
+// ImportIDRange WAL message, mirroring the commit/rollback builders above.
+// A zero timeTick leaves Results empty, so GetMaxTimeTick() == 0.
+func buildImportIDRangeBroadcastResult(jobID int64, fileRanges []*messagespb.FileIDRange, timeTick uint64) message.BroadcastResultImportIDRangeMessageV2 {
+	broadcastMsg := message.NewImportIDRangeMessageBuilderV2().
+		WithHeader(&message.ImportIDRangeMessageHeader{CollectionId: 1, JobId: jobID}).
+		WithBody(&messagespb.ImportIDRangeMessageBody{FileRanges: fileRanges}).
+		WithBroadcast([]string{"v0"}).
+		MustBuildBroadcast()
+	results := map[string]*message.AppendResult{}
+	if timeTick != 0 {
+		results["v0"] = &message.AppendResult{TimeTick: timeTick}
+	}
+	return message.BroadcastResultImportIDRangeMessageV2{
+		Message: message.MustAsSpecializedBroadcastMessage[*message.ImportIDRangeMessageHeader, *messagespb.ImportIDRangeMessageBody](broadcastMsg),
+		Results: results,
+	}
+}
+
+func newIDRangeTestJob(jobID int64, state internalpb.ImportJobState) *importJob {
+	return &importJob{
+		ImportJob: &datapb.ImportJob{
+			JobID: jobID,
+			State: state,
+			Files: []*internalpb.ImportFile{
+				{Id: 101, Paths: []string{"a.parquet"}},
+				{Id: 102, Paths: []string{"b.parquet"}},
+			},
+		},
+		tr: timerecord.NewTimeRecorder("test"),
+	}
+}
+
+// validIDRangeFileRanges deliberately arrives out of order: ranges must be
+// applied by FileIndex (position in job.Files), not by message order.
+func validIDRangeFileRanges() []*messagespb.FileIDRange {
+	return []*messagespb.FileIDRange{
+		{FileIndex: 1, RowCount: 0, IdRange: &commonpb.IDRange{Begin: 1010, End: 1010}},
+		{FileIndex: 0, RowCount: 10, IdRange: &commonpb.IDRange{Begin: 1000, End: 1010}},
+	}
+}
+
+// First delivery applies the ranges by FileIndex, sets the exact marker, and
+// persists the updated job through the catalog.
+func TestImportIDRangeAckCallback_FirstApply(t *testing.T) {
+	ctx := context.Background()
+	var saved []*datapb.ImportJob
+	importMeta := newCapturingImportMeta(t, &saved)
+
+	job := newIDRangeTestJob(21, internalpb.ImportJobState_PreImporting)
+	require.NoError(t, importMeta.AddJob(ctx, job))
+
+	callbacks := &DDLCallbacks{Server: &Server{importMeta: importMeta}}
+	require.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(21, validIDRangeFileRanges(), 0)))
+
+	got := importMeta.GetJob(ctx, 21)
+	require.NotNil(t, got)
+	assert.True(t, got.GetPkRangesExact(), "the exact-range marker must be set")
+	// Applied by FileIndex, not by message order.
+	assert.EqualValues(t, 1000, got.GetFiles()[0].GetPreAllocatedAutoIds().GetBegin())
+	assert.EqualValues(t, 1010, got.GetFiles()[0].GetPreAllocatedAutoIds().GetEnd())
+	assert.EqualValues(t, 1010, got.GetFiles()[1].GetPreAllocatedAutoIds().GetBegin())
+	assert.EqualValues(t, 1010, got.GetFiles()[1].GetPreAllocatedAutoIds().GetEnd())
+	assert.Equal(t, internalpb.ImportJobState_PreImporting, got.GetState(),
+		"applying ranges must not move the state machine; the checker gate does")
+
+	// Persisted: the proto handed to the catalog carries the ranges and the marker.
+	require.NotEmpty(t, saved)
+	last := saved[len(saved)-1]
+	assert.True(t, last.GetPkRangesExact())
+	assert.EqualValues(t, 1000, last.GetFiles()[0].GetPreAllocatedAutoIds().GetBegin())
+	assert.EqualValues(t, 1010, last.GetFiles()[1].GetPreAllocatedAutoIds().GetBegin())
+}
+
+// The ack callback applies ranges while the job waits in AssigningIDRange: the
+// state is left for the checker to advance, and the exact marker is set.
+func TestImportIDRangeAckCallback_AppliesInAssigningIDRange(t *testing.T) {
+	ctx := context.Background()
+	importMeta, _ := newTestImportMeta(t)
+	job := newIDRangeTestJob(24, internalpb.ImportJobState_AssigningIDRange)
+	require.NoError(t, importMeta.AddJob(ctx, job))
+
+	callbacks := &DDLCallbacks{Server: &Server{importMeta: importMeta}}
+	require.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(24, validIDRangeFileRanges(), 0)))
+
+	got := importMeta.GetJob(ctx, 24)
+	require.NotNil(t, got)
+	assert.True(t, got.GetPkRangesExact())
+	assert.EqualValues(t, 1000, got.GetFiles()[0].GetPreAllocatedAutoIds().GetBegin())
+	assert.EqualValues(t, 1010, got.GetFiles()[0].GetPreAllocatedAutoIds().GetEnd())
+	assert.Equal(t, internalpb.ImportJobState_AssigningIDRange, got.GetState(),
+		"applying ranges must not move the state machine; the checker gate does")
+}
+
+// At-least-once redelivery of the same message is a clean no-op; a conflicting
+// range must never overwrite the first applied one (first-range-wins).
+func TestImportIDRangeAckCallback_RedeliveryIdempotentAndFirstWins(t *testing.T) {
+	ctx := context.Background()
+	importMeta, _ := newTestImportMeta(t)
+	job := newIDRangeTestJob(22, internalpb.ImportJobState_PreImporting)
+	require.NoError(t, importMeta.AddJob(ctx, job))
+	callbacks := &DDLCallbacks{Server: &Server{importMeta: importMeta}}
+
+	// First apply.
+	require.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(22, validIDRangeFileRanges(), 0)))
+
+	// Equal redelivery -> nil, nothing changes.
+	assert.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(22, validIDRangeFileRanges(), 0)))
+	got := importMeta.GetJob(ctx, 22)
+	assert.True(t, got.GetPkRangesExact())
+	assert.EqualValues(t, 1000, got.GetFiles()[0].GetPreAllocatedAutoIds().GetBegin())
+	assert.Equal(t, internalpb.ImportJobState_PreImporting, got.GetState())
+
+	// Conflicting redelivery (self-consistent, passes protocol checks, but a
+	// different range) -> nil, the original range is kept.
+	conflicting := []*messagespb.FileIDRange{
+		{FileIndex: 0, RowCount: 10, IdRange: &commonpb.IDRange{Begin: 2000, End: 2010}},
+		{FileIndex: 1, RowCount: 0, IdRange: &commonpb.IDRange{Begin: 2010, End: 2010}},
+	}
+	assert.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(22, conflicting, 0)))
+	got = importMeta.GetJob(ctx, 22)
+	assert.EqualValues(t, 1000, got.GetFiles()[0].GetPreAllocatedAutoIds().GetBegin(), "first applied range wins")
+	assert.EqualValues(t, 1010, got.GetFiles()[0].GetPreAllocatedAutoIds().GetEnd())
+	assert.EqualValues(t, 1010, got.GetFiles()[1].GetPreAllocatedAutoIds().GetBegin())
+}
+
+// A legacy job whose files already carry ranges from an old-format ImportMsg
+// (no exact marker) treats an equal message as a redelivery: no-op, and the
+// exact marker stays unset so the looser legacy > guard keeps applying.
+func TestImportIDRangeAckCallback_LegacyPresetRangesEqualNoOp(t *testing.T) {
+	ctx := context.Background()
+	importMeta, _ := newTestImportMeta(t)
+	job := newIDRangeTestJob(23, internalpb.ImportJobState_PreImporting)
+	job.Files[0].PreAllocatedAutoIds = &commonpb.IDRange{Begin: 1000, End: 1010}
+	job.Files[1].PreAllocatedAutoIds = &commonpb.IDRange{Begin: 1010, End: 1010}
+	require.NoError(t, importMeta.AddJob(ctx, job))
+
+	callbacks := &DDLCallbacks{Server: &Server{importMeta: importMeta}}
+	assert.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(23, validIDRangeFileRanges(), 0)))
+
+	got := importMeta.GetJob(ctx, 23)
+	assert.False(t, got.GetPkRangesExact(), "an equal redelivery must not upgrade a legacy job to exact")
+	assert.EqualValues(t, 1000, got.GetFiles()[0].GetPreAllocatedAutoIds().GetBegin())
+}
+
+// Job-not-found retries only within a bounded window measured from the
+// broadcast TimeTick, then WARNs and releases the collection lock; a zero tick
+// has nothing to bound the window and stays retryable.
+func TestImportIDRangeAckCallback_JobNotFoundBoundedRetry(t *testing.T) {
+	ctx := context.Background()
+	importMeta, _ := newTestImportMeta(t)
+	callbacks := &DDLCallbacks{Server: &Server{importMeta: importMeta}}
+
+	freshTick := tsoutil.ComposeTSByTime(time.Now())
+	staleTick := tsoutil.ComposeTSByTime(time.Now().Add(-importIDRangeAckJobNotFoundRetryWindow - time.Minute))
+
+	// Fresh broadcast, job missing -> retryable error (the ImportMsg ack may
+	// still be in flight).
+	err := callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(31, validIDRangeFileRanges(), freshTick))
+	assert.Error(t, err)
+	assert.True(t, errors.Is(err, merr.ErrImportSysFailed))
+
+	// No time tick to bound the window -> retryable as well.
+	err = callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(31, validIDRangeFileRanges(), 0))
+	assert.Error(t, err)
+	assert.True(t, errors.Is(err, merr.ErrImportSysFailed))
+
+	// Broadcast older than the bounded window -> WARN + release (nil), no job appears.
+	assert.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+		buildImportIDRangeBroadcastResult(31, validIDRangeFileRanges(), staleTick)))
+	assert.Nil(t, importMeta.GetJob(ctx, 31))
+}
+
+// A job at or past the range gate (Failed/Completed/Committing/Uncommitted) is
+// a race the callback must not disturb: nil no-op, ranges never applied.
+func TestImportIDRangeAckCallback_TerminalStatesNoOp(t *testing.T) {
+	states := []internalpb.ImportJobState{
+		internalpb.ImportJobState_Failed,
+		internalpb.ImportJobState_Completed,
+		internalpb.ImportJobState_Committing,
+		internalpb.ImportJobState_Uncommitted,
+	}
+	for _, state := range states {
+		t.Run(state.String(), func(t *testing.T) {
+			ctx := context.Background()
+			importMeta, _ := newTestImportMeta(t)
+			job := newIDRangeTestJob(41, state)
+			require.NoError(t, importMeta.AddJob(ctx, job))
+
+			callbacks := &DDLCallbacks{Server: &Server{importMeta: importMeta}}
+			assert.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+				buildImportIDRangeBroadcastResult(41, validIDRangeFileRanges(), 0)))
+
+			got := importMeta.GetJob(ctx, 41)
+			assert.Equal(t, state, got.GetState())
+			assert.False(t, got.GetPkRangesExact())
+			assert.Nil(t, got.GetFiles()[0].GetPreAllocatedAutoIds(),
+				"ranges must not be applied past the gate")
+		})
+	}
+}
+
+// Protocol violations -- the two clusters disagree on the job's shape -- fail
+// the job loudly instead of applying a partial or misaligned range. Failing the
+// job is the callback's successful outcome (nil error).
+func TestImportIDRangeAckCallback_ProtocolViolationsFailJob(t *testing.T) {
+	okRange0 := &messagespb.FileIDRange{FileIndex: 0, RowCount: 10, IdRange: &commonpb.IDRange{Begin: 1000, End: 1010}}
+	okRange1 := &messagespb.FileIDRange{FileIndex: 1, RowCount: 0, IdRange: &commonpb.IDRange{Begin: 1010, End: 1010}}
+	cases := []struct {
+		name           string
+		fileRanges     []*messagespb.FileIDRange
+		reasonContains []string
+	}{
+		{
+			name:           "file count mismatch",
+			fileRanges:     []*messagespb.FileIDRange{okRange0},
+			reasonContains: []string{"carries 1 file ranges", "job has 2 files"},
+		},
+		{
+			name:           "file index out of range",
+			fileRanges:     []*messagespb.FileIDRange{okRange0, {FileIndex: 2, RowCount: 0, IdRange: &commonpb.IDRange{Begin: 1010, End: 1010}}},
+			reasonContains: []string{"file index 2 out of range"},
+		},
+		{
+			name:           "negative file index",
+			fileRanges:     []*messagespb.FileIDRange{okRange0, {FileIndex: -1, RowCount: 0, IdRange: &commonpb.IDRange{Begin: 1010, End: 1010}}},
+			reasonContains: []string{"file index -1 out of range"},
+		},
+		{
+			name:           "row count does not match range size",
+			fileRanges:     []*messagespb.FileIDRange{{FileIndex: 0, RowCount: 9, IdRange: &commonpb.IDRange{Begin: 1000, End: 1010}}, okRange1},
+			reasonContains: []string{"row count 9", "range size 10"},
+		},
+		{
+			// Both entries are individually self-consistent; the violation is the
+			// duplicated index alone, which would otherwise leave file 1's range
+			// nil while PkRangesExact=true.
+			name: "duplicate file index",
+			fileRanges: []*messagespb.FileIDRange{
+				okRange0,
+				{FileIndex: 0, RowCount: 10, IdRange: &commonpb.IDRange{Begin: 1000, End: 1010}},
+			},
+			reasonContains: []string{"duplicate file index 0"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			importMeta, _ := newTestImportMeta(t)
+			job := newIDRangeTestJob(51, internalpb.ImportJobState_PreImporting)
+			require.NoError(t, importMeta.AddJob(ctx, job))
+
+			callbacks := &DDLCallbacks{Server: &Server{importMeta: importMeta}}
+			assert.NoError(t, callbacks.importIDRangeAckCallback(ctx,
+				buildImportIDRangeBroadcastResult(51, tc.fileRanges, 0)))
+
+			got := importMeta.GetJob(ctx, 51)
+			require.NotNil(t, got)
+			assert.Equal(t, internalpb.ImportJobState_Failed, got.GetState())
+			for _, sub := range tc.reasonContains {
+				assert.Contains(t, got.GetReason(), sub)
+			}
+		})
+	}
+}
+
+// --------------------------------
+// assignAndBroadcastImportIDRange Tests
+// --------------------------------
+
+// The producer side of the two-phase flow: exact per-file ranges (one entry per
+// job file, FileIndex == position, RowCount == exact rows, range size == rows,
+// zero-row file gets an empty range) broadcast to the job's data vchannels.
+func TestAssignAndBroadcastImportIDRange_MessageShape(t *testing.T) {
+	ctx := context.Background()
+	wantVchannels := []string{"by-dev-rootcoord-dml_0_v0", "by-dev-rootcoord-dml_1_v0"}
+
+	mockBroker := broker.NewMockBroker(t)
+	mockBroker.EXPECT().DescribeCollectionInternal(mock.Anything, int64(7)).Return(&milvuspb.DescribeCollectionResponse{
+		DbName:         "test_db",
+		CollectionName: "test_collection",
+	}, nil)
+
+	capture := &captureBroadcastAPI{}
+	mockBroadcast := mockey.Mock(broadcast.StartBroadcastWithResourceKeys).To(
+		func(_ context.Context, _ ...message.ResourceKey) (broadcaster.BroadcastAPI, error) {
+			return capture, nil
+		}).Build()
+	defer mockBroadcast.UnPatch()
+
+	alloc := allocator.NewMockAllocator(t)
+	alloc.EXPECT().AllocN(mock.Anything).RunAndReturn(func(n int64) (int64, int64, error) {
+		return 1000, 1000 + n, nil
+	})
+
+	server := &Server{broker: mockBroker, allocator: alloc}
+	job := &importJob{
+		ImportJob: &datapb.ImportJob{
+			JobID:        9,
+			CollectionID: 7,
+			Vchannels:    wantVchannels,
+			Files: []*internalpb.ImportFile{
+				{Id: 101, Paths: []string{"a.parquet"}},
+				{Id: 102, Paths: []string{"b.parquet"}},
+				{Id: 103, Paths: []string{"c.parquet"}},
+			},
+		},
+		tr: timerecord.NewTimeRecorder("test"),
+	}
+
+	// fileRows aligned with job.GetFiles(): 10 rows, 0 rows (empty file), 5 rows.
+	require.NoError(t, server.assignAndBroadcastImportIDRange(ctx, job, []int64{10, 0, 5}))
+
+	require.NotNil(t, capture.captured, "Broadcast must have been called")
+	assert.ElementsMatch(t, wantVchannels, capture.captured.BroadcastHeader().VChannels,
+		"ImportIDRange must target the job's data vchannels, like ImportMsg")
+
+	msg, err := message.AsBroadcastImportIDRangeMessageV2(capture.captured)
+	require.NoError(t, err)
+	assert.EqualValues(t, 7, msg.Header().GetCollectionId())
+	assert.EqualValues(t, 9, msg.Header().GetJobId())
+
+	body := msg.MustBody()
+	require.Len(t, body.GetFileRanges(), 3)
+	wantRows := []int64{10, 0, 5}
+	for i, fr := range body.GetFileRanges() {
+		assert.EqualValues(t, i, fr.GetFileIndex(), "FileIndex is the position in job.Files")
+		assert.EqualValues(t, wantRows[i], fr.GetRowCount())
+		assert.EqualValues(t, wantRows[i], fr.GetIdRange().GetEnd()-fr.GetIdRange().GetBegin(),
+			"reservation is exact: range size == row count (empty for a zero-row file)")
+	}
+	// Exact greedy batching: one allocation for the whole 15-id total, contiguous.
+	assert.EqualValues(t, body.GetFileRanges()[0].GetIdRange().GetEnd(),
+		body.GetFileRanges()[2].GetIdRange().GetBegin())
+}
+
+// Allocation failure is transient and propagates without any broadcast; a job
+// without vchannels can never deliver the message and fails loudly.
+func TestAssignAndBroadcastImportIDRange_ErrorPaths(t *testing.T) {
+	ctx := context.Background()
+
+	// AllocN failure -> error propagates, nothing is broadcast.
+	allocErr := allocator.NewMockAllocator(t)
+	allocErr.EXPECT().AllocN(mock.Anything).Return(0, 0, errors.New("rootcoord unavailable"))
+	broadcastStarted := false
+	mockBroadcast := mockey.Mock(broadcast.StartBroadcastWithResourceKeys).To(
+		func(_ context.Context, _ ...message.ResourceKey) (broadcaster.BroadcastAPI, error) {
+			broadcastStarted = true
+			return nil, errors.New("must not be reached")
+		}).Build()
+	defer mockBroadcast.UnPatch()
+
+	server := &Server{allocator: allocErr}
+	job := &importJob{
+		ImportJob: &datapb.ImportJob{
+			JobID: 9, CollectionID: 7, Vchannels: []string{"v0"},
+			Files: []*internalpb.ImportFile{{Id: 101}},
+		},
+		tr: timerecord.NewTimeRecorder("test"),
+	}
+	err := server.assignAndBroadcastImportIDRange(ctx, job, []int64{10})
+	assert.Error(t, err)
+	assert.False(t, broadcastStarted, "no broadcast without a successful allocation")
+
+	// No vchannels -> ErrImportSysFailed (same contract as commit/rollback broadcasts).
+	alloc := allocator.NewMockAllocator(t)
+	alloc.EXPECT().AllocN(mock.Anything).RunAndReturn(func(n int64) (int64, int64, error) {
+		return 1000, 1000 + n, nil
+	})
+	server = &Server{allocator: alloc}
+	noVchannelJob := &importJob{
+		ImportJob: &datapb.ImportJob{
+			JobID: 9, CollectionID: 7,
+			Files: []*internalpb.ImportFile{{Id: 101}},
+		},
+		tr: timerecord.NewTimeRecorder("test"),
+	}
+	err = server.assignAndBroadcastImportIDRange(ctx, noVchannelJob, []int64{10})
+	assert.Error(t, err)
+	assert.True(t, errors.Is(err, merr.ErrImportSysFailed))
+	assert.Contains(t, err.Error(), "job 9 has no vchannels")
+	assert.False(t, broadcastStarted)
 }

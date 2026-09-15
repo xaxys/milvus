@@ -82,6 +82,7 @@ const (
 	MessageType_RollbackImport            MessageType = 46
 	MessageType_AlterRLSMetadata          MessageType = 47
 	MessageType_DropRLSMetadata           MessageType = 48
+	MessageType_ImportIDRange             MessageType = 49
 	// AlterWAL is used to alter the wal configuration to the current cluster.
 	MessageType_AlterWAL MessageType = 700
 	// RecoveryBarrier is appended as the first WAL recovery write to fence the writer
@@ -169,6 +170,7 @@ var (
 		46:  "RollbackImport",
 		47:  "AlterRLSMetadata",
 		48:  "DropRLSMetadata",
+		49:  "ImportIDRange",
 		700: "AlterWAL",
 		701: "RecoveryBarrier",
 		800: "AlterReplicateConfig",
@@ -227,6 +229,7 @@ var (
 		"RollbackImport":            46,
 		"AlterRLSMetadata":          47,
 		"DropRLSMetadata":           48,
+		"ImportIDRange":             49,
 		"AlterWAL":                  700,
 		"RecoveryBarrier":           701,
 		"AlterReplicateConfig":      800,
@@ -5746,6 +5749,175 @@ func (*RollbackImportMessageBody) Descriptor() ([]byte, []int) {
 	return file_messages_proto_rawDescGZIP(), []int{102}
 }
 
+// ImportIDRangeMessageHeader is the header of the import id range message.
+type ImportIDRangeMessageHeader struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	CollectionId int64 `protobuf:"varint,1,opt,name=collection_id,json=collectionId,proto3" json:"collection_id,omitempty"`
+	JobId        int64 `protobuf:"varint,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+}
+
+func (x *ImportIDRangeMessageHeader) Reset() {
+	*x = ImportIDRangeMessageHeader{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_messages_proto_msgTypes[103]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ImportIDRangeMessageHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ImportIDRangeMessageHeader) ProtoMessage() {}
+
+func (x *ImportIDRangeMessageHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[103]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ImportIDRangeMessageHeader.ProtoReflect.Descriptor instead.
+func (*ImportIDRangeMessageHeader) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{103}
+}
+
+func (x *ImportIDRangeMessageHeader) GetCollectionId() int64 {
+	if x != nil {
+		return x.CollectionId
+	}
+	return 0
+}
+
+func (x *ImportIDRangeMessageHeader) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+// ImportIDRangeMessageBody carries the per-file PK ranges allocated from the
+// exact post-preimport row counts, aligned by file index with ImportMsg.Files.
+type ImportIDRangeMessageBody struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	FileRanges []*FileIDRange `protobuf:"bytes,1,rep,name=file_ranges,json=fileRanges,proto3" json:"file_ranges,omitempty"`
+}
+
+func (x *ImportIDRangeMessageBody) Reset() {
+	*x = ImportIDRangeMessageBody{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_messages_proto_msgTypes[104]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ImportIDRangeMessageBody) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ImportIDRangeMessageBody) ProtoMessage() {}
+
+func (x *ImportIDRangeMessageBody) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[104]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ImportIDRangeMessageBody.ProtoReflect.Descriptor instead.
+func (*ImportIDRangeMessageBody) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{104}
+}
+
+func (x *ImportIDRangeMessageBody) GetFileRanges() []*FileIDRange {
+	if x != nil {
+		return x.FileRanges
+	}
+	return nil
+}
+
+// FileIDRange is the reserved autoID/rowID range of a single import file.
+type FileIDRange struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	FileIndex int64             `protobuf:"varint,1,opt,name=file_index,json=fileIndex,proto3" json:"file_index,omitempty"` // position in ImportMsg.Files / job.Files order
+	RowCount  int64             `protobuf:"varint,2,opt,name=row_count,json=rowCount,proto3" json:"row_count,omitempty"`    // exact row count from the primary's preimport
+	IdRange   *commonpb.IDRange `protobuf:"bytes,3,opt,name=id_range,json=idRange,proto3" json:"id_range,omitempty"`        // reserved autoID/rowID range, sized exactly row_count
+}
+
+func (x *FileIDRange) Reset() {
+	*x = FileIDRange{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_messages_proto_msgTypes[105]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *FileIDRange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileIDRange) ProtoMessage() {}
+
+func (x *FileIDRange) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[105]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileIDRange.ProtoReflect.Descriptor instead.
+func (*FileIDRange) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{105}
+}
+
+func (x *FileIDRange) GetFileIndex() int64 {
+	if x != nil {
+		return x.FileIndex
+	}
+	return 0
+}
+
+func (x *FileIDRange) GetRowCount() int64 {
+	if x != nil {
+		return x.RowCount
+	}
+	return 0
+}
+
+func (x *FileIDRange) GetIdRange() *commonpb.IDRange {
+	if x != nil {
+		return x.IdRange
+	}
+	return nil
+}
+
 // CacheExpirations is the cache expirations of proxy collection meta cache.
 type CacheExpirations struct {
 	state         protoimpl.MessageState
@@ -5758,7 +5930,7 @@ type CacheExpirations struct {
 func (x *CacheExpirations) Reset() {
 	*x = CacheExpirations{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[103]
+		mi := &file_messages_proto_msgTypes[106]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5771,7 +5943,7 @@ func (x *CacheExpirations) String() string {
 func (*CacheExpirations) ProtoMessage() {}
 
 func (x *CacheExpirations) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[103]
+	mi := &file_messages_proto_msgTypes[106]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5784,7 +5956,7 @@ func (x *CacheExpirations) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CacheExpirations.ProtoReflect.Descriptor instead.
 func (*CacheExpirations) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{103}
+	return file_messages_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *CacheExpirations) GetCacheExpirations() []*CacheExpiration {
@@ -5809,7 +5981,7 @@ type CacheExpiration struct {
 func (x *CacheExpiration) Reset() {
 	*x = CacheExpiration{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[104]
+		mi := &file_messages_proto_msgTypes[107]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5822,7 +5994,7 @@ func (x *CacheExpiration) String() string {
 func (*CacheExpiration) ProtoMessage() {}
 
 func (x *CacheExpiration) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[104]
+	mi := &file_messages_proto_msgTypes[107]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5835,7 +6007,7 @@ func (x *CacheExpiration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CacheExpiration.ProtoReflect.Descriptor instead.
 func (*CacheExpiration) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{104}
+	return file_messages_proto_rawDescGZIP(), []int{107}
 }
 
 func (m *CacheExpiration) GetCache() isCacheExpiration_Cache {
@@ -5879,7 +6051,7 @@ type LegacyProxyCollectionMetaCache struct {
 func (x *LegacyProxyCollectionMetaCache) Reset() {
 	*x = LegacyProxyCollectionMetaCache{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[105]
+		mi := &file_messages_proto_msgTypes[108]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5892,7 +6064,7 @@ func (x *LegacyProxyCollectionMetaCache) String() string {
 func (*LegacyProxyCollectionMetaCache) ProtoMessage() {}
 
 func (x *LegacyProxyCollectionMetaCache) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[105]
+	mi := &file_messages_proto_msgTypes[108]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5905,7 +6077,7 @@ func (x *LegacyProxyCollectionMetaCache) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LegacyProxyCollectionMetaCache.ProtoReflect.Descriptor instead.
 func (*LegacyProxyCollectionMetaCache) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{105}
+	return file_messages_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *LegacyProxyCollectionMetaCache) GetDbName() string {
@@ -5959,7 +6131,7 @@ type PartialUpdateCAS struct {
 func (x *PartialUpdateCAS) Reset() {
 	*x = PartialUpdateCAS{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[106]
+		mi := &file_messages_proto_msgTypes[109]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -5972,7 +6144,7 @@ func (x *PartialUpdateCAS) String() string {
 func (*PartialUpdateCAS) ProtoMessage() {}
 
 func (x *PartialUpdateCAS) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[106]
+	mi := &file_messages_proto_msgTypes[109]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5985,7 +6157,7 @@ func (x *PartialUpdateCAS) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PartialUpdateCAS.ProtoReflect.Descriptor instead.
 func (*PartialUpdateCAS) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{106}
+	return file_messages_proto_rawDescGZIP(), []int{109}
 }
 
 func (x *PartialUpdateCAS) GetReadTs() uint64 {
@@ -6014,7 +6186,7 @@ type ManualFlushExtraResponse struct {
 func (x *ManualFlushExtraResponse) Reset() {
 	*x = ManualFlushExtraResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[107]
+		mi := &file_messages_proto_msgTypes[110]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6027,7 +6199,7 @@ func (x *ManualFlushExtraResponse) String() string {
 func (*ManualFlushExtraResponse) ProtoMessage() {}
 
 func (x *ManualFlushExtraResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[107]
+	mi := &file_messages_proto_msgTypes[110]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6040,7 +6212,7 @@ func (x *ManualFlushExtraResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ManualFlushExtraResponse.ProtoReflect.Descriptor instead.
 func (*ManualFlushExtraResponse) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{107}
+	return file_messages_proto_rawDescGZIP(), []int{110}
 }
 
 func (x *ManualFlushExtraResponse) GetSegmentIds() []int64 {
@@ -6059,7 +6231,7 @@ type FlushAllMessageHeader struct {
 func (x *FlushAllMessageHeader) Reset() {
 	*x = FlushAllMessageHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[108]
+		mi := &file_messages_proto_msgTypes[111]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6072,7 +6244,7 @@ func (x *FlushAllMessageHeader) String() string {
 func (*FlushAllMessageHeader) ProtoMessage() {}
 
 func (x *FlushAllMessageHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[108]
+	mi := &file_messages_proto_msgTypes[111]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6085,7 +6257,7 @@ func (x *FlushAllMessageHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushAllMessageHeader.ProtoReflect.Descriptor instead.
 func (*FlushAllMessageHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{108}
+	return file_messages_proto_rawDescGZIP(), []int{111}
 }
 
 type FlushAllMessageBody struct {
@@ -6097,7 +6269,7 @@ type FlushAllMessageBody struct {
 func (x *FlushAllMessageBody) Reset() {
 	*x = FlushAllMessageBody{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[109]
+		mi := &file_messages_proto_msgTypes[112]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6110,7 +6282,7 @@ func (x *FlushAllMessageBody) String() string {
 func (*FlushAllMessageBody) ProtoMessage() {}
 
 func (x *FlushAllMessageBody) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[109]
+	mi := &file_messages_proto_msgTypes[112]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6123,7 +6295,7 @@ func (x *FlushAllMessageBody) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FlushAllMessageBody.ProtoReflect.Descriptor instead.
 func (*FlushAllMessageBody) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{109}
+	return file_messages_proto_rawDescGZIP(), []int{112}
 }
 
 // TxnContext is the context of transaction.
@@ -6144,7 +6316,7 @@ type TxnContext struct {
 func (x *TxnContext) Reset() {
 	*x = TxnContext{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[110]
+		mi := &file_messages_proto_msgTypes[113]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6157,7 +6329,7 @@ func (x *TxnContext) String() string {
 func (*TxnContext) ProtoMessage() {}
 
 func (x *TxnContext) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[110]
+	mi := &file_messages_proto_msgTypes[113]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6170,7 +6342,7 @@ func (x *TxnContext) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TxnContext.ProtoReflect.Descriptor instead.
 func (*TxnContext) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{110}
+	return file_messages_proto_rawDescGZIP(), []int{113}
 }
 
 func (x *TxnContext) GetTxnId() int64 {
@@ -6200,7 +6372,7 @@ type RMQMessageLayout struct {
 func (x *RMQMessageLayout) Reset() {
 	*x = RMQMessageLayout{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[111]
+		mi := &file_messages_proto_msgTypes[114]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6213,7 +6385,7 @@ func (x *RMQMessageLayout) String() string {
 func (*RMQMessageLayout) ProtoMessage() {}
 
 func (x *RMQMessageLayout) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[111]
+	mi := &file_messages_proto_msgTypes[114]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6226,7 +6398,7 @@ func (x *RMQMessageLayout) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RMQMessageLayout.ProtoReflect.Descriptor instead.
 func (*RMQMessageLayout) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{111}
+	return file_messages_proto_rawDescGZIP(), []int{114}
 }
 
 func (x *RMQMessageLayout) GetPayload() []byte {
@@ -6261,7 +6433,7 @@ type BroadcastHeader struct {
 func (x *BroadcastHeader) Reset() {
 	*x = BroadcastHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[112]
+		mi := &file_messages_proto_msgTypes[115]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6274,7 +6446,7 @@ func (x *BroadcastHeader) String() string {
 func (*BroadcastHeader) ProtoMessage() {}
 
 func (x *BroadcastHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[112]
+	mi := &file_messages_proto_msgTypes[115]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6287,7 +6459,7 @@ func (x *BroadcastHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BroadcastHeader.ProtoReflect.Descriptor instead.
 func (*BroadcastHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{112}
+	return file_messages_proto_rawDescGZIP(), []int{115}
 }
 
 func (x *BroadcastHeader) GetBroadcastId() uint64 {
@@ -6334,7 +6506,7 @@ type ReplicateHeader struct {
 func (x *ReplicateHeader) Reset() {
 	*x = ReplicateHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[113]
+		mi := &file_messages_proto_msgTypes[116]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6347,7 +6519,7 @@ func (x *ReplicateHeader) String() string {
 func (*ReplicateHeader) ProtoMessage() {}
 
 func (x *ReplicateHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[113]
+	mi := &file_messages_proto_msgTypes[116]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6360,7 +6532,7 @@ func (x *ReplicateHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicateHeader.ProtoReflect.Descriptor instead.
 func (*ReplicateHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{113}
+	return file_messages_proto_rawDescGZIP(), []int{116}
 }
 
 func (x *ReplicateHeader) GetClusterId() string {
@@ -6414,7 +6586,7 @@ type ResourceKey struct {
 func (x *ResourceKey) Reset() {
 	*x = ResourceKey{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[114]
+		mi := &file_messages_proto_msgTypes[117]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6427,7 +6599,7 @@ func (x *ResourceKey) String() string {
 func (*ResourceKey) ProtoMessage() {}
 
 func (x *ResourceKey) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[114]
+	mi := &file_messages_proto_msgTypes[117]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6440,7 +6612,7 @@ func (x *ResourceKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceKey.ProtoReflect.Descriptor instead.
 func (*ResourceKey) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{114}
+	return file_messages_proto_rawDescGZIP(), []int{117}
 }
 
 func (x *ResourceKey) GetDomain() ResourceDomain {
@@ -6479,7 +6651,7 @@ type CipherHeader struct {
 func (x *CipherHeader) Reset() {
 	*x = CipherHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[115]
+		mi := &file_messages_proto_msgTypes[118]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6492,7 +6664,7 @@ func (x *CipherHeader) String() string {
 func (*CipherHeader) ProtoMessage() {}
 
 func (x *CipherHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[115]
+	mi := &file_messages_proto_msgTypes[118]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6505,7 +6677,7 @@ func (x *CipherHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CipherHeader.ProtoReflect.Descriptor instead.
 func (*CipherHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{115}
+	return file_messages_proto_rawDescGZIP(), []int{118}
 }
 
 func (x *CipherHeader) GetEzId() int64 {
@@ -6555,7 +6727,7 @@ type TraceContextHeader struct {
 func (x *TraceContextHeader) Reset() {
 	*x = TraceContextHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[116]
+		mi := &file_messages_proto_msgTypes[119]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6568,7 +6740,7 @@ func (x *TraceContextHeader) String() string {
 func (*TraceContextHeader) ProtoMessage() {}
 
 func (x *TraceContextHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[116]
+	mi := &file_messages_proto_msgTypes[119]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6581,7 +6753,7 @@ func (x *TraceContextHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TraceContextHeader.ProtoReflect.Descriptor instead.
 func (*TraceContextHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{116}
+	return file_messages_proto_rawDescGZIP(), []int{119}
 }
 
 func (x *TraceContextHeader) GetTraceId() []byte {
@@ -6619,7 +6791,7 @@ type TruncateCollectionMessageHeader struct {
 func (x *TruncateCollectionMessageHeader) Reset() {
 	*x = TruncateCollectionMessageHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[117]
+		mi := &file_messages_proto_msgTypes[120]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6632,7 +6804,7 @@ func (x *TruncateCollectionMessageHeader) String() string {
 func (*TruncateCollectionMessageHeader) ProtoMessage() {}
 
 func (x *TruncateCollectionMessageHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[117]
+	mi := &file_messages_proto_msgTypes[120]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6645,7 +6817,7 @@ func (x *TruncateCollectionMessageHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TruncateCollectionMessageHeader.ProtoReflect.Descriptor instead.
 func (*TruncateCollectionMessageHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{117}
+	return file_messages_proto_rawDescGZIP(), []int{120}
 }
 
 func (x *TruncateCollectionMessageHeader) GetDbId() int64 {
@@ -6679,7 +6851,7 @@ type TruncateCollectionMessageBody struct {
 func (x *TruncateCollectionMessageBody) Reset() {
 	*x = TruncateCollectionMessageBody{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[118]
+		mi := &file_messages_proto_msgTypes[121]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6692,7 +6864,7 @@ func (x *TruncateCollectionMessageBody) String() string {
 func (*TruncateCollectionMessageBody) ProtoMessage() {}
 
 func (x *TruncateCollectionMessageBody) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[118]
+	mi := &file_messages_proto_msgTypes[121]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6705,7 +6877,7 @@ func (x *TruncateCollectionMessageBody) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TruncateCollectionMessageBody.ProtoReflect.Descriptor instead.
 func (*TruncateCollectionMessageBody) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{118}
+	return file_messages_proto_rawDescGZIP(), []int{121}
 }
 
 // BatchUpdateManifestMessageHeader is the header of batch update manifest message.
@@ -6720,7 +6892,7 @@ type BatchUpdateManifestMessageHeader struct {
 func (x *BatchUpdateManifestMessageHeader) Reset() {
 	*x = BatchUpdateManifestMessageHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[119]
+		mi := &file_messages_proto_msgTypes[122]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6733,7 +6905,7 @@ func (x *BatchUpdateManifestMessageHeader) String() string {
 func (*BatchUpdateManifestMessageHeader) ProtoMessage() {}
 
 func (x *BatchUpdateManifestMessageHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[119]
+	mi := &file_messages_proto_msgTypes[122]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6746,7 +6918,7 @@ func (x *BatchUpdateManifestMessageHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchUpdateManifestMessageHeader.ProtoReflect.Descriptor instead.
 func (*BatchUpdateManifestMessageHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{119}
+	return file_messages_proto_rawDescGZIP(), []int{122}
 }
 
 func (x *BatchUpdateManifestMessageHeader) GetCollectionId() int64 {
@@ -6768,7 +6940,7 @@ type BatchUpdateManifestMessageBody struct {
 func (x *BatchUpdateManifestMessageBody) Reset() {
 	*x = BatchUpdateManifestMessageBody{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[120]
+		mi := &file_messages_proto_msgTypes[123]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6781,7 +6953,7 @@ func (x *BatchUpdateManifestMessageBody) String() string {
 func (*BatchUpdateManifestMessageBody) ProtoMessage() {}
 
 func (x *BatchUpdateManifestMessageBody) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[120]
+	mi := &file_messages_proto_msgTypes[123]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6794,7 +6966,7 @@ func (x *BatchUpdateManifestMessageBody) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchUpdateManifestMessageBody.ProtoReflect.Descriptor instead.
 func (*BatchUpdateManifestMessageBody) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{120}
+	return file_messages_proto_rawDescGZIP(), []int{123}
 }
 
 func (x *BatchUpdateManifestMessageBody) GetItems() []*BatchUpdateManifestItem {
@@ -6822,7 +6994,7 @@ type BatchUpdateManifestItem struct {
 func (x *BatchUpdateManifestItem) Reset() {
 	*x = BatchUpdateManifestItem{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[121]
+		mi := &file_messages_proto_msgTypes[124]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6835,7 +7007,7 @@ func (x *BatchUpdateManifestItem) String() string {
 func (*BatchUpdateManifestItem) ProtoMessage() {}
 
 func (x *BatchUpdateManifestItem) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[121]
+	mi := &file_messages_proto_msgTypes[124]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6848,7 +7020,7 @@ func (x *BatchUpdateManifestItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchUpdateManifestItem.ProtoReflect.Descriptor instead.
 func (*BatchUpdateManifestItem) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{121}
+	return file_messages_proto_rawDescGZIP(), []int{124}
 }
 
 func (x *BatchUpdateManifestItem) GetSegmentId() int64 {
@@ -6885,7 +7057,7 @@ type BatchUpdateManifestV2ColumnGroups struct {
 func (x *BatchUpdateManifestV2ColumnGroups) Reset() {
 	*x = BatchUpdateManifestV2ColumnGroups{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[122]
+		mi := &file_messages_proto_msgTypes[125]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6898,7 +7070,7 @@ func (x *BatchUpdateManifestV2ColumnGroups) String() string {
 func (*BatchUpdateManifestV2ColumnGroups) ProtoMessage() {}
 
 func (x *BatchUpdateManifestV2ColumnGroups) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[122]
+	mi := &file_messages_proto_msgTypes[125]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6911,7 +7083,7 @@ func (x *BatchUpdateManifestV2ColumnGroups) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use BatchUpdateManifestV2ColumnGroups.ProtoReflect.Descriptor instead.
 func (*BatchUpdateManifestV2ColumnGroups) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{122}
+	return file_messages_proto_rawDescGZIP(), []int{125}
 }
 
 func (x *BatchUpdateManifestV2ColumnGroups) GetColumnGroups() map[int64]*datapb.FieldBinlog {
@@ -6936,7 +7108,7 @@ type AlterRLSMetadataMessageHeader struct {
 func (x *AlterRLSMetadataMessageHeader) Reset() {
 	*x = AlterRLSMetadataMessageHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[123]
+		mi := &file_messages_proto_msgTypes[126]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -6949,7 +7121,7 @@ func (x *AlterRLSMetadataMessageHeader) String() string {
 func (*AlterRLSMetadataMessageHeader) ProtoMessage() {}
 
 func (x *AlterRLSMetadataMessageHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[123]
+	mi := &file_messages_proto_msgTypes[126]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6962,7 +7134,7 @@ func (x *AlterRLSMetadataMessageHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AlterRLSMetadataMessageHeader.ProtoReflect.Descriptor instead.
 func (*AlterRLSMetadataMessageHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{123}
+	return file_messages_proto_rawDescGZIP(), []int{126}
 }
 
 func (x *AlterRLSMetadataMessageHeader) GetDbId() int64 {
@@ -6996,7 +7168,7 @@ type AlterRLSMetadataMessageBody struct {
 func (x *AlterRLSMetadataMessageBody) Reset() {
 	*x = AlterRLSMetadataMessageBody{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[124]
+		mi := &file_messages_proto_msgTypes[127]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -7009,7 +7181,7 @@ func (x *AlterRLSMetadataMessageBody) String() string {
 func (*AlterRLSMetadataMessageBody) ProtoMessage() {}
 
 func (x *AlterRLSMetadataMessageBody) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[124]
+	mi := &file_messages_proto_msgTypes[127]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7022,7 +7194,7 @@ func (x *AlterRLSMetadataMessageBody) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AlterRLSMetadataMessageBody.ProtoReflect.Descriptor instead.
 func (*AlterRLSMetadataMessageBody) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{124}
+	return file_messages_proto_rawDescGZIP(), []int{127}
 }
 
 func (m *AlterRLSMetadataMessageBody) GetMetadata() isAlterRLSMetadataMessageBody_Metadata {
@@ -7079,7 +7251,7 @@ type RLSPolicyMetadata struct {
 func (x *RLSPolicyMetadata) Reset() {
 	*x = RLSPolicyMetadata{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[125]
+		mi := &file_messages_proto_msgTypes[128]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -7092,7 +7264,7 @@ func (x *RLSPolicyMetadata) String() string {
 func (*RLSPolicyMetadata) ProtoMessage() {}
 
 func (x *RLSPolicyMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[125]
+	mi := &file_messages_proto_msgTypes[128]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7105,7 +7277,7 @@ func (x *RLSPolicyMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RLSPolicyMetadata.ProtoReflect.Descriptor instead.
 func (*RLSPolicyMetadata) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{125}
+	return file_messages_proto_rawDescGZIP(), []int{128}
 }
 
 func (x *RLSPolicyMetadata) GetPolicyId() int64 {
@@ -7170,7 +7342,7 @@ type RLSPrincipalMetadata struct {
 func (x *RLSPrincipalMetadata) Reset() {
 	*x = RLSPrincipalMetadata{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[126]
+		mi := &file_messages_proto_msgTypes[129]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -7183,7 +7355,7 @@ func (x *RLSPrincipalMetadata) String() string {
 func (*RLSPrincipalMetadata) ProtoMessage() {}
 
 func (x *RLSPrincipalMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[126]
+	mi := &file_messages_proto_msgTypes[129]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7196,7 +7368,7 @@ func (x *RLSPrincipalMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RLSPrincipalMetadata.ProtoReflect.Descriptor instead.
 func (*RLSPrincipalMetadata) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{126}
+	return file_messages_proto_rawDescGZIP(), []int{129}
 }
 
 func (x *RLSPrincipalMetadata) GetPrincipalName() string {
@@ -7227,7 +7399,7 @@ type DropRLSMetadataMessageHeader struct {
 func (x *DropRLSMetadataMessageHeader) Reset() {
 	*x = DropRLSMetadataMessageHeader{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[127]
+		mi := &file_messages_proto_msgTypes[130]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -7240,7 +7412,7 @@ func (x *DropRLSMetadataMessageHeader) String() string {
 func (*DropRLSMetadataMessageHeader) ProtoMessage() {}
 
 func (x *DropRLSMetadataMessageHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[127]
+	mi := &file_messages_proto_msgTypes[130]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7253,7 +7425,7 @@ func (x *DropRLSMetadataMessageHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropRLSMetadataMessageHeader.ProtoReflect.Descriptor instead.
 func (*DropRLSMetadataMessageHeader) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{127}
+	return file_messages_proto_rawDescGZIP(), []int{130}
 }
 
 func (x *DropRLSMetadataMessageHeader) GetDbId() int64 {
@@ -7287,7 +7459,7 @@ type DropRLSMetadataMessageBody struct {
 func (x *DropRLSMetadataMessageBody) Reset() {
 	*x = DropRLSMetadataMessageBody{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_messages_proto_msgTypes[128]
+		mi := &file_messages_proto_msgTypes[131]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -7300,7 +7472,7 @@ func (x *DropRLSMetadataMessageBody) String() string {
 func (*DropRLSMetadataMessageBody) ProtoMessage() {}
 
 func (x *DropRLSMetadataMessageBody) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[128]
+	mi := &file_messages_proto_msgTypes[131]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7313,7 +7485,7 @@ func (x *DropRLSMetadataMessageBody) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropRLSMetadataMessageBody.ProtoReflect.Descriptor instead.
 func (*DropRLSMetadataMessageBody) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{128}
+	return file_messages_proto_rawDescGZIP(), []int{131}
 }
 
 func (m *DropRLSMetadataMessageBody) GetMetadata() isDropRLSMetadataMessageBody_Metadata {
@@ -7994,7 +8166,27 @@ var file_messages_proto_rawDesc = []byte{
 	0x6f, 0x6e, 0x49, 0x64, 0x12, 0x15, 0x0a, 0x06, 0x6a, 0x6f, 0x62, 0x5f, 0x69, 0x64, 0x18, 0x02,
 	0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x6a, 0x6f, 0x62, 0x49, 0x64, 0x22, 0x1b, 0x0a, 0x19, 0x52,
 	0x6f, 0x6c, 0x6c, 0x62, 0x61, 0x63, 0x6b, 0x49, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x4d, 0x65, 0x73,
-	0x73, 0x61, 0x67, 0x65, 0x42, 0x6f, 0x64, 0x79, 0x22, 0x67, 0x0a, 0x10, 0x43, 0x61, 0x63, 0x68,
+	0x73, 0x61, 0x67, 0x65, 0x42, 0x6f, 0x64, 0x79, 0x22, 0x58, 0x0a, 0x1a, 0x49, 0x6d, 0x70, 0x6f,
+	0x72, 0x74, 0x49, 0x44, 0x52, 0x61, 0x6e, 0x67, 0x65, 0x4d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65,
+	0x48, 0x65, 0x61, 0x64, 0x65, 0x72, 0x12, 0x23, 0x0a, 0x0d, 0x63, 0x6f, 0x6c, 0x6c, 0x65, 0x63,
+	0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0c, 0x63,
+	0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x64, 0x12, 0x15, 0x0a, 0x06, 0x6a,
+	0x6f, 0x62, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x6a, 0x6f, 0x62,
+	0x49, 0x64, 0x22, 0x5f, 0x0a, 0x18, 0x49, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x49, 0x44, 0x52, 0x61,
+	0x6e, 0x67, 0x65, 0x4d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x42, 0x6f, 0x64, 0x79, 0x12, 0x43,
+	0x0a, 0x0b, 0x66, 0x69, 0x6c, 0x65, 0x5f, 0x72, 0x61, 0x6e, 0x67, 0x65, 0x73, 0x18, 0x01, 0x20,
+	0x03, 0x28, 0x0b, 0x32, 0x22, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f,
+	0x74, 0x6f, 0x2e, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x73, 0x2e, 0x46, 0x69, 0x6c, 0x65,
+	0x49, 0x44, 0x52, 0x61, 0x6e, 0x67, 0x65, 0x52, 0x0a, 0x66, 0x69, 0x6c, 0x65, 0x52, 0x61, 0x6e,
+	0x67, 0x65, 0x73, 0x22, 0x82, 0x01, 0x0a, 0x0b, 0x46, 0x69, 0x6c, 0x65, 0x49, 0x44, 0x52, 0x61,
+	0x6e, 0x67, 0x65, 0x12, 0x1d, 0x0a, 0x0a, 0x66, 0x69, 0x6c, 0x65, 0x5f, 0x69, 0x6e, 0x64, 0x65,
+	0x78, 0x18, 0x01, 0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x66, 0x69, 0x6c, 0x65, 0x49, 0x6e, 0x64,
+	0x65, 0x78, 0x12, 0x1b, 0x0a, 0x09, 0x72, 0x6f, 0x77, 0x5f, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x18,
+	0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x08, 0x72, 0x6f, 0x77, 0x43, 0x6f, 0x75, 0x6e, 0x74, 0x12,
+	0x37, 0x0a, 0x08, 0x69, 0x64, 0x5f, 0x72, 0x61, 0x6e, 0x67, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28,
+	0x0b, 0x32, 0x1c, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f,
+	0x2e, 0x63, 0x6f, 0x6d, 0x6d, 0x6f, 0x6e, 0x2e, 0x49, 0x44, 0x52, 0x61, 0x6e, 0x67, 0x65, 0x52,
+	0x07, 0x69, 0x64, 0x52, 0x61, 0x6e, 0x67, 0x65, 0x22, 0x67, 0x0a, 0x10, 0x43, 0x61, 0x63, 0x68,
 	0x65, 0x45, 0x78, 0x70, 0x69, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x12, 0x53, 0x0a, 0x11,
 	0x63, 0x61, 0x63, 0x68, 0x65, 0x5f, 0x65, 0x78, 0x70, 0x69, 0x72, 0x61, 0x74, 0x69, 0x6f, 0x6e,
 	0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x26, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73,
@@ -8211,7 +8403,7 @@ var file_messages_proto_rawDesc = []byte{
 	0x6f, 0x6c, 0x69, 0x63, 0x79, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x27, 0x0a, 0x0e, 0x70, 0x72, 0x69,
 	0x6e, 0x63, 0x69, 0x70, 0x61, 0x6c, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28,
 	0x09, 0x48, 0x00, 0x52, 0x0d, 0x70, 0x72, 0x69, 0x6e, 0x63, 0x69, 0x70, 0x61, 0x6c, 0x4e, 0x61,
-	0x6d, 0x65, 0x42, 0x0a, 0x0a, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x2a, 0xa4,
+	0x6d, 0x65, 0x42, 0x0a, 0x0a, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x2a, 0xb7,
 	0x08, 0x0a, 0x0b, 0x4d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x54, 0x79, 0x70, 0x65, 0x12, 0x0b,
 	0x0a, 0x07, 0x55, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x10, 0x00, 0x12, 0x0c, 0x0a, 0x08, 0x54,
 	0x69, 0x6d, 0x65, 0x54, 0x69, 0x63, 0x6b, 0x10, 0x01, 0x12, 0x0a, 0x0a, 0x06, 0x49, 0x6e, 0x73,
@@ -8270,40 +8462,42 @@ var file_messages_proto_rawDesc = []byte{
 	0x6f, 0x6c, 0x6c, 0x62, 0x61, 0x63, 0x6b, 0x49, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x10, 0x2e, 0x12,
 	0x14, 0x0a, 0x10, 0x41, 0x6c, 0x74, 0x65, 0x72, 0x52, 0x4c, 0x53, 0x4d, 0x65, 0x74, 0x61, 0x64,
 	0x61, 0x74, 0x61, 0x10, 0x2f, 0x12, 0x13, 0x0a, 0x0f, 0x44, 0x72, 0x6f, 0x70, 0x52, 0x4c, 0x53,
-	0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x10, 0x30, 0x12, 0x0d, 0x0a, 0x08, 0x41, 0x6c,
-	0x74, 0x65, 0x72, 0x57, 0x41, 0x4c, 0x10, 0xbc, 0x05, 0x12, 0x14, 0x0a, 0x0f, 0x52, 0x65, 0x63,
-	0x6f, 0x76, 0x65, 0x72, 0x79, 0x42, 0x61, 0x72, 0x72, 0x69, 0x65, 0x72, 0x10, 0xbd, 0x05, 0x12,
-	0x19, 0x0a, 0x14, 0x41, 0x6c, 0x74, 0x65, 0x72, 0x52, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74,
-	0x65, 0x43, 0x6f, 0x6e, 0x66, 0x69, 0x67, 0x10, 0xa0, 0x06, 0x12, 0x0d, 0x0a, 0x08, 0x42, 0x65,
-	0x67, 0x69, 0x6e, 0x54, 0x78, 0x6e, 0x10, 0x84, 0x07, 0x12, 0x0e, 0x0a, 0x09, 0x43, 0x6f, 0x6d,
-	0x6d, 0x69, 0x74, 0x54, 0x78, 0x6e, 0x10, 0x85, 0x07, 0x12, 0x10, 0x0a, 0x0b, 0x52, 0x6f, 0x6c,
-	0x6c, 0x62, 0x61, 0x63, 0x6b, 0x54, 0x78, 0x6e, 0x10, 0x86, 0x07, 0x12, 0x08, 0x0a, 0x03, 0x54,
-	0x78, 0x6e, 0x10, 0xe7, 0x07, 0x2a, 0x74, 0x0a, 0x08, 0x54, 0x78, 0x6e, 0x53, 0x74, 0x61, 0x74,
-	0x65, 0x12, 0x0e, 0x0a, 0x0a, 0x54, 0x78, 0x6e, 0x55, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x10,
-	0x00, 0x12, 0x0f, 0x0a, 0x0b, 0x54, 0x78, 0x6e, 0x49, 0x6e, 0x46, 0x6c, 0x69, 0x67, 0x68, 0x74,
-	0x10, 0x01, 0x12, 0x0f, 0x0a, 0x0b, 0x54, 0x78, 0x6e, 0x4f, 0x6e, 0x43, 0x6f, 0x6d, 0x6d, 0x69,
-	0x74, 0x10, 0x02, 0x12, 0x10, 0x0a, 0x0c, 0x54, 0x78, 0x6e, 0x43, 0x6f, 0x6d, 0x6d, 0x69, 0x74,
-	0x74, 0x65, 0x64, 0x10, 0x03, 0x12, 0x11, 0x0a, 0x0d, 0x54, 0x78, 0x6e, 0x4f, 0x6e, 0x52, 0x6f,
-	0x6c, 0x6c, 0x62, 0x61, 0x63, 0x6b, 0x10, 0x04, 0x12, 0x11, 0x0a, 0x0d, 0x54, 0x78, 0x6e, 0x52,
-	0x6f, 0x6c, 0x6c, 0x62, 0x61, 0x63, 0x6b, 0x65, 0x64, 0x10, 0x05, 0x2a, 0xe2, 0x01, 0x0a, 0x0e,
-	0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x12, 0x19,
-	0x0a, 0x15, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e,
-	0x55, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x10, 0x00, 0x12, 0x21, 0x0a, 0x19, 0x52, 0x65, 0x73,
-	0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x49, 0x6d, 0x70, 0x6f, 0x72,
-	0x74, 0x4a, 0x6f, 0x62, 0x49, 0x44, 0x10, 0x01, 0x1a, 0x02, 0x08, 0x01, 0x12, 0x20, 0x0a, 0x1c,
-	0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x43, 0x6f,
-	0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x4e, 0x61, 0x6d, 0x65, 0x10, 0x02, 0x12, 0x18,
-	0x0a, 0x14, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e,
-	0x44, 0x42, 0x4e, 0x61, 0x6d, 0x65, 0x10, 0x03, 0x12, 0x1b, 0x0a, 0x17, 0x52, 0x65, 0x73, 0x6f,
-	0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x50, 0x72, 0x69, 0x76, 0x69, 0x6c,
-	0x65, 0x67, 0x65, 0x10, 0x04, 0x12, 0x1e, 0x0a, 0x1a, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63,
-	0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x53, 0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x4e,
-	0x61, 0x6d, 0x65, 0x10, 0x05, 0x12, 0x19, 0x0a, 0x15, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63,
-	0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x43, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x10, 0x7f,
-	0x42, 0x35, 0x5a, 0x33, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x6d,
-	0x69, 0x6c, 0x76, 0x75, 0x73, 0x2d, 0x69, 0x6f, 0x2f, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2f,
-	0x70, 0x6b, 0x67, 0x2f, 0x76, 0x33, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2f, 0x6d, 0x65, 0x73,
-	0x73, 0x61, 0x67, 0x65, 0x73, 0x70, 0x62, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x10, 0x30, 0x12, 0x11, 0x0a, 0x0d, 0x49, 0x6d,
+	0x70, 0x6f, 0x72, 0x74, 0x49, 0x44, 0x52, 0x61, 0x6e, 0x67, 0x65, 0x10, 0x31, 0x12, 0x0d, 0x0a,
+	0x08, 0x41, 0x6c, 0x74, 0x65, 0x72, 0x57, 0x41, 0x4c, 0x10, 0xbc, 0x05, 0x12, 0x14, 0x0a, 0x0f,
+	0x52, 0x65, 0x63, 0x6f, 0x76, 0x65, 0x72, 0x79, 0x42, 0x61, 0x72, 0x72, 0x69, 0x65, 0x72, 0x10,
+	0xbd, 0x05, 0x12, 0x19, 0x0a, 0x14, 0x41, 0x6c, 0x74, 0x65, 0x72, 0x52, 0x65, 0x70, 0x6c, 0x69,
+	0x63, 0x61, 0x74, 0x65, 0x43, 0x6f, 0x6e, 0x66, 0x69, 0x67, 0x10, 0xa0, 0x06, 0x12, 0x0d, 0x0a,
+	0x08, 0x42, 0x65, 0x67, 0x69, 0x6e, 0x54, 0x78, 0x6e, 0x10, 0x84, 0x07, 0x12, 0x0e, 0x0a, 0x09,
+	0x43, 0x6f, 0x6d, 0x6d, 0x69, 0x74, 0x54, 0x78, 0x6e, 0x10, 0x85, 0x07, 0x12, 0x10, 0x0a, 0x0b,
+	0x52, 0x6f, 0x6c, 0x6c, 0x62, 0x61, 0x63, 0x6b, 0x54, 0x78, 0x6e, 0x10, 0x86, 0x07, 0x12, 0x08,
+	0x0a, 0x03, 0x54, 0x78, 0x6e, 0x10, 0xe7, 0x07, 0x2a, 0x74, 0x0a, 0x08, 0x54, 0x78, 0x6e, 0x53,
+	0x74, 0x61, 0x74, 0x65, 0x12, 0x0e, 0x0a, 0x0a, 0x54, 0x78, 0x6e, 0x55, 0x6e, 0x6b, 0x6e, 0x6f,
+	0x77, 0x6e, 0x10, 0x00, 0x12, 0x0f, 0x0a, 0x0b, 0x54, 0x78, 0x6e, 0x49, 0x6e, 0x46, 0x6c, 0x69,
+	0x67, 0x68, 0x74, 0x10, 0x01, 0x12, 0x0f, 0x0a, 0x0b, 0x54, 0x78, 0x6e, 0x4f, 0x6e, 0x43, 0x6f,
+	0x6d, 0x6d, 0x69, 0x74, 0x10, 0x02, 0x12, 0x10, 0x0a, 0x0c, 0x54, 0x78, 0x6e, 0x43, 0x6f, 0x6d,
+	0x6d, 0x69, 0x74, 0x74, 0x65, 0x64, 0x10, 0x03, 0x12, 0x11, 0x0a, 0x0d, 0x54, 0x78, 0x6e, 0x4f,
+	0x6e, 0x52, 0x6f, 0x6c, 0x6c, 0x62, 0x61, 0x63, 0x6b, 0x10, 0x04, 0x12, 0x11, 0x0a, 0x0d, 0x54,
+	0x78, 0x6e, 0x52, 0x6f, 0x6c, 0x6c, 0x62, 0x61, 0x63, 0x6b, 0x65, 0x64, 0x10, 0x05, 0x2a, 0xe2,
+	0x01, 0x0a, 0x0e, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69,
+	0x6e, 0x12, 0x19, 0x0a, 0x15, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d,
+	0x61, 0x69, 0x6e, 0x55, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x10, 0x00, 0x12, 0x21, 0x0a, 0x19,
+	0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x49, 0x6d,
+	0x70, 0x6f, 0x72, 0x74, 0x4a, 0x6f, 0x62, 0x49, 0x44, 0x10, 0x01, 0x1a, 0x02, 0x08, 0x01, 0x12,
+	0x20, 0x0a, 0x1c, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69,
+	0x6e, 0x43, 0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x4e, 0x61, 0x6d, 0x65, 0x10,
+	0x02, 0x12, 0x18, 0x0a, 0x14, 0x52, 0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d,
+	0x61, 0x69, 0x6e, 0x44, 0x42, 0x4e, 0x61, 0x6d, 0x65, 0x10, 0x03, 0x12, 0x1b, 0x0a, 0x17, 0x52,
+	0x65, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x50, 0x72, 0x69,
+	0x76, 0x69, 0x6c, 0x65, 0x67, 0x65, 0x10, 0x04, 0x12, 0x1e, 0x0a, 0x1a, 0x52, 0x65, 0x73, 0x6f,
+	0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x53, 0x6e, 0x61, 0x70, 0x73, 0x68,
+	0x6f, 0x74, 0x4e, 0x61, 0x6d, 0x65, 0x10, 0x05, 0x12, 0x19, 0x0a, 0x15, 0x52, 0x65, 0x73, 0x6f,
+	0x75, 0x72, 0x63, 0x65, 0x44, 0x6f, 0x6d, 0x61, 0x69, 0x6e, 0x43, 0x6c, 0x75, 0x73, 0x74, 0x65,
+	0x72, 0x10, 0x7f, 0x42, 0x35, 0x5a, 0x33, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f,
+	0x6d, 0x2f, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2d, 0x69, 0x6f, 0x2f, 0x6d, 0x69, 0x6c, 0x76,
+	0x75, 0x73, 0x2f, 0x70, 0x6b, 0x67, 0x2f, 0x76, 0x33, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2f,
+	0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x73, 0x70, 0x62, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74,
+	0x6f, 0x33,
 }
 
 var (
@@ -8319,7 +8513,7 @@ func file_messages_proto_rawDescGZIP() []byte {
 }
 
 var file_messages_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 134)
+var file_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 137)
 var file_messages_proto_goTypes = []interface{}{
 	(MessageType)(0),                               // 0: milvus.proto.messages.MessageType
 	(TxnState)(0),                                  // 1: milvus.proto.messages.TxnState
@@ -8427,122 +8621,128 @@ var file_messages_proto_goTypes = []interface{}{
 	(*CommitImportMessageBody)(nil),                // 103: milvus.proto.messages.CommitImportMessageBody
 	(*RollbackImportMessageHeader)(nil),            // 104: milvus.proto.messages.RollbackImportMessageHeader
 	(*RollbackImportMessageBody)(nil),              // 105: milvus.proto.messages.RollbackImportMessageBody
-	(*CacheExpirations)(nil),                       // 106: milvus.proto.messages.CacheExpirations
-	(*CacheExpiration)(nil),                        // 107: milvus.proto.messages.CacheExpiration
-	(*LegacyProxyCollectionMetaCache)(nil),         // 108: milvus.proto.messages.LegacyProxyCollectionMetaCache
-	(*PartialUpdateCAS)(nil),                       // 109: milvus.proto.messages.PartialUpdateCAS
-	(*ManualFlushExtraResponse)(nil),               // 110: milvus.proto.messages.ManualFlushExtraResponse
-	(*FlushAllMessageHeader)(nil),                  // 111: milvus.proto.messages.FlushAllMessageHeader
-	(*FlushAllMessageBody)(nil),                    // 112: milvus.proto.messages.FlushAllMessageBody
-	(*TxnContext)(nil),                             // 113: milvus.proto.messages.TxnContext
-	(*RMQMessageLayout)(nil),                       // 114: milvus.proto.messages.RMQMessageLayout
-	(*BroadcastHeader)(nil),                        // 115: milvus.proto.messages.BroadcastHeader
-	(*ReplicateHeader)(nil),                        // 116: milvus.proto.messages.ReplicateHeader
-	(*ResourceKey)(nil),                            // 117: milvus.proto.messages.ResourceKey
-	(*CipherHeader)(nil),                           // 118: milvus.proto.messages.CipherHeader
-	(*TraceContextHeader)(nil),                     // 119: milvus.proto.messages.TraceContextHeader
-	(*TruncateCollectionMessageHeader)(nil),        // 120: milvus.proto.messages.TruncateCollectionMessageHeader
-	(*TruncateCollectionMessageBody)(nil),          // 121: milvus.proto.messages.TruncateCollectionMessageBody
-	(*BatchUpdateManifestMessageHeader)(nil),       // 122: milvus.proto.messages.BatchUpdateManifestMessageHeader
-	(*BatchUpdateManifestMessageBody)(nil),         // 123: milvus.proto.messages.BatchUpdateManifestMessageBody
-	(*BatchUpdateManifestItem)(nil),                // 124: milvus.proto.messages.BatchUpdateManifestItem
-	(*BatchUpdateManifestV2ColumnGroups)(nil),      // 125: milvus.proto.messages.BatchUpdateManifestV2ColumnGroups
-	(*AlterRLSMetadataMessageHeader)(nil),          // 126: milvus.proto.messages.AlterRLSMetadataMessageHeader
-	(*AlterRLSMetadataMessageBody)(nil),            // 127: milvus.proto.messages.AlterRLSMetadataMessageBody
-	(*RLSPolicyMetadata)(nil),                      // 128: milvus.proto.messages.RLSPolicyMetadata
-	(*RLSPrincipalMetadata)(nil),                   // 129: milvus.proto.messages.RLSPrincipalMetadata
-	(*DropRLSMetadataMessageHeader)(nil),           // 130: milvus.proto.messages.DropRLSMetadataMessageHeader
-	(*DropRLSMetadataMessageBody)(nil),             // 131: milvus.proto.messages.DropRLSMetadataMessageBody
-	nil,                                            // 132: milvus.proto.messages.Message.PropertiesEntry
-	nil,                                            // 133: milvus.proto.messages.AlterResourceGroupMessageHeader.ResourceGroupConfigsEntry
-	nil,                                            // 134: milvus.proto.messages.AlterWALMessageHeader.ConfigEntry
-	nil,                                            // 135: milvus.proto.messages.RMQMessageLayout.PropertiesEntry
-	nil,                                            // 136: milvus.proto.messages.BatchUpdateManifestV2ColumnGroups.ColumnGroupsEntry
-	(datapb.SegmentLevel)(0),                       // 137: milvus.proto.data.SegmentLevel
-	(*commonpb.ReplicateConfiguration)(nil),        // 138: milvus.proto.common.ReplicateConfiguration
-	(*schemapb.CollectionSchema)(nil),              // 139: milvus.proto.schema.CollectionSchema
-	(*fieldmaskpb.FieldMask)(nil),                  // 140: google.protobuf.FieldMask
-	(commonpb.ConsistencyLevel)(0),                 // 141: milvus.proto.common.ConsistencyLevel
-	(*commonpb.KeyValuePair)(nil),                  // 142: milvus.proto.common.KeyValuePair
-	(*indexpb.FieldIndex)(nil),                     // 143: milvus.proto.index.FieldIndex
-	(commonpb.LoadPriority)(0),                     // 144: milvus.proto.common.LoadPriority
-	(*milvuspb.UserEntity)(nil),                    // 145: milvus.proto.milvus.UserEntity
-	(*internalpb.CredentialInfo)(nil),              // 146: milvus.proto.internal.CredentialInfo
-	(*milvuspb.RoleEntity)(nil),                    // 147: milvus.proto.milvus.RoleEntity
-	(*milvuspb.RBACMeta)(nil),                      // 148: milvus.proto.milvus.RBACMeta
-	(*milvuspb.GrantEntity)(nil),                   // 149: milvus.proto.milvus.GrantEntity
-	(*milvuspb.PrivilegeGroupInfo)(nil),            // 150: milvus.proto.milvus.PrivilegeGroupInfo
-	(commonpb.WALName)(0),                          // 151: milvus.proto.common.WALName
-	(commonpb.MsgType)(0),                          // 152: milvus.proto.common.MsgType
-	(*commonpb.MessageID)(nil),                     // 153: milvus.proto.common.MessageID
-	(milvuspb.RowPolicyType)(0),                    // 154: milvus.proto.milvus.RowPolicyType
-	(milvuspb.RowPolicyAction)(0),                  // 155: milvus.proto.milvus.RowPolicyAction
-	(*rgpb.ResourceGroupConfig)(nil),               // 156: milvus.proto.rg.ResourceGroupConfig
-	(*datapb.FieldBinlog)(nil),                     // 157: milvus.proto.data.FieldBinlog
+	(*ImportIDRangeMessageHeader)(nil),             // 106: milvus.proto.messages.ImportIDRangeMessageHeader
+	(*ImportIDRangeMessageBody)(nil),               // 107: milvus.proto.messages.ImportIDRangeMessageBody
+	(*FileIDRange)(nil),                            // 108: milvus.proto.messages.FileIDRange
+	(*CacheExpirations)(nil),                       // 109: milvus.proto.messages.CacheExpirations
+	(*CacheExpiration)(nil),                        // 110: milvus.proto.messages.CacheExpiration
+	(*LegacyProxyCollectionMetaCache)(nil),         // 111: milvus.proto.messages.LegacyProxyCollectionMetaCache
+	(*PartialUpdateCAS)(nil),                       // 112: milvus.proto.messages.PartialUpdateCAS
+	(*ManualFlushExtraResponse)(nil),               // 113: milvus.proto.messages.ManualFlushExtraResponse
+	(*FlushAllMessageHeader)(nil),                  // 114: milvus.proto.messages.FlushAllMessageHeader
+	(*FlushAllMessageBody)(nil),                    // 115: milvus.proto.messages.FlushAllMessageBody
+	(*TxnContext)(nil),                             // 116: milvus.proto.messages.TxnContext
+	(*RMQMessageLayout)(nil),                       // 117: milvus.proto.messages.RMQMessageLayout
+	(*BroadcastHeader)(nil),                        // 118: milvus.proto.messages.BroadcastHeader
+	(*ReplicateHeader)(nil),                        // 119: milvus.proto.messages.ReplicateHeader
+	(*ResourceKey)(nil),                            // 120: milvus.proto.messages.ResourceKey
+	(*CipherHeader)(nil),                           // 121: milvus.proto.messages.CipherHeader
+	(*TraceContextHeader)(nil),                     // 122: milvus.proto.messages.TraceContextHeader
+	(*TruncateCollectionMessageHeader)(nil),        // 123: milvus.proto.messages.TruncateCollectionMessageHeader
+	(*TruncateCollectionMessageBody)(nil),          // 124: milvus.proto.messages.TruncateCollectionMessageBody
+	(*BatchUpdateManifestMessageHeader)(nil),       // 125: milvus.proto.messages.BatchUpdateManifestMessageHeader
+	(*BatchUpdateManifestMessageBody)(nil),         // 126: milvus.proto.messages.BatchUpdateManifestMessageBody
+	(*BatchUpdateManifestItem)(nil),                // 127: milvus.proto.messages.BatchUpdateManifestItem
+	(*BatchUpdateManifestV2ColumnGroups)(nil),      // 128: milvus.proto.messages.BatchUpdateManifestV2ColumnGroups
+	(*AlterRLSMetadataMessageHeader)(nil),          // 129: milvus.proto.messages.AlterRLSMetadataMessageHeader
+	(*AlterRLSMetadataMessageBody)(nil),            // 130: milvus.proto.messages.AlterRLSMetadataMessageBody
+	(*RLSPolicyMetadata)(nil),                      // 131: milvus.proto.messages.RLSPolicyMetadata
+	(*RLSPrincipalMetadata)(nil),                   // 132: milvus.proto.messages.RLSPrincipalMetadata
+	(*DropRLSMetadataMessageHeader)(nil),           // 133: milvus.proto.messages.DropRLSMetadataMessageHeader
+	(*DropRLSMetadataMessageBody)(nil),             // 134: milvus.proto.messages.DropRLSMetadataMessageBody
+	nil,                                            // 135: milvus.proto.messages.Message.PropertiesEntry
+	nil,                                            // 136: milvus.proto.messages.AlterResourceGroupMessageHeader.ResourceGroupConfigsEntry
+	nil,                                            // 137: milvus.proto.messages.AlterWALMessageHeader.ConfigEntry
+	nil,                                            // 138: milvus.proto.messages.RMQMessageLayout.PropertiesEntry
+	nil,                                            // 139: milvus.proto.messages.BatchUpdateManifestV2ColumnGroups.ColumnGroupsEntry
+	(datapb.SegmentLevel)(0),                       // 140: milvus.proto.data.SegmentLevel
+	(*commonpb.ReplicateConfiguration)(nil),        // 141: milvus.proto.common.ReplicateConfiguration
+	(*schemapb.CollectionSchema)(nil),              // 142: milvus.proto.schema.CollectionSchema
+	(*fieldmaskpb.FieldMask)(nil),                  // 143: google.protobuf.FieldMask
+	(commonpb.ConsistencyLevel)(0),                 // 144: milvus.proto.common.ConsistencyLevel
+	(*commonpb.KeyValuePair)(nil),                  // 145: milvus.proto.common.KeyValuePair
+	(*indexpb.FieldIndex)(nil),                     // 146: milvus.proto.index.FieldIndex
+	(commonpb.LoadPriority)(0),                     // 147: milvus.proto.common.LoadPriority
+	(*milvuspb.UserEntity)(nil),                    // 148: milvus.proto.milvus.UserEntity
+	(*internalpb.CredentialInfo)(nil),              // 149: milvus.proto.internal.CredentialInfo
+	(*milvuspb.RoleEntity)(nil),                    // 150: milvus.proto.milvus.RoleEntity
+	(*milvuspb.RBACMeta)(nil),                      // 151: milvus.proto.milvus.RBACMeta
+	(*milvuspb.GrantEntity)(nil),                   // 152: milvus.proto.milvus.GrantEntity
+	(*milvuspb.PrivilegeGroupInfo)(nil),            // 153: milvus.proto.milvus.PrivilegeGroupInfo
+	(commonpb.WALName)(0),                          // 154: milvus.proto.common.WALName
+	(*commonpb.IDRange)(nil),                       // 155: milvus.proto.common.IDRange
+	(commonpb.MsgType)(0),                          // 156: milvus.proto.common.MsgType
+	(*commonpb.MessageID)(nil),                     // 157: milvus.proto.common.MessageID
+	(milvuspb.RowPolicyType)(0),                    // 158: milvus.proto.milvus.RowPolicyType
+	(milvuspb.RowPolicyAction)(0),                  // 159: milvus.proto.milvus.RowPolicyAction
+	(*rgpb.ResourceGroupConfig)(nil),               // 160: milvus.proto.rg.ResourceGroupConfig
+	(*datapb.FieldBinlog)(nil),                     // 161: milvus.proto.data.FieldBinlog
 }
 var file_messages_proto_depIdxs = []int32{
-	132, // 0: milvus.proto.messages.Message.properties:type_name -> milvus.proto.messages.Message.PropertiesEntry
+	135, // 0: milvus.proto.messages.Message.properties:type_name -> milvus.proto.messages.Message.PropertiesEntry
 	3,   // 1: milvus.proto.messages.TxnMessageBody.messages:type_name -> milvus.proto.messages.Message
 	15,  // 2: milvus.proto.messages.InsertMessageHeader.partitions:type_name -> milvus.proto.messages.PartitionSegmentAssignment
 	16,  // 3: milvus.proto.messages.PartitionSegmentAssignment.segment_assignment:type_name -> milvus.proto.messages.SegmentAssignment
-	137, // 4: milvus.proto.messages.CreateSegmentMessageHeader.level:type_name -> milvus.proto.data.SegmentLevel
-	138, // 5: milvus.proto.messages.AlterReplicateConfigMessageHeader.replicate_configuration:type_name -> milvus.proto.common.ReplicateConfiguration
-	139, // 6: milvus.proto.messages.SchemaChangeMessageBody.schema:type_name -> milvus.proto.schema.CollectionSchema
-	140, // 7: milvus.proto.messages.AlterCollectionMessageHeader.update_mask:type_name -> google.protobuf.FieldMask
-	106, // 8: milvus.proto.messages.AlterCollectionMessageHeader.cache_expirations:type_name -> milvus.proto.messages.CacheExpirations
+	140, // 4: milvus.proto.messages.CreateSegmentMessageHeader.level:type_name -> milvus.proto.data.SegmentLevel
+	141, // 5: milvus.proto.messages.AlterReplicateConfigMessageHeader.replicate_configuration:type_name -> milvus.proto.common.ReplicateConfiguration
+	142, // 6: milvus.proto.messages.SchemaChangeMessageBody.schema:type_name -> milvus.proto.schema.CollectionSchema
+	143, // 7: milvus.proto.messages.AlterCollectionMessageHeader.update_mask:type_name -> google.protobuf.FieldMask
+	109, // 8: milvus.proto.messages.AlterCollectionMessageHeader.cache_expirations:type_name -> milvus.proto.messages.CacheExpirations
 	36,  // 9: milvus.proto.messages.AlterCollectionMessageBody.updates:type_name -> milvus.proto.messages.AlterCollectionMessageUpdates
-	139, // 10: milvus.proto.messages.AlterCollectionMessageUpdates.schema:type_name -> milvus.proto.schema.CollectionSchema
-	141, // 11: milvus.proto.messages.AlterCollectionMessageUpdates.consistency_level:type_name -> milvus.proto.common.ConsistencyLevel
-	142, // 12: milvus.proto.messages.AlterCollectionMessageUpdates.properties:type_name -> milvus.proto.common.KeyValuePair
+	142, // 10: milvus.proto.messages.AlterCollectionMessageUpdates.schema:type_name -> milvus.proto.schema.CollectionSchema
+	144, // 11: milvus.proto.messages.AlterCollectionMessageUpdates.consistency_level:type_name -> milvus.proto.common.ConsistencyLevel
+	145, // 12: milvus.proto.messages.AlterCollectionMessageUpdates.properties:type_name -> milvus.proto.common.KeyValuePair
 	37,  // 13: milvus.proto.messages.AlterCollectionMessageUpdates.alter_load_config:type_name -> milvus.proto.messages.AlterLoadConfigOfAlterCollection
-	143, // 14: milvus.proto.messages.AlterCollectionMessageUpdates.bound_field_indexes:type_name -> milvus.proto.index.FieldIndex
+	146, // 14: milvus.proto.messages.AlterCollectionMessageUpdates.bound_field_indexes:type_name -> milvus.proto.index.FieldIndex
 	40,  // 15: milvus.proto.messages.AlterLoadConfigMessageHeader.load_fields:type_name -> milvus.proto.messages.LoadFieldConfig
 	41,  // 16: milvus.proto.messages.AlterLoadConfigMessageHeader.replicas:type_name -> milvus.proto.messages.LoadReplicaConfig
-	144, // 17: milvus.proto.messages.LoadReplicaConfig.priority:type_name -> milvus.proto.common.LoadPriority
-	142, // 18: milvus.proto.messages.CreateDatabaseMessageBody.properties:type_name -> milvus.proto.common.KeyValuePair
-	142, // 19: milvus.proto.messages.AlterDatabaseMessageBody.properties:type_name -> milvus.proto.common.KeyValuePair
+	147, // 17: milvus.proto.messages.LoadReplicaConfig.priority:type_name -> milvus.proto.common.LoadPriority
+	145, // 18: milvus.proto.messages.CreateDatabaseMessageBody.properties:type_name -> milvus.proto.common.KeyValuePair
+	145, // 19: milvus.proto.messages.AlterDatabaseMessageBody.properties:type_name -> milvus.proto.common.KeyValuePair
 	48,  // 20: milvus.proto.messages.AlterDatabaseMessageBody.alter_load_config:type_name -> milvus.proto.messages.AlterLoadConfigOfAlterDatabase
-	145, // 21: milvus.proto.messages.CreateUserMessageHeader.user_entity:type_name -> milvus.proto.milvus.UserEntity
-	146, // 22: milvus.proto.messages.CreateUserMessageBody.credential_info:type_name -> milvus.proto.internal.CredentialInfo
-	145, // 23: milvus.proto.messages.AlterUserMessageHeader.user_entity:type_name -> milvus.proto.milvus.UserEntity
-	146, // 24: milvus.proto.messages.AlterUserMessageBody.credential_info:type_name -> milvus.proto.internal.CredentialInfo
-	147, // 25: milvus.proto.messages.AlterRoleMessageHeader.role_entity:type_name -> milvus.proto.milvus.RoleEntity
-	145, // 26: milvus.proto.messages.RoleBinding.user_entity:type_name -> milvus.proto.milvus.UserEntity
-	147, // 27: milvus.proto.messages.RoleBinding.role_entity:type_name -> milvus.proto.milvus.RoleEntity
+	148, // 21: milvus.proto.messages.CreateUserMessageHeader.user_entity:type_name -> milvus.proto.milvus.UserEntity
+	149, // 22: milvus.proto.messages.CreateUserMessageBody.credential_info:type_name -> milvus.proto.internal.CredentialInfo
+	148, // 23: milvus.proto.messages.AlterUserMessageHeader.user_entity:type_name -> milvus.proto.milvus.UserEntity
+	149, // 24: milvus.proto.messages.AlterUserMessageBody.credential_info:type_name -> milvus.proto.internal.CredentialInfo
+	150, // 25: milvus.proto.messages.AlterRoleMessageHeader.role_entity:type_name -> milvus.proto.milvus.RoleEntity
+	148, // 26: milvus.proto.messages.RoleBinding.user_entity:type_name -> milvus.proto.milvus.UserEntity
+	150, // 27: milvus.proto.messages.RoleBinding.role_entity:type_name -> milvus.proto.milvus.RoleEntity
 	65,  // 28: milvus.proto.messages.AlterUserRoleMessageHeader.role_binding:type_name -> milvus.proto.messages.RoleBinding
 	65,  // 29: milvus.proto.messages.DropUserRoleMessageHeader.role_binding:type_name -> milvus.proto.messages.RoleBinding
-	148, // 30: milvus.proto.messages.RestoreRBACMessageBody.rbac_meta:type_name -> milvus.proto.milvus.RBACMeta
-	149, // 31: milvus.proto.messages.AlterPrivilegeMessageHeader.entity:type_name -> milvus.proto.milvus.GrantEntity
-	149, // 32: milvus.proto.messages.DropPrivilegeMessageHeader.entity:type_name -> milvus.proto.milvus.GrantEntity
-	150, // 33: milvus.proto.messages.AlterPrivilegeGroupMessageHeader.privilege_group_info:type_name -> milvus.proto.milvus.PrivilegeGroupInfo
-	150, // 34: milvus.proto.messages.DropPrivilegeGroupMessageHeader.privilege_group_info:type_name -> milvus.proto.milvus.PrivilegeGroupInfo
-	133, // 35: milvus.proto.messages.AlterResourceGroupMessageHeader.resource_group_configs:type_name -> milvus.proto.messages.AlterResourceGroupMessageHeader.ResourceGroupConfigsEntry
-	143, // 36: milvus.proto.messages.CreateIndexMessageBody.field_index:type_name -> milvus.proto.index.FieldIndex
-	143, // 37: milvus.proto.messages.AlterIndexMessageBody.field_indexes:type_name -> milvus.proto.index.FieldIndex
-	151, // 38: milvus.proto.messages.AlterWALMessageHeader.target_wal_name:type_name -> milvus.proto.common.WALName
-	134, // 39: milvus.proto.messages.AlterWALMessageHeader.config:type_name -> milvus.proto.messages.AlterWALMessageHeader.ConfigEntry
-	107, // 40: milvus.proto.messages.CacheExpirations.cache_expirations:type_name -> milvus.proto.messages.CacheExpiration
-	108, // 41: milvus.proto.messages.CacheExpiration.legacy_proxy_collection_meta_cache:type_name -> milvus.proto.messages.LegacyProxyCollectionMetaCache
-	152, // 42: milvus.proto.messages.LegacyProxyCollectionMetaCache.msg_type:type_name -> milvus.proto.common.MsgType
-	135, // 43: milvus.proto.messages.RMQMessageLayout.properties:type_name -> milvus.proto.messages.RMQMessageLayout.PropertiesEntry
-	117, // 44: milvus.proto.messages.BroadcastHeader.Resource_keys:type_name -> milvus.proto.messages.ResourceKey
-	153, // 45: milvus.proto.messages.ReplicateHeader.message_id:type_name -> milvus.proto.common.MessageID
-	153, // 46: milvus.proto.messages.ReplicateHeader.last_confirmed_message_id:type_name -> milvus.proto.common.MessageID
-	2,   // 47: milvus.proto.messages.ResourceKey.domain:type_name -> milvus.proto.messages.ResourceDomain
-	124, // 48: milvus.proto.messages.BatchUpdateManifestMessageBody.items:type_name -> milvus.proto.messages.BatchUpdateManifestItem
-	125, // 49: milvus.proto.messages.BatchUpdateManifestItem.v2_column_groups:type_name -> milvus.proto.messages.BatchUpdateManifestV2ColumnGroups
-	136, // 50: milvus.proto.messages.BatchUpdateManifestV2ColumnGroups.column_groups:type_name -> milvus.proto.messages.BatchUpdateManifestV2ColumnGroups.ColumnGroupsEntry
-	128, // 51: milvus.proto.messages.AlterRLSMetadataMessageBody.policy:type_name -> milvus.proto.messages.RLSPolicyMetadata
-	129, // 52: milvus.proto.messages.AlterRLSMetadataMessageBody.principal:type_name -> milvus.proto.messages.RLSPrincipalMetadata
-	154, // 53: milvus.proto.messages.RLSPolicyMetadata.policy_type:type_name -> milvus.proto.milvus.RowPolicyType
-	155, // 54: milvus.proto.messages.RLSPolicyMetadata.actions:type_name -> milvus.proto.milvus.RowPolicyAction
-	156, // 55: milvus.proto.messages.AlterResourceGroupMessageHeader.ResourceGroupConfigsEntry.value:type_name -> milvus.proto.rg.ResourceGroupConfig
-	157, // 56: milvus.proto.messages.BatchUpdateManifestV2ColumnGroups.ColumnGroupsEntry.value:type_name -> milvus.proto.data.FieldBinlog
-	57,  // [57:57] is the sub-list for method output_type
-	57,  // [57:57] is the sub-list for method input_type
-	57,  // [57:57] is the sub-list for extension type_name
-	57,  // [57:57] is the sub-list for extension extendee
-	0,   // [0:57] is the sub-list for field type_name
+	151, // 30: milvus.proto.messages.RestoreRBACMessageBody.rbac_meta:type_name -> milvus.proto.milvus.RBACMeta
+	152, // 31: milvus.proto.messages.AlterPrivilegeMessageHeader.entity:type_name -> milvus.proto.milvus.GrantEntity
+	152, // 32: milvus.proto.messages.DropPrivilegeMessageHeader.entity:type_name -> milvus.proto.milvus.GrantEntity
+	153, // 33: milvus.proto.messages.AlterPrivilegeGroupMessageHeader.privilege_group_info:type_name -> milvus.proto.milvus.PrivilegeGroupInfo
+	153, // 34: milvus.proto.messages.DropPrivilegeGroupMessageHeader.privilege_group_info:type_name -> milvus.proto.milvus.PrivilegeGroupInfo
+	136, // 35: milvus.proto.messages.AlterResourceGroupMessageHeader.resource_group_configs:type_name -> milvus.proto.messages.AlterResourceGroupMessageHeader.ResourceGroupConfigsEntry
+	146, // 36: milvus.proto.messages.CreateIndexMessageBody.field_index:type_name -> milvus.proto.index.FieldIndex
+	146, // 37: milvus.proto.messages.AlterIndexMessageBody.field_indexes:type_name -> milvus.proto.index.FieldIndex
+	154, // 38: milvus.proto.messages.AlterWALMessageHeader.target_wal_name:type_name -> milvus.proto.common.WALName
+	137, // 39: milvus.proto.messages.AlterWALMessageHeader.config:type_name -> milvus.proto.messages.AlterWALMessageHeader.ConfigEntry
+	108, // 40: milvus.proto.messages.ImportIDRangeMessageBody.file_ranges:type_name -> milvus.proto.messages.FileIDRange
+	155, // 41: milvus.proto.messages.FileIDRange.id_range:type_name -> milvus.proto.common.IDRange
+	110, // 42: milvus.proto.messages.CacheExpirations.cache_expirations:type_name -> milvus.proto.messages.CacheExpiration
+	111, // 43: milvus.proto.messages.CacheExpiration.legacy_proxy_collection_meta_cache:type_name -> milvus.proto.messages.LegacyProxyCollectionMetaCache
+	156, // 44: milvus.proto.messages.LegacyProxyCollectionMetaCache.msg_type:type_name -> milvus.proto.common.MsgType
+	138, // 45: milvus.proto.messages.RMQMessageLayout.properties:type_name -> milvus.proto.messages.RMQMessageLayout.PropertiesEntry
+	120, // 46: milvus.proto.messages.BroadcastHeader.Resource_keys:type_name -> milvus.proto.messages.ResourceKey
+	157, // 47: milvus.proto.messages.ReplicateHeader.message_id:type_name -> milvus.proto.common.MessageID
+	157, // 48: milvus.proto.messages.ReplicateHeader.last_confirmed_message_id:type_name -> milvus.proto.common.MessageID
+	2,   // 49: milvus.proto.messages.ResourceKey.domain:type_name -> milvus.proto.messages.ResourceDomain
+	127, // 50: milvus.proto.messages.BatchUpdateManifestMessageBody.items:type_name -> milvus.proto.messages.BatchUpdateManifestItem
+	128, // 51: milvus.proto.messages.BatchUpdateManifestItem.v2_column_groups:type_name -> milvus.proto.messages.BatchUpdateManifestV2ColumnGroups
+	139, // 52: milvus.proto.messages.BatchUpdateManifestV2ColumnGroups.column_groups:type_name -> milvus.proto.messages.BatchUpdateManifestV2ColumnGroups.ColumnGroupsEntry
+	131, // 53: milvus.proto.messages.AlterRLSMetadataMessageBody.policy:type_name -> milvus.proto.messages.RLSPolicyMetadata
+	132, // 54: milvus.proto.messages.AlterRLSMetadataMessageBody.principal:type_name -> milvus.proto.messages.RLSPrincipalMetadata
+	158, // 55: milvus.proto.messages.RLSPolicyMetadata.policy_type:type_name -> milvus.proto.milvus.RowPolicyType
+	159, // 56: milvus.proto.messages.RLSPolicyMetadata.actions:type_name -> milvus.proto.milvus.RowPolicyAction
+	160, // 57: milvus.proto.messages.AlterResourceGroupMessageHeader.ResourceGroupConfigsEntry.value:type_name -> milvus.proto.rg.ResourceGroupConfig
+	161, // 58: milvus.proto.messages.BatchUpdateManifestV2ColumnGroups.ColumnGroupsEntry.value:type_name -> milvus.proto.data.FieldBinlog
+	59,  // [59:59] is the sub-list for method output_type
+	59,  // [59:59] is the sub-list for method input_type
+	59,  // [59:59] is the sub-list for extension type_name
+	59,  // [59:59] is the sub-list for extension extendee
+	0,   // [0:59] is the sub-list for field type_name
 }
 
 func init() { file_messages_proto_init() }
@@ -9788,7 +9988,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[103].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*CacheExpirations); i {
+			switch v := v.(*ImportIDRangeMessageHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9800,7 +10000,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[104].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*CacheExpiration); i {
+			switch v := v.(*ImportIDRangeMessageBody); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9812,7 +10012,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[105].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*LegacyProxyCollectionMetaCache); i {
+			switch v := v.(*FileIDRange); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9824,7 +10024,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[106].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*PartialUpdateCAS); i {
+			switch v := v.(*CacheExpirations); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9836,7 +10036,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[107].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ManualFlushExtraResponse); i {
+			switch v := v.(*CacheExpiration); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9848,7 +10048,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[108].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*FlushAllMessageHeader); i {
+			switch v := v.(*LegacyProxyCollectionMetaCache); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9860,7 +10060,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[109].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*FlushAllMessageBody); i {
+			switch v := v.(*PartialUpdateCAS); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9872,7 +10072,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[110].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*TxnContext); i {
+			switch v := v.(*ManualFlushExtraResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9884,7 +10084,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[111].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*RMQMessageLayout); i {
+			switch v := v.(*FlushAllMessageHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9896,7 +10096,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[112].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*BroadcastHeader); i {
+			switch v := v.(*FlushAllMessageBody); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9908,7 +10108,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[113].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ReplicateHeader); i {
+			switch v := v.(*TxnContext); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9920,7 +10120,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[114].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ResourceKey); i {
+			switch v := v.(*RMQMessageLayout); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9932,7 +10132,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[115].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*CipherHeader); i {
+			switch v := v.(*BroadcastHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9944,7 +10144,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[116].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*TraceContextHeader); i {
+			switch v := v.(*ReplicateHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9956,7 +10156,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[117].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*TruncateCollectionMessageHeader); i {
+			switch v := v.(*ResourceKey); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9968,7 +10168,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[118].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*TruncateCollectionMessageBody); i {
+			switch v := v.(*CipherHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9980,7 +10180,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[119].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*BatchUpdateManifestMessageHeader); i {
+			switch v := v.(*TraceContextHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -9992,7 +10192,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[120].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*BatchUpdateManifestMessageBody); i {
+			switch v := v.(*TruncateCollectionMessageHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -10004,7 +10204,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[121].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*BatchUpdateManifestItem); i {
+			switch v := v.(*TruncateCollectionMessageBody); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -10016,7 +10216,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[122].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*BatchUpdateManifestV2ColumnGroups); i {
+			switch v := v.(*BatchUpdateManifestMessageHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -10028,7 +10228,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[123].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*AlterRLSMetadataMessageHeader); i {
+			switch v := v.(*BatchUpdateManifestMessageBody); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -10040,7 +10240,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[124].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*AlterRLSMetadataMessageBody); i {
+			switch v := v.(*BatchUpdateManifestItem); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -10052,7 +10252,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[125].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*RLSPolicyMetadata); i {
+			switch v := v.(*BatchUpdateManifestV2ColumnGroups); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -10064,7 +10264,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[126].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*RLSPrincipalMetadata); i {
+			switch v := v.(*AlterRLSMetadataMessageHeader); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -10076,7 +10276,7 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[127].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*DropRLSMetadataMessageHeader); i {
+			switch v := v.(*AlterRLSMetadataMessageBody); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -10088,6 +10288,42 @@ func file_messages_proto_init() {
 			}
 		}
 		file_messages_proto_msgTypes[128].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*RLSPolicyMetadata); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_messages_proto_msgTypes[129].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*RLSPrincipalMetadata); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_messages_proto_msgTypes[130].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*DropRLSMetadataMessageHeader); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_messages_proto_msgTypes[131].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*DropRLSMetadataMessageBody); i {
 			case 0:
 				return &v.state
@@ -10101,14 +10337,14 @@ func file_messages_proto_init() {
 		}
 	}
 	file_messages_proto_msgTypes[11].OneofWrappers = []interface{}{}
-	file_messages_proto_msgTypes[104].OneofWrappers = []interface{}{
+	file_messages_proto_msgTypes[107].OneofWrappers = []interface{}{
 		(*CacheExpiration_LegacyProxyCollectionMetaCache)(nil),
 	}
-	file_messages_proto_msgTypes[124].OneofWrappers = []interface{}{
+	file_messages_proto_msgTypes[127].OneofWrappers = []interface{}{
 		(*AlterRLSMetadataMessageBody_Policy)(nil),
 		(*AlterRLSMetadataMessageBody_Principal)(nil),
 	}
-	file_messages_proto_msgTypes[128].OneofWrappers = []interface{}{
+	file_messages_proto_msgTypes[131].OneofWrappers = []interface{}{
 		(*DropRLSMetadataMessageBody_PolicyName)(nil),
 		(*DropRLSMetadataMessageBody_PrincipalName)(nil),
 	}
@@ -10118,7 +10354,7 @@ func file_messages_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_messages_proto_rawDesc,
 			NumEnums:      3,
-			NumMessages:   134,
+			NumMessages:   137,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

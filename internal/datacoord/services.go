@@ -3117,6 +3117,68 @@ func (s *Server) broadcastRollbackImportMessage(ctx context.Context, job ImportJ
 	return err
 }
 
+// assignAndBroadcastImportIDRange allocates the per-file exact autoID PK ranges for an
+// import job and broadcasts them as an ImportIDRange WAL message to the job's data
+// vchannels. It runs on the cluster acting as primary, inside the import checker's
+// PreImporting gate, once the exact post-preimport row counts are known. Each cluster's
+// importIDRangeAckCallback then applies the ranges to its local job meta so both derive
+// identical autoID primary keys. fileRows is aligned with job.GetFiles() order.
+//
+// An allocation failure (rootcoord unavailable) is transient — the checker retries on the
+// next tick. If the process crashes after AllocN but before the broadcast is persisted,
+// the allocated ids leak harmlessly (the id space is TSO-derived): the persisted WAL
+// message, not local memory, is the only authority for the range, and the retry allocates
+// a fresh one.
+func (s *Server) assignAndBroadcastImportIDRange(ctx context.Context, job ImportJob, fileRows []int64) error {
+	ranges, err := assignExactPKRanges(fileRows, s.allocator.AllocN, Params.CommonCfg.ClusterID.GetAsUint64())
+	if err != nil {
+		return err
+	}
+
+	vchannels := job.GetVchannels()
+	if len(vchannels) == 0 {
+		return merr.WrapErrImportSysFailedMsg("job %d has no vchannels", job.GetJobID())
+	}
+
+	broadcaster, err := s.startBroadcastWithCollectionID(ctx, job.GetCollectionID())
+	if err != nil {
+		return err
+	}
+	defer broadcaster.Close()
+
+	files := job.GetFiles()
+	fileRanges := make([]*messagespb.FileIDRange, len(files))
+	for i := range files {
+		fileRanges[i] = &messagespb.FileIDRange{
+			FileIndex: int64(i),
+			RowCount:  fileRows[i],
+			IdRange:   ranges[i],
+		}
+	}
+
+	msg := message.NewImportIDRangeMessageBuilderV2().
+		WithHeader(&message.ImportIDRangeMessageHeader{
+			CollectionId: job.GetCollectionID(),
+			JobId:        job.GetJobID(),
+		}).
+		WithBody(&messagespb.ImportIDRangeMessageBody{
+			FileRanges: fileRanges,
+		}).
+		// Scoped to the collection and keyed by jobID, so a checker retry of the same job
+		// dedups to the original broadcast instead of minting a second authoritative range.
+		WithIdempotencyKey(message.NewCollectionScopedIdempotencyKey(job.GetCollectionID(),
+			fmt.Sprintf("import-id-range:%d", job.GetJobID()))).
+		WithBroadcast(vchannels).
+		MustBuildBroadcast()
+
+	_, err = broadcaster.Broadcast(ctx, msg)
+	// A duplicate resolution (result.Duplicated != nil) means an earlier broadcast for this
+	// job is authoritative — its ack callback applies the ORIGINAL ranges, and the ranges
+	// freshly allocated above leak harmlessly (see the function comment). Either way there
+	// is nothing further to do here, so the result is intentionally not inspected.
+	return err
+}
+
 // validateAndExecuteImportAction handles the boilerplate for commit/abort import operations:
 // health check, get job, auto-commit guard, per-job keylock with TOCTOU re-validation, and action execution.
 func (s *Server) validateAndExecuteImportAction(
