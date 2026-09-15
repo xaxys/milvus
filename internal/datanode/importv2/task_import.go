@@ -143,15 +143,18 @@ func (t *ImportTask) GetSegmentsInfo() []*datapb.ImportSegmentInfo {
 }
 
 func (t *ImportTask) Clone() Task {
-	ctx, cancel := context.WithCancel(t.ctx)
 	infos := make(map[int64]*datapb.ImportSegmentInfo)
 	for id, info := range t.segmentsInfo {
 		infos[id] = typeutil.Clone(info)
 	}
+	// Share the running task's context instead of deriving a new one. The
+	// goroutines started by Execute hold the original ctx, and taskManager
+	// cancels whatever the map entry carries; a derived context would make
+	// that cancellation a no-op on the work actually in flight.
 	return &ImportTask{
 		ImportTaskV2: typeutil.Clone(t.ImportTaskV2),
-		ctx:          ctx,
-		cancel:       cancel,
+		ctx:          t.ctx,
+		cancel:       t.cancel,
 		segmentsInfo: infos,
 		req:          t.req,
 		allocator:    t.allocator,
@@ -186,7 +189,7 @@ func (t *ImportTask) Execute() []*conc.Future[any] {
 		// Deterministic autoID: each file owns a disjoint PK range replicated from
 		// the primary. A nil cursor (no range) falls back to the local allocator.
 		var cur *pkCursor
-		if r := file.GetPreAllocatedAutoIds(); r.GetEnd() > r.GetBegin() {
+		if r := file.GetPreAllocatedAutoIds(); r != nil && r.GetEnd() > r.GetBegin() {
 			cur = &pkCursor{begin: r.GetBegin(), end: r.GetEnd(), next: r.GetBegin()}
 		} else if pkField, err := typeutil.GetPrimaryFieldSchema(t.GetSchema()); err == nil &&
 			pkField.GetAutoID() && !importutilv2.IsBackup(req.GetOptions()) && !importutilv2.IsL0Import(req.GetOptions()) {

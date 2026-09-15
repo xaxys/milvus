@@ -27,9 +27,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/shirou/gopsutil/v4/disk"
 	"go.uber.org/atomic"
 
+	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/config"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/fips"
@@ -87,6 +89,11 @@ type ComponentParam struct {
 	ServiceParam
 	once      sync.Once
 	baseTable *BaseTable
+
+	// versionGates drives the version-gated config items (e.g. write-before
+	// function materialization). It is created and started by the MixCoord
+	// role after the role has been set; see StartVersionGateSwitcher.
+	versionGates *confirmator
 
 	CommonCfg       commonConfig
 	QuotaConfig     quotaConfig
@@ -193,6 +200,83 @@ func (p *ComponentParam) init(bt *BaseTable) {
 	p.StreamingNodeGrpcClientCfg.Init("streamingNode", bt)
 
 	p.IntegrationTestCfg.init(bt)
+}
+
+// versionGateItems returns every version-gated config item of the param table.
+// Gate registration follows paramtable initialization: a single confirmator
+// (a paramtable-level capability) drives all of them together.
+func (p *ComponentParam) versionGateItems() []*ParamItem {
+	return []*ParamItem{
+		&p.FunctionCfg.EnableWriteBeforeMaterialization,
+	}
+}
+
+// startVersionGateSwitcherOnce guards the one-shot global version-gate
+// switcher: only the MixCoord role calls StartVersionGateSwitcher, but the
+// once keeps the driving logic idempotent however it is reached.
+var startVersionGateSwitcherOnce sync.Once
+
+// StartVersionGateSwitcher drives every version-gated config item of the
+// process, exactly once. It is only called by the MixCoord role (the single
+// coordinator per cluster) after the role has been set; other roles observe
+// the flipped config value through the regular config refresh. Embedded-etcd
+// deployments are single-process (service_param.go enforces "embedded etcd
+// can not be used under distributed mode"): the local process is the whole
+// cluster, so when the local version already satisfies a gate there is
+// nothing to coordinate across nodes — resolve the gate directly and skip the
+// confirmator (there is no usable etcd client anyway). Otherwise the cluster
+// confirmator is created and started; it runs in the background and stops
+// itself once every gate is resolved. It is a no-op when remote config is
+// skipped (e.g. tests) or there is no usable etcd.
+func StartVersionGateSwitcher() {
+	startVersionGateSwitcherOnce.Do(func() {
+		Get().startVersionGates()
+	})
+}
+
+// startVersionGates implements StartVersionGateSwitcher on a param table.
+func (p *ComponentParam) startVersionGates() {
+	if p == nil || p.baseTable == nil || p.baseTable.config.skipRemote {
+		return
+	}
+	if p.EtcdCfg.UseEmbedEtcd.GetAsBool() {
+		for _, item := range p.versionGateItems() {
+			if item == nil || item.VersionGateSwitcher == nil {
+				continue
+			}
+			gv, err := semver.Parse(item.VersionGateSwitcher.GateVersion)
+			if err != nil {
+				// Validate() at Init already rejected malformed versions; on any
+				// residual parse issue keep the gate unresolved (PreSwitchValue).
+				continue
+			}
+			if common.Version.GE(gv) {
+				item.VersionGateSwitcher.localSatisfied = true
+				// GetAs* accessors short-circuit on the value cache, which is
+				// keyed by config key only and is blind to the runtime
+				// localSatisfied hint, so evict the cached entry to make the
+				// resolved value observable immediately.
+				p.baseTable.mgr.EvictCachedValue(item.Key)
+				mlog.Info(context.TODO(), "version gate: embedded-etcd deployment, local version satisfies the gate",
+					mlog.String("key", item.Key), mlog.String("localVersion", common.Version.String()),
+					mlog.String("gateVersion", item.VersionGateSwitcher.GateVersion))
+			}
+		}
+		return
+	}
+	// The confirmator shares the etcd client created for the config etcd
+	// source: when remote config is disabled or there is no usable etcd, no
+	// client exists and there is nothing to confirm against.
+	if p.baseTable.etcdClient == nil {
+		return
+	}
+	vg, err := recoverConfirmator(p.baseTable.etcdClient,
+		p.EtcdCfg.MetaRootPath.GetValue(), p.EtcdCfg.RootPath.GetValue(), p.versionGateItems())
+	if err != nil {
+		mlog.Warn(context.TODO(), "recover version gate confirmator failed", mlog.Err(err))
+		return
+	}
+	p.versionGates = vg
 }
 
 func (p *ComponentParam) GetComponentConfigurations(componentName string, sub string) map[string]string {
@@ -4132,6 +4216,7 @@ type queryNodeConfig struct {
 	MultipleChunkedEnable              ParamItem `refreshable:"false"` // Deprecated
 	EnableGeometryCache                ParamItem `refreshable:"false"`
 	EnableGISSplitFusion               ParamItem `refreshable:"false"`
+	ScanCursorOwnsPin                  ParamItem `refreshable:"false"`
 
 	TieredWarmupScalarField         ParamItem `refreshable:"true"`
 	TieredWarmupScalarIndex         ParamItem `refreshable:"true"`
@@ -4917,6 +5002,15 @@ This defaults to true, indicating that Milvus creates temporary index for growin
 		Export:       true,
 	}
 	p.EnableGISSplitFusion.Init(base.mgr)
+
+	p.ScanCursorOwnsPin = ParamItem{
+		Key:          "queryNode.segcore.scanCursorOwnsPin",
+		Version:      "2.6.6",
+		DefaultValue: "false",
+		Doc:          "Use cursor-owned rather than result-owned Cell pins for scalar Scan",
+		Export:       true,
+	}
+	p.ScanCursorOwnsPin.Init(base.mgr)
 
 	p.InterimIndexNProbe = ParamItem{
 		Key:     "queryNode.segcore.interimIndex.nprobe",
@@ -5866,7 +5960,7 @@ user-task-polling:
 		Key:          "queryNode.takeForOutput.resultCountLimit",
 		Version:      "3.0.0",
 		DefaultValue: defaultTakeForOutputResultCountLimit,
-		Doc:          `Maximum search topK, unique search offset count, or retrieve result row count that can use take() for output fields. Set to 0 to disable the limit`,
+		Doc:          `Maximum request-level output result count allowed to use take() for output fields. Set to 0 to disable the limit`,
 		Export:       false,
 		Formatter: func(v string) string {
 			limit, err := strconv.ParseInt(v, 10, 64)
@@ -5986,12 +6080,17 @@ type dataCoordConfig struct {
 	StorageVersionCompactionRateLimitInterval         ParamItem `refreshable:"true"`
 	StorageVersionCompactionSessionVersionRequirement ParamItem `refreshable:"true"`
 
+	MaxFragmentsPerGroup ParamItem `refreshable:"true"`
+	TwoTierCompaction    ParamItem `refreshable:"true"`
+
 	ChannelCheckpointMaxLag ParamItem `refreshable:"true"`
 	SyncSegmentsInterval    ParamItem `refreshable:"false"`
 
 	// Index related configuration
 	IndexMemSizeEstimateMultiplier      ParamItem `refreshable:"true"`
 	IndexStorePathVersion               ParamItem `refreshable:"true"`
+	WriteSegmentIndexToManifest         ParamItem `refreshable:"false"`
+	SegmentIndexManifestLoadConcurrency ParamItem `refreshable:"false"`
 	HybridIndexLowCardinalityIndexType  ParamItem `refreshable:"true"`
 	HybridIndexHighCardinalityIndexType ParamItem `refreshable:"true"`
 
@@ -6071,11 +6170,15 @@ type dataCoordConfig struct {
 	MaxImportJobNum                 ParamItem `refreshable:"true"`
 	WaitForIndex                    ParamItem `refreshable:"true"`
 	ImportInReplicatingCluster      ParamItem `refreshable:"true"`
+	EnableImportV3                  ParamItem `refreshable:"true"`
 	EnableL0Import                  ParamItem `refreshable:"true"`
 	ImportPreAllocIDExpansionFactor ParamItem `refreshable:"true"`
 	ImportParquetFooterMaxSize      ParamItem `refreshable:"true"`
 	ImportFileNumPerSlot            ParamItem `refreshable:"true"`
 	ImportMemoryLimitPerSlot        ParamItem `refreshable:"true"`
+	ImportFragmentSize              ParamItem `refreshable:"true"`
+	FragmentMergeFanIn              ParamItem `refreshable:"true"`
+	ReshardResidentBucketCap        ParamItem `refreshable:"true"`
 	MaxSegmentsPerCopyTask          ParamItem `refreshable:"true"`
 	CopySegmentCheckInterval        ParamItem `refreshable:"true"`
 	CopySegmentTaskRetention        ParamItem `refreshable:"true"`
@@ -6422,6 +6525,7 @@ mix is prioritized by level: mix compactions first, then L0 compactions, then cl
 		Key:          "dataCoord.compaction.min.segment",
 		Version:      "2.0.0",
 		DefaultValue: "3",
+		Doc:          "Deprecated: unused since two-tier compaction. Replaced by fill-rate gate.",
 	}
 	p.MinSegmentToMerge.Init(base.mgr)
 
@@ -6429,7 +6533,7 @@ mix is prioritized by level: mix compactions first, then L0 compactions, then cl
 		Key:          "dataCoord.segment.smallProportion",
 		Version:      "2.0.0",
 		DefaultValue: "0.5",
-		Doc:          "The segment is considered as \"small segment\" when its # of rows is smaller than",
+		Doc:          "Deprecated: unused since two-tier compaction. Replaced by middleSize (idealSize/4) × fillRate.",
 		Export:       true,
 	}
 	p.SegmentSmallProportion.Init(base.mgr)
@@ -6438,9 +6542,8 @@ mix is prioritized by level: mix compactions first, then L0 compactions, then cl
 		Key:          "dataCoord.segment.compactableProportion",
 		Version:      "2.2.1",
 		DefaultValue: "0.85",
-		Doc: `(smallProportion * segment max # of rows).
-A compaction will happen on small segments if the segment after compaction will have`,
-		Export: true,
+		Doc:          "Deprecated: fill rate is now a hardcoded constant (0.85) in the two-tier compaction algorithm.",
+		Export:       true,
 	}
 	p.SegmentCompactableProportion.Init(base.mgr)
 
@@ -6448,10 +6551,8 @@ A compaction will happen on small segments if the segment after compaction will 
 		Key:          "dataCoord.segment.expansionRate",
 		Version:      "2.2.1",
 		DefaultValue: "1.25",
-		Doc: `over (compactableProportion * segment max # of rows) rows.
-MUST BE GREATER THAN OR EQUAL TO <smallProportion>!!!
-During compaction, the size of segment # of rows is able to exceed segment max # of rows by (expansionRate-1) * 100%. `,
-		Export: true,
+		Doc:          "Deprecated: no longer used by the mix compaction planner. Still read by v2 trigger and import paths.",
+		Export:       true,
 	}
 	p.SegmentExpansionRate.Init(base.mgr)
 
@@ -6625,6 +6726,24 @@ During compaction, the size of segment # of rows is able to exceed segment max #
 	}
 	p.StorageVersionCompactionSessionVersionRequirement.Init(base.mgr)
 
+	p.MaxFragmentsPerGroup = ParamItem{
+		Key:          "dataCoord.compaction.maxFragmentsPerGroup",
+		Version:      "2.6.0",
+		DefaultValue: "8",
+		Doc:          "maximum number of fragment segments allowed per channel-partition group before fragment-tier compaction triggers",
+		Export:       true,
+	}
+	p.MaxFragmentsPerGroup.Init(base.mgr)
+
+	p.TwoTierCompaction = ParamItem{
+		Key:          "dataCoord.compaction.twoTierCompaction",
+		Version:      "2.6.0",
+		DefaultValue: "false",
+		Doc:          "whether to use the two-tier (full + fragment) compaction algorithm instead of the legacy algorithm",
+		Export:       false,
+	}
+	p.TwoTierCompaction.Init(base.mgr)
+
 	p.GlobalCompactionInterval = ParamItem{
 		Key:          "dataCoord.compaction.global.interval",
 		Version:      "2.0.0",
@@ -6760,6 +6879,30 @@ Layout 1 is additionally gated on no QueryNode still reporting an older release 
 		Export: true,
 	}
 	p.IndexStorePathVersion.Init(base.mgr)
+
+	p.WriteSegmentIndexToManifest = ParamItem{
+		Key:          "dataCoord.index.writeSegmentIndexToManifest",
+		Version:      "3.0.0",
+		DefaultValue: "false",
+		Doc: `Whether completed StorageV3 index artifacts are published in segment manifests. Off (the default) keeps the legacy path: every SegmentIndex task record stays in etcd and no manifest index entry is produced. On still persists Unissued, InProgress, Failed, fake-finished, and other task states in etcd; only a successful build with artifact files is published to the manifest, and that commit atomically deletes the corresponding Finished etcd row. StorageV1/V2 always use etcd.
+The setting may be switched in either direction. Turning it off changes where new completions are written; records already published to manifests remain recoverable through the segment's sticky manifest_has_index marker.
+The value must be exactly true or false. A value that does not parse as a boolean, such as yes, is silently read as false, i.e. the legacy etcd behavior.`,
+		Export: true,
+	}
+	p.WriteSegmentIndexToManifest.Init(base.mgr)
+
+	p.SegmentIndexManifestLoadConcurrency = ParamItem{
+		Key:          "dataCoord.index.segmentIndexManifestLoadConcurrency",
+		Version:      "3.0.0",
+		DefaultValue: "64",
+		Formatter: func(v string) string {
+			return strconv.Itoa(min(256, max(1, getAsInt(v))))
+		},
+		Doc: `Concurrency of StorageV3 manifest index reads during startup and snapshot restore. Each read blocks a native thread. Values are clamped to [1, 256], and the process-wide limit is also capped by positive minio.maxConnections values. Zero leaves the storage default in effect. Restore assembly and verification share the same budget.
+Startup processes fixed-size batches and retries failed reads per segment. An exhausted read or invalid manifest fails startup without replaying successful reads through the metastore retry loop. Recovery follows the durable manifest_has_index marker independently of the current write-mode switch.`,
+		Export: true,
+	}
+	p.SegmentIndexManifestLoadConcurrency.Init(base.mgr)
 
 	p.HybridIndexLowCardinalityIndexType = ParamItem{
 		Key:          "dataCoord.index.hybridIndex.lowCardinalityIndexType",
@@ -7438,6 +7581,19 @@ and can lower this freely; 10800 was the default before idempotency keys existed
 	}
 	p.ImportInReplicatingCluster.Init(base.mgr)
 
+	p.EnableImportV3 = ParamItem{
+		Key:     "dataCoord.import.enableImportV3",
+		Version: "3.0.0",
+		Doc: "One-way rollout gate for creating ImportTaskV3 jobs from new ordinary or backup import requests. " +
+			"Keep disabled until all DataNodes and all DataCoords that may become active support Import V3. " +
+			"The gate only selects the version for new requests; persisted WAL messages and jobs always resume " +
+			"with their stored version. Disabling the gate again after activation is unsupported.",
+		DefaultValue: "false",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.EnableImportV3.Init(base.mgr)
+
 	p.EnableL0Import = ParamItem{
 		Key:     "dataCoord.import.enableL0Import",
 		Version: "2.7.0",
@@ -7493,6 +7649,45 @@ raise this for files written with small row groups, many columns, or untruncated
 		},
 	}
 	p.ImportMemoryLimitPerSlot.Init(base.mgr)
+
+	p.ImportFragmentSize = ParamItem{
+		Key:          "dataCoord.import.fragmentSizeInMB",
+		Version:      "3.0.0",
+		Doc:          "Target logical size in MiB for one sorted ImportTaskV3 fragment.",
+		DefaultValue: "128",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.ImportFragmentSize.Init(base.mgr)
+	if p.ImportFragmentSize.GetAsInt64() <= 0 {
+		panic("dataCoord.import.fragmentSizeInMB must be positive")
+	}
+
+	p.FragmentMergeFanIn = ParamItem{
+		Key:          "dataCoord.import.fragmentMergeFanIn",
+		Version:      "3.0.0",
+		Doc:          "Maximum direct merge fan-in used by ImportTaskV3. Values must be in [2,1024].",
+		DefaultValue: "16",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.FragmentMergeFanIn.Init(base.mgr)
+	if fanIn := p.FragmentMergeFanIn.GetAsInt(); fanIn < 2 || fanIn > 1024 {
+		panic("dataCoord.import.fragmentMergeFanIn must be in [2, 1024]")
+	}
+
+	p.ReshardResidentBucketCap = ParamItem{
+		Key:          "dataCoord.import.reshardResidentBucketCap",
+		Version:      "3.0.0",
+		Doc:          "Number of (vchannel, partition) buckets whose full in-flight working set (cap x fragmentSizeInMB) the ImportTaskV3 reshard slot estimate keeps memory-resident as a ceiling, so a job with at most this many buckets can reshard without local spill on an idle node. Beyond the cap the same total resident budget spreads across all buckets (per-bucket tail cap = cap x fragmentSizeInMB / buckets) and tails over it stream into the DataNode's shared spill log. The DataNode's dynamic memory probe may still spill below this ceiling when the real process memory is tight. The cap also bounds per-task slot demand so the task stays schedulable on small nodes.",
+		DefaultValue: "16",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.ReshardResidentBucketCap.Init(base.mgr)
+	if cap := p.ReshardResidentBucketCap.GetAsInt64(); cap < 1 {
+		panic("dataCoord.import.reshardResidentBucketCap must be at least 1")
+	}
 
 	p.MaxSegmentsPerCopyTask = ParamItem{
 		Key:          "dataCoord.import.maxSegmentsPerCopyTask",
@@ -7902,6 +8097,7 @@ type dataNodeConfig struct {
 	MaxImportFileSizeInGB           ParamItem `refreshable:"true"`
 	ImportBaseBufferSize            ParamItem `refreshable:"true"`
 	ImportDeleteBufferSize          ParamItem `refreshable:"true"`
+	ReshardSpillMaxStreams          ParamItem `refreshable:"false"`
 	ImportMemoryLimitPercentage     ParamItem `refreshable:"true"`
 	ImportMaxWriteRetryAttempts     ParamItem `refreshable:"true"`
 	ImportWriteRetryInitialInterval ParamItem `refreshable:"true"`
@@ -8253,6 +8449,19 @@ if this parameter <= 0, will set it as 10`,
 		Export:       true,
 	}
 	p.ImportDeleteBufferSize.Init(base.mgr)
+
+	p.ReshardSpillMaxStreams = ParamItem{
+		Key:          "dataNode.import.reshardSpillMaxStreams",
+		Version:      "3.0.0",
+		Doc:          "Maximum number of spill files (Arrow IPC streams) one ImportTaskV3 reshard run keeps open. Buckets are mapped to streams by a fixed hash, so every range of one bucket lives in exactly one file and a run with more buckets than streams never opens more files than this cap. A stream file is removed as soon as all of its ranges are consumed; the actual stream count is min(buckets, this value). Must be at least 1.",
+		DefaultValue: "128",
+		PanicIfEmpty: false,
+		Export:       true,
+	}
+	p.ReshardSpillMaxStreams.Init(base.mgr)
+	if streams := p.ReshardSpillMaxStreams.GetAsInt(); streams < 1 {
+		panic("dataNode.import.reshardSpillMaxStreams must be at least 1")
+	}
 
 	p.ImportMemoryLimitPercentage = ParamItem{
 		Key:          "dataNode.import.memoryLimitPercentage",
