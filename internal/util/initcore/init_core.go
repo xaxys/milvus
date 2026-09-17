@@ -779,11 +779,6 @@ func SetupCoreConfigChangelCallback() {
 			return nil
 		})
 
-		paramtable.Get().QueryNodeCfg.TakeForOutputResultCountLimit.RegisterCallback(func(ctx context.Context, key, oldValue, newValue string) error {
-			SyncTakeForOutputResultCountLimit(paramtable.Get())
-			return nil
-		})
-
 		paramtable.Get().QueryNodeCfg.InterimIndexGrowingBuildThreadRate.RegisterCallback(func(ctx context.Context, key, oldValue, newValue string) error {
 			rate, err := strconv.ParseFloat(newValue, 32)
 			if err != nil {
@@ -899,6 +894,12 @@ func InitGISSplitFusion(params *paramtable.ComponentParam) error {
 	return nil
 }
 
+func InitScanPinPolicy(params *paramtable.ComponentParam) error {
+	cursorOwnsPin := C.bool(params.QueryNodeCfg.ScanCursorOwnsPin.GetAsBool())
+	C.SegcoreSetScanCursorOwnsPin(cursorOwnsPin)
+	return nil
+}
+
 func CleanRemoteChunkManager() {
 	C.CleanRemoteChunkManagerSingleton()
 }
@@ -950,7 +951,7 @@ func serializeHeaders(headerstr string) string {
 func InitPluginLoader() error {
 	if hookutil.IsClusterEncryptionEnabled() {
 		cSoPath := C.CString(paramtable.GetCipherParams().SoPathCpp.GetValue())
-		mlog.Info(context.TODO(), "Init PluginLoader", mlog.String("soPath", paramtable.GetCipherParams().SoPathCpp.GetValue()))
+		mlog.Info(context.TODO(), "Init PluginLoader")
 		defer C.free(unsafe.Pointer(cSoPath))
 		status := C.InitPluginLoader(cSoPath)
 		return HandleCStatus(&status, "InitPluginLoader failed")

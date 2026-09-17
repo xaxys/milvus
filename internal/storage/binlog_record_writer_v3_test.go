@@ -46,7 +46,7 @@ func TestPackedManifestRecordWriter_CloseWithoutWrite(t *testing.T) {
 	w, err := newPackedManifestRecordWriter(1, 2, 3, schema,
 		ChunkedBlobsWriter(func(_ []*Blob) error { return nil }),
 		allocator.NewLocalAllocator(1, 1<<20),
-		1024, 0, 0, nil, cfg, nil, false, "")
+		1024, 0, 0, nil, cfg, nil, false, "", nil)
 	require.NoError(t, err)
 
 	// No Write before Close. The internal `writer` field stays nil so
@@ -74,7 +74,7 @@ func TestPackedTextManifestRecordWriter_CloseWithoutWrite(t *testing.T) {
 	w, err := NewPackedTextManifestRecordWriter(1, 2, 3, schema,
 		ChunkedBlobsWriter(func(_ []*Blob) error { return nil }),
 		allocator.NewLocalAllocator(1, 1<<20),
-		1024, 0, 0, nil, cfg, nil, "")
+		1024, 0, 0, nil, cfg, nil, nil, "", nil)
 	require.NoError(t, err)
 
 	// No Write before Close. The text writer's nil-handling path must
@@ -96,7 +96,7 @@ func TestPackedTextManifestRecordWriter_AppendsV3StatsToManifest(t *testing.T) {
 	w, err := NewPackedTextManifestRecordWriter(collectionID, partitionID, segmentID, schema,
 		ChunkedBlobsWriter(func(_ []*Blob) error { return nil }),
 		allocator.NewLocalAllocator(1000, 1<<20),
-		1024, 0, 0, nil, cfg, nil, "")
+		1024, 0, 0, nil, cfg, nil, nil, "", nil)
 	require.NoError(t, err)
 
 	value := &Value{
@@ -172,7 +172,7 @@ func TestPackedManifestRecordWriter_FillsV3ColumnGroupFormats(t *testing.T) {
 	w, err := newPackedManifestRecordWriter(1, 2, 3, schema,
 		ChunkedBlobsWriter(func(_ []*Blob) error { return nil }),
 		allocator.NewLocalAllocator(1, 1<<20),
-		1024, 0, 0, columnGroups, cfg, nil, false, "")
+		1024, 0, 0, columnGroups, cfg, nil, false, "", nil)
 	require.NoError(t, err)
 	require.NoError(t, w.initWriters(nil))
 
@@ -225,7 +225,7 @@ func TestPackedManifestRecordWriter_TextRefsUseBinarySchema(t *testing.T) {
 	w, err := newPackedManifestRecordWriter(1, 2, 3, schema,
 		ChunkedBlobsWriter(func(_ []*Blob) error { return nil }),
 		allocator.NewLocalAllocator(1, 1<<20),
-		1024, 0, 0, columnGroups, cfg, nil, true, "")
+		1024, 0, 0, columnGroups, cfg, nil, true, "", nil)
 	require.NoError(t, err)
 	err = w.initWriters(nil)
 	require.NoError(t, err)
@@ -303,7 +303,7 @@ func TestPackedManifestRecordWriter_UsesExplicitWriterFormat(t *testing.T) {
 	w, err := newPackedManifestRecordWriter(1, 2, 3, schema,
 		ChunkedBlobsWriter(func(_ []*Blob) error { return nil }),
 		allocator.NewLocalAllocator(1, 1<<20),
-		1024, 0, 0, columnGroups, cfg, nil, false, "parquet")
+		1024, 0, 0, columnGroups, cfg, nil, false, "parquet", nil)
 	require.NoError(t, err)
 	require.NoError(t, w.initWriters(nil))
 
@@ -330,10 +330,13 @@ func TestPackedTextManifestRecordWriter_FillsV3ColumnGroupFormats(t *testing.T) 
 	var gotWriterFormat string
 	var gotSchemaBasedFormats []string
 	var gotColumnGroups []storagecommon.ColumnGroup
+	pluginContext := &indexcgopb.StoragePluginContext{EncryptionZoneId: 7, CollectionId: 1, EncryptionKey: "key"}
+	var gotPluginContext *indexcgopb.StoragePluginContext
 	patch := mockey.Mock(NewPackedTextBatchWriter).To(
 		func(_ string, _ string, _ *schemapb.CollectionSchema, _, _ int64, groups []storagecommon.ColumnGroup,
-			_ *indexpb.StorageConfig, _ []packed.TextColumnConfig, writerFormat string, schemaBasedFormats []string,
+			_ *indexpb.StorageConfig, _ []packed.TextColumnConfig, gotPlugin *indexcgopb.StoragePluginContext, writerFormat string, schemaBasedFormats []string,
 		) (*packedTextBatchWriter, error) {
+			gotPluginContext = gotPlugin
 			gotWriterFormat = writerFormat
 			gotSchemaBasedFormats = append([]string(nil), schemaBasedFormats...)
 			gotColumnGroups = append([]storagecommon.ColumnGroup(nil), groups...)
@@ -344,7 +347,7 @@ func TestPackedTextManifestRecordWriter_FillsV3ColumnGroupFormats(t *testing.T) 
 	w, err := NewPackedTextManifestRecordWriter(1, 2, 3, schema,
 		ChunkedBlobsWriter(func(_ []*Blob) error { return nil }),
 		allocator.NewLocalAllocator(1, 1<<20),
-		1024, 0, 0, columnGroups, cfg, nil, "")
+		1024, 0, 0, columnGroups, cfg, nil, pluginContext, "", nil)
 	require.NoError(t, err)
 	require.NoError(t, w.initWriters(nil))
 
@@ -354,4 +357,69 @@ func TestPackedTextManifestRecordWriter_FillsV3ColumnGroupFormats(t *testing.T) 
 	assert.Equal(t, "vortex", gotColumnGroups[0].Format)
 	assert.Equal(t, "parquet", gotColumnGroups[1].Format)
 	assert.Equal(t, gotColumnGroups, w.columnGroups)
+	assert.Same(t, pluginContext, gotPluginContext)
+}
+
+// TestSegmentManifestBasePath verifies that the V3 manifest base path stays
+// consistent with the loon filesystem root for both storage types. For local
+// storage the filesystem is rooted at localStorage.path, so the key must stay
+// relative to it and minio.rootPath must NOT leak in (see #53051, #53052). For
+// remote storage the logical minio.rootPath is a key prefix and must be kept.
+func TestSegmentManifestBasePath(t *testing.T) {
+	// One rule for every backend: <storage prefix>/insert_log/<coll>/<part>/<seg>.
+	// The prefix is localStorage.path for local and minio.rootPath for remote;
+	// the manifest stores the complete key and never a root-relative path.
+	localCfg := &indexpb.StorageConfig{StorageType: "local", RootPath: "/var/lib/milvus/data"}
+	assert.Equal(t, "/var/lib/milvus/data/insert_log/1/2/3",
+		SegmentManifestBasePath(localCfg.GetRootPath(), 1, 2, 3))
+	assert.Equal(t, "/var/lib/milvus/data/insert_log/1/2",
+		SegmentPartitionBasePath(localCfg.GetRootPath(), 1, 2))
+
+	remoteCfg := &indexpb.StorageConfig{StorageType: "minio", RootPath: "files"}
+	assert.Equal(t, "files/insert_log/1/2/3",
+		SegmentManifestBasePath(remoteCfg.GetRootPath(), 1, 2, 3))
+	assert.Equal(t, "files/insert_log/1/2",
+		SegmentPartitionBasePath(remoteCfg.GetRootPath(), 1, 2))
+
+	// Bucket-root remote layouts keep working: an empty prefix adds nothing.
+	bucketRootCfg := &indexpb.StorageConfig{StorageType: "remote", RootPath: ""}
+	assert.Equal(t, "insert_log/1/2/3",
+		SegmentManifestBasePath(bucketRootCfg.GetRootPath(), 1, 2, 3))
+}
+
+// TestPackedManifestRecordWriter_LocalStorageBasePath verifies that initWriters
+// derives the complete key <localStorage.path>/insert_log/<c>/<p>/<s> for local
+// storage, exactly as it derives <minio.rootPath>/insert_log/... for remote.
+func TestPackedManifestRecordWriter_LocalStorageBasePath(t *testing.T) {
+	schema := &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+		{FieldID: common.TimeStampField, DataType: schemapb.DataType_Int64},
+		{FieldID: common.RowIDField, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+	}}
+	columnGroups := []storagecommon.ColumnGroup{
+		{GroupID: 0, Columns: []int{0, 1}, Fields: []int64{common.TimeStampField, common.RowIDField}},
+	}
+
+	var gotBasePath string
+	patch := mockey.Mock(newPackedRecordBatchWriter).To(
+		func(basePath string, _ *schemapb.CollectionSchema, _, _ int64, _ []storagecommon.ColumnGroup,
+			_ *indexpb.StorageConfig, _ *indexcgopb.StoragePluginContext, _ bool, _ bool,
+			_ string, _ []string,
+		) (*packedRecordBatchWriter, error) {
+			gotBasePath = basePath
+			return &packedRecordBatchWriter{}, nil
+		}).Build()
+	defer patch.UnPatch()
+
+	root := t.TempDir()
+	cfg := &indexpb.StorageConfig{StorageType: "local", RootPath: root}
+
+	w, err := newPackedManifestRecordWriter(1, 2, 3, schema,
+		ChunkedBlobsWriter(func(_ []*Blob) error { return nil }),
+		allocator.NewLocalAllocator(1, 1<<20),
+		1024, 0, 0, columnGroups, cfg, nil, false, "", nil)
+	require.NoError(t, err)
+	require.NoError(t, w.initWriters(nil))
+
+	assert.Equal(t, root+"/insert_log/1/2/3", w.basePath)
+	assert.Equal(t, root+"/insert_log/1/2/3", gotBasePath)
 }

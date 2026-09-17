@@ -25,12 +25,14 @@ import (
 	"path"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
 	"golang.org/x/exp/maps"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -101,6 +103,10 @@ type meta struct {
 	// segment. It must be acquired before segMu. Manifest I/O runs outside
 	// segMu; final full-record catalog and memory publication runs under segMu.
 	segmentManifestLocks *lock.KeyLock[int64]
+	copyResultLocksOnce  sync.Once
+	copyResultLocks      *lock.KeyLock[int64]
+	manifestReadOnce     sync.Once
+	manifestReadSlots    *semaphore.Weighted
 
 	channelCPs   *channelCPs // vChannel -> channel checkpoint/see position
 	chunkManager storage.ChunkManager
@@ -364,6 +370,16 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 	mt.externalCollectionRefreshMeta = ecrm
 	mt.snapshotMeta = spm
 
+	// Recovery follows the durable storage location, not the current write
+	// mode. A segment marked manifest_has_index may contain records published
+	// while the switch was previously on, so it must still be loaded after the
+	// switch is turned off. Unmarked clusters perform no manifest reads.
+	if err := mt.reloadSegmentIndexesFromManifests(ctx); err != nil {
+		// Object-store reads have already retried per segment. Re-entering
+		// initMeta's metastore retry would reread every successful manifest.
+		return nil, retry.Unrecoverable(err)
+	}
+
 	return mt, nil
 }
 
@@ -397,9 +413,23 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 	metrics.DataCoordNumSegments.Reset()
 	numStoredRows := int64(0)
 	numSegments := 0
+	local, localStorage := m.chunkManager.(*storage.LocalChunkManager)
 	for _, segments := range collectionSegments {
 		numSegments += len(segments)
 		for _, segment := range segments {
+			if localStorage && segment.GetStorageVersion() == storage.StorageV3 {
+				manifestPath, err := normalizeLocalManifestPath(segment.GetManifestPath(), local.RootPath(),
+					Params.MinioCfg.RootPath.GetValue(), segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
+				if err != nil {
+					return err
+				}
+				if manifestPath != segment.GetManifestPath() {
+					// Resolve only the loaded view. Startup does not write the
+					// catalog; a later ordinary update can persist the new path.
+					segment = proto.Clone(segment).(*datapb.SegmentInfo)
+					segment.ManifestPath = manifestPath
+				}
+			}
 			// segments from catalog.ListSegments will not have logPath
 			m.segments.SetSegment(segment.ID, NewSegmentInfo(segment))
 			metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(NewSegmentInfo(segment))...).Inc()
@@ -1805,9 +1835,47 @@ func UpdateManifest(segmentID int64, manifestPath string) UpdateOperator {
 		// owner) and the finalization of a fresh copy/import target. These segments
 		// have no concurrent manifest writer, so no CommitSegmentManifest
 		// serialization is needed even for StorageV3. Concurrent post-flush writers
-		// (stats, index, GC, compaction, batch DDL) never reach this operator; they
-		// build revisions and advance the pointer through CommitSegmentManifest.
+		// (stats, index, GC, compaction) never reach this operator; they build
+		// revisions and advance the pointer through CommitSegmentManifest. Batch
+		// DDL and backfill adoption do not: they adopt an externally built
+		// revision through UpdateManifestVersion below, guarded only by version
+		// monotonicity - a known bypass of the manifest lock (see the design
+		// doc's known limitations).
 		segment.ManifestPath = manifestPath
+		return true
+	}
+}
+
+// UpdateManifestHasIndex sets the segment's manifest_has_index marker
+// when a copy target adopts a worker-produced manifest containing target index
+// entries. It must be committed together with UpdateManifest so recovery can
+// never observe the pointer without the marker. Clearing requires proof of an
+// empty index section at the exact pointer being published or recovered.
+func UpdateManifestHasIndex(segmentID int64) UpdateOperator {
+	return func(modPack *updateSegmentPack) bool {
+		segment := modPack.Get(segmentID)
+		if segment == nil {
+			mlog.Warn(modPack.meta.ctx, "meta update: set manifest has index failed - segment not found",
+				mlog.Int64("segmentID", segmentID))
+			return false
+		}
+		if segment.ManifestHasIndex {
+			return false
+		}
+		segment.ManifestHasIndex = true
+		return true
+	}
+}
+
+// clearEmptyManifestIndexMarker applies a verified empty index section only to
+// the pointer that was read. A changed pointer must retain its own marker.
+func clearEmptyManifestIndexMarker(segmentID int64, expectedManifest string) UpdateOperator {
+	return func(pack *updateSegmentPack) bool {
+		segment := pack.Get(segmentID)
+		if segment == nil || segment.GetManifestPath() != expectedManifest || !segment.GetManifestHasIndex() {
+			return false
+		}
+		segment.ManifestHasIndex = false
 		return true
 	}
 }
@@ -1906,15 +1974,23 @@ func UpdateIsImporting(segmentID int64, isImporting bool) UpdateOperator {
 	}
 }
 
+// maxSegmentTimestampTo returns the highest accepted insert timestamp for a
+// segment. Statistics is authoritative for manifest-backed V3 segments whose
+// FieldBinlog arrays are intentionally absent after restart; the array value is
+// retained as a compatibility fallback for old V2 metadata.
+func maxSegmentTimestampTo(segment *SegmentInfo) uint64 {
+	if segment == nil {
+		return 0
+	}
+	maxTsTo := maxBinlogTimestampTo(segment.GetBinlogs())
+	if stats := segment.EnsureStats(); stats != nil && stats.GetTimestampTo() > maxTsTo {
+		maxTsTo = stats.GetTimestampTo()
+	}
+	return maxTsTo
+}
+
 // maxBinlogTimestampTo returns the highest TimestampTo across a segment's insert
-// binlogs, or 0 when the arrays are absent.
-//
-// Absent is not the same as "no rows": a V3 (manifest-backed) segment never
-// persists these arrays -- buildAlterSegmentsKvs skips the per-FieldBinlog KVs
-// for it (kv_catalog.go:357) and the SegmentInfo is written without them -- so a
-// V3 segment reloaded after a DataCoord restart reports 0 here regardless of the
-// row timestamps it actually holds. Callers therefore get a bound that is safe
-// to compare against but that does not fire for reloaded V3 segments.
+// binlogs, or 0 when the arrays are absent. It is retained for legacy V2 callers.
 func maxBinlogTimestampTo(fieldBinlogs []*datapb.FieldBinlog) uint64 {
 	var maxTsTo uint64
 	for _, fb := range fieldBinlogs {
@@ -1931,8 +2007,9 @@ func maxBinlogTimestampTo(fieldBinlogs []*datapb.FieldBinlog) uint64 {
 // Non-zero marks it as committed at that transaction time, overriding
 // start_position.Timestamp for all temporal decisions.
 //
-// Invariant: a non-zero commit_timestamp MUST be >= max(binlog.TimestampTo)
-// across all binlogs on the segment. Row timestamps cannot exceed the commit
+// Invariant: a non-zero commit_timestamp MUST be >= the accepted segment
+// timestamp bound (Statistics.TimestampTo for V3, with the V2 binlog fallback).
+// Row timestamps cannot exceed the commit
 // time logically (the data did not "exist" until commit). Violating inputs
 // (e.g., CDC where source-cluster TSO > target-cluster TSO) are rejected at
 // this entry point rather than letting C++ segcore silently lower row
@@ -1947,9 +2024,9 @@ func UpdateCommitTimestamp(segmentID int64, ts uint64) UpdateOperator {
 			return false
 		}
 		if ts != 0 {
-			maxTsTo := maxBinlogTimestampTo(segment.GetBinlogs())
+			maxTsTo := maxSegmentTimestampTo(segment)
 			if ts < maxTsTo {
-				mlog.Error(modPack.meta.ctx, "meta update: update commit timestamp rejected - commit_ts < max(binlog.TimestampTo)",
+				mlog.Error(modPack.meta.ctx, "meta update: update commit timestamp rejected - commit_ts < segment timestamp bound",
 					mlog.Int64("segmentID", segmentID),
 					mlog.Uint64("commitTs", ts),
 					mlog.Uint64("maxBinlogTimestampTo", maxTsTo))
@@ -1963,10 +2040,9 @@ func UpdateCommitTimestamp(segmentID int64, ts uint64) UpdateOperator {
 				// Recovery from here is out of band. The job is already
 				// Committing by the time this runs -- commitImportV2AckCallback
 				// persists that state on the broadcast FastAck, independent of
-				// this fence -- and Committing is terminal for AbortImport while
-				// tryTimeoutJob never reaches it (TimeoutTs defaults to
-				// math.MaxUint64). Validating earlier does not change that: the
-				// ack path flips the state regardless of what this check says.
+				// this fence -- and Committing cannot be failed by any writer
+				// (UnfailableJobStates). Validating earlier does not change that:
+				// the ack path flips the state regardless of what this check says.
 				return modPack.fail(merr.WrapErrImportSysFailedMsg(
 					"commit timestamp %d is less than max binlog timestamp %d for import segment %d",
 					ts, maxTsTo, segmentID))

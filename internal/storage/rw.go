@@ -79,6 +79,7 @@ type rwOptions struct {
 	externalReader      packed.ExternalReaderContext
 	writerFormat        string
 	presentFields       map[FieldID]struct{} // reader: caller-known physically-present field IDs, skips a manifest re-read
+	pkStatsConfig       *PkStatsConfig
 }
 
 func (o *rwOptions) validate() error {
@@ -232,6 +233,12 @@ func WithWriterFormat(format string) RwOption {
 	}
 }
 
+func WithPkStatsConfig(config PkStatsConfig) RwOption {
+	return func(options *rwOptions) {
+		options.pkStatsConfig = &config
+	}
+}
+
 func makeBlobsReader(ctx context.Context, binlogs []*datapb.FieldBinlog, downloader downloaderFn) (ChunkedBlobsReader, error) {
 	if len(binlogs) == 0 {
 		return func() ([]*Blob, error) {
@@ -313,7 +320,7 @@ func NewBinlogRecordReader(ctx context.Context, binlogs []*datapb.FieldBinlog, s
 	}
 
 	binlogReaderOpts := []BinlogReaderOption{}
-	var pluginContext *indexcgopb.StoragePluginContext
+	pluginContext := rwOptions.pluginContext
 	if hookutil.IsClusterEncryptionEnabled() {
 		// Reader pluginContext from import tasks
 		if rwOptions.pluginContext != nil {
@@ -443,6 +450,48 @@ func NewManifestRecordReader(ctx context.Context, manifestPath string, neededSch
 	return NewAbsentFieldFillRecordReader(inner, neededSchema, present), nil
 }
 
+// NewTextDecodedManifestRecordReader resolves persisted TEXT references through
+// source-specific LOB paths and returns logical UTF8 columns. It is intended for
+// compaction that must rewrite LOB payloads into a different partition namespace.
+func NewTextDecodedManifestRecordReader(
+	_ context.Context,
+	manifestPath string,
+	neededSchema *schemapb.CollectionSchema,
+	textColumnConfigs []packed.TextColumnConfig,
+	option ...RwOption,
+) (RecordReader, error) {
+	rwOptions := DefaultReaderOptions()
+	for _, opt := range option {
+		opt(rwOptions)
+	}
+	if err := rwOptions.validate(); err != nil {
+		return nil, err
+	}
+	present := rwOptions.presentFields
+	if present == nil {
+		var err error
+		present, err = packed.GetManifestFieldIDs(manifestPath, rwOptions.storageConfig)
+		if err != nil {
+			return nil, err
+		}
+	}
+	presentSchema, err := filterSchemaToPresentFields(neededSchema, present)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := NewTextDecodedManifestReader(
+		manifestPath,
+		presentSchema,
+		rwOptions.bufferSize,
+		rwOptions.storageConfig,
+		textColumnConfigs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return NewAbsentFieldFillRecordReader(inner, neededSchema, present), nil
+}
+
 // filterSchemaToPresentFields returns a copy of schema keeping only the fields
 // (and struct sub-fields) whose FieldID is physically present, so the packed
 // reader is asked to read only stored columns; absent fields are then filled by
@@ -530,7 +579,7 @@ func NewBinlogRecordWriter(ctx context.Context, collectionID, partitionID, segme
 	}
 
 	opts := []StreamWriterOption{}
-	var pluginContext *indexcgopb.StoragePluginContext
+	pluginContext := rwOptions.pluginContext
 	if hookutil.IsClusterEncryptionEnabled() {
 		ez := hookutil.GetEzByCollProperties(schema.GetProperties(), collectionID)
 		if ez != nil {
@@ -541,7 +590,7 @@ func NewBinlogRecordWriter(ctx context.Context, collectionID, partitionID, segme
 			opts = append(opts, GetEncryptionOptions(ez.EzID, edek, encryptor)...)
 
 			unsafe := hookutil.GetCipher().GetUnsafeKey(ez.EzID, ez.CollectionID)
-			if len(unsafe) > 0 {
+			if pluginContext == nil && len(unsafe) > 0 {
 				pluginContext = &indexcgopb.StoragePluginContext{
 					EncryptionZoneId: ez.EzID,
 					CollectionId:     ez.CollectionID,
@@ -550,7 +599,6 @@ func NewBinlogRecordWriter(ctx context.Context, collectionID, partitionID, segme
 			}
 		}
 	}
-
 	switch rwOptions.version {
 	case StorageV1:
 		rootPath := rwOptions.storageConfig.GetRootPath()
@@ -563,6 +611,7 @@ func NewBinlogRecordWriter(ctx context.Context, collectionID, partitionID, segme
 			rwOptions.storageConfig,
 			pluginContext,
 			rwOptions.writerFormat,
+			rwOptions.pkStatsConfig,
 		)
 	case StorageV3:
 		// if TEXT column configs are provided, use the text writer with TEXT column support
@@ -572,7 +621,9 @@ func NewBinlogRecordWriter(ctx context.Context, collectionID, partitionID, segme
 				rwOptions.bufferSize, rwOptions.multiPartUploadSize, rwOptions.columnGroups,
 				rwOptions.storageConfig,
 				rwOptions.textColumnConfigs,
+				pluginContext,
 				rwOptions.writerFormat,
+				rwOptions.pkStatsConfig,
 			)
 		}
 		return newPackedManifestRecordWriter(collectionID, partitionID, segmentID, schema,
@@ -582,6 +633,7 @@ func NewBinlogRecordWriter(ctx context.Context, collectionID, partitionID, segme
 			pluginContext,
 			rwOptions.textRefsAsBinary,
 			rwOptions.writerFormat,
+			rwOptions.pkStatsConfig,
 		)
 	}
 	return nil, merr.WrapErrServiceInternalMsg("unsupported storage version %d", rwOptions.version)

@@ -931,6 +931,14 @@ func PrepareResultFieldData(sample []*schemapb.FieldData, topK int64) []*schemap
 				vectors.Vectors.Data = &schemapb.VectorField_Int8Vector{
 					Int8Vector: make([]byte, 0, topK*dim),
 				}
+			case *schemapb.VectorField_VectorArray:
+				vectors.Vectors.Data = &schemapb.VectorField_VectorArray{
+					VectorArray: &schemapb.VectorArray{
+						Dim:         vectorField.GetVectorArray().GetDim(),
+						ElementType: vectorField.GetVectorArray().GetElementType(),
+						Data:        make([]*schemapb.VectorField, 0, topK),
+					},
+				}
 			}
 			fd.Field = vectors
 		case *schemapb.FieldData_StructArrays:
@@ -1931,6 +1939,8 @@ func DeleteFieldData(dst []*schemapb.FieldData) {
 				dstScalar.GetDoubleData().Data = dstScalar.GetDoubleData().Data[:len(dstScalar.GetDoubleData().Data)-1]
 			case *schemapb.ScalarField_StringData:
 				dstScalar.GetStringData().Data = dstScalar.GetStringData().Data[:len(dstScalar.GetStringData().Data)-1]
+			case *schemapb.ScalarField_ArrayData:
+				dstScalar.GetArrayData().Data = dstScalar.GetArrayData().Data[:len(dstScalar.GetArrayData().Data)-1]
 			case *schemapb.ScalarField_JsonData:
 				dstScalar.GetJsonData().Data = dstScalar.GetJsonData().Data[:len(dstScalar.GetJsonData().Data)-1]
 			case *schemapb.ScalarField_GeometryData:
@@ -1959,6 +1969,8 @@ func DeleteFieldData(dst []*schemapb.FieldData) {
 			case *schemapb.VectorField_Int8Vector:
 				dstInt8Vector := dstVector.Data.(*schemapb.VectorField_Int8Vector)
 				dstInt8Vector.Int8Vector = dstInt8Vector.Int8Vector[:len(dstInt8Vector.Int8Vector)-int(dim)]
+			case *schemapb.VectorField_VectorArray:
+				dstVector.GetVectorArray().Data = dstVector.GetVectorArray().Data[:len(dstVector.GetVectorArray().Data)-1]
 			}
 		}
 	}
@@ -4302,9 +4314,13 @@ func CreateSparseFloatRowFromMap(input map[string]interface{}) ([]byte, error) {
 	} else if !ok1 && !ok2 {
 		// try format2
 		for k, v := range input {
-			idx, err := strconv.ParseUint(k, 0, 32)
+			// Base 10 is mandatory: the accepted format documents the key as a
+			// decimal index. With base 0 strconv infers the base from the
+			// prefix, so "010" silently became index 8 and "0x10" index 16,
+			// while "08"/"09" were rejected as invalid octal.
+			idx, err := strconv.ParseUint(k, 10, 32)
 			if err != nil {
-				return nil, err
+				return nil, merr.WrapErrParameterInvalidMsg("invalid index in JSON: %s must be a decimal index in [0, 2^32-1)", k)
 			}
 
 			val, err := getValue(v)

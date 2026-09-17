@@ -69,7 +69,6 @@
 #include "milvus-storage/reader.h"
 #include "mmap/ChunkedColumnInterface.h"
 #include "mmap/Types.h"
-#include "parquet/statistics.h"
 #include "pb/common.pb.h"
 #include "pb/index_cgo_msg.pb.h"
 #include "pb/plan.pb.h"
@@ -82,6 +81,7 @@
 #include "segcore/SegmentInterface.h"
 #include "segcore/SegmentLoadInfo.h"
 #include "segcore/Types.h"
+#include "segcore/storagev2translator/GroupCTMeta.h"
 #include "storage/MmapChunkManager.h"
 #include "segcore/TextColumnCache.h"
 
@@ -107,7 +107,6 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     friend class CommitTimestampV2TestAccess;
 
  public:
-    using ParquetStatistics = std::vector<std::shared_ptr<parquet::Statistics>>;
     explicit ChunkedSegmentSealedImpl(SchemaPtr schema,
                                       IndexMetaPtr index_meta,
                                       const SegcoreConfig& segcore_config,
@@ -353,7 +352,6 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         std::shared_ptr<CacheSlot<storagev2translator::PkIndexCell>>
             pk_index_slot;
         std::shared_ptr<const OffsetMap> virtual_pk2offset;
-        std::shared_ptr<SkipIndex> skip_index;
         std::unordered_set<FieldId> mmap_field_ids;
         std::unordered_map<FieldId, std::pair<int64_t, int64_t>>
             variable_fields_avg_size;
@@ -429,8 +427,8 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                        int64_t num_rows,
                        int64_t field_size) override;
 
-    std::shared_ptr<const SkipIndex>
-    GetSkipIndexSnapshot() const;
+    FieldSkipMetricsView
+    GetFieldSkipMetrics(FieldId field_id) const override;
 
     int64_t
     get_deleted_count() const override;
@@ -620,6 +618,14 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                                  const int64_t* offsets,
                                  int64_t count,
                                  TargetBitmapView valid_result) const override;
+
+    std::shared_ptr<ChunkedColumnInterface>
+    GetChunkedColumn(FieldId field_id) const override {
+        return get_column(field_id);
+    }
+
+    std::pair<std::shared_ptr<ChunkedColumnInterface>, FieldSkipMetricsView>
+    GetDataScanResources(FieldId field_id) const override;
 
  protected:
     // blob and row_count
@@ -2127,22 +2133,9 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         const SegmentLoadInfo& segment_load_info,
         const SchemaPtr& schema_snapshot,
         RuntimeResourceState* runtime,
-        std::optional<ParquetStatistics> statistics = {},
         milvus::OpContext* op_ctx = nullptr,
         bool is_replace = false,
         StagedStateCommitter* committer = nullptr);
-
-    void
-    load_field_data_common(
-        FieldId field_id,
-        const std::shared_ptr<ChunkedColumnInterface>& column,
-        size_t num_rows,
-        DataType data_type,
-        bool enable_mmap,
-        bool is_proxy_column,
-        std::optional<ParquetStatistics> statistics = {},
-        milvus::OpContext* op_ctx = nullptr,
-        bool is_replace = false);
 
     std::shared_ptr<ChunkedColumnInterface>
     get_column(const std::shared_ptr<const RuntimeResourceState>& runtime,
@@ -2461,6 +2454,33 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         const std::shared_ptr<const PublishedSegmentState>& current,
         StateDelta& final_delta,
         Verifier&& verifier) {
+        TestStageLoadFieldDataThenPublish(field_id,
+                                          column,
+                                          num_rows,
+                                          data_type,
+                                          schema_snapshot,
+                                          std::move(runtime),
+                                          staged_state,
+                                          current,
+                                          final_delta,
+                                          /*is_proxy_column=*/false,
+                                          std::forward<Verifier>(verifier));
+    }
+
+    template <typename Verifier>
+    void
+    TestStageLoadFieldDataThenPublish(
+        FieldId field_id,
+        const std::shared_ptr<ChunkedColumnInterface>& column,
+        size_t num_rows,
+        DataType data_type,
+        const SchemaPtr& schema_snapshot,
+        std::shared_ptr<RuntimeResourceState> runtime,
+        PublishedSegmentState* staged_state,
+        const std::shared_ptr<const PublishedSegmentState>& current,
+        StateDelta& final_delta,
+        bool is_proxy_column,
+        Verifier&& verifier) {
         std::lock_guard<std::mutex> reopen_guard(reopen_mutex_);
         StagedStateCommitter committer(*this, runtime.get(), staged_state);
         load_field_data_common(field_id,
@@ -2468,11 +2488,10 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                                num_rows,
                                data_type,
                                /*enable_mmap=*/false,
-                               /*is_proxy_column=*/false,
+                               is_proxy_column,
                                *current->load_info,
                                schema_snapshot,
                                runtime.get(),
-                               std::nullopt,
                                nullptr,
                                /*is_replace=*/true,
                                &committer);
@@ -2668,17 +2687,15 @@ CreateSealedSegment(
         schema, index_meta, segcore_config, segment_id, is_sorted_by_pk);
 }
 
-using ParquetStatisticsByField =
-    std::map<int64_t, ChunkedSegmentSealedImpl::ParquetStatistics>;
-
 struct LoadedGroupChunkMetadata {
     std::vector<milvus_storage::RowGroupMetadataVector> row_group_meta_list;
-    ParquetStatisticsByField parquet_stats_by_field;
+    storagev2translator::SkipMetricsByField skip_metrics_by_field;
 };
 
 LoadedGroupChunkMetadata
-LoadGroupChunkMetadata(const std::vector<std::string>& insert_files,
-                       const std::vector<FieldId>& field_ids_for_stats,
-                       const std::string& debug_key);
+LoadGroupChunkMetadata(
+    const std::vector<std::string>& insert_files,
+    const std::vector<std::pair<FieldId, DataType>>& fields_for_stats,
+    const std::string& debug_key);
 
 }  // namespace milvus::segcore

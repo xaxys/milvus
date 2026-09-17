@@ -92,7 +92,6 @@ func doInitQueryNodeOnce(ctx context.Context) error {
 
 	SyncPreferFieldDataWhenIndexHasRawData(ctx, paramtable.Get())
 	SyncEnableGrowingSourceFlush(ctx, paramtable.Get())
-	SyncTakeForOutputResultCountLimit(paramtable.Get())
 
 	cKnowhereThreadPoolSize := C.uint32_t(paramtable.Get().QueryNodeCfg.KnowhereThreadPoolSize.GetAsUint32())
 	C.SegcoreSetKnowhereSearchThreadPoolNum(cKnowhereThreadPoolSize)
@@ -172,7 +171,7 @@ func doInitQueryNodeOnce(ctx context.Context) error {
 		UpdateExprResCacheConfig()
 	}
 
-	C.SetArrowIOThreadPoolCapacity(C.int(ResolveArrowIOThreadPoolCapacity()))
+	ApplyArrowIOThreadPoolCapacity("querynode", "init")
 
 	cStorageV2CellTargetSizeBytes := C.int64_t(paramtable.Get().QueryNodeCfg.StorageV2CellTargetSizeBytes.GetAsInt64())
 	C.SetStorageV2CellTargetSizeBytes(cStorageV2CellTargetSizeBytes)
@@ -246,6 +245,11 @@ func doInitQueryNodeOnce(ctx context.Context) error {
 		return err
 	}
 
+	err = InitScanPinPolicy(paramtable.Get())
+	if err != nil {
+		return err
+	}
+
 	InitTraceConfig(paramtable.Get())
 	C.InitExecExpressionFunctionFactory()
 
@@ -278,16 +282,4 @@ func SyncEnableGrowingSourceFlush(ctx context.Context, params *paramtable.Compon
 	if v {
 		mlog.Info(ctx, "enableGrowingSourceFlush=true: growing segments retain raw field chunks for StorageV3 growing-source flush")
 	}
-}
-
-// SyncTakeForOutputResultCountLimit pushes the maximum search topK or retrieve
-// result row count allowed to use take() for output fields into segcore. A
-// value of 0 disables the limit.
-func SyncTakeForOutputResultCountLimit(params *paramtable.ComponentParam) {
-	limit := params.QueryNodeCfg.TakeForOutputResultCountLimit.GetAsInt64()
-	C.SegcoreSetTakeForOutputResultCountLimit(C.int64_t(limit))
-}
-
-func getTakeForOutputResultCountLimit() int64 {
-	return int64(C.SegcoreGetTakeForOutputResultCountLimit())
 }

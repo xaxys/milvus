@@ -222,6 +222,7 @@ var (
 			Buckets:   longTaskBuckets,
 		}, []string{
 			importStageLabelName,
+			jobVersionLabelName,
 		})
 
 	ImportTaskLatency = prometheus.NewHistogramVec(
@@ -233,6 +234,7 @@ var (
 			Buckets:   longTaskBuckets,
 		}, []string{
 			importStageLabelName,
+			TaskTypeLabel,
 		})
 
 	FlushedSegmentFileNum = prometheus.NewHistogramVec(
@@ -262,6 +264,14 @@ var (
 			Subsystem: typeutil.DataCoordRole,
 			Name:      "gc_run_count",
 			Help:      "garbage collection running count",
+		}, []string{nodeIDLabelName})
+
+	GarbageCollectorInvalidManifestCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.DataCoordRole,
+			Name:      "gc_invalid_manifest_count",
+			Help:      "number of times garbage collection is blocked by an invalid segment manifest index entry",
 		}, []string{nodeIDLabelName})
 
 	/* hard to implement, commented now
@@ -336,7 +346,7 @@ var (
 			Subsystem: typeutil.DataCoordRole,
 			Name:      "import_jobs",
 			Help:      "the import jobs grouping by state",
-		}, []string{"import_state"})
+		}, []string{"import_state", jobVersionLabelName})
 
 	ImportTasks = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -493,6 +503,7 @@ func RegisterDataCoord(registry *prometheus.Registry) {
 	registry.MustRegister(CopySegmentJobLatency)
 	registry.MustRegister(GarbageCollectorFileScanDuration)
 	registry.MustRegister(GarbageCollectorRunCount)
+	registry.MustRegister(GarbageCollectorInvalidManifestCount)
 	registry.MustRegister(DataCoordTaskExecuteLatency)
 	registry.MustRegister(IndexStatsTaskNum)
 	registry.MustRegister(TaskVersion)
