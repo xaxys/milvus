@@ -130,9 +130,19 @@ const (
 	//   An older QueryNode does not recognize FMINDEX and would fail to load
 	//   such a segment, so creation is gated on the whole cluster reporting >= 5
 	//   (see MinScalarIndexVersionForFMINDEX).
+	//
+	// Scalar index engine version 6:
+	// - Several scalar indexes may coexist on one field: they are loaded
+	//   together and each filter leaf picks one by capability.
+	//   An older QueryNode keeps at most one scalar index per field and its
+	//   ChunkedSegmentSealedImpl::LoadScalarIndex asserts while loading a
+	//   segment that carries two, so creating a second index under the same
+	//   (field, json_path) identity is gated on the whole cluster reporting
+	//   >= 6 (see MinScalarIndexVersionForScalarMultiIndex).
+	// - On-disk file format is unchanged from v3.
 	MinimalScalarIndexEngineVersion = int32(0)
-	CurrentScalarIndexEngineVersion = int32(5)
-	MaximumScalarIndexEngineVersion = int32(5)
+	CurrentScalarIndexEngineVersion = int32(6)
+	MaximumScalarIndexEngineVersion = int32(6)
 
 	// MinScalarIndexVersionForJsonPathMultiType is the minimum scalar index
 	// engine version that supports STL_SORT / BITMAP / HYBRID on JSON fields.
@@ -143,6 +153,16 @@ const (
 	// that recognizes FMINDEX. Creating an FMINDEX while any node still reports a
 	// lower version would break rolling upgrade (old QueryNodes cannot load it).
 	MinScalarIndexVersionForFMINDEX = int32(5)
+
+	// MinScalarIndexVersionForScalarMultiIndex is the minimum scalar index
+	// engine version that can hold more than one scalar index on a single field.
+	// Creating a second index under the same (field, json_path) identity while
+	// any node still reports a lower version would break rolling upgrade: an
+	// older QueryNode asserts while loading such a segment.
+	//
+	// Multiple JSON indexes on DIFFERENT paths are the pre-existing capability
+	// and are deliberately not gated by this version.
+	MinScalarIndexVersionForScalarMultiIndex = int32(6)
 )
 
 // ClampScalarIndexVersion clamps the given scalar index version to MaximumScalarIndexEngineVersion.

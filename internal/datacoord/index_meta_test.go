@@ -488,11 +488,15 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
 
-	t.Run("multiple indexes", func(t *testing.T) {
+	// A field may now carry several indexes: the index name is the identity, so a
+	// different name on the same field is accepted at this layer. The field-type
+	// policy (a vector field keeps a single index; a second scalar index needs the
+	// whole cluster upgraded) lives in Server.checkIndexCreationPolicy.
+	t.Run("multiple scalar indexes on one field", func(t *testing.T) {
 		req.IndexName = "_default_idx_2"
 		req.FieldID = fieldID
 		tmpIndexID, err := m.CanCreateIndex(req, false)
-		assert.Error(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
 

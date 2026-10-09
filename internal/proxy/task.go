@@ -3210,10 +3210,18 @@ func (t *loadCollectionTask) Execute(ctx context.Context) (err error) {
 		return err
 	}
 
-	// not support multiple indexes on one field
+	// One field may carry several indexes; v1 does not let a user pick one for
+	// loading. Take the smallest indexID (the earliest created) so the load config
+	// broadcast to the WAL stays stable across repeated Load calls: DescribeIndex
+	// returns indexes in map order, so "last write wins" would flap between two
+	// indexes on the same field, re-broadcast the config, and reset an
+	// already-loaded collection back to Loading.
+	// This is NOT a user-visible "default index"; no such concept exists yet.
 	fieldIndexIDs := make(map[int64]int64)
 	for _, index := range indexResponse.IndexInfos {
-		fieldIndexIDs[index.FieldID] = index.IndexID
+		if prev, ok := fieldIndexIDs[index.FieldID]; !ok || index.IndexID < prev {
+			fieldIndexIDs[index.FieldID] = index.IndexID
+		}
 	}
 
 	loadFieldsSet := typeutil.NewSet(loadFields...)
@@ -3470,10 +3478,18 @@ func (t *loadPartitionsTask) Execute(ctx context.Context) error {
 		return err
 	}
 
-	// not support multiple indexes on one field
+	// One field may carry several indexes; v1 does not let a user pick one for
+	// loading. Take the smallest indexID (the earliest created) so the load config
+	// broadcast to the WAL stays stable across repeated Load calls: DescribeIndex
+	// returns indexes in map order, so "last write wins" would flap between two
+	// indexes on the same field, re-broadcast the config, and reset an
+	// already-loaded collection back to Loading.
+	// This is NOT a user-visible "default index"; no such concept exists yet.
 	fieldIndexIDs := make(map[int64]int64)
 	for _, index := range indexResponse.IndexInfos {
-		fieldIndexIDs[index.FieldID] = index.IndexID
+		if prev, ok := fieldIndexIDs[index.FieldID]; !ok || index.IndexID < prev {
+			fieldIndexIDs[index.FieldID] = index.IndexID
+		}
 	}
 
 	loadFieldsSet := typeutil.NewSet(loadFields...)

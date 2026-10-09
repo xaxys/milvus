@@ -447,6 +447,13 @@ func (m *indexMeta) CanCreateIndex(req *indexpb.CreateIndexRequest, isJSON bool)
 	return indexID, nil
 }
 
+// canCreateIndex decides whether the request may be written as a new index.
+//
+// It answers one question only: is this index name already used by a DIFFERENT
+// index in the collection? A field may carry several indexes, so the field is not
+// part of the decision here -- the field-type policy (a vector field keeps exactly
+// one index, and a second scalar index needs the whole cluster to be upgraded)
+// lives in Server.checkIndexCreationPolicy, which has the schema.
 func (m *indexMeta) canCreateIndex(req *indexpb.CreateIndexRequest, isJSON bool) (UniqueID, error) {
 	indexes, ok := m.indexes[req.CollectionID]
 	if !ok {
@@ -456,39 +463,20 @@ func (m *indexMeta) canCreateIndex(req *indexpb.CreateIndexRequest, isJSON bool)
 		if index.IsDeleted {
 			continue
 		}
-		if req.IndexName == index.IndexName {
-			if req.FieldID == index.FieldID && checkParams(index, req) &&
-				/*only check json params when it is json index*/ (!isJSON || checkIdenticalJSON(index, req)) {
-				return index.IndexID, errIndexOperationIgnored
-			}
-			errMsg := "at most one distinct index is allowed per field"
-			mlog.Warn(context.TODO(), errMsg,
-				mlog.String("source index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
-					index.IndexName, index.FieldID, index.IndexParams, index.UserIndexParams, index.TypeParams)),
-				mlog.String("current index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
-					req.GetIndexName(), req.GetFieldID(), req.GetIndexParams(), req.GetUserIndexParams(), req.GetTypeParams())))
-			return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
+		if req.IndexName != index.IndexName {
+			continue
 		}
-		if req.FieldID == index.FieldID {
-			if isJSON {
-				// Skip error handling since json path existence is guaranteed in CreateIndex
-				jsonPath1, _ := getIndexParam(index.IndexParams, common.JSONPathKey)
-				jsonPath2, _ := getIndexParam(req.GetIndexParams(), common.JSONPathKey)
-
-				if jsonPath1 != jsonPath2 {
-					// if json path is not same, create index is allowed
-					continue
-				}
-			}
-			// creating multiple indexes on same field is not supported
-			errMsg := "CreateIndex failed: creating multiple indexes on same field is not supported"
-			mlog.Warn(context.TODO(), errMsg)
-			// Client-caused conflict, same family as the "one distinct index per
-			// field" case above: return an input-class error rather than
-			// ServiceInternal (code 5, "never return out of Milvus") so the
-			// caller is not blamed with a system error / counted as a system-caused failure.
-			return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
+		if req.FieldID == index.FieldID && checkParams(index, req) &&
+			/*only check json params when it is json index*/ (!isJSON || checkIdenticalJSON(index, req)) {
+			return index.IndexID, errIndexOperationIgnored
 		}
+		errMsg := "index name is already used by another index in this collection"
+		mlog.Warn(context.TODO(), errMsg,
+			mlog.String("source index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
+				index.IndexName, index.FieldID, index.IndexParams, index.UserIndexParams, index.TypeParams)),
+			mlog.String("current index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
+				req.GetIndexName(), req.GetFieldID(), req.GetIndexParams(), req.GetUserIndexParams(), req.GetTypeParams())))
+		return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
 	}
 	return 0, nil
 }
