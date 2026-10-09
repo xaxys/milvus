@@ -1650,3 +1650,65 @@ TEST(TestTTLFieldFilter, TestMaskWithNullableTTLField) {
 
     EXPECT_EQ(expired_count, test_data_count / 4);
 }
+
+// 反例（一列多索引 v1）：同一字段加载第二个标量索引时，现状会命中
+// ChunkedSegmentSealedImpl::LoadScalarIndex 里的 AssertInfo(!has_index)。
+//
+// 这证明「只放开创建校验、不改 C++ 容器」会直接让 QueryNode 抛错，因此
+// S1（DataCoord 放开校验）必须与 S3（容器改造）/S4（选择层）一起上。
+//
+// 生产链路走的是 LoadDiff -> LoadBatchIndexes -> committer.Commit ->
+// LoadIndex(is_replace=false)，断言在 LoadScalarIndex 内，两条入口共用；
+// T1（SegmentLoadInfoTest.GetLoadDiffWithTwoScalarIndexesOnSameField）
+// 已经证明两个索引会进同一个 indexes_to_load[field] 向量。
+TEST_P(TestChunkSegment, MultiScalarIndexOnSameFieldAsserts) {
+    using namespace milvus::segcore;
+    auto seg = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(seg, nullptr);
+    auto fid = fields.at("int64");
+
+    auto load_inverted_index = [&](int64_t index_id) {
+        auto file_manager_ctx = storage::FileManagerContext();
+        file_manager_ctx.fieldDataMeta.field_schema.set_data_type(
+            milvus::proto::schema::Int64);
+        file_manager_ctx.fieldDataMeta.field_schema.set_fieldid(fid.get());
+        file_manager_ctx.fieldDataMeta.field_id = fid.get();
+        milvus::storage::IndexMeta index_meta;
+        index_meta.field_id = fid.get();
+        index_meta.build_id = static_cast<uint64_t>(index_id);
+        index_meta.index_version = static_cast<uint64_t>(index_id);
+        file_manager_ctx.indexMeta = index_meta;
+
+        index::CreateIndexInfo create_index_info;
+        create_index_info.field_type = DataType::INT64;
+        create_index_info.index_type = index::INVERTED_INDEX_TYPE;
+        auto index = index::IndexFactory::GetInstance().CreateScalarIndex(
+            create_index_info, file_manager_ctx);
+
+        std::vector<int64_t> data(test_data_count * chunk_num);
+        for (int i = 0; i < chunk_num; i++) {
+            auto pw = seg->chunk_data<int64_t>(nullptr, fid, i);
+            auto d = pw.get();
+            std::copy(d.data(),
+                      d.data() + test_data_count,
+                      data.begin() + i * test_data_count);
+        }
+        index->BuildWithRawDataForUT(data.size(), data.data());
+
+        segcore::LoadIndexInfo load_index_info;
+        load_index_info.field_id = fid.get();
+        load_index_info.field_type = DataType::INT64;
+        load_index_info.index_id = index_id;
+        load_index_info.index_params = GenIndexParams(index.get());
+        load_index_info.cache_index = CreateTestCacheIndex(
+            "test_" + std::to_string(index_id), std::move(index));
+        seg->LoadIndex(load_index_info);
+    };
+
+    // 第一个索引：正常加载，字段变成 index_ready
+    ASSERT_NO_THROW(load_inverted_index(1));
+    ASSERT_TRUE(seg->HasIndex(fid));
+
+    // 第二个索引（同字段、不同 indexID）：现状命中 AssertInfo(!has_index)
+    EXPECT_THROW(load_inverted_index(2), SegcoreError);
+}

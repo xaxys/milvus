@@ -3953,3 +3953,41 @@ TEST(IndexFactoryRawDataTest,
     EXPECT_FALSE(milvus::index::IndexFactory::CanUseIndexRawDataForField(
         DataType::JSON, false));
 }
+
+// 反例（一列多索引 v1）：同一标量字段上的两个索引会**同时**进入
+// indexes_to_load[field]，而不是「一个 load + 一个 replace」。
+//
+// 这是 ChunkedSegmentSealedImpl::LoadScalarIndex 里
+//   AssertInfo(!has_index, "scalar index has been exist at ...")
+// 会被触发的**前置条件**：LoadBatchIndexes 会为同一个 field 的向量里的每个
+// 元素各提交一次 LoadIndex(..., is_replace=false)，而
+// StagedStateCommitter::Commit 是互斥的，所以第二次一定能读到
+// has_index == true。
+TEST_F(SegmentLoadInfoTest, GetLoadDiffWithTwoScalarIndexesOnSameField) {
+    proto::segcore::SegmentLoadInfo test_proto;
+    test_proto.set_segmentid(100);
+    test_proto.set_num_of_rows(1000);
+
+    constexpr int64_t kFieldId = 103;  // varchar，标量字段
+    for (int64_t index_id : {1001LL, 1002LL}) {
+        auto* index_info = test_proto.add_index_infos();
+        index_info->set_fieldid(kFieldId);
+        index_info->set_indexid(index_id);
+        index_info->add_index_file_paths("/path/to/index" +
+                                         std::to_string(index_id));
+        auto* index_param = index_info->add_index_params();
+        index_param->set_key("index_type");
+        index_param->set_value(milvus::index::INVERTED_INDEX_TYPE);
+    }
+
+    SegmentLoadInfo info(test_proto, schema_);
+    auto diff = info.GetLoadDiff();
+
+    ASSERT_TRUE(diff.HasChanges());
+    // 关键断言：两个索引都在 indexes_to_load 里（2 元素向量）
+    ASSERT_TRUE(diff.indexes_to_load.count(FieldId(kFieldId)) > 0);
+    EXPECT_EQ(diff.indexes_to_load[FieldId(kFieldId)].size(), 2);
+    // 现状不会走 replace 分支（字段此前没有任何索引）
+    EXPECT_TRUE(diff.indexes_to_replace.empty());
+    EXPECT_TRUE(diff.indexes_to_drop.empty());
+}
