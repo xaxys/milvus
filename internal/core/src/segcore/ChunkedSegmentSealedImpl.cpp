@@ -985,7 +985,12 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
     LoadResourceRequest request{};
     if (info.load_resource_request.has_value()) {
         request = *info.load_resource_request;
-    } else {
+    } else if (!is_json_index) {
+        // A JSON path index never consulted the factory: the old json_indices and
+        // ngram_indexings branches returned before this point, and JSON index
+        // params are not guaranteed to carry an index_type (the factory asserts
+        // on it, so an older or partially-populated index info used to load fine
+        // and would now fail). Keep the JSON case on the default resource.
         request =
             milvus::index::IndexFactory::GetInstance().ScalarIndexLoadResource(
                 field_meta.get_data_type(),

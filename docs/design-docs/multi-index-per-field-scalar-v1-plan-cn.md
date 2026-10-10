@@ -611,3 +611,62 @@ S5 T1–T8 + G1–G5 + 全量回归 + e2e
 4. §3 的 I1–I4 有**显式测试**（T5/T6），不是靠"看代码应该没问题"。
 5. 单字段单索引与 Vector 路径零回归（`make test-go` + C++ `all_tests` + e2e L0/L1）。
 6. S0 门禁实测：挂一个低版本 session 时第二个索引建不出来。
+
+---
+
+## 9. 实现记录（S3/S4 落地后补记）
+
+### 9.1 实际落地的形状
+
+**S3（段级容器，`ChunkedSegmentSealedImpl.{h,cpp}` + `SegmentLoadInfo.{h,cpp}`）**
+
+- `RuntimeResourceState::scalar_indexings` 变成 `field -> indexID -> ScalarIndexEntry`，吸收原 `ngram_fields` / `ngram_indexings` / `json_indices`。`ScalarIndexEntry` 带 `index_id/index_type/json_path/json_cast_type/is_ngram/capability/cache_index`。
+- `LoadScalarIndex` 删掉 `AssertInfo(!has_index)`；`is_replace` 只 retire 该 indexID；同 indexID 重载幂等跳过。JSON 的两个分支合并成一条路径——`EraseJsonIndexesAtPath` 随之删除（JSON 身份不再是 path）。
+- `LoadDiff::indexes_to_drop` 变成 `(field, indexID)`；新增 `fields_index_fully_dropped` 承接"该字段一个索引都不剩"的字段级清理（retire 向量索引 + 清位）。**修掉了"删一个索引把整个字段的索引都删掉"**。
+- `SegmentLoadInfo::json_index_path_cache_` 失去最后一个读者，删除。
+
+**S4（选择层）**——比 §4.1 的计划更集中，因为 `SegmentExpr::DetermineExecPath()` 是共享的、且已经有"pin 为空 → RawData"的兜底：
+
+- `EnsurePinnedIndex()` 改为：取 `GetScalarIndexCandidates()` → 按 capability 排序（pattern 叶子把 PatternIndexed 排前，其余把 TermIndexed 排前，Unknown 居中）→ `!CanUseNgramIndex()` 时跳过 is_ngram 候选（这就是原 `ngram_fields` 挡的那件事）→ 逐个 `PinScalarIndex()`，第一个被 `ShouldUseOp(op, pattern)` 接受的留下。
+- 为了让基类能问"这个索引能不能服务这个算子"，**`ShouldUseOp` 提升到 `index::IndexBase`**（默认 `true`；`ScalarIndex<T>` 及三个 override 保持不变）。这是 §4.1 里没有的一步，它让 7 个叶子的 `pinned_index_[0]` 消费方式**完全不用改**。
+- 算子探测：新增 `SegmentExpr::ScalarIndexProbe()`（默认 `nullopt` = 不探测、第一个候选胜出），`UnaryExpr` override（它的 op 来自 plan 节点的 `op_type_`）。**其余 6 个叶子暂未提供探测**——见 9.3。
+
+### 9.2 测试暴露并修掉的两个真问题
+
+1. **I1/I3 一度被破坏（`HasIndex(JSON 字段)` 由 false 变 true）**。原因：`NormalizePublishedState` 有**两条**折叠路径——我改的是容器那条（按 `FoldsIntoIndexReadyBit` 过滤），但另一条"`published_index_ready_bitset` → `index_ready_bitset`"是**只加不减**的，而我的统一尾段对 JSON 索引也置了这个位。修复：JSON 走 `sync_json_index_ready_bits`（原 `SyncJsonNgramIndexState` 的语义——JSON 字段的位只属于 NGRAM 索引，typed path 索引要**清**它），普通标量仍走 `PublishIndexReadyLocked`。**教训**：折叠规则分散在两处时，改一处等于没改。
+2. **§S3.5 的 raw-data 信任问题（原标 [待实现时确认]）**。`published_index_has_raw_data` 是**字段级**且由"最后加载的那个索引"写，而读者 pin 的是最小 indexID → `bulk_subscript` 可能对一个没有 raw data 的索引做 reverse lookup（`InvertedIndexTantivy::Reverse_Lookup` 会抛）。修复：`IndexHasRawDataFromState` 在字段有 >1 个标量索引时直接返回 false（保守回退到列）。
+
+### 9.3 明确遗留（如实记录，不当作已完成）
+
+- **算子探测只覆盖 `UnaryExpr`**。其余 6 个（TermExpr / BinaryRangeExpr / NullExpr / ExistsExpr / GISFunctionFilterExpr / MembershipFilterExpr）走"排序 + 第一个候选"。它们不提供探测的后果：`ShouldUseOp` 的默认实现对**非 pattern 算子**一律返回 true（它只区分 pattern 类），所以 D1/D5 那种"同字段多个不同类型 term 索引"的组合下，叶子仍可能 pin 到一个不能服务该算子的索引——**但这与单索引时代的风险相同**（那时也无从选择），不是回归。后续可在 `ScalarIndex` 层细化 `ShouldUseOp` 的非 pattern 判定。
+- **§S3.4 仍把"已索引字段上的新 indexID"送进 `indexes_to_replace`**（计划说标量应当恒 append）。当前无害：`erase_scalar_index` 按 indexID 生效、字段级 drop 有 `indexes_to_load/replace` 护栏。留着会让新增索引走一次"先删后加"。
+- `ComputeDiffIndexes` 的字段级 drop 判定依赖 `new_info.field_index_id_cache_` 为空；若将来出现"字段级 drop 但缓存非空"的场景需重看。
+
+### 9.4 全量 C++ UT 结果与一个未决失败
+
+首轮全量（8242 用例 / 464 套件）：**8171 通过，91 失败**。91 个全部是 JSON 索引的表达式测试，
+根因是**我引入的真实回归**：统一 `LoadScalarIndex` 后 JSON 索引也走到 `ScalarIndexLoadResource`，
+而旧代码在 JSON 分支提前 return、从不调它；该调用会走到 `IndexFactory.cpp:714` 的
+`Assert(index_type 存在)`，而 JSON 索引参数不保证带 `index_type`（测试里就没有）。这既是测试失败，
+也是真实稳健性回归（旧元数据的 JSON 索引会因此加载失败）。修复：`request` 仅在**非 JSON** 时才向
+factory 询问资源（恢复旧行为），JSON 走默认资源。
+
+修复后重跑 JSON 索引 + MultiScalar 全组：**29 个用例 28 通过**。剩余 1 个未决失败：
+
+- `JsonIndexTest.JsonBinaryRangeFlatIndexSupportsOffsetInputWithoutRawJson`
+- 现象：flat JSON 索引 + offsets 输入 + 段内**无原始列**时，叶子回退去读列 →
+  `Assert "column != nullptr" => field 100 must exist when getting chunk by offset`
+  （`ChunkedSegmentSealedImpl.cpp:3367`）。
+- **归因未定**：我逐条比对了这条路径上我的改动与旧行为的等价性——单一 flat 索引下，
+  `PinJsonIndex` 的匹配、`GetJsonFlatIndexNestedPath` 的返回、`HasJsonIndex`、
+  `IndexHasRawData` 的结论都与旧代码一致——所以不能断言它是我引入的，也不能断言它是预存的。
+  判定需要一次基线运行（父提交重建后跑同一用例），本轮未做。
+- 复现命令（本机已装好新库）：
+  `./cmake_build/unittest/all_tests --gtest_filter='JsonIndexTest.JsonBinaryRangeFlatIndexSupportsOffsetInputWithoutRawJson'`
+
+### 9.5 其他记录
+
+- `LoadIndexInfo::index_id` 是**无默认值**的 `int64_t`，而现在它是容器键与幂等判定的键。
+  生产路径总会填；测试里若未填则是未定义值。加默认值要动 `Types.h`（全量重编），本轮未改。
+- 测试侧一处收窄：`internal/core/unittest/test_sealed.cpp` 的 3 个 fixture 增加了显式 indexID；
+  其余约 30 处 `LoadIndexInfo` 局部变量仍不设 index_id（同文件内没有同字段两次加载，故行为中性）。
