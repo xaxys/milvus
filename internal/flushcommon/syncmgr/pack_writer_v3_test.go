@@ -28,6 +28,7 @@ import (
 	"github.com/bytedance/mockey"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -44,6 +45,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
@@ -598,6 +600,544 @@ func (s *PackWriterV3Suite) TestMultiBatchStatsAccumulation() {
 	s.NotEmpty(stats3[bfKey].Metadata["memory_size"], "memory_size metadata should be set")
 }
 
+// TestFinalFlushWritesCompoundOnly verifies the H22/H23 contract on a brand
+// new non-L0 final flush: no allocator call is needed for a batch bloom object,
+// the manifest publishes only the compound path, and size accounting reflects
+// the object the resolver will actually load.
+func (s *PackWriterV3Suite) TestFinalFlushWritesCompoundOnly() {
+	collectionID := int64(124)
+	partitionID := int64(457)
+	segmentID := int64(10003)
+	rows := 10
+	basePath := path.Join(common.SegmentInsertLogPath,
+		metautil.JoinIDPath(collectionID, partitionID, segmentID))
+	manifestPath := packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{ManifestPath: manifestPath},
+		pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
+	metacache.UpdateNumOfRows(int64(rows))(seg)
+	mc := metacache.NewMockMetaCache(s.T())
+	mc.EXPECT().Collection().Return(collectionID).Maybe()
+	mc.EXPECT().GetSegmentByID(segmentID).Return(seg, true).Maybe()
+	alloc := allocator.NewMockAllocator(s.T())
+
+	pack := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithInsertData(genInsertDataWithPKOffset(rows, 0, s.schema)).
+		WithBatchRows(int64(rows)).
+		WithLevel(datapb.SegmentLevel_L1).
+		WithFlush()
+
+	bw := NewBulkPackWriterV3(mc, s.schema, s.cm, alloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, manifestPath)
+	_, _, _, _, writtenManifest, _, segmentStats, err := bw.Write(context.Background(), pack)
+	s.Require().NoError(err)
+
+	manifestStats, err := packed.GetManifestStats(writtenManifest, s.storageConfig)
+	s.Require().NoError(err)
+	bloom := manifestStats["bloom_filter.100"]
+	s.Require().Len(bloom.Paths, 1)
+	s.Equal(storage.CompoundStatsType.LogIdx(), path.Base(bloom.Paths[0]))
+	s.Equal("bloom_filter.100", path.Base(path.Dir(path.Dir(bloom.Paths[0]))))
+	s.Regexp(`^compound-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+		path.Base(path.Dir(bloom.Paths[0])))
+
+	compoundBlob, err := packed.ReadFile(s.storageConfig, bloom.Paths[0])
+	s.Require().NoError(err)
+	memorySize, err := strconv.ParseInt(bloom.Metadata["memory_size"], 10, 64)
+	s.Require().NoError(err)
+	s.EqualValues(len(compoundBlob), memorySize)
+	s.Equal(memorySize, segmentStats.GetStatsBinlogSize())
+
+	decoded, err := storage.DeserializeBloomFilterStats(
+		bloom.Paths, []*storage.Blob{{Value: compoundBlob}})
+	s.Require().NoError(err)
+	s.Require().Len(decoded, 1)
+	assertInt64PKMembership(s.T(), decoded, 1, int64(rows))
+}
+
+// TestFinalCompoundPathsIsolateHandoffWriters simulates a new channel owner
+// writing first and an old owner finishing late from the same initial manifest.
+// Their compound objects must have different keys, so the late write cannot
+// change the bytes already published by the new owner.
+func (s *PackWriterV3Suite) TestFinalCompoundPathsIsolateHandoffWriters() {
+	collectionID := int64(129)
+	partitionID := int64(462)
+	segmentID := int64(10009)
+	basePath := path.Join(common.SegmentInsertLogPath,
+		metautil.JoinIDPath(collectionID, partitionID, segmentID))
+	manifestPath := packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{ManifestPath: manifestPath},
+		pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
+	metacache.UpdateNumOfRows(10)(seg)
+	mc := metacache.NewMockMetaCache(s.T())
+	mc.EXPECT().Collection().Return(collectionID).Maybe()
+	mc.EXPECT().GetSegmentByID(segmentID).Return(seg, true).Maybe()
+
+	newFinalPack := func(rows, offset int) *SyncPack {
+		return new(SyncPack).
+			WithCollectionID(collectionID).
+			WithPartitionID(partitionID).
+			WithSegmentID(segmentID).
+			WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+			WithInsertData(genInsertDataWithPKOffset(rows, offset, s.schema)).
+			WithBatchRows(int64(rows)).
+			WithLevel(datapb.SegmentLevel_L1).
+			WithFlush()
+	}
+
+	newOwner := NewBulkPackWriterV3(mc, s.schema, s.cm, allocator.NewMockAllocator(s.T()),
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, manifestPath)
+	newOwner.initialManifestPath = manifestPath
+	newEntries, err := newOwner.writeStats(context.Background(), newFinalPack(7, 100), basePath)
+	s.Require().NoError(err)
+	s.Require().Len(newEntries, 1)
+	s.Require().Len(newEntries[0].Files, 1)
+	newPath := newEntries[0].Files[0]
+	newBytesBeforeLateWrite, err := packed.ReadFile(s.storageConfig, newPath)
+	s.Require().NoError(err)
+
+	// This represents the old channel owner's background task completing after
+	// the new owner has already written its compound object.
+	oldOwner := NewBulkPackWriterV3(mc, s.schema, s.cm, allocator.NewMockAllocator(s.T()),
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, manifestPath)
+	oldOwner.initialManifestPath = manifestPath
+	oldEntries, err := oldOwner.writeStats(context.Background(), newFinalPack(3, 0), basePath)
+	s.Require().NoError(err)
+	s.Require().Len(oldEntries, 1)
+	s.Require().Len(oldEntries[0].Files, 1)
+	oldPath := oldEntries[0].Files[0]
+	s.NotEqual(newPath, oldPath)
+
+	newBytesAfterLateWrite, err := packed.ReadFile(s.storageConfig, newPath)
+	s.Require().NoError(err)
+	s.Equal(newBytesBeforeLateWrite, newBytesAfterLateWrite,
+		"a late old writer must not overwrite the new owner's compound bloom")
+	oldBytes, err := packed.ReadFile(s.storageConfig, oldPath)
+	s.Require().NoError(err)
+	s.NotEqual(newBytesAfterLateWrite, oldBytes)
+
+	newStats, err := storage.DeserializeBloomFilterStats(
+		[]string{newPath}, []*storage.Blob{{Value: newBytesAfterLateWrite}})
+	s.Require().NoError(err)
+	assertInt64PKMembership(s.T(), newStats, 101, 107)
+	oldStats, err := storage.DeserializeBloomFilterStats(
+		[]string{oldPath}, []*storage.Blob{{Value: oldBytes}})
+	s.Require().NoError(err)
+	assertInt64PKMembership(s.T(), oldStats, 1, 3)
+}
+
+func (s *PackWriterV3Suite) TestEmptyFinalMigratesLegacySharedCompoundPath() {
+	collectionID := int64(130)
+	partitionID := int64(463)
+	segmentID := int64(10010)
+	rows := 5
+	basePath := path.Join(common.SegmentInsertLogPath,
+		metautil.JoinIDPath(collectionID, partitionID, segmentID))
+	manifestPath := packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{ManifestPath: manifestPath},
+		pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
+	metacache.UpdateNumOfRows(int64(rows))(seg)
+	mc := metacache.NewMockMetaCache(s.T())
+	mc.EXPECT().Collection().Return(collectionID).Maybe()
+	mc.EXPECT().GetSegmentByID(segmentID).Return(seg, true).Maybe()
+
+	sourcePack := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithInsertData(genInsertDataWithPKOffset(rows, 0, s.schema)).
+		WithBatchRows(int64(rows)).
+		WithLevel(datapb.SegmentLevel_L1).
+		WithFlush()
+	serializer, err := NewStorageSerializer(mc, s.schema)
+	s.Require().NoError(err)
+	pkStats, err := serializer.buildPrimaryKeyStats(sourcePack)
+	s.Require().NoError(err)
+	legacyBlob, err := serializer.serializeMergedPkStatsList(
+		[]*storage.PrimaryKeyStats{pkStats}, int64(rows))
+	s.Require().NoError(err)
+
+	legacyPath := path.Join(basePath, "_stats/bloom_filter.100", storage.CompoundStatsType.LogIdx())
+	s.False(isIsolatedCompoundBloomPath(legacyPath))
+	s.Require().NoError(packed.WriteFile(s.storageConfig, legacyPath, legacyBlob.Value))
+	legacyManifest, err := packed.CommitManifestUpdates(basePath, packed.ManifestEarliest, s.storageConfig,
+		&packed.ManifestUpdates{Stats: []packed.StatEntry{{
+			Key:      "bloom_filter.100",
+			Files:    []string{legacyPath},
+			Metadata: map[string]string{"memory_size": strconv.Itoa(len(legacyBlob.Value))},
+		}}})
+	s.Require().NoError(err)
+
+	emptyFinal := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithLevel(datapb.SegmentLevel_L1).
+		WithFlush()
+	writer := NewBulkPackWriterV3(mc, s.schema, s.cm, allocator.NewMockAllocator(s.T()),
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, legacyManifest)
+	writer.initialManifestPath = legacyManifest
+	entries, err := writer.writeStats(context.Background(), emptyFinal, basePath)
+	s.Require().NoError(err)
+	s.Require().Len(entries, 1)
+	s.Require().Len(entries[0].Files, 1)
+	migratedPath := entries[0].Files[0]
+	s.NotEqual(legacyPath, migratedPath)
+	s.True(isIsolatedCompoundBloomPath(migratedPath))
+
+	migratedBytes, err := packed.ReadFile(s.storageConfig, migratedPath)
+	s.Require().NoError(err)
+	migratedStats, err := storage.DeserializeBloomFilterStats(
+		[]string{migratedPath}, []*storage.Blob{{Value: migratedBytes}})
+	s.Require().NoError(err)
+	assertInt64PKMembership(s.T(), migratedStats, 1, int64(rows))
+}
+
+func (s *PackWriterV3Suite) TestL0FinalFlushKeepsBatchBloom() {
+	collectionID := int64(126)
+	partitionID := int64(459)
+	segmentID := int64(10005)
+	rows := 4
+	basePath := path.Join(common.SegmentInsertLogPath,
+		metautil.JoinIDPath(collectionID, partitionID, segmentID))
+	manifestPath := packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{ManifestPath: manifestPath},
+		pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
+	metacache.UpdateNumOfRows(int64(rows))(seg)
+	mc := metacache.NewMockMetaCache(s.T())
+	mc.EXPECT().Collection().Return(collectionID).Maybe()
+	mc.EXPECT().GetSegmentByID(segmentID).Return(seg, true).Maybe()
+
+	pack := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithInsertData(genInsertDataWithPKOffset(rows, 0, s.schema)).
+		WithBatchRows(int64(rows)).
+		WithLevel(datapb.SegmentLevel_L0).
+		WithFlush()
+
+	bw := NewBulkPackWriterV3(mc, s.schema, s.cm, s.logIDAlloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, manifestPath)
+	_, _, _, _, writtenManifest, _, _, err := bw.Write(context.Background(), pack)
+	s.Require().NoError(err)
+	manifestStats, err := packed.GetManifestStats(writtenManifest, s.storageConfig)
+	s.Require().NoError(err)
+	bloom := manifestStats["bloom_filter.100"]
+	s.Require().Len(bloom.Paths, 1)
+	s.NotEqual(storage.CompoundStatsType.LogIdx(), path.Base(bloom.Paths[0]))
+}
+
+func (s *PackWriterV3Suite) TestFinalFlushCompoundOnlyWithStringPK() {
+	s.schema = &schemapb.CollectionSchema{
+		Name: "string_pk",
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: common.RowIDField, DataType: schemapb.DataType_Int64},
+			{FieldID: common.TimeStampField, DataType: schemapb.DataType_Int64},
+			{FieldID: 100, Name: "pk", DataType: schemapb.DataType_VarChar, IsPrimaryKey: true},
+			{
+				FieldID: 101, Name: "vector", DataType: schemapb.DataType_FloatVector,
+				TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "8"}},
+			},
+		},
+	}
+	s.currentSplit = storagecommon.SplitColumns(typeutil.GetAllFieldSchemas(s.schema),
+		map[int64]storagecommon.ColumnStats{}, storagecommon.NewSelectedDataTypePolicy(), storagecommon.NewRemanentShortPolicy(-1))
+
+	collectionID := int64(127)
+	partitionID := int64(460)
+	segmentID := int64(10006)
+	rows := 3
+	basePath := path.Join(common.SegmentInsertLogPath,
+		metautil.JoinIDPath(collectionID, partitionID, segmentID))
+	manifestPath := packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{ManifestPath: manifestPath},
+		pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
+	metacache.UpdateNumOfRows(int64(rows))(seg)
+	mc := metacache.NewMockMetaCache(s.T())
+	mc.EXPECT().Collection().Return(collectionID).Maybe()
+	mc.EXPECT().GetSegmentByID(segmentID).Return(seg, true).Maybe()
+	alloc := allocator.NewMockAllocator(s.T())
+
+	pack := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithInsertData(s.genStringPKInsertData(rows, s.schema)).
+		WithBatchRows(int64(rows)).
+		WithLevel(datapb.SegmentLevel_L1).
+		WithFlush()
+	bw := NewBulkPackWriterV3(mc, s.schema, s.cm, alloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, manifestPath)
+	_, _, _, _, writtenManifest, _, _, err := bw.Write(context.Background(), pack)
+	s.Require().NoError(err)
+	decoded := s.readCompoundPKStats(writtenManifest)
+	s.Require().Len(decoded, 1)
+	bfs := pkoracle.NewBloomFilterSet()
+	bfs.Roll(decoded...)
+	for i := 0; i < rows; i++ {
+		pk := fmt.Sprintf("pk-%d", i)
+		s.True(bfs.PkExists(storage.NewLocationsCache(storage.NewVarCharPrimaryKey(pk))),
+			"compound bloom missing PK %s", pk)
+	}
+}
+
+func (s *PackWriterV3Suite) TestEmptyFinalFlushCompactsCommittedBatchHistory() {
+	collectionID := int64(128)
+	partitionID := int64(461)
+	segmentID := int64(10008)
+	rows := 5
+	basePath := path.Join(common.SegmentInsertLogPath,
+		metautil.JoinIDPath(collectionID, partitionID, segmentID))
+	manifestPath := packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{ManifestPath: manifestPath},
+		pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
+	metacache.UpdateNumOfRows(int64(rows))(seg)
+	mc := metacache.NewMockMetaCache(s.T())
+	mc.EXPECT().Collection().Return(collectionID).Maybe()
+	mc.EXPECT().GetSegmentByID(segmentID).Return(seg, true).Maybe()
+
+	incremental := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithInsertData(genInsertDataWithPKOffset(rows, 0, s.schema)).
+		WithBatchRows(int64(rows)).
+		WithLevel(datapb.SegmentLevel_L1)
+	bw1 := NewBulkPackWriterV3(mc, s.schema, s.cm, s.logIDAlloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, manifestPath)
+	_, _, _, _, manifest1, _, _, err := bw1.Write(context.Background(), incremental)
+	s.Require().NoError(err)
+	metacache.SetStatistics(bw1.PreparedStats())(seg)
+	metacache.UpdateManifestPath(manifest1)(seg)
+
+	finalPack := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithLevel(datapb.SegmentLevel_L1).
+		WithFlush()
+	currentSplit := storagecommon.FillColumnGroupFormats(s.currentSplit, paramtable.Get().DataNodeCfg.StorageFormat.GetValue())
+	bw2 := NewBulkPackWriterV3(mc, s.schema, s.cm, allocator.NewMockAllocator(s.T()),
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, currentSplit, manifest1)
+	_, _, _, _, manifest2, _, segmentStats, err := bw2.Write(context.Background(), finalPack)
+	s.Require().NoError(err)
+	decoded := s.readCompoundPKStats(manifest2)
+	s.Require().Len(decoded, 1)
+	assertInt64PKMembership(s.T(), decoded, 1, int64(rows))
+	manifestFootprint, err := packed.StatsBinlogSizeFromManifest(manifest2, s.storageConfig)
+	s.Require().NoError(err)
+	s.Equal(manifestFootprint, segmentStats.GetStatsBinlogSize())
+}
+
+// TestFinalFlushRecoversMissingStatsFootprint covers a rolling upgrade from a
+// pre-Statistics DataNode. Its committed V3 manifest contains the prior batch
+// bloom, but DataCoord's legacy array fallback persisted StatsBinlogSize=0
+// because V3 does not publish stats-log arrays.
+func (s *PackWriterV3Suite) TestFinalFlushRecoversMissingStatsFootprint() {
+	collectionID := int64(131)
+	partitionID := int64(464)
+	segmentID := int64(10011)
+	rows := 5
+	basePath := path.Join(common.SegmentInsertLogPath,
+		metautil.JoinIDPath(collectionID, partitionID, segmentID))
+	earliestManifest := packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+
+	initialSegment := metacache.NewSegmentInfo(&datapb.SegmentInfo{ManifestPath: earliestManifest},
+		pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
+	metacache.UpdateNumOfRows(int64(rows))(initialSegment)
+	initialMetaCache := metacache.NewMockMetaCache(s.T())
+	initialMetaCache.EXPECT().Collection().Return(collectionID).Maybe()
+	initialMetaCache.EXPECT().GetSegmentByID(segmentID).Return(initialSegment, true).Maybe()
+
+	incremental := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithInsertData(genInsertDataWithPKOffset(rows, 0, s.schema)).
+		WithBatchRows(int64(rows)).
+		WithLevel(datapb.SegmentLevel_L1)
+	initialWriter := NewBulkPackWriterV3(initialMetaCache, s.schema, s.cm, s.logIDAlloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, earliestManifest)
+	_, _, _, _, batchManifest, _, _, err := initialWriter.Write(context.Background(), incremental)
+	s.Require().NoError(err)
+	priorFootprint, err := packed.StatsBinlogSizeFromManifest(batchManifest, s.storageConfig)
+	s.Require().NoError(err)
+	s.Positive(priorFootprint)
+
+	// Simulate recovery from the SegmentInfo written by the old DataNode. Do
+	// not install initialWriter.PreparedStats(): the persisted Statistics has a
+	// zero StatsBinlogSize despite the batch bloom in batchManifest.
+	recoveredStats := &datapb.Statistics{StatsBinlogSize: 0}
+	recoveredSegment := metacache.NewSegmentInfo(&datapb.SegmentInfo{
+		ID:             segmentID,
+		PartitionID:    partitionID,
+		NumOfRows:      int64(rows),
+		Level:          datapb.SegmentLevel_L1,
+		StorageVersion: storage.StorageV3,
+		ManifestPath:   batchManifest,
+		Stats:          recoveredStats,
+	}, pkoracle.NewBloomFilterSet(), nil, metacache.NewSegmentStatsFromStats(recoveredStats, int64(rows)))
+	metacache.UpdateBufferedRows(int64(rows))(recoveredSegment)
+	recoveredMetaCache := metacache.NewMockMetaCache(s.T())
+	recoveredMetaCache.EXPECT().Collection().Return(collectionID).Maybe()
+	recoveredMetaCache.EXPECT().GetSegmentByID(segmentID).Return(recoveredSegment, true).Maybe()
+
+	finalPack := new(SyncPack).
+		WithCollectionID(collectionID).
+		WithPartitionID(partitionID).
+		WithSegmentID(segmentID).
+		WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+		WithInsertData(genInsertDataWithPKOffset(rows, rows, s.schema)).
+		WithBatchRows(int64(rows)).
+		WithLevel(datapb.SegmentLevel_L1).
+		WithFlush()
+	currentSplit := storagecommon.FillColumnGroupFormats(s.currentSplit, paramtable.Get().DataNodeCfg.StorageFormat.GetValue())
+	finalWriter := NewBulkPackWriterV3(recoveredMetaCache, s.schema, s.cm, allocator.NewMockAllocator(s.T()),
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, currentSplit, batchManifest)
+	_, _, _, _, finalManifest, _, segmentStats, err := finalWriter.Write(context.Background(), finalPack)
+	s.Require().NoError(err)
+
+	manifestFootprint, err := packed.StatsBinlogSizeFromManifest(finalManifest, s.storageConfig)
+	s.Require().NoError(err)
+	s.Equal(manifestFootprint, segmentStats.GetStatsBinlogSize())
+	s.Require().NotNil(finalWriter.PreparedStats())
+	s.Equal(manifestFootprint, finalWriter.PreparedStats().Publish().GetStatsBinlogSize(),
+		"the collector installed after DataCoord ack must keep the repaired baseline")
+	decoded := s.readCompoundPKStats(finalManifest)
+	s.Require().Len(decoded, 2)
+	assertInt64PKMembership(s.T(), decoded, 1, int64(rows*2))
+}
+
+// TestFinalFlushCompoundCarriesCommittedHistory verifies that the compound is
+// built from the committed manifest's prior batch blobs plus the current
+// in-memory stats. It also covers a subsequent final flush whose input
+// manifest is already compound-only.
+func (s *PackWriterV3Suite) TestFinalFlushCompoundCarriesCommittedHistory() {
+	collectionID := int64(125)
+	partitionID := int64(458)
+	segmentID := int64(10004)
+	batchRows := 5
+	basePath := path.Join(common.SegmentInsertLogPath,
+		metautil.JoinIDPath(collectionID, partitionID, segmentID))
+	manifestPath := packed.MarshalManifestPath(basePath, packed.ManifestEarliest)
+
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{ManifestPath: manifestPath},
+		pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
+	metacache.UpdateNumOfRows(int64(batchRows * 3))(seg)
+	mc := metacache.NewMockMetaCache(s.T())
+	mc.EXPECT().Collection().Return(collectionID).Maybe()
+	mc.EXPECT().GetSegmentByID(segmentID).Return(seg, true).Maybe()
+
+	newPack := func(offset int, final bool) *SyncPack {
+		pack := new(SyncPack).
+			WithCollectionID(collectionID).
+			WithPartitionID(partitionID).
+			WithSegmentID(segmentID).
+			WithChannelName(fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)).
+			WithInsertData(genInsertDataWithPKOffset(batchRows, offset, s.schema)).
+			WithBatchRows(int64(batchRows)).
+			WithLevel(datapb.SegmentLevel_L1)
+		if final {
+			pack.WithFlush()
+		}
+		return pack
+	}
+
+	bw1 := NewBulkPackWriterV3(mc, s.schema, s.cm, s.logIDAlloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, s.currentSplit, manifestPath)
+	_, _, _, _, manifest1, _, _, err := bw1.Write(context.Background(), newPack(0, false))
+	s.Require().NoError(err)
+	metacache.SetStatistics(bw1.PreparedStats())(seg)
+	metacache.UpdateManifestPath(manifest1)(seg)
+	currentSplit := storagecommon.FillColumnGroupFormats(s.currentSplit, paramtable.Get().DataNodeCfg.StorageFormat.GetValue())
+
+	bw2 := NewBulkPackWriterV3(mc, s.schema, s.cm, s.logIDAlloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, currentSplit, manifest1)
+	_, _, _, _, manifest2, _, segmentStats2, err := bw2.Write(context.Background(), newPack(batchRows, true))
+	s.Require().NoError(err)
+	decoded := s.readCompoundPKStats(manifest2)
+	s.Require().Len(decoded, 2)
+	assertInt64PKMembership(s.T(), decoded, 1, int64(batchRows*2))
+	manifestFootprint, err := packed.StatsBinlogSizeFromManifest(manifest2, s.storageConfig)
+	s.Require().NoError(err)
+	s.Equal(manifestFootprint, segmentStats2.GetStatsBinlogSize(),
+		"final replacement must update the cumulative footprint, not add all historical PUT bytes")
+	metacache.SetStatistics(bw2.PreparedStats())(seg)
+	metacache.UpdateManifestPath(manifest2)(seg)
+
+	// Once compound-only is committed, an incremental batch would be invisible
+	// because readers prioritize the compound. Reject this lifecycle violation
+	// instead of producing an ambiguous compound+batch manifest.
+	bwInvalid := NewBulkPackWriterV3(mc, s.schema, s.cm, s.logIDAlloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, currentSplit, manifest2)
+	_, _, _, _, _, _, _, err = bwInvalid.Write(context.Background(), newPack(batchRows*2, false))
+	s.Require().Error(err)
+	s.ErrorIs(err, merr.ErrDataIntegrity)
+
+	// The second final starts from a compound-only committed manifest. The
+	// reader expands that compound back to its per-batch stats before appending
+	// the current batch, so no prior PK is lost.
+	bw3 := NewBulkPackWriterV3(mc, s.schema, s.cm, s.logIDAlloc,
+		packed.DefaultWriteBufferSize, 0, s.storageConfig, currentSplit, manifest2)
+	_, _, _, _, manifest3, _, _, err := bw3.Write(context.Background(), newPack(batchRows*2, true))
+	s.Require().NoError(err)
+	decoded = s.readCompoundPKStats(manifest3)
+	s.Require().Len(decoded, 3)
+	assertInt64PKMembership(s.T(), decoded, 1, int64(batchRows*3))
+}
+
+func (s *PackWriterV3Suite) readCompoundPKStats(manifestPath string) []*storage.PrimaryKeyStats {
+	manifestStats, err := packed.GetManifestStats(manifestPath, s.storageConfig)
+	s.Require().NoError(err)
+	bloom := manifestStats["bloom_filter.100"]
+	s.Require().Len(bloom.Paths, 1)
+	s.Equal(storage.CompoundStatsType.LogIdx(), path.Base(bloom.Paths[0]))
+	value, err := packed.ReadFile(s.storageConfig, bloom.Paths[0])
+	s.Require().NoError(err)
+	decoded, err := storage.DeserializeBloomFilterStats(bloom.Paths, []*storage.Blob{{Value: value}})
+	s.Require().NoError(err)
+	return decoded
+}
+
+func assertInt64PKMembership(t *testing.T, stats []*storage.PrimaryKeyStats, from, to int64) {
+	t.Helper()
+	bfs := pkoracle.NewBloomFilterSet()
+	bfs.Roll(stats...)
+	for id := from; id <= to; id++ {
+		location := storage.NewLocationsCache(storage.NewInt64PrimaryKey(id))
+		require.True(t, bfs.PkExists(location), "compound bloom missing PK %d", id)
+	}
+}
+
+func (s *PackWriterV3Suite) genStringPKInsertData(size int, schema *schemapb.CollectionSchema) []*storage.InsertData {
+	buf, err := storage.NewInsertData(schema)
+	s.Require().NoError(err)
+	for i := 0; i < size; i++ {
+		data := map[storage.FieldID]any{
+			common.RowIDField:     int64(i + 1),
+			common.TimeStampField: int64(i + 1),
+			100:                   fmt.Sprintf("pk-%d", i),
+			101:                   make([]float32, 8),
+		}
+		s.Require().NoError(buf.Append(data))
+	}
+	return []*storage.InsertData{buf}
+}
+
 // TestWrite_PropagatesPriorStatsReadError guards against silently committing a
 // truncated compound bloom blob. When the prior-batch stats read fails on a
 // flush over an existing manifest, Write must return the error so the sync
@@ -678,6 +1218,13 @@ func (s *PackWriterV3Suite) TestPerBatchStatPathsExcludesCompound() {
 	s.Equal([]string{perBatch1}, perBatchStatPaths([]string{perBatch1}))
 	// Empty input.
 	s.Empty(perBatchStatPaths(nil))
+
+	// Bloom merge uses all batches for a mixed layout, but falls back to the
+	// compound when H22 has already replaced the manifest entry.
+	s.Equal([]string{perBatch1, perBatch2}, bloomMergeSourcePaths([]string{perBatch1, compound, perBatch2}))
+	s.Equal([]string{compound}, bloomMergeSourcePaths([]string{compound}))
+	s.True(hasCompoundStatPath([]string{perBatch1, compound}))
+	s.False(hasCompoundStatPath([]string{perBatch1, perBatch2}))
 }
 
 // TestMultiBatchBM25StatsAccumulation verifies that BM25 stat files from
