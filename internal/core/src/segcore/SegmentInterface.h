@@ -34,6 +34,7 @@
 #include "boost/container/detail/std_fwd.hpp"
 #include "cachinglayer/CacheSlot.h"
 #include "cachinglayer/Utils.h"
+#include "ScalarIndexCandidate.h"
 #include "common/Array.h"
 #include "common/ArrayOffsets.h"
 #include "common/BitsetView.h"
@@ -252,6 +253,24 @@ class SegmentInterface {
     std::vector<PinWrapper<const index::IndexBase*>>
     PinIndex(milvus::OpContext* op_ctx, FieldId field_id) const {
         return PinIndex(op_ctx, field_id, false);
+    }
+
+    // Metadata about every scalar index loaded for field_id -- read without
+    // pinning anything, so callers can decide whether a scalar-index execution
+    // path is worth committing to (and paying PinCells() for) at all.
+    virtual std::vector<ScalarIndexCandidate>
+    GetScalarIndexCandidates(FieldId field_id) const {
+        return {};
+    }
+
+    // Pins exactly the index identified by index_id, so the caller can ask it
+    // (via IndexBase::ShouldUseOp) whether it can serve the leaf. Returns an
+    // empty vector when that index is not loaded for the field.
+    virtual std::vector<PinWrapper<const index::IndexBase*>>
+    PinScalarIndex(milvus::OpContext* op_ctx,
+                   FieldId field_id,
+                   int64_t index_id) const {
+        return {};
     }
 
     virtual void

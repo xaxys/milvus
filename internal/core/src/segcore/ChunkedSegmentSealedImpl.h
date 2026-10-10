@@ -145,25 +145,15 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     std::vector<PinWrapper<const index::IndexBase*>>
     PinIndex(milvus::OpContext* op_ctx,
              FieldId field_id,
-             bool include_ngram = false) const override {
-        auto snapshot = CapturePublishedState();
-        if (snapshot != nullptr && snapshot->runtime != nullptr) {
-            const auto& runtime = *snapshot->runtime;
-            if (!include_ngram && runtime.ngram_fields.find(field_id) !=
-                                      runtime.ngram_fields.end()) {
-                return {};
-            }
+             bool include_ngram = false) const override;
 
-            auto iter = runtime.scalar_indexings.find(field_id);
-            if (iter != runtime.scalar_indexings.end()) {
-                auto ca = SemiInlineGet(iter->second->PinCells(op_ctx, {0}));
-                auto index = ca->get_cell_of(0);
-                return {
-                    PinWrapper<const index::IndexBase*>(std::move(ca), index)};
-            }
-        }
-        return {};
-    }
+    std::vector<ScalarIndexCandidate>
+    GetScalarIndexCandidates(FieldId field_id) const override;
+
+    std::vector<PinWrapper<const index::IndexBase*>>
+    PinScalarIndex(milvus::OpContext* op_ctx,
+                   FieldId field_id,
+                   int64_t index_id) const override;
 
     std::vector<PinWrapper<const index::IndexBase*>>
     PinJsonIndex(milvus::OpContext* op_ctx,
@@ -323,11 +313,28 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                      std::shared_ptr<milvus::cachinglayer::CacheSlot<
                          milvus::index::TextMatchIndex>>>;
 
-    struct JsonIndex {
-        FieldId field_id;
-        std::string nested_path;
-        JsonCastType cast_type{JsonCastType::UNKNOWN};
-        index::CacheIndexBasePtr index;
+    // One loaded scalar index. A field may carry several of these: plain scalar
+    // indexes, JSON indexes on different paths, and JSON indexes that differ only
+    // by cast type. index_id is the identity -- a JSON path alone is not, since
+    // one path can carry several cast types.
+    struct ScalarIndexEntry {
+        int64_t index_id{0};
+        std::string index_type;
+        std::string json_path;  // empty => not a JSON path index
+        JsonCastType json_cast_type{JsonCastType::UNKNOWN};
+        bool is_ngram{false};
+        ScalarIndexCapability capability{ScalarIndexCapability::Unknown};
+        index::CacheIndexBasePtr cache_index;
+
+        ScalarIndexCandidate
+        Candidate() const {
+            return ScalarIndexCandidate{index_id,
+                                        index_type,
+                                        json_path,
+                                        json_cast_type,
+                                        is_ngram,
+                                        capability};
+        }
     };
 
     // When non-zero commit_ts is active, every row in this segment carries it
@@ -344,18 +351,16 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
             struct_to_array_offsets;
         std::unordered_map<FieldId, std::shared_ptr<ArrayOffsetsSealed>>
             array_offsets_map;
-        std::unordered_map<FieldId, index::CacheIndexBasePtr> scalar_indexings;
+        // field -> indexID -> entry. Plain scalar, JSON path/cast and JSON NGRAM
+        // indexes all live here; see ScalarIndexEntry.
+        std::unordered_map<FieldId,
+                           std::unordered_map<int64_t, ScalarIndexEntry>>
+            scalar_indexings;
         std::unordered_map<FieldId, SealedIndexingEntryPtr> vector_indexings;
         std::unordered_map<FieldId, std::shared_ptr<const VecIndexConfig>>
             vec_binlog_config;
-        std::unordered_set<FieldId> ngram_fields;
-        std::unordered_map<
-            FieldId,
-            std::unordered_map<std::string, index::CacheIndexBasePtr>>
-            ngram_indexings;
         std::unordered_map<FieldId, std::string> text_lob_paths;
         std::unordered_map<FieldId, TextIndexVariant> text_indexes;
-        std::vector<JsonIndex> json_indices;
         std::unordered_map<FieldId, std::shared_ptr<index::JsonKeyStats>>
             json_stats;
         std::shared_ptr<milvus_storage::api::Reader> reader;
@@ -1450,30 +1455,6 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
 
     static void
     DropVectorIndexing(RuntimeResourceState& runtime, FieldId field_id);
-
-    static std::vector<index::CacheIndexBasePtr>
-    EraseJsonIndexings(RuntimeResourceState& runtime,
-                       FieldId field_id,
-                       std::string_view nested_path);
-
-    static index::CacheIndexBasePtr
-    EraseJsonNgramIndexing(RuntimeResourceState& runtime,
-                           FieldId field_id,
-                           std::string_view nested_path);
-
-    static std::vector<index::CacheIndexBasePtr>
-    EraseJsonIndexesAtPath(RuntimeResourceState& runtime,
-                           FieldId field_id,
-                           std::string_view nested_path);
-
-    static bool
-    RuntimeJsonNgramIndexReady(const RuntimeResourceState& runtime,
-                               FieldId field_id);
-
-    static void
-    SyncJsonNgramIndexState(PublishedSegmentState& state,
-                            const RuntimeResourceState& runtime,
-                            FieldId field_id);
 
     std::shared_ptr<PublishedSegmentState>
     BuildNextPublishedState(
