@@ -498,7 +498,12 @@ TEST_F(SegmentLoadInfoTest,
     auto diff = current_info.ComputeDiff(new_info);
     EXPECT_TRUE(diff.indexes_to_load.empty());
     EXPECT_TRUE(diff.indexes_to_replace.empty());
-    EXPECT_EQ(diff.indexes_to_drop, std::set<FieldId>({FieldId(101)}));
+    // Field 101 is gone from the new schema, so its index is dropped by indexID
+    // and the field is dropped at field level too (the path that also retires the
+    // vector index and clears the field's bits). 102 keeps its index.
+    ASSERT_EQ(diff.indexes_to_drop.count(FieldId(101)), 1u);
+    EXPECT_FALSE(diff.indexes_to_drop.at(FieldId(101)).empty());
+    EXPECT_EQ(diff.fields_index_fully_dropped, std::set<FieldId>({FieldId(101)}));
 
     SegmentLoadInfo next_info(new_info);
     next_info.ReplaceSchemaForReopen(new_schema);
@@ -2324,10 +2329,12 @@ TEST_F(SegmentLoadInfoTest, ComputeDiffIndexReplaceDropConflict) {
     // Verify the replacement has the correct new index_id
     EXPECT_EQ(diff.indexes_to_replace[FieldId(101)][0].index_id, 2001);
 
-    // Simulate the ApplyLoadDiff filter: fields with replace should be skipped
-    // in the drop loop
+    // Simulate the ApplyLoadDiff filter: a field whose index is being replaced is
+    // skipped by the field-level drop loop (the replacement load re-establishes
+    // it), and with indexes dropped by indexID the field is not dropped at field
+    // level at all while it still has an index in the new config.
     std::vector<FieldId> actually_dropped;
-    for (auto field_id : diff.indexes_to_drop) {
+    for (auto field_id : diff.fields_index_fully_dropped) {
         if (diff.indexes_to_replace.count(field_id) > 0 ||
             diff.indexes_to_load.count(field_id) > 0) {
             continue;
@@ -2336,9 +2343,10 @@ TEST_F(SegmentLoadInfoTest, ComputeDiffIndexReplaceDropConflict) {
     }
     // Field 101 has a replacement, so it should NOT be dropped
     EXPECT_TRUE(actually_dropped.empty());
+    EXPECT_TRUE(diff.fields_index_fully_dropped.empty());
 }
 
-TEST_F(SegmentLoadInfoTest, ComputeDiffDropsJsonIndexByNestedPath) {
+TEST_F(SegmentLoadInfoTest, ComputeDiffDropsOneJsonIndexByIndexId) {
     auto add_json_index = [](proto::segcore::SegmentLoadInfo& proto,
                              int64_t index_id,
                              const std::string& nested_path) {
@@ -2381,10 +2389,13 @@ TEST_F(SegmentLoadInfoTest, ComputeDiffDropsJsonIndexByNestedPath) {
     EXPECT_EQ(current_info.GetIndexInfoCount(), 0);
     auto diff = current_info.ComputeDiff(new_info);
 
-    ASSERT_EQ(diff.json_indexes_to_drop.count(FieldId(102)), 1);
-    EXPECT_EQ(diff.json_indexes_to_drop.at(FieldId(102)).count("a"), 1);
-    EXPECT_EQ(diff.json_indexes_to_drop.at(FieldId(102)).count("b"), 0);
-    EXPECT_EQ(diff.indexes_to_drop.count(FieldId(102)), 0);
+    // Dropped by indexID: path "a"'s index (5001) is no longer listed, while
+    // "b"'s (5002) stays -- so the field is NOT dropped at field level, which is
+    // what keeps its sibling alive (identity is the indexID now, not the path).
+    ASSERT_EQ(diff.indexes_to_drop.count(FieldId(102)), 1u);
+    EXPECT_EQ(diff.indexes_to_drop.at(FieldId(102)).count(5001), 1u);
+    EXPECT_EQ(diff.indexes_to_drop.at(FieldId(102)).count(5002), 0u);
+    EXPECT_TRUE(diff.fields_index_fully_dropped.empty());
 }
 
 TEST_F(SegmentLoadInfoTest, ComputeDiffBinlogReplace) {
@@ -3990,4 +4001,64 @@ TEST_F(SegmentLoadInfoTest, GetLoadDiffWithTwoScalarIndexesOnSameField) {
     // 现状不会走 replace 分支（字段此前没有任何索引）
     EXPECT_TRUE(diff.indexes_to_replace.empty());
     EXPECT_TRUE(diff.indexes_to_drop.empty());
+}
+
+// 一列多索引 v1 / T7：drop 的粒度是 (field, indexID)，不是 field。
+//
+// 同字段两个索引、新的 load config 少一个 —— 只删掉那一个 indexID；
+// fields_index_fully_dropped **不能**被填（那条字段级清理会连字段的
+// index_ready 一起清掉，把留下来的兄弟索引变成不可见）。两个索引都没了才进
+// fields_index_fully_dropped。
+TEST_F(SegmentLoadInfoTest, ComputeDiffDropOneOfTwoScalarIndexesOnSameField) {
+    constexpr int64_t kFieldId = 108;  // int64 标量字段（extra_field1）
+    constexpr int64_t kFirstIndexId = 1001;
+    constexpr int64_t kSecondIndexId = 1002;
+
+    auto make_proto = [&](const std::vector<int64_t>& index_ids) {
+        proto::segcore::SegmentLoadInfo p;
+        p.set_segmentid(100);
+        p.set_num_of_rows(1000);
+        for (int64_t index_id : index_ids) {
+            auto* index_info = p.add_index_infos();
+            index_info->set_fieldid(kFieldId);
+            index_info->set_indexid(index_id);
+            index_info->add_index_file_paths("/path/to/index" +
+                                             std::to_string(index_id));
+            auto* index_param = index_info->add_index_params();
+            index_param->set_key("index_type");
+            index_param->set_value(milvus::index::INVERTED_INDEX_TYPE);
+        }
+        return p;
+    };
+
+    // 现状（两个索引）与"只留第二个索引"的新配置
+    SegmentLoadInfo current_info(
+        make_proto({kFirstIndexId, kSecondIndexId}), schema_);
+    SegmentLoadInfo new_info(make_proto({kSecondIndexId}), schema_);
+    auto diff = current_info.ComputeDiff(new_info);
+
+    // 只删被丢掉的那个 indexID
+    ASSERT_EQ(diff.indexes_to_drop.count(FieldId(kFieldId)), 1u);
+    ASSERT_EQ(diff.indexes_to_drop.at(FieldId(kFieldId)).size(), 1u);
+    EXPECT_EQ(*diff.indexes_to_drop.at(FieldId(kFieldId)).begin(),
+              kFirstIndexId);
+    // 留下来的那个索引不重新加载、也不替换 —— 段上原样留着，仍然可用
+    EXPECT_TRUE(diff.indexes_to_load.empty());
+    EXPECT_TRUE(diff.indexes_to_replace.empty());
+    // 字段级清理不能触发
+    EXPECT_TRUE(diff.fields_index_fully_dropped.empty())
+        << "字段还有一个索引，不能被当成整字段 drop";
+
+    // 两个索引都没了：才进 fields_index_fully_dropped（连同两个 indexID 一起删）
+    SegmentLoadInfo empty_info(make_proto({}), schema_);
+    auto drop_all = current_info.ComputeDiff(empty_info);
+    ASSERT_EQ(drop_all.indexes_to_drop.count(FieldId(kFieldId)), 1u);
+    EXPECT_EQ(drop_all.indexes_to_drop.at(FieldId(kFieldId)).size(), 2u);
+    EXPECT_EQ(drop_all.indexes_to_drop.at(FieldId(kFieldId)).count(
+                  kFirstIndexId),
+              1u);
+    EXPECT_EQ(drop_all.indexes_to_drop.at(FieldId(kFieldId)).count(
+                  kSecondIndexId),
+              1u);
+    EXPECT_EQ(drop_all.fields_index_fully_dropped.count(FieldId(kFieldId)), 1u);
 }

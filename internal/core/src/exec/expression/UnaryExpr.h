@@ -1029,6 +1029,15 @@ class PhyUnaryRangeFilterExpr : public SegmentExpr {
     void
     DetermineExecPath() override;
 
+    // A UnaryRange leaf knows its operator at compile time via the plan node, so
+    // the index selector in SegmentExpr can ask a pinned index whether it can
+    // serve it (a pattern operator needs a string-backed index) instead of
+    // committing to whatever the field's index happens to be.
+    std::optional<std::pair<proto::plan::OpType, std::string>>
+    ScalarIndexProbe() const override {
+        return std::make_pair(expr_->op_type_, std::string{});
+    }
+
     bool
     SupportOffsetInput() override {
         if (IsTextIndexOpType(expr_->op_type_)) {

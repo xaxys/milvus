@@ -5076,9 +5076,13 @@ TEST(SealedSegmentCowState, ReplaceScalarIndexStagesRuntimeUntilFinalPublish) {
     auto* sealed = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
     ASSERT_NE(sealed, nullptr);
 
+    // A field now carries one entry per indexID: reusing the id of the loaded
+    // index is what makes the second load replace it instead of adding a sibling.
+    constexpr int64_t kPayloadIndexId = 1;
     LoadIndexInfo first_index;
     first_index.field_id = payload.get();
     first_index.field_type = DataType::INT64;
+    first_index.index_id = kPayloadIndexId;
     first_index.index_params["index_type"] = "STL_SORT";
     auto payload_data = dataset.get_col<int64_t>(payload);
     auto first_impl = GenScalarIndexing<int64_t>(dataset.raw_->num_rows(),
@@ -5094,17 +5098,21 @@ TEST(SealedSegmentCowState, ReplaceScalarIndexStagesRuntimeUntilFinalPublish) {
     ASSERT_NE(before->runtime, nullptr);
     ASSERT_TRUE(before->runtime->scalar_indexings.count(payload) > 0);
     auto published_before_replace =
-        before->runtime->scalar_indexings.at(payload);
+        before->runtime->scalar_indexings.at(payload)
+            .at(kPayloadIndexId)
+            .cache_index;
     ASSERT_EQ(published_before_replace, first_cache_index);
 
     auto runtime = sealed->TestCloneMutableRuntimeResourceState();
     ASSERT_TRUE(runtime->scalar_indexings.count(payload) > 0);
-    auto stale_runtime_index = runtime->scalar_indexings.at(payload);
+    auto stale_runtime_index =
+        runtime->scalar_indexings.at(payload).at(kPayloadIndexId).cache_index;
     ASSERT_EQ(stale_runtime_index, first_cache_index);
 
     LoadIndexInfo replacement_index;
     replacement_index.field_id = payload.get();
     replacement_index.field_type = DataType::INT64;
+    replacement_index.index_id = kPayloadIndexId;
     replacement_index.index_params["index_type"] = "STL_SORT";
     auto replacement_impl = GenScalarIndexing<int64_t>(dataset.raw_->num_rows(),
                                                        payload_data.data());
@@ -5117,7 +5125,10 @@ TEST(SealedSegmentCowState, ReplaceScalarIndexStagesRuntimeUntilFinalPublish) {
 
     ASSERT_TRUE(runtime->scalar_indexings.count(payload) > 0);
     EXPECT_EQ(runtime->scalar_indexings.size(), 1);
-    auto updated_runtime_index = runtime->scalar_indexings.at(payload);
+    // The entry carrying the replaced indexID is gone: one entry, not two.
+    ASSERT_EQ(runtime->scalar_indexings.at(payload).size(), 1);
+    auto updated_runtime_index =
+        runtime->scalar_indexings.at(payload).at(kPayloadIndexId).cache_index;
     EXPECT_EQ(updated_runtime_index, replacement_cache_index);
     EXPECT_NE(updated_runtime_index, stale_runtime_index);
 
@@ -5125,7 +5136,9 @@ TEST(SealedSegmentCowState, ReplaceScalarIndexStagesRuntimeUntilFinalPublish) {
     ASSERT_NE(staged_only, nullptr);
     ASSERT_NE(staged_only->runtime, nullptr);
     ASSERT_TRUE(staged_only->runtime->scalar_indexings.count(payload) > 0);
-    EXPECT_EQ(staged_only->runtime->scalar_indexings.at(payload),
+    EXPECT_EQ(staged_only->runtime->scalar_indexings.at(payload)
+                  .at(kPayloadIndexId)
+                  .cache_index,
               first_cache_index);
 
     ChunkedSegmentSealedImpl::StateDelta delta;
@@ -5139,10 +5152,17 @@ TEST(SealedSegmentCowState, ReplaceScalarIndexStagesRuntimeUntilFinalPublish) {
     ASSERT_NE(next->runtime, nullptr);
     EXPECT_EQ(next->runtime->scalar_indexings.size(), 1);
     ASSERT_TRUE(next->runtime->scalar_indexings.count(payload) > 0);
-    auto published_runtime_index = next->runtime->scalar_indexings.at(payload);
+    ASSERT_EQ(next->runtime->scalar_indexings.at(payload).size(), 1);
+    auto published_runtime_index = next->runtime->scalar_indexings.at(payload)
+                                       .at(kPayloadIndexId)
+                                       .cache_index;
     EXPECT_EQ(published_runtime_index, replacement_cache_index);
     EXPECT_NE(published_runtime_index, stale_runtime_index);
-    EXPECT_EQ(next->runtime->ngram_fields.count(payload), 0);
+    // A plain STL_SORT index is not an NGRAM one, so nothing of the field is
+    // NGRAM (the old ngram_fields.count(payload) == 0).
+    EXPECT_FALSE(next->runtime->scalar_indexings.at(payload)
+                     .at(kPayloadIndexId)
+                     .is_ngram);
 }
 
 TEST(SealedSegmentCowState, ReplacePkStateIsInvisibleUntilFinalPublish) {
@@ -5298,9 +5318,11 @@ TEST(SealedSegmentCowState, JsonIndexStagesAndFollowsSnapshotLifetime) {
 
     std::array<int64_t, 4> values = {1, 2, 3, 4};
     auto indexing = GenScalarIndexing<int64_t>(values.size(), values.data());
+    constexpr int64_t kJsonIndexId = 1;
     LoadIndexInfo load_info;
     load_info.field_id = json.get();
     load_info.field_type = DataType::JSON;
+    load_info.index_id = kJsonIndexId;
     load_info.index_params = {
         {index::INDEX_TYPE, index::INVERTED_INDEX_TYPE},
         {JSON_PATH, "a"},
@@ -5311,7 +5333,8 @@ TEST(SealedSegmentCowState, JsonIndexStagesAndFollowsSnapshotLifetime) {
     auto loaded_index = load_info.cache_index;
 
     auto current = sealed->TestGetPublishedStateSnapshot();
-    ASSERT_TRUE(current->runtime->json_indices.empty());
+    // The JSON index is not loaded yet: the field carries no entry at all.
+    ASSERT_EQ(current->runtime->scalar_indexings.count(json), 0);
     auto runtime = sealed->TestCloneMutableRuntimeResourceState();
     ChunkedSegmentSealedImpl::StateDelta initial_delta;
     initial_delta.schema = current->schema;
@@ -5333,14 +5356,24 @@ TEST(SealedSegmentCowState, JsonIndexStagesAndFollowsSnapshotLifetime) {
         current,
         final_delta,
         [&] {
-            EXPECT_EQ(runtime->json_indices.size(), 1);
-            EXPECT_TRUE(current->runtime->json_indices.empty());
+            // Staged: exactly the one entry, keyed by its indexID, and it is not
+            // visible through the still-published snapshot.
+            ASSERT_EQ(runtime->scalar_indexings.count(json), 1);
+            EXPECT_EQ(runtime->scalar_indexings.at(json).size(), 1);
+            EXPECT_EQ(
+                runtime->scalar_indexings.at(json).at(kJsonIndexId).cache_index,
+                loaded_index);
+            EXPECT_EQ(current->runtime->scalar_indexings.count(json), 0);
             EXPECT_FALSE(sealed->HasJsonIndex(json));
         });
 
     auto published = sealed->TestGetPublishedStateSnapshot();
-    ASSERT_EQ(published->runtime->json_indices.size(), 1);
-    EXPECT_EQ(published->runtime->json_indices.front().index, loaded_index);
+    ASSERT_EQ(published->runtime->scalar_indexings.count(json), 1);
+    ASSERT_EQ(published->runtime->scalar_indexings.at(json).size(), 1);
+    EXPECT_EQ(published->runtime->scalar_indexings.at(json)
+                  .at(kJsonIndexId)
+                  .cache_index,
+              loaded_index);
     EXPECT_TRUE(sealed->HasJsonIndex(json));
 }
 
@@ -5355,20 +5388,26 @@ TEST(SealedSegmentCowState, JsonIndexReplaceScalarWithNgramErasesScalarPath) {
     ASSERT_NE(sealed, nullptr);
 
     std::array<int64_t, 4> values = {1, 2, 3, 4};
+    // The indexID is the identity of a loaded index: replacing one means loading
+    // the new index under the id of the index it displaces.
+    constexpr int64_t kSiblingIndexId = 1;
+    constexpr int64_t kReplacedIndexId = 2;
     auto make_load_info = [&](std::string key,
+                              int64_t index_id,
                               std::string path,
                               bool is_ngram) {
         LoadIndexInfo info;
         info.field_id = json.get();
         info.field_type = DataType::JSON;
+        info.index_id = index_id;
         info.index_params = {
             {index::INDEX_TYPE,
              is_ngram ? index::NGRAM_INDEX_TYPE : index::INVERTED_INDEX_TYPE},
             {JSON_PATH, std::move(path)},
+            // A JSON path index always carries a cast type; an ngram one is
+            // VARCHAR by construction.
+            {JSON_CAST_TYPE, is_ngram ? "VARCHAR" : "DOUBLE"},
         };
-        if (!is_ngram) {
-            info.index_params[JSON_CAST_TYPE] = "DOUBLE";
-        }
         auto indexing =
             GenScalarIndexing<int64_t>(values.size(), values.data());
         info.cache_index =
@@ -5376,17 +5415,24 @@ TEST(SealedSegmentCowState, JsonIndexReplaceScalarWithNgramErasesScalarPath) {
         return info;
     };
 
-    auto sibling = make_load_info("json-scalar-b", "b", false);
+    auto sibling = make_load_info("json-scalar-b", kSiblingIndexId, "b", false);
     auto sibling_index = sibling.cache_index;
     sealed->LoadIndex(sibling);
 
-    auto original = make_load_info("json-scalar-a", "a", false);
+    auto original =
+        make_load_info("json-scalar-a", kReplacedIndexId, "a", false);
     auto original_index = original.cache_index;
     sealed->LoadIndex(original);
 
     auto current = sealed->TestGetPublishedStateSnapshot();
-    ASSERT_EQ(current->runtime->json_indices.size(), 2);
-    EXPECT_TRUE(current->runtime->ngram_indexings.empty());
+    // Two JSON path indexes on the one field, neither of them an NGRAM index.
+    ASSERT_EQ(current->runtime->scalar_indexings.count(json), 1);
+    const auto& current_entries = current->runtime->scalar_indexings.at(json);
+    ASSERT_EQ(current_entries.size(), 2);
+    EXPECT_EQ(current_entries.at(kSiblingIndexId).json_path, "b");
+    EXPECT_FALSE(current_entries.at(kSiblingIndexId).is_ngram);
+    EXPECT_EQ(current_entries.at(kReplacedIndexId).json_path, "a");
+    EXPECT_FALSE(current_entries.at(kReplacedIndexId).is_ngram);
     EXPECT_FALSE(GetFieldBit(current->index_ready_bitset, json));
 
     auto runtime = sealed->TestCloneMutableRuntimeResourceState();
@@ -5397,7 +5443,10 @@ TEST(SealedSegmentCowState, JsonIndexReplaceScalarWithNgramErasesScalarPath) {
     initial_delta.commit_ts = current->commit_ts;
     auto staged = sealed->TestBuildNextPublishedState(current, initial_delta);
 
-    auto replacement = make_load_info("json-ngram-a", "a", true);
+    // The same indexID as the index at path "a": with is_replace this load
+    // retires that entry instead of adding a sibling.
+    auto replacement =
+        make_load_info("json-ngram-a", kReplacedIndexId, "a", true);
     auto replacement_index = replacement.cache_index;
     ChunkedSegmentSealedImpl::StateDelta final_delta;
     final_delta.schema = current->schema;
@@ -5412,35 +5461,48 @@ TEST(SealedSegmentCowState, JsonIndexReplaceScalarWithNgramErasesScalarPath) {
         current,
         final_delta,
         [&] {
-            ASSERT_EQ(runtime->json_indices.size(), 1);
-            EXPECT_EQ(runtime->json_indices.front().nested_path, "b");
-            EXPECT_EQ(runtime->json_indices.front().index, sibling_index);
-            ASSERT_EQ(runtime->ngram_indexings.count(json), 1);
-            ASSERT_EQ(runtime->ngram_indexings.at(json).count("a"), 1);
-            EXPECT_EQ(runtime->ngram_indexings.at(json).at("a"),
+            // The NGRAM index displaced the entry that carried its indexID; the
+            // sibling at path "b" is untouched.
+            ASSERT_EQ(runtime->scalar_indexings.count(json), 1);
+            const auto& staged_entries = runtime->scalar_indexings.at(json);
+            ASSERT_EQ(staged_entries.size(), 2);
+            EXPECT_EQ(staged_entries.at(kSiblingIndexId).json_path, "b");
+            EXPECT_FALSE(staged_entries.at(kSiblingIndexId).is_ngram);
+            EXPECT_EQ(staged_entries.at(kSiblingIndexId).cache_index,
+                      sibling_index);
+            EXPECT_EQ(staged_entries.at(kReplacedIndexId).json_path, "a");
+            EXPECT_TRUE(staged_entries.at(kReplacedIndexId).is_ngram);
+            EXPECT_EQ(staged_entries.at(kReplacedIndexId).cache_index,
                       replacement_index);
             EXPECT_TRUE(GetFieldBit(staged->index_ready_bitset, json));
 
-            ASSERT_EQ(current->runtime->json_indices.size(), 2);
-            EXPECT_TRUE(current->runtime->ngram_indexings.empty());
+            // The published snapshot still holds both original path indexes.
+            ASSERT_EQ(current_entries.size(), 2);
+            EXPECT_EQ(current_entries.at(kReplacedIndexId).json_path, "a");
+            EXPECT_FALSE(current_entries.at(kReplacedIndexId).is_ngram);
+            EXPECT_EQ(current_entries.at(kReplacedIndexId).cache_index,
+                      original_index);
         });
 
     auto published = sealed->TestGetPublishedStateSnapshot();
-    ASSERT_EQ(published->runtime->json_indices.size(), 1);
-    EXPECT_EQ(published->runtime->json_indices.front().nested_path, "b");
-    EXPECT_EQ(published->runtime->json_indices.front().index, sibling_index);
-    ASSERT_EQ(published->runtime->ngram_indexings.count(json), 1);
-    EXPECT_EQ(published->runtime->ngram_indexings.at(json).at("a"),
+    ASSERT_EQ(published->runtime->scalar_indexings.count(json), 1);
+    const auto& published_entries =
+        published->runtime->scalar_indexings.at(json);
+    ASSERT_EQ(published_entries.size(), 2);
+    EXPECT_EQ(published_entries.at(kSiblingIndexId).json_path, "b");
+    EXPECT_FALSE(published_entries.at(kSiblingIndexId).is_ngram);
+    EXPECT_EQ(published_entries.at(kSiblingIndexId).cache_index, sibling_index);
+    EXPECT_EQ(published_entries.at(kReplacedIndexId).json_path, "a");
+    EXPECT_TRUE(published_entries.at(kReplacedIndexId).is_ngram);
+    EXPECT_EQ(published_entries.at(kReplacedIndexId).cache_index,
               replacement_index);
     EXPECT_TRUE(GetFieldBit(published->index_ready_bitset, json));
 
-    ASSERT_EQ(current->runtime->json_indices.size(), 2);
-    auto old_path = std::find_if(
-        current->runtime->json_indices.begin(),
-        current->runtime->json_indices.end(),
-        [](const auto& index) { return index.nested_path == "a"; });
-    ASSERT_NE(old_path, current->runtime->json_indices.end());
-    EXPECT_EQ(old_path->index, original_index);
+    // The snapshot taken before the publish still serves the replaced index.
+    ASSERT_EQ(current_entries.size(), 2);
+    EXPECT_EQ(current_entries.at(kReplacedIndexId).json_path, "a");
+    EXPECT_FALSE(current_entries.at(kReplacedIndexId).is_ngram);
+    EXPECT_EQ(current_entries.at(kReplacedIndexId).cache_index, original_index);
 }
 
 TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
@@ -5454,20 +5516,26 @@ TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
     ASSERT_NE(sealed, nullptr);
 
     std::array<int64_t, 4> values = {1, 2, 3, 4};
+    // The indexID is the identity of a loaded index: replacing one means loading
+    // the new index under the id of the index it displaces.
+    constexpr int64_t kSiblingIndexId = 1;
+    constexpr int64_t kReplacedIndexId = 2;
     auto make_load_info = [&](std::string key,
+                              int64_t index_id,
                               std::string path,
                               bool is_ngram) {
         LoadIndexInfo info;
         info.field_id = json.get();
         info.field_type = DataType::JSON;
+        info.index_id = index_id;
         info.index_params = {
             {index::INDEX_TYPE,
              is_ngram ? index::NGRAM_INDEX_TYPE : index::INVERTED_INDEX_TYPE},
             {JSON_PATH, std::move(path)},
+            // A JSON path index always carries a cast type; an ngram one is
+            // VARCHAR by construction.
+            {JSON_CAST_TYPE, is_ngram ? "VARCHAR" : "DOUBLE"},
         };
-        if (!is_ngram) {
-            info.index_params[JSON_CAST_TYPE] = "DOUBLE";
-        }
         auto indexing =
             GenScalarIndexing<int64_t>(values.size(), values.data());
         info.cache_index =
@@ -5475,19 +5543,25 @@ TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
         return info;
     };
 
-    auto sibling = make_load_info("json-scalar-b", "b", false);
+    auto sibling = make_load_info("json-scalar-b", kSiblingIndexId, "b", false);
     auto sibling_index = sibling.cache_index;
     sealed->LoadIndex(sibling);
 
-    auto original = make_load_info("json-ngram-a", "a", true);
+    auto original = make_load_info("json-ngram-a", kReplacedIndexId, "a", true);
     auto original_index = original.cache_index;
     sealed->LoadIndex(original);
 
     auto current = sealed->TestGetPublishedStateSnapshot();
-    ASSERT_EQ(current->runtime->json_indices.size(), 1);
-    ASSERT_EQ(current->runtime->ngram_indexings.count(json), 1);
-    EXPECT_EQ(current->runtime->ngram_indexings.at(json).at("a"),
-              original_index);
+    // The field carries the sibling path index and the NGRAM one at path "a";
+    // only the NGRAM index folds into the field's index ready bit.
+    ASSERT_EQ(current->runtime->scalar_indexings.count(json), 1);
+    const auto& current_entries = current->runtime->scalar_indexings.at(json);
+    ASSERT_EQ(current_entries.size(), 2);
+    EXPECT_EQ(current_entries.at(kSiblingIndexId).json_path, "b");
+    EXPECT_FALSE(current_entries.at(kSiblingIndexId).is_ngram);
+    EXPECT_EQ(current_entries.at(kReplacedIndexId).json_path, "a");
+    EXPECT_TRUE(current_entries.at(kReplacedIndexId).is_ngram);
+    EXPECT_EQ(current_entries.at(kReplacedIndexId).cache_index, original_index);
     EXPECT_TRUE(GetFieldBit(current->index_ready_bitset, json));
 
     auto runtime = sealed->TestCloneMutableRuntimeResourceState();
@@ -5498,7 +5572,10 @@ TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
     initial_delta.commit_ts = current->commit_ts;
     auto staged = sealed->TestBuildNextPublishedState(current, initial_delta);
 
-    auto replacement = make_load_info("json-scalar-a", "a", false);
+    // The scalar index takes the indexID of the NGRAM one it displaces, so no
+    // NGRAM entry is left on the field.
+    auto replacement =
+        make_load_info("json-scalar-a", kReplacedIndexId, "a", false);
     auto replacement_index = replacement.cache_index;
     ChunkedSegmentSealedImpl::StateDelta final_delta;
     final_delta.schema = current->schema;
@@ -5513,41 +5590,46 @@ TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
         current,
         final_delta,
         [&] {
-            EXPECT_TRUE(runtime->ngram_indexings.empty());
-            ASSERT_EQ(runtime->json_indices.size(), 2);
-            auto replacement_path = std::find_if(
-                runtime->json_indices.begin(),
-                runtime->json_indices.end(),
-                [](const auto& index) { return index.nested_path == "a"; });
-            ASSERT_NE(replacement_path, runtime->json_indices.end());
-            EXPECT_EQ(replacement_path->index, replacement_index);
+            // Both entries are plain JSON path indexes now: nothing on the field
+            // is NGRAM.
+            ASSERT_EQ(runtime->scalar_indexings.count(json), 1);
+            const auto& staged_entries = runtime->scalar_indexings.at(json);
+            ASSERT_EQ(staged_entries.size(), 2);
+            EXPECT_EQ(staged_entries.at(kSiblingIndexId).json_path, "b");
+            EXPECT_FALSE(staged_entries.at(kSiblingIndexId).is_ngram);
+            EXPECT_EQ(staged_entries.at(kSiblingIndexId).cache_index,
+                      sibling_index);
+            EXPECT_EQ(staged_entries.at(kReplacedIndexId).json_path, "a");
+            EXPECT_FALSE(staged_entries.at(kReplacedIndexId).is_ngram);
+            EXPECT_EQ(staged_entries.at(kReplacedIndexId).cache_index,
+                      replacement_index);
             EXPECT_FALSE(GetFieldBit(staged->index_ready_bitset, json));
 
-            ASSERT_EQ(current->runtime->ngram_indexings.count(json), 1);
-            EXPECT_EQ(current->runtime->ngram_indexings.at(json).at("a"),
+            // The published snapshot keeps the NGRAM index it was built with.
+            ASSERT_TRUE(current_entries.at(kReplacedIndexId).is_ngram);
+            EXPECT_EQ(current_entries.at(kReplacedIndexId).cache_index,
                       original_index);
         });
 
     auto published = sealed->TestGetPublishedStateSnapshot();
-    EXPECT_TRUE(published->runtime->ngram_indexings.empty());
-    ASSERT_EQ(published->runtime->json_indices.size(), 2);
-    auto sibling_path = std::find_if(
-        published->runtime->json_indices.begin(),
-        published->runtime->json_indices.end(),
-        [](const auto& index) { return index.nested_path == "b"; });
-    ASSERT_NE(sibling_path, published->runtime->json_indices.end());
-    EXPECT_EQ(sibling_path->index, sibling_index);
-    auto replacement_path = std::find_if(
-        published->runtime->json_indices.begin(),
-        published->runtime->json_indices.end(),
-        [](const auto& index) { return index.nested_path == "a"; });
-    ASSERT_NE(replacement_path, published->runtime->json_indices.end());
-    EXPECT_EQ(replacement_path->index, replacement_index);
+    ASSERT_EQ(published->runtime->scalar_indexings.count(json), 1);
+    const auto& published_entries =
+        published->runtime->scalar_indexings.at(json);
+    ASSERT_EQ(published_entries.size(), 2);
+    EXPECT_EQ(published_entries.at(kSiblingIndexId).json_path, "b");
+    EXPECT_FALSE(published_entries.at(kSiblingIndexId).is_ngram);
+    EXPECT_EQ(published_entries.at(kSiblingIndexId).cache_index, sibling_index);
+    EXPECT_EQ(published_entries.at(kReplacedIndexId).json_path, "a");
+    EXPECT_FALSE(published_entries.at(kReplacedIndexId).is_ngram);
+    EXPECT_EQ(published_entries.at(kReplacedIndexId).cache_index,
+              replacement_index);
     EXPECT_FALSE(GetFieldBit(published->index_ready_bitset, json));
 
-    ASSERT_EQ(current->runtime->ngram_indexings.count(json), 1);
-    EXPECT_EQ(current->runtime->ngram_indexings.at(json).at("a"),
-              original_index);
+    // The snapshot taken before the publish still serves the NGRAM index.
+    ASSERT_EQ(current_entries.size(), 2);
+    EXPECT_EQ(current_entries.at(kReplacedIndexId).json_path, "a");
+    EXPECT_TRUE(current_entries.at(kReplacedIndexId).is_ngram);
+    EXPECT_EQ(current_entries.at(kReplacedIndexId).cache_index, original_index);
 }
 
 TEST(SealedSegmentCowState, JsonStatsLivesInRuntimeSnapshot) {

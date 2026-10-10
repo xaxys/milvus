@@ -225,7 +225,8 @@ class ScalarIndex : public IndexBase {
     // repeat the `= ""` default — keep the values identical (a differing
     // default on a virtual is the classic static-binding trap).
     virtual bool
-    ShouldUseOp(proto::plan::OpType op, const std::string& pattern = "") const {
+    ShouldUseOp(proto::plan::OpType op,
+                const std::string& pattern = "") const override {
         switch (op) {
             case proto::plan::OpType::Match:
             case proto::plan::OpType::PrefixMatch:

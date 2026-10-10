@@ -830,6 +830,10 @@ ChunkedSegmentSealedImpl::LoadVecIndex(LoadIndexInfo& info,
     }
 }
 
+// NOTE: the JSON readiness-bit sync lives as a lambda inside LoadScalarIndex --
+// it calls the class's private static bit helpers, which a file-local function
+// cannot reach.
+
 void
 ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
                                           const SchemaPtr& schema_snapshot,
@@ -898,6 +902,41 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
 
     std::unique_lock lck(mutex_);
     const bool is_json_index = field_meta.get_data_type() == DataType::JSON;
+    // Keeps a JSON field's field-level readiness bit what it was before the
+    // containers were unified: it belongs to an NGRAM index only. A typed JSON
+    // path index (json_indices before) deliberately does not set it -- HasIndex()
+    // feeds the plan compiler's per-leaf sampling (Expr.cpp) and must not start
+    // answering true for JSON fields -- and the container fold in
+    // NormalizePublishedState only ever ADDS bits, so the clearing side lives
+    // here. This is the old SyncJsonNgramIndexState, with the unified container in
+    // place of its RuntimeJsonNgramIndexReady helper.
+    auto sync_json_index_ready_bits =
+        [](PublishedSegmentState& state,
+           const RuntimeResourceState& runtime,
+           FieldId fid) {
+            bool has_ngram = false;
+            auto field_it = runtime.scalar_indexings.find(fid);
+            if (field_it != runtime.scalar_indexings.end()) {
+                for (const auto& [index_id, entry] : field_it->second) {
+                    if (entry.is_ngram) {
+                        has_ngram = true;
+                        break;
+                    }
+                }
+            }
+            if (has_ngram) {
+                set_bit(state.published_index_ready_bitset, fid, true);
+                SetPublishedIndexRawDataInState(state, fid, false);
+                return;
+            }
+            clear_bit_if_present(state.published_index_ready_bitset, fid);
+            clear_bit_if_present(state.index_ready_bitset, fid);
+            if (!get_bit_if_present(state.published_binlog_index_ready_bitset,
+                                    fid)) {
+                ClearPublishedIndexRawDataInState(state, fid);
+                ClearIndexRawDataInState(state, fid);
+            }
+        };
     if (target_runtime == nullptr) {
         owned_runtime = CloneRuntimeResourceState(snapshot->runtime);
         target_runtime = owned_runtime.get();
@@ -929,9 +968,15 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
     }
     entry.capability = ResolveScalarIndexCapability(entry.index_type);
     if (is_json_index) {
+        // A path index always carries its path. The cast type is optional in
+        // older metadata -- a JSON NGRAM index that predates the multi-cast work
+        // does not carry one -- and reading it with at() would make such a
+        // segment unloadable, so a missing cast type stays UNKNOWN.
         entry.json_path = info.index_params.at(JSON_PATH);
-        entry.json_cast_type =
-            JsonCastType::FromString(info.index_params.at(JSON_CAST_TYPE));
+        if (auto it = info.index_params.find(JSON_CAST_TYPE);
+            it != info.index_params.end()) {
+            entry.json_cast_type = JsonCastType::FromString(it->second);
+        }
     }
     entry.cache_index = info.cache_index;
     target_runtime->scalar_indexings[field_id][info.index_id] =
@@ -971,18 +1016,29 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
         request.has_raw_data);
     lck.unlock();
     if (staged_state != nullptr) {
-        clear_bit_if_present(staged_state->published_binlog_index_ready_bitset,
-                             field_id);
-        set_bit(staged_state->published_index_ready_bitset, field_id, true);
-        if (!is_json_index) {
+        if (is_json_index) {
+            // JSON indexes set (or clear) both bits through the ngram-aware
+            // helper, so a typed path index cannot widen HasIndex().
+            sync_json_index_ready_bits(*staged_state, *target_runtime, field_id);
+        } else {
+            clear_bit_if_present(
+                staged_state->published_binlog_index_ready_bitset, field_id);
+            set_bit(staged_state->published_index_ready_bitset, field_id, true);
             SetPublishedIndexRawDataInState(
                 *staged_state, field_id, request.has_raw_data);
         }
         NormalizePublishedState(*staged_state);
     } else if (owned_runtime != nullptr) {
         auto published_runtime = ToConstRuntimeState(std::move(owned_runtime));
-        PublishIndexReadyLocked(
-            field_id, request.has_raw_data, published_runtime);
+        if (is_json_index) {
+            MutatePublishedStateLocked([&](PublishedSegmentState& state) {
+                state.runtime = published_runtime;
+                sync_json_index_ready_bits(state, *published_runtime, field_id);
+            });
+        } else {
+            PublishIndexReadyLocked(
+                field_id, request.has_raw_data, published_runtime);
+        }
         cancel_retired_indexings();
     }
 }
@@ -1671,6 +1727,18 @@ ChunkedSegmentSealedImpl::IndexHasRawDataFromState(
     if (!get_bit_if_present(state.index_ready_bitset, field_id) &&
         !get_bit_if_present(state.binlog_index_bitset, field_id)) {
         return false;
+    }
+    // A field with several scalar indexes has no single raw-data answer: the flag
+    // is per-field and describes whichever index was loaded last, while a reader
+    // pins the smallest indexID. Claiming raw data would let it reverse-look-up
+    // through an index that has none (InvertedIndexTantivy throws there), so be
+    // conservative and make the caller fall back to the column.
+    if (state.runtime != nullptr) {
+        auto field_it = state.runtime->scalar_indexings.find(field_id);
+        if (field_it != state.runtime->scalar_indexings.end() &&
+            field_it->second.size() > 1) {
+            return false;
+        }
     }
     return HasIndexRawDataFromState(state, field_id);
 }
@@ -3508,21 +3576,33 @@ ChunkedSegmentSealedImpl::PinIndex(milvus::OpContext* op_ctx,
                                    FieldId field_id,
                                    bool include_ngram) const {
     auto runtime = CaptureRuntimeResourceState();
-    auto entry =
-        runtime != nullptr
-            ? find_plain_scalar_entry(runtime->scalar_indexings, field_id)
-            : nullptr;
-    if (entry == nullptr) {
+    if (runtime == nullptr) {
         return {};
     }
-    if (!include_ngram && entry->is_ngram) {
-        // An NGRAM index answers pattern operators and nothing else, so a leaf
-        // that does not ask for it has to fall back to the raw column instead of
-        // borrowing it. The ngram_fields set used to enforce this; the entry's own
-        // is_ngram flag does now.
+    auto field_it = runtime->scalar_indexings.find(field_id);
+    if (field_it == runtime->scalar_indexings.end()) {
         return {};
     }
-    auto ca = SemiInlineGet(entry->cache_index->PinCells(op_ctx, {0}));
+    // The field's plain (non-JSON-path) index. include_ngram=false must pick a
+    // non-NGRAM sibling when one exists rather than merely refuse an NGRAM-only
+    // field -- with several indexes those are different questions. Ties go to the
+    // smallest indexID so the choice never depends on hash order.
+    const ScalarIndexEntry* best = nullptr;
+    for (const auto& [index_id, entry] : field_it->second) {
+        if (!entry.json_path.empty()) {
+            continue;
+        }
+        if (!include_ngram && entry.is_ngram) {
+            continue;
+        }
+        if (best == nullptr || index_id < best->index_id) {
+            best = &entry;
+        }
+    }
+    if (best == nullptr) {
+        return {};
+    }
+    auto ca = SemiInlineGet(best->cache_index->PinCells(op_ctx, {0}));
     auto index = ca->get_cell_of(0);
     return {PinWrapper<const index::IndexBase*>(std::move(ca), index)};
 }

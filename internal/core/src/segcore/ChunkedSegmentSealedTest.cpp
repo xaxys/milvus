@@ -53,11 +53,14 @@
 #include "common/Types.h"
 #include "common/protobuf_utils.h"
 #include "expr/ITypeExpr.h"
+#include "exec/QueryContext.h"
+#include "exec/expression/Expr.h"
 #include "filemanager/InputStream.h"
 #include "gtest/gtest.h"
 #include "index/Index.h"
 #include "index/IndexFactory.h"
 #include "index/IndexInfo.h"
+#include "index/InvertedIndexTantivy.h"
 #include "index/Meta.h"
 #include "knowhere/comp/index_param.h"
 #include "knowhere/config.h"
@@ -1651,22 +1654,27 @@ TEST(TestTTLFieldFilter, TestMaskWithNullableTTLField) {
     EXPECT_EQ(expired_count, test_data_count / 4);
 }
 
-// 反例（一列多索引 v1）：同一字段加载第二个标量索引时，现状会命中
-// ChunkedSegmentSealedImpl::LoadScalarIndex 里的 AssertInfo(!has_index)。
+// 一列多索引 v1 / T3：同一字段上的两个标量索引都加载成功、都被报告为已加载，
+// 而且各自都能被 pin。
 //
-// 这证明「只放开创建校验、不改 C++ 容器」会直接让 QueryNode 抛错，因此
-// S1（DataCoord 放开校验）必须与 S3（容器改造）/S4（选择层）一起上。
+// 这条用例原来叫 MultiScalarIndexOnSameFieldAsserts，断言的是「加载同字段第二个
+// 索引会命中 AssertInfo(!has_index)」（S3 之前 ChunkedSegmentSealedImpl 的
+// LoadScalarIndex，见 plan 文档 §1.2）。容器改成
+// field -> indexID -> ScalarIndexEntry 之后，第二个索引不再触发断言、也不再
+// 覆盖兄弟索引，而是作为独立 entry 共存。
 //
 // 生产链路走的是 LoadDiff -> LoadBatchIndexes -> committer.Commit ->
-// LoadIndex(is_replace=false)，断言在 LoadScalarIndex 内，两条入口共用；
-// T1（SegmentLoadInfoTest.GetLoadDiffWithTwoScalarIndexesOnSameField）
-// 已经证明两个索引会进同一个 indexes_to_load[field] 向量。
-TEST_P(TestChunkSegment, MultiScalarIndexOnSameFieldAsserts) {
+// LoadIndex(is_replace=false)，两条入口共用 LoadScalarIndex；T1
+// （SegmentLoadInfoTest.GetLoadDiffWithTwoScalarIndexesOnSameField）已经证明两个
+// 索引会进同一个 indexes_to_load[field] 向量。
+TEST_P(TestChunkSegment, MultiScalarIndexOnSameFieldLoads) {
     using namespace milvus::segcore;
     auto seg = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
     ASSERT_NE(seg, nullptr);
     auto fid = fields.at("int64");
 
+    // indexID -> 该索引对象本身，下面按身份断言 pin 到的是哪一个
+    std::unordered_map<int64_t, const index::IndexBase*> raw_indexes;
     auto load_inverted_index = [&](int64_t index_id) {
         auto file_manager_ctx = storage::FileManagerContext();
         file_manager_ctx.fieldDataMeta.field_schema.set_data_type(
@@ -1700,6 +1708,7 @@ TEST_P(TestChunkSegment, MultiScalarIndexOnSameFieldAsserts) {
         load_index_info.field_type = DataType::INT64;
         load_index_info.index_id = index_id;
         load_index_info.index_params = GenIndexParams(index.get());
+        raw_indexes[index_id] = index.get();
         load_index_info.cache_index = CreateTestCacheIndex(
             "test_" + std::to_string(index_id), std::move(index));
         seg->LoadIndex(load_index_info);
@@ -1709,6 +1718,354 @@ TEST_P(TestChunkSegment, MultiScalarIndexOnSameFieldAsserts) {
     ASSERT_NO_THROW(load_inverted_index(1));
     ASSERT_TRUE(seg->HasIndex(fid));
 
-    // 第二个索引（同字段、不同 indexID）：现状命中 AssertInfo(!has_index)
-    EXPECT_THROW(load_inverted_index(2), SegcoreError);
+    // 第二个索引（同字段、不同 indexID）：不再命中 AssertInfo(!has_index)
+    ASSERT_NO_THROW(load_inverted_index(2));
+
+    // 容器里有两个 entry，按 indexID 升序报告（与 unordered_map 迭代序无关）
+    auto candidates = seg->GetScalarIndexCandidates(fid);
+    ASSERT_EQ(candidates.size(), 2u);
+    EXPECT_EQ(candidates[0].index_id, 1);
+    EXPECT_EQ(candidates[1].index_id, 2);
+    for (const auto& candidate : candidates) {
+        EXPECT_EQ(candidate.index_type, index::INVERTED_INDEX_TYPE);
+        EXPECT_FALSE(candidate.is_ngram);
+        EXPECT_TRUE(candidate.json_path.empty());
+        EXPECT_EQ(candidate.capability,
+                  ScalarIndexCapability::TermIndexed);
+    }
+    EXPECT_TRUE(seg->HasIndex(fid));
+
+    // 两个索引都还能 pin，而且各自 pin 到的是自己那个索引对象
+    milvus::OpContext op_ctx;
+    auto pinned_1 = seg->PinScalarIndex(&op_ctx, fid, 1);
+    ASSERT_EQ(pinned_1.size(), 1u);
+    EXPECT_EQ(pinned_1[0].get(), raw_indexes.at(1));
+    auto pinned_2 = seg->PinScalarIndex(&op_ctx, fid, 2);
+    ASSERT_EQ(pinned_2.size(), 1u);
+    EXPECT_EQ(pinned_2[0].get(), raw_indexes.at(2));
+
+    // 不带 indexID 的入口（C1 免费 PinIndex）在多个候选里取 indexID 最小者，
+    // 结果与加载顺序 / hash 序无关
+    auto plain = seg->PinIndex(&op_ctx, fid);
+    ASSERT_EQ(plain.size(), 1u);
+    EXPECT_EQ(plain[0].get(), raw_indexes.at(1));
+}
+
+// 一列多索引 v1 / D9 + T8：同一个 JSON path 上的两个 cast 是两个不同的身份
+// （S3 起的身份键是 indexID，不再是 path），所以两个都加载成功，并且能各自 pin。
+//
+// 顺带验证 §3 的 I1/I3：JSON 非 NGRAM 的 path 索引**不**应该让字段的
+// index_ready_bitset 置位 —— HasIndex() 是执行计划采样的输入，必须保持"窄"
+// （见 ScalarIndexCandidate.h 的 FoldsIntoIndexReadyBit / CountsAsJsonIndex）。
+TEST(MultiScalarIndexOnSameField, JsonSamePathTwoCastTypesBothLoadAndPin) {
+    using namespace milvus::segcore;
+    auto schema = std::make_shared<Schema>();
+    auto pk_fid = schema->AddDebugField("pk", DataType::INT64);
+    auto json_fid = schema->AddDebugField("json_field", DataType::JSON);
+    schema->set_primary_field_id(pk_fid);
+
+    auto segment = CreateSealedSegment(
+        schema, nullptr, -1, SegcoreConfig::default_config(), false);
+    auto seg = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(seg, nullptr);
+
+    std::array<int64_t, 4> values = {1, 2, 3, 4};
+    auto load_json_cast =
+        [&](int64_t index_id,
+            const std::string& cast) -> const index::IndexBase* {
+        auto indexing = GenScalarIndexing<int64_t>(values.size(), values.data());
+        auto* raw = indexing.get();
+        LoadIndexInfo load_index_info;
+        load_index_info.field_id = json_fid.get();
+        load_index_info.field_type = DataType::JSON;
+        load_index_info.index_id = index_id;
+        load_index_info.index_params = {
+            {index::INDEX_TYPE, index::INVERTED_INDEX_TYPE},
+            {JSON_PATH, "a"},
+            {JSON_CAST_TYPE, cast},
+        };
+        load_index_info.cache_index =
+            CreateTestCacheIndex("json-" + cast, std::move(indexing));
+        seg->LoadIndex(load_index_info);
+        return raw;
+    };
+
+    auto* double_index = load_json_cast(11, "DOUBLE");
+    auto* varchar_index = load_json_cast(12, "VARCHAR");
+
+    auto candidates = seg->GetScalarIndexCandidates(json_fid);
+    ASSERT_EQ(candidates.size(), 2u)
+        << "同 path 不同 cast 是两个身份（indexID 不同）";
+    EXPECT_EQ(candidates[0].index_id, 11);
+    EXPECT_EQ(candidates[0].json_path, "a");
+    EXPECT_EQ(candidates[0].json_cast_type.data_type(),
+              JsonCastType::DataType::DOUBLE);
+    EXPECT_FALSE(candidates[0].is_ngram);
+    EXPECT_EQ(candidates[1].index_id, 12);
+    EXPECT_EQ(candidates[1].json_path, "a");
+    EXPECT_EQ(candidates[1].json_cast_type.data_type(),
+              JsonCastType::DataType::VARCHAR);
+    EXPECT_FALSE(candidates[1].is_ngram);
+
+    // 两个都可单独 pin，且 pin 到的是各自那个索引对象（不是兄弟 cast）
+    milvus::OpContext op_ctx;
+    auto pinned_double = seg->PinScalarIndex(&op_ctx, json_fid, 11);
+    ASSERT_EQ(pinned_double.size(), 1u);
+    EXPECT_EQ(pinned_double[0].get(), double_index);
+    auto pinned_varchar = seg->PinScalarIndex(&op_ctx, json_fid, 12);
+    ASSERT_EQ(pinned_varchar.size(), 1u);
+    EXPECT_EQ(pinned_varchar[0].get(), varchar_index);
+
+    // I2：HasJsonIndex 认的是"非 NGRAM 的 JSON path 索引"
+    EXPECT_TRUE(seg->HasJsonIndex(json_fid));
+    // I1/I3：JSON path 索引（非 NGRAM）不进 index_ready_bitset。
+    // 注意：当前实现里 LoadScalarIndex 的公共尾部对 JSON 也无条件
+    // set published_index_ready_bitset，NormalizePublishedState 再把它折进
+    // index_ready_bitset —— 若这条失败，就是该处绕过了
+    // FoldsIntoIndexReadyBit()，见交付说明里的 discrepancy。
+    EXPECT_FALSE(seg->HasIndex(json_fid));
+}
+
+// ---------------------------------------------------------------------------
+// T4/T5/T6：同字段多个标量索引时，叶子挑哪一个 —— S4 选择层
+// （SegmentExpr::EnsurePinnedIndex + PhyUnaryRangeFilterExpr::ScalarIndexProbe
+//  + IndexBase::ShouldUseOp），观察点是段上的 PinScalarIndex / GetNgramIndex。
+//
+// 选择逻辑本身在 Expr.h 里，pin 出来的那个索引对象从表达式拿不到，所以这里用
+// 一个记录型的段子类把"选择层问了哪个 indexID"记下来：这就是选择层的对外契约
+// （GetScalarIndexCandidates -> PinScalarIndex(field, indexID) 以及 NGRAM 通道
+// 的 GetNgramIndex(field)）。
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr int64_t kInvertedIndexId = 4001;
+constexpr int64_t kNgramIndexId = 4002;
+
+class RecordingScalarIndexSegment : public segcore::ChunkedSegmentSealedImpl {
+ public:
+    RecordingScalarIndexSegment(SchemaPtr schema, int64_t segment_id)
+        : ChunkedSegmentSealedImpl(std::move(schema),
+                                   empty_index_meta,
+                                   segcore::SegcoreConfig::default_config(),
+                                   segment_id,
+                                   /*is_sorted_by_pk=*/false) {
+    }
+
+    std::vector<milvus::cachinglayer::PinWrapper<const index::IndexBase*>>
+    PinScalarIndex(milvus::OpContext* op_ctx,
+                   FieldId field_id,
+                   int64_t index_id) const override {
+        pinned_index_ids_.push_back(index_id);
+        return ChunkedSegmentSealedImpl::PinScalarIndex(
+            op_ctx, field_id, index_id);
+    }
+
+    milvus::cachinglayer::PinWrapper<index::NgramInvertedIndex*>
+    GetNgramIndex(milvus::OpContext* op_ctx, FieldId field_id) const override {
+        ++ngram_index_requests_;
+        return ChunkedSegmentSealedImpl::GetNgramIndex(op_ctx, field_id);
+    }
+
+    // 选择层是通过 const SegmentInterface* 调进来的
+    mutable std::vector<int64_t> pinned_index_ids_;
+    mutable int ngram_index_requests_{0};
+};
+
+}  // namespace
+
+class MultiScalarIndexSelectionTest : public ::testing::Test {
+ protected:
+    void
+    SetUp() override {
+        schema_ = std::make_shared<Schema>();
+        schema_->AddDebugField(
+            "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
+        pk_fid_ = schema_->AddDebugField("pk", DataType::INT64);
+        varchar_fid_ = schema_->AddDebugField("varchar", DataType::VARCHAR);
+        schema_->set_primary_field_id(pk_fid_);
+
+        segment_ = std::make_unique<RecordingScalarIndexSegment>(schema_, 1);
+        auto dataset = segcore::DataGen(schema_, N_);
+        LoadGeneratedDataIntoSegment(dataset, segment_.get());
+    }
+
+    // 真 tantivy 倒排索引（UT 的 build_with_raw_data 入口）。它的 Type() 就是
+    // "INVERTED"，与 load 时 index_params 里写的类型一致。
+    std::unique_ptr<index::IndexBase>
+    MakeInvertedIndex() {
+        auto inverted =
+            std::make_unique<index::InvertedIndexTantivy<std::string>>();
+        std::vector<std::string> data{"prefix_a", "prefix_b", "other"};
+        inverted->BuildWithRawDataForUT(data.size(), data.data(), Config());
+        return inverted;
+    }
+
+    // 只当 NGRAM entry 用的索引对象：loading_index=true 跳过 build，这里只需要
+    // 它的类型身份 —— NGRAM 通道（GetNgramIndex）断言 pin 出来的必须真的是
+    // NgramInvertedIndex。
+    std::unique_ptr<index::NgramInvertedIndex>
+    MakeNgramIndex() {
+        storage::FileManagerContext ctx;
+        ctx.fieldDataMeta.field_schema.set_data_type(
+            milvus::proto::schema::VarChar);
+        ctx.fieldDataMeta.field_schema.set_fieldid(varchar_fid_.get());
+        ctx.fieldDataMeta.field_id = varchar_fid_.get();
+        return std::make_unique<index::NgramInvertedIndex>(
+            ctx, index::NgramParams{/*loading_index=*/true, 2, 4});
+    }
+
+    void
+    LoadVarcharIndex(int64_t index_id,
+                     std::unique_ptr<index::IndexBase> index,
+                     const std::string& index_type) {
+        segcore::LoadIndexInfo info;
+        info.field_id = varchar_fid_.get();
+        info.field_type = DataType::VARCHAR;
+        info.index_id = index_id;
+        info.index_params = {{index::INDEX_TYPE, index_type}};
+        info.cache_index = CreateTestCacheIndex(
+            "varchar-" + std::to_string(index_id), std::move(index));
+        segment_->LoadIndex(info);
+    }
+
+    expr::TypedExprPtr
+    MakeVarcharRangeExpr(proto::plan::OpType op, const std::string& literal) {
+        proto::plan::GenericValue val;
+        val.set_string_val(literal);
+        return std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(varchar_fid_, DataType::VARCHAR),
+            op,
+            val,
+            std::vector<proto::plan::GenericValue>{});
+    }
+
+    // CompileExpressions 只是把逻辑表达式编成物理表达式；执行路径是
+    // EnsureExecPathDetermined() 懒做的，CanExecuteAllAtOnce() 会触发它。
+    std::vector<milvus::exec::ExprPtr>
+    CompileExpr(const expr::TypedExprPtr& logical_expr) {
+        auto query_context = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, segment_.get(), N_, MAX_TIMESTAMP);
+        milvus::exec::ExecContext context(query_context.get());
+        return milvus::exec::CompileExpressions(
+            {logical_expr}, &context, {}, false);
+    }
+
+    SchemaPtr schema_;
+    FieldId pk_fid_;
+    FieldId varchar_fid_;
+    int64_t N_ = 1000;
+    std::unique_ptr<RecordingScalarIndexSegment> segment_;
+};
+
+// T4：[INVERTED, NGRAM] 同一个 VARCHAR 字段 + Equal 叶子。Equal 不是 pattern
+// 算子，NGRAM 候选必须被跳过（§3 I4 / §S4.4 排序），选中 INVERTED；也不能退回
+// 原始数据。
+TEST_F(MultiScalarIndexSelectionTest, EqualPinsTheInvertedIndexNotTheNgram) {
+    using namespace milvus::segcore;
+    auto inverted = MakeInvertedIndex();
+    auto* inverted_raw = inverted.get();
+    LoadVarcharIndex(
+        kInvertedIndexId, std::move(inverted), index::INVERTED_INDEX_TYPE);
+    auto ngram = MakeNgramIndex();
+    LoadVarcharIndex(kNgramIndexId, std::move(ngram), index::NGRAM_INDEX_TYPE);
+
+    // 叶子确实有得挑：两个候选都报告出来（按 indexID 升序）
+    auto candidates = segment_->GetScalarIndexCandidates(varchar_fid_);
+    ASSERT_EQ(candidates.size(), 2u);
+    ASSERT_EQ(candidates[0].index_id, kInvertedIndexId);
+    EXPECT_FALSE(candidates[0].is_ngram);
+    EXPECT_EQ(candidates[0].capability, ScalarIndexCapability::TermIndexed);
+    ASSERT_EQ(candidates[1].index_id, kNgramIndexId);
+    EXPECT_TRUE(candidates[1].is_ngram);
+    EXPECT_EQ(candidates[1].capability,
+              ScalarIndexCapability::PatternIndexed);
+
+    auto compiled = CompileExpr(
+        MakeVarcharRangeExpr(proto::plan::OpType::Equal, "prefix_a"));
+    ASSERT_EQ(compiled.size(), 1);
+    EXPECT_TRUE(compiled[0]->CanExecuteAllAtOnce())
+        << "Equal 必须走 ScalarIndex，而不是原始数据";
+
+    ASSERT_FALSE(segment_->pinned_index_ids_.empty())
+        << "Equal 必须 pin 到 INVERTED 索引";
+    EXPECT_LE(segment_->pinned_index_ids_.size(), 1u)
+        << "只 pin 真正会用到的那一个（I8）";
+    EXPECT_EQ(segment_->pinned_index_ids_.front(), kInvertedIndexId)
+        << "Equal 不能 pin 同字段的 NGRAM 兄弟索引";
+    // 而且 pin 出来的就是那个 INVERTED 索引对象
+    milvus::OpContext op_ctx;
+    auto pinned =
+        segment_->PinScalarIndex(&op_ctx, varchar_fid_, kInvertedIndexId);
+    ASSERT_EQ(pinned.size(), 1u);
+    EXPECT_EQ(pinned[0].get(), inverted_raw);
+}
+
+// T5：同字段 + LIKE 'prefix%' 叶子（planner 会把它变成 PrefixMatch + 字面量
+// "prefix"）。pattern 类算子走 NGRAM 通道（GetNgramIndex -> ExecNgramMatch），
+// 不走 pinned_index_ 那条标量索引通道 —— §S4 保留了 CanUseNgramIndex() 和改造
+// 后的 GetNgramIndex 作为入口。
+TEST_F(MultiScalarIndexSelectionTest, LikePrefixUsesTheNgramIndex) {
+    using namespace milvus::segcore;
+    auto inverted = MakeInvertedIndex();
+    auto* inverted_raw = inverted.get();
+    LoadVarcharIndex(
+        kInvertedIndexId, std::move(inverted), index::INVERTED_INDEX_TYPE);
+    auto ngram = MakeNgramIndex();
+    auto* ngram_raw = ngram.get();
+    LoadVarcharIndex(kNgramIndexId, std::move(ngram), index::NGRAM_INDEX_TYPE);
+
+    auto compiled = CompileExpr(MakeVarcharRangeExpr(
+        proto::plan::OpType::PrefixMatch, "prefix"));
+    ASSERT_EQ(compiled.size(), 1);
+
+    // LIKE 叶子在构造时就来问这个字段的 NGRAM 索引 —— 这就是 NGRAM 通道入口
+    EXPECT_GE(segment_->ngram_index_requests_, 1)
+        << "LIKE 必须走 NGRAM 通道";
+    // 通道挑到的是 NGRAM entry，而不是 INVERTED 兄弟（GetNgramIndex 会对 cell
+    // 做 dynamic_cast，挑错会直接断言失败）
+    milvus::OpContext op_ctx;
+    auto pinned_ngram = segment_->GetNgramIndex(&op_ctx, varchar_fid_);
+    ASSERT_NE(pinned_ngram.get(), nullptr);
+    EXPECT_EQ(pinned_ngram.get(), ngram_raw);
+    EXPECT_TRUE(pinned_ngram.get()->CanHandleLiteral(
+        "prefix", proto::plan::OpType::PrefixMatch))
+        << "这个字面量下叶子会真的跑 ExecNgramMatch";
+    // 另一条（非 NGRAM）通道服务的是另一个索引，两者不会串
+    auto pinned_plain = segment_->PinIndex(&op_ctx, varchar_fid_);
+    ASSERT_EQ(pinned_plain.size(), 1u);
+    EXPECT_EQ(pinned_plain[0].get(), inverted_raw);
+
+    // LIKE 不会提交到标量索引执行路径（NGRAM 是独立机制），所以 pinned_index_
+    // 通道上一次 pin 都没有
+    EXPECT_FALSE(compiled[0]->CanExecuteAllAtOnce());
+    EXPECT_TRUE(segment_->pinned_index_ids_.empty());
+}
+
+// T6：I4 回归（§3）。字段上只有 NGRAM 索引 + Equal 叶子：NGRAM 索引只服务
+// pattern 类叶子，必须退回原始数据，不能借用它。
+TEST_F(MultiScalarIndexSelectionTest, EqualNeverUsesAnNgramOnlyField) {
+    using namespace milvus::segcore;
+    auto ngram = MakeNgramIndex();
+    LoadVarcharIndex(kNgramIndexId, std::move(ngram), index::NGRAM_INDEX_TYPE);
+
+    auto candidates = segment_->GetScalarIndexCandidates(varchar_fid_);
+    ASSERT_EQ(candidates.size(), 1u);
+    EXPECT_TRUE(candidates[0].is_ngram);
+    EXPECT_TRUE(candidates[0].json_path.empty());
+    // NGRAM 索引会让字段 index_ready，所以叶子确实会先考虑 ScalarIndex 路径
+    EXPECT_TRUE(segment_->HasIndex(varchar_fid_));
+
+    // I4 的段侧一半：非 NGRAM 通道宁可返回空，也不把这个索引交出去
+    milvus::OpContext op_ctx;
+    EXPECT_TRUE(
+        segment_->PinIndex(&op_ctx, varchar_fid_, /*include_ngram=*/false)
+            .empty());
+
+    auto compiled = CompileExpr(
+        MakeVarcharRangeExpr(proto::plan::OpType::Equal, "prefix_a"));
+    ASSERT_EQ(compiled.size(), 1);
+    EXPECT_FALSE(compiled[0]->CanExecuteAllAtOnce())
+        << "NGRAM 服务不了 Equal => 退回 RawData";
+    EXPECT_TRUE(segment_->pinned_index_ids_.empty())
+        << "Equal 连 pin 都不该尝试 NGRAM 索引";
 }
