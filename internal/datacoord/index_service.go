@@ -190,6 +190,18 @@ func (s *Server) checkIndexCreationPolicy(
 		if index.IsDeleted {
 			continue
 		}
+		// An identical request creates nothing new: canCreateIndex reports it as
+		// errIndexOperationIgnored, and for an unnamed request resolveIndexName
+		// reuses this index's name. Treating that as "a second index" would reject a
+		// plain replay of a CreateIndex (and a snapshot restore that replays one), so
+		// the replay has to skip the field-type policy.
+		//
+		// The name is part of the check: identical parameters under a DIFFERENT name
+		// really do create a second index and must stay rejected.
+		if checkParams(index, req) && (!isJSON || checkIdenticalJSON(index, req)) &&
+			(req.GetIndexName() == "" || req.GetIndexName() == index.IndexName) {
+			return nil
+		}
 		if isVector {
 			errMsg := "CreateIndex failed: creating multiple indexes on a vector field is not supported"
 			mlog.Warn(ctx, errMsg)
@@ -207,7 +219,12 @@ func (s *Server) checkIndexCreationPolicy(
 			continue
 		}
 
-		resolved := s.indexEngineVersionManager.ResolveScalarIndexVersion()
+		// An unknown version (no manager, e.g. a bare Server in a unit test) counts
+		// as the oldest one, mirroring snapshot_manager's nil guard.
+		resolved := int32(0)
+		if s.indexEngineVersionManager != nil {
+			resolved = s.indexEngineVersionManager.ResolveScalarIndexVersion()
+		}
 		if resolved < common.MinScalarIndexVersionForScalarMultiIndex {
 			return merr.WrapErrServiceNotReadyMsg(
 				"creating a second index on field %d requires scalar index engine version >= %d, current resolved version: %d (a rolling upgrade may still be in progress)",
@@ -264,7 +281,8 @@ func (s *Server) resolveIndexName(
 	}
 
 	// 2. Mint a unique name. The index type disambiguates the common case; the
-	// ordinal covers indexes that differ only in their parameters.
+	// ordinal covers indexes that differ only in their parameters, and is the only
+	// option when the request carries no usable index type.
 	indexType := strings.ToLower(common.GetIndexType(req.GetIndexParams()))
 	if indexType != "" {
 		if candidate := base + "_" + indexType; !s.indexNameTaken(req.GetCollectionID(), candidate) {
@@ -272,6 +290,13 @@ func (s *Server) resolveIndexName(
 		}
 		for n := 2; n <= maxAutoIndexNameOrdinal; n++ {
 			candidate := fmt.Sprintf("%s_%s_%d", base, indexType, n)
+			if !s.indexNameTaken(req.GetCollectionID(), candidate) {
+				return candidate, nil
+			}
+		}
+	} else {
+		for n := 2; n <= maxAutoIndexNameOrdinal; n++ {
+			candidate := fmt.Sprintf("%s_%d", base, n)
 			if !s.indexNameTaken(req.GetCollectionID(), candidate) {
 				return candidate, nil
 			}

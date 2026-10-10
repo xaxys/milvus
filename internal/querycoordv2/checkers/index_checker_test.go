@@ -438,6 +438,132 @@ func TestRemoveRedundantIndex(t *testing.T) {
 	require.EqualValues(t, 2, action.GetSegmentID())
 }
 
+// TestTwoIndexesOnOneField covers G5 of the implementation plan
+// (docs/design-docs/multi-index-per-field-scalar-v1-plan-cn.md, §S5): a field may
+// carry two indexes while a segment was loaded with only one of them.
+//
+// segment.IndexInfo is keyed by indexID, so the missing index is detected per
+// indexID while the field itself is not missing. The pre-existing
+// field-granularity acceptance of the fresh GetIndexInfo answer must not regress
+// into "one index of the field is loaded, so the field is fine": the Reopen has to
+// be issued, and it has to stop once the segment reports both indexes.
+//
+// Written in the etcd-free style of TestRemoveRedundantIndex because the
+// IndexCheckerSuite needs an etcd endpoint.
+func TestTwoIndexesOnOneField(t *testing.T) {
+	paramtable.Init()
+	ctx := context.Background()
+
+	catalog := catalogmocks.NewQueryCoordCatalog(t)
+	catalog.EXPECT().SaveCollection(mock.Anything, mock.Anything).Return(nil)
+	catalog.EXPECT().SaveReplica(mock.Anything, mock.Anything).Return(nil)
+	catalog.EXPECT().SaveResourceGroup(mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	nodeMgr := session.NewNodeManager()
+	metaMgr := meta.NewMeta(params.RandomIncrementIDAllocator(), catalog, nodeMgr)
+	distManager := meta.NewDistributionManager(nodeMgr)
+	broker := meta.NewMockBroker(t)
+	targetMgr := meta.NewMockTargetManager(t)
+	checker := NewIndexChecker(metaMgr, distManager, broker, nodeMgr, targetMgr)
+	targetMgr.EXPECT().GetSealedSegment(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, cid, sid int64, i3 int32) *datapb.SegmentInfo {
+		return &datapb.SegmentInfo{
+			ID:    sid,
+			Level: datapb.SegmentLevel_L1,
+		}
+	}).Maybe()
+
+	// meta: field 101 carries two indexes; the load config pinned the smallest one
+	coll := utils.CreateTestCollection(1, 1)
+	coll.FieldIndexID = map[int64]int64{101: 1000}
+	coll.Schema = &schemapb.CollectionSchema{
+		Name: "test_two_indexes_one_field",
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: 101, DataType: schemapb.DataType_Int64, Name: "scalar"},
+		},
+	}
+	require.NoError(t, metaMgr.PutCollection(ctx, coll))
+	require.NoError(t, metaMgr.Put(ctx, utils.CreateTestReplica(200, 1, []int64{1, 2})))
+	nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   1,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+		NodeID:   2,
+		Address:  "localhost",
+		Hostname: "localhost",
+	}))
+	metaMgr.HandleNodeUp(ctx, 1)
+	metaMgr.HandleNodeUp(ctx, 2)
+
+	// dist: the segment was loaded before the second index existed, so only 1000 is
+	// on it. 1001 is missing from the segment alone, the field itself is not.
+	segment := utils.CreateTestSegment(1, 1, 2, 1, 1, "test-insert-channel")
+	segment.IndexInfo = map[int64]*querypb.FieldIndexInfo{1000: {
+		FieldID:     101,
+		IndexID:     1000,
+		EnableIndex: true,
+	}}
+	distManager.SegmentDistManager.Update(1, segment)
+
+	// broker: DataCoord knows both indexes and reports them both built on segment 2
+	broker.EXPECT().ListIndexes(mock.Anything, mock.Anything).Return([]*indexpb.IndexInfo{
+		{
+			FieldID: 101,
+			IndexID: 1000,
+		},
+		{
+			FieldID: 101,
+			IndexID: 1001,
+		},
+	}, nil)
+	broker.EXPECT().GetIndexInfo(mock.Anything, mock.Anything, mock.AnythingOfType("int64")).
+		Return(map[int64][]*querypb.FieldIndexInfo{2: {
+			{
+				FieldID:        101,
+				IndexID:        1000,
+				EnableIndex:    true,
+				IndexFilePaths: []string{"index"},
+			},
+			{
+				FieldID:        101,
+				IndexID:        1001,
+				EnableIndex:    true,
+				IndexFilePaths: []string{"index"},
+			},
+		}}, nil)
+	broker.EXPECT().GetSegmentInfo(mock.Anything, mock.Anything).
+		Return([]*datapb.SegmentInfo{}, nil).Maybe()
+
+	// only the second index is missing, and that alone must produce a Reopen
+	tasks := checker.Check(ctx)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].Actions(), 1)
+	action, ok := tasks[0].Actions()[0].(*task.SegmentAction)
+	require.True(t, ok)
+	require.EqualValues(t, 200, tasks[0].ReplicaID())
+	require.Equal(t, task.ActionTypeReopen, action.Type())
+	require.EqualValues(t, 2, action.GetSegmentID())
+
+	// control: once the segment reports both indexes, nothing is scheduled
+	loaded := utils.CreateTestSegment(1, 1, 2, 1, 1, "test-insert-channel")
+	loaded.IndexInfo = map[int64]*querypb.FieldIndexInfo{
+		1000: {
+			FieldID:     101,
+			IndexID:     1000,
+			EnableIndex: true,
+		},
+		1001: {
+			FieldID:     101,
+			IndexID:     1001,
+			EnableIndex: true,
+		},
+	}
+	distManager.SegmentDistManager.Update(1, loaded)
+
+	require.Len(t, checker.Check(ctx), 0)
+}
+
 func (suite *IndexCheckerSuite) TestLoadJsonIndex() {
 	checker := suite.checker
 	ctx := context.Background()

@@ -41,6 +41,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/workerpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -504,6 +505,91 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 		m.indexes[collID][indexID].IsDeleted = true
 		tmpIndexID, err := m.CanCreateIndex(req, false)
 		assert.NoError(t, err)
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+}
+
+// TestMeta_CanCreateIndex_NameUniqueness covers the name-uniqueness half of G1
+// (docs/design-docs/multi-index-per-field-scalar-v1-plan-cn.md, §S5). Since v1 a
+// field may carry several indexes, so canCreateIndex only answers "is this name
+// already used by a different index in this collection?"; the field-type policy
+// lives in Server.checkIndexCreationPolicy.
+func TestMeta_CanCreateIndex_NameUniqueness(t *testing.T) {
+	var (
+		collID  = UniqueID(1)
+		fieldID = UniqueID(100)
+		indexID = UniqueID(10)
+	)
+
+	catalog := catalogmocks.NewDataCoordCatalog(t)
+	catalog.EXPECT().CreateIndex(mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	m := newSegmentIndexMeta(catalog)
+	indexParams := []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}
+	stored := &model.Index{
+		CollectionID:    collID,
+		FieldID:         fieldID,
+		IndexID:         indexID,
+		IndexName:       "scalar_idx",
+		IndexParams:     indexParams,
+		UserIndexParams: indexParams,
+	}
+	require.NoError(t, m.CreateIndex(context.Background(), stored))
+
+	t.Run("another name on the same field is a new index", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       "_default_idx_2",
+			IndexParams:     indexParams,
+			UserIndexParams: indexParams,
+		}
+		tmpIndexID, err := m.CanCreateIndex(req, false)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+
+	t.Run("same name on the same field with different params conflicts", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       stored.IndexName,
+			IndexParams:     []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "STL_SORT"}},
+			UserIndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "STL_SORT"}},
+		}
+		tmpIndexID, err := m.CanCreateIndex(req, false)
+		assert.Error(t, err)
+		assert.NotErrorIs(t, err, errIndexOperationIgnored)
+		assert.Equal(t, merr.Code(merr.ErrParameterInvalid), merr.Code(err))
+		assert.Contains(t, err.Error(), "index name is already used by another index in this collection")
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+
+	t.Run("same name on another field conflicts", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID + 1,
+			IndexName:       stored.IndexName,
+			IndexParams:     indexParams,
+			UserIndexParams: indexParams,
+		}
+		tmpIndexID, err := m.CanCreateIndex(req, false)
+		assert.Error(t, err)
+		assert.NotErrorIs(t, err, errIndexOperationIgnored)
+		assert.Contains(t, err.Error(), "index name is already used by another index in this collection")
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+
+	t.Run("same name, same field, same params is an idempotent replay", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       stored.IndexName,
+			IndexParams:     indexParams,
+			UserIndexParams: indexParams,
+		}
+		tmpIndexID, err := m.CanCreateIndex(req, false)
+		assert.ErrorIs(t, err, errIndexOperationIgnored)
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
 }
