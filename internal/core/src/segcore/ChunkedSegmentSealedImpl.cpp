@@ -497,15 +497,99 @@ cancel_warmup(const index::CacheIndexBasePtr& index) {
     }
 }
 
-static inline void
-cancel_and_erase_scalar_index(
-    std::unordered_map<FieldId, index::CacheIndexBasePtr>& scalar_indexings,
-    FieldId field_id) {
-    if (auto it = scalar_indexings.find(field_id);
-        it != scalar_indexings.end()) {
-        cancel_warmup(it->second);
-        scalar_indexings.erase(it);
+using ScalarIndexings = std::unordered_map<
+    FieldId,
+    std::unordered_map<int64_t, ChunkedSegmentSealedImpl::ScalarIndexEntry>>;
+
+// Retires and removes one scalar index, identified by (field, indexID).
+//
+// The indexID is what makes this safe now that one field -- and even one JSON
+// path -- can carry several indexes: erasing by field, or by path, would take a
+// sibling with it.
+static inline index::CacheIndexBasePtr
+erase_scalar_index(ScalarIndexings& scalar_indexings,
+                   FieldId field_id,
+                   int64_t index_id) {
+    auto field_it = scalar_indexings.find(field_id);
+    if (field_it == scalar_indexings.end()) {
+        return nullptr;
     }
+    auto index_it = field_it->second.find(index_id);
+    if (index_it == field_it->second.end()) {
+        return nullptr;
+    }
+    auto retired = std::move(index_it->second.cache_index);
+    cancel_warmup(retired);
+    field_it->second.erase(index_it);
+    if (field_it->second.empty()) {
+        scalar_indexings.erase(field_it);
+    }
+    return retired;
+}
+
+// Drops every scalar index of a field: the field-level drop, used when the load
+// config no longer lists any index for it (as opposed to LoadScalarIndex's
+// is_replace, which retires one indexID).
+static inline void
+drop_scalar_indexings(ScalarIndexings& scalar_indexings, FieldId field_id) {
+    auto field_it = scalar_indexings.find(field_id);
+    if (field_it == scalar_indexings.end()) {
+        return;
+    }
+    for (const auto& [index_id, entry] : field_it->second) {
+        cancel_warmup(entry.cache_index);
+    }
+    scalar_indexings.erase(field_it);
+}
+
+// The plain (non-JSON-path) scalar index of a field, or nullptr. All of a
+// field's entries are either plain or JSON, so this is the field's only kind of
+// "non-JSON" index; ties are broken by the smallest indexID to stay
+// deterministic.
+static inline const ChunkedSegmentSealedImpl::ScalarIndexEntry*
+find_plain_scalar_entry(const ScalarIndexings& scalar_indexings,
+                        FieldId field_id) {
+    auto field_it = scalar_indexings.find(field_id);
+    if (field_it == scalar_indexings.end()) {
+        return nullptr;
+    }
+    const ChunkedSegmentSealedImpl::ScalarIndexEntry* best = nullptr;
+    for (const auto& [index_id, entry] : field_it->second) {
+        if (entry.is_json) {
+            continue;
+        }
+        if (best == nullptr || index_id < best->index_id) {
+            best = &entry;
+        }
+    }
+    return best;
+}
+
+static inline bool
+has_scalar_index(const ScalarIndexings& scalar_indexings,
+                 FieldId field_id,
+                 int64_t index_id) {
+    auto field_it = scalar_indexings.find(field_id);
+    return field_it != scalar_indexings.end() &&
+           field_it->second.count(index_id) > 0;
+}
+
+// What an index type can answer, as far as its name says. HYBRID/AUTOINDEX pick a
+// physical implementation from the data at build time, so they stay Unknown: the
+// ordering this feeds is only a preference, and the real decision is
+// IndexBase::ShouldUseOp() after pinning.
+static inline ScalarIndexCapability
+ResolveScalarIndexCapability(const std::string& index_type) {
+    if (index_type == index::INVERTED_INDEX_TYPE ||
+        index_type == index::BITMAP_INDEX_TYPE ||
+        index_type == index::ASCENDING_SORT) {
+        return ScalarIndexCapability::TermIndexed;
+    }
+    if (index_type == index::NGRAM_INDEX_TYPE ||
+        index_type == index::FMINDEX_INDEX_TYPE) {
+        return ScalarIndexCapability::PatternIndexed;
+    }
+    return ScalarIndexCapability::Unknown;
 }
 
 cachinglayer::PinWrapper<const storagev2translator::TimestampIndexCell*>
@@ -589,42 +673,66 @@ ChunkedSegmentSealedImpl::PinJsonIndex(milvus::OpContext* op_ctx,
                                        bool any_type,
                                        bool is_array) const {
     auto runtime = CaptureRuntimeResourceState();
+    auto field_it = runtime->scalar_indexings.find(field_id);
+    if (field_it == runtime->scalar_indexings.end()) {
+        return {};
+    }
+
+    // Matching rules are unchanged from when these lived in a json_indices
+    // vector: a JsonFlatIndex matches by longest prefix of the query path, a
+    // typed index only by exact path plus cast compatibility. What is new is
+    // that several indexes can share one path, so each category keeps its own
+    // deterministic winner (smallest indexID) instead of "last one walked".
+    index::CacheIndexBasePtr flat_match = nullptr;
     int path_len_diff = std::numeric_limits<int>::max();
-    index::CacheIndexBasePtr best_match = nullptr;
+    int64_t flat_match_id = std::numeric_limits<int64_t>::max();
+    index::CacheIndexBasePtr typed_match = nullptr;
+    int64_t typed_match_id = std::numeric_limits<int64_t>::max();
     std::string_view path_view = path;
-    for (const auto& index : runtime->json_indices) {
-        if (index.field_id != field_id) {
+    for (const auto& [index_id, entry] : field_it->second) {
+        // An NGRAM index answers pattern operators only, and it is reached through
+        // the dedicated ngram channel (GetNgramIndexForJson). It must never be
+        // pinned here: its cast type is VARCHAR, so a plain string comparison would
+        // match it through IsDataTypeSupported, and running a term lookup over
+        // n-gram tokens silently returns wrong rows (a row containing "xabcx"
+        // matches == "abc", and a literal longer than the max gram never matches).
+        if (entry.is_ngram) {
             continue;
         }
-        switch (index.cast_type.data_type()) {
+        switch (entry.json_cast_type.data_type()) {
             case JsonCastType::DataType::JSON:
-                if (path_view.length() < index.nested_path.length()) {
+                if (path_view.length() < entry.json_path.length()) {
                     continue;
                 }
-                if (path_view.substr(0, index.nested_path.length()) ==
-                    index.nested_path) {
+                if (path_view.substr(0, entry.json_path.length()) ==
+                    entry.json_path) {
                     int current_len_diff =
-                        path_view.length() - index.nested_path.length();
-                    if (current_len_diff < path_len_diff) {
+                        path_view.length() - entry.json_path.length();
+                    if (current_len_diff < path_len_diff ||
+                        (current_len_diff == path_len_diff &&
+                         index_id < flat_match_id)) {
                         path_len_diff = current_len_diff;
-                        best_match = index.index;
-                    }
-                    if (path_len_diff == 0) {
-                        break;
+                        flat_match = entry.cache_index;
+                        flat_match_id = index_id;
                     }
                 }
                 break;
             default:
-                if (index.nested_path != path) {
+                if (entry.json_path != path) {
                     continue;
                 }
-                if (any_type || milvus::index::json::IsDataTypeSupported(
-                                    index.cast_type, data_type, is_array)) {
-                    best_match = index.index;
+                if (index_id < typed_match_id &&
+                    (any_type || milvus::index::json::IsDataTypeSupported(
+                                     entry.json_cast_type, data_type, is_array))) {
+                    typed_match_id = index_id;
+                    typed_match = entry.cache_index;
                 }
                 break;
         }
     }
+    // A flat index covering the query path is the more specific match, so it
+    // wins over a typed one when both exist.
+    auto best_match = flat_match != nullptr ? flat_match : typed_match;
     if (best_match == nullptr) {
         return {};
     }
@@ -638,23 +746,22 @@ std::string
 ChunkedSegmentSealedImpl::GetJsonFlatIndexNestedPath(
     FieldId field_id, std::string_view query_path) const {
     auto runtime = CaptureRuntimeResourceState();
+    auto field_it = runtime->scalar_indexings.find(field_id);
+    if (field_it == runtime->scalar_indexings.end()) {
+        return "";
+    }
     std::string best_path;
     int path_len_diff = std::numeric_limits<int>::max();
-    for (const auto& index : runtime->json_indices) {
-        if (index.field_id != field_id ||
-            index.cast_type.data_type() != JsonCastType::DataType::JSON ||
-            query_path.length() < index.nested_path.length() ||
-            query_path.substr(0, index.nested_path.length()) !=
-                index.nested_path) {
+    for (const auto& [index_id, entry] : field_it->second) {
+        if (entry.json_cast_type.data_type() != JsonCastType::DataType::JSON ||
+            query_path.length() < entry.json_path.length() ||
+            query_path.substr(0, entry.json_path.length()) != entry.json_path) {
             continue;
         }
-        int current_len_diff = query_path.length() - index.nested_path.length();
+        int current_len_diff = query_path.length() - entry.json_path.length();
         if (current_len_diff < path_len_diff) {
             path_len_diff = current_len_diff;
-            best_path = index.nested_path;
-        }
-        if (path_len_diff == 0) {
-            break;
+            best_path = entry.json_path;
         }
     }
     return best_path;
@@ -976,6 +1083,41 @@ ChunkedSegmentSealedImpl::LoadVecIndex(LoadIndexInfo& info,
     }
 }
 
+// Keeps a JSON field's field-level readiness bit what it was before the scalar
+// containers were unified: it belongs to an NGRAM index only. An older reader saw
+// a typed JSON path index through json_indices, which never set the field's
+// readiness bit, so this must clear it -- NormalizePublishedState only ORs
+// published bits back in, it never clears.
+void
+ChunkedSegmentSealedImpl::SyncJsonIndexReadyBits(
+    PublishedSegmentState& state,
+    const RuntimeResourceState& runtime,
+    FieldId field_id) {
+    bool has_ngram = false;
+    auto field_it = runtime.scalar_indexings.find(field_id);
+    if (field_it != runtime.scalar_indexings.end()) {
+        for (const auto& [index_id, entry] : field_it->second) {
+            if (entry.is_ngram) {
+                has_ngram = true;
+                break;
+            }
+        }
+    }
+    if (has_ngram) {
+        set_bit(state.published_index_ready_bitset, field_id, true);
+        SetPublishedIndexRawDataInState(state, field_id, false);
+        return;
+    }
+    clear_bit_if_present(state.published_index_ready_bitset, field_id);
+    clear_bit_if_present(state.index_ready_bitset, field_id);
+    if (!get_bit_if_present(state.published_binlog_index_ready_bitset,
+                            field_id)) {
+        ClearPublishedIndexRawDataInState(state, field_id);
+        ClearIndexRawDataInState(state, field_id);
+    }
+}
+
+
 void
 ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
                                           const SchemaPtr& schema_snapshot,
@@ -1026,108 +1168,90 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
         return;
     }
 
-    const auto& visible_state =
-        staged_state != nullptr ? *staged_state : *snapshot;
-    bool has_index =
-        get_bit_if_present(visible_state.index_ready_bitset, field_id);
+    // A field may carry several scalar indexes now, so a load no longer has to
+    // displace anything: the entry is keyed by its own indexID. The
+    // AssertInfo(!has_index) that used to guard this field is exactly what this
+    // change removes -- with one index per field it could never fire twice.
+    if (!is_replace && snapshot->runtime != nullptr &&
+        has_scalar_index(
+            snapshot->runtime->scalar_indexings, field_id, info.index_id)) {
+        // Idempotent: already loaded (a reopen re-listing it, or a retried load).
+        LOG_INFO(
+            "scalar index {} already loaded for field {} in segment {}, skipping",
+            info.index_id,
+            field_id.get(),
+            id_);
+        return;
+    }
 
     std::unique_lock lck(mutex_);
-    if (is_replace) {
-        if (target_runtime == nullptr) {
-            owned_runtime = CloneRuntimeResourceState(snapshot->runtime);
-            target_runtime = owned_runtime.get();
-        }
-        cancel_and_erase_scalar_index(target_runtime->scalar_indexings,
-                                      field_id);
-        target_runtime->ngram_fields.erase(field_id);
-        LOG_INFO("Replacing scalar index for field {} in segment {}",
-                 field_id.get(),
-                 id_);
-    } else {
-        AssertInfo(
-            !has_index,
-            "scalar index has been exist at " + std::to_string(field_id.get()));
-    }
-
-    if (field_meta.get_data_type() == DataType::JSON) {
-        auto path = info.index_params.at(JSON_PATH);
-        if (target_runtime == nullptr) {
-            owned_runtime = CloneRuntimeResourceState(snapshot->runtime);
-            target_runtime = owned_runtime.get();
-        }
-        for (auto& retired :
-             EraseJsonIndexesAtPath(*target_runtime, field_id, path)) {
-            retire_indexing(std::move(retired));
-        }
-        if (auto it = info.index_params.find(index::INDEX_TYPE);
-            it != info.index_params.end() &&
-            it->second == index::NGRAM_INDEX_TYPE) {
-            target_runtime->ngram_indexings[field_id][path] =
-                std::move(info.cache_index);
-            if (staged_state != nullptr) {
-                clear_bit_if_present(
-                    staged_state->published_binlog_index_ready_bitset,
-                    field_id);
-                set_bit(
-                    staged_state->published_index_ready_bitset, field_id, true);
-                SetPublishedIndexRawDataInState(*staged_state, field_id, false);
-                NormalizePublishedState(*staged_state);
-            } else {
-                auto published_runtime =
-                    owned_runtime != nullptr
-                        ? ToConstRuntimeState(std::move(owned_runtime))
-                        : FreezeRuntimeResourceState(*target_runtime);
-                lck.unlock();
-                PublishIndexReadyLocked(field_id, false, published_runtime);
-                cancel_retired_indexings();
-            }
-            return;
-        } else {
-            JsonIndex index;
-            index.nested_path = path;
-            index.field_id = field_id;
-            index.index = std::move(info.cache_index);
-            index.cast_type =
-                JsonCastType::FromString(info.index_params.at(JSON_CAST_TYPE));
-            target_runtime->json_indices.push_back(std::move(index));
-            if (staged_state != nullptr) {
-                SyncJsonNgramIndexState(
-                    *staged_state, *target_runtime, field_id);
-                NormalizePublishedState(*staged_state);
-            } else if (owned_runtime != nullptr) {
-                auto published_runtime =
-                    ToConstRuntimeState(std::move(owned_runtime));
-                lck.unlock();
-                MutatePublishedStateLocked([&](PublishedSegmentState& state) {
-                    state.runtime = published_runtime;
-                    SyncJsonNgramIndexState(
-                        state, *published_runtime, field_id);
-                });
-                cancel_retired_indexings();
-            }
-            return;
-        }
-    }
-
+    const bool is_json_index = field_meta.get_data_type() == DataType::JSON;
+    // Keeps a JSON field's field-level readiness bit what it was before the
+    // containers were unified: it belongs to an NGRAM index only. A typed JSON
+    // path index (json_indices before) deliberately does not set it -- HasIndex()
+    // feeds the plan compiler's per-leaf sampling (Expr.cpp) and must not start
+    // answering true for JSON fields -- and the container fold in
+    // NormalizePublishedState only ever ADDS bits, so the clearing side lives
+    // here. This is the old SyncJsonNgramIndexState, with the unified container in
+    // place of its RuntimeJsonNgramIndexReady helper.
     if (target_runtime == nullptr) {
         owned_runtime = CloneRuntimeResourceState(snapshot->runtime);
         target_runtime = owned_runtime.get();
     }
-    auto cache_index = info.cache_index;
-    if (auto it = info.index_params.find(index::INDEX_TYPE);
-        it != info.index_params.end() &&
-        it->second == index::NGRAM_INDEX_TYPE) {
-        target_runtime->ngram_fields.insert(field_id);
-        target_runtime->scalar_indexings[field_id] = cache_index;
-    } else {
-        target_runtime->scalar_indexings[field_id] = cache_index;
+    if (is_replace) {
+        if (auto retired =
+                erase_scalar_index(
+                    target_runtime->scalar_indexings, field_id, info.index_id);
+            retired != nullptr) {
+            retire_indexing(std::move(retired));
+        }
+        LOG_INFO("Replacing scalar index {} for field {} in segment {}",
+                 info.index_id,
+                 field_id.get(),
+                 id_);
     }
-    info.cache_index = std::move(cache_index);
+
+    // One uniform path for every scalar index shape: plain scalar, JSON
+    // path/cast and JSON NGRAM all become an entry keyed by indexID. Nothing is
+    // displaced, so the per-shape early returns the old code needed are gone --
+    // and with them EraseJsonIndexesAtPath, which existed only because identity
+    // used to be the JSON path (and would now take a sibling cast with it).
+    ScalarIndexEntry entry;
+    entry.index_id = info.index_id;
+    if (auto it = info.index_params.find(index::INDEX_TYPE);
+        it != info.index_params.end()) {
+        entry.index_type = it->second;
+        entry.is_ngram = entry.index_type == index::NGRAM_INDEX_TYPE;
+    }
+    entry.capability = ResolveScalarIndexCapability(entry.index_type);
+    // is_json -- not json_path being empty -- is what marks a JSON path index: a
+    // flat index on the ROOT path has an empty path yet is still a JSON index, and
+    // both HasJsonIndex() and the readiness-bit fold key on that distinction.
+    entry.is_json = is_json_index;
+    if (is_json_index) {
+        // A path index always carries its path, possibly the root (""). The cast
+        // type is optional in older metadata -- a JSON NGRAM index that predates
+        // the multi-cast work does not carry one -- and reading it with at() would
+        // make such a segment unloadable, so a missing cast type stays UNKNOWN.
+        entry.json_path = info.index_params.at(JSON_PATH);
+        if (auto it = info.index_params.find(JSON_CAST_TYPE);
+            it != info.index_params.end()) {
+            entry.json_cast_type = JsonCastType::FromString(it->second);
+        }
+    }
+    entry.cache_index = info.cache_index;
+    target_runtime->scalar_indexings[field_id][info.index_id] =
+        std::move(entry);
 
     LoadResourceRequest request{};
     if (info.load_resource_request.has_value()) {
         request = *info.load_resource_request;
-    } else {
+    } else if (!is_json_index) {
+        // A JSON path index never consulted the factory: the old json_indices and
+        // ngram_indexings branches returned before this point, and JSON index
+        // params are not guaranteed to carry an index_type (the factory asserts
+        // on it, so an older or partially-populated index info used to load fine
+        // and would now fail). Keep the JSON case on the default resource.
         request =
             milvus::index::IndexFactory::GetInstance().ScalarIndexLoadResource(
                 field_meta.get_data_type(),
@@ -1138,28 +1262,50 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
                 target_runtime->row_count);
     }
 
+    // A JSON path index never exposes raw data through the index: neither the
+    // json_indices nor the ngram_indexings branch used to, because the JSON
+    // paths returned before reaching this point. Only the plain scalar path
+    // consults the factory, so the JSON case leaves
+    // published_index_has_raw_data untouched and NormalizePublishedState leaves
+    // index_has_raw_data alone for it.
     request.has_raw_data =
+        !is_json_index &&
         milvus::index::IndexFactory::CanUseIndexRawDataForField(
             field_meta.get_data_type(), request.has_raw_data);
     // Note: raw data lifecycle (eviction/drop) is handled by LoadDiff + ApplyLoadDiff,
     // not here. This avoids unsafe ManualEvictCache on column groups.
     LOG_INFO(
-        "Has load scalar index done, fieldID:{}. segmentID:{}, has_raw_data:{}",
+        "Has load scalar index done, fieldID:{}, indexID:{}. segmentID:{}, has_raw_data:{}",
         info.field_id,
+        info.index_id,
         id_,
         request.has_raw_data);
     lck.unlock();
     if (staged_state != nullptr) {
-        clear_bit_if_present(staged_state->published_binlog_index_ready_bitset,
-                             field_id);
-        set_bit(staged_state->published_index_ready_bitset, field_id, true);
-        SetPublishedIndexRawDataInState(
-            *staged_state, field_id, request.has_raw_data);
+        if (is_json_index) {
+            // JSON indexes set (or clear) both bits through the ngram-aware
+            // helper, so a typed path index cannot widen HasIndex().
+            SyncJsonIndexReadyBits(*staged_state, *target_runtime, field_id);
+        } else {
+            clear_bit_if_present(
+                staged_state->published_binlog_index_ready_bitset, field_id);
+            set_bit(staged_state->published_index_ready_bitset, field_id, true);
+            SetPublishedIndexRawDataInState(
+                *staged_state, field_id, request.has_raw_data);
+        }
         NormalizePublishedState(*staged_state);
     } else if (owned_runtime != nullptr) {
         auto published_runtime = ToConstRuntimeState(std::move(owned_runtime));
-        PublishIndexReadyLocked(
-            field_id, request.has_raw_data, published_runtime);
+        if (is_json_index) {
+            MutatePublishedStateLocked([&](PublishedSegmentState& state) {
+                state.runtime = published_runtime;
+                SyncJsonIndexReadyBits(state, *published_runtime, field_id);
+            });
+        } else {
+            PublishIndexReadyLocked(
+                field_id, request.has_raw_data, published_runtime);
+        }
+        cancel_retired_indexings();
     }
 }
 
@@ -1445,11 +1591,8 @@ ChunkedSegmentSealedImpl::CloneRuntimeResourceState(
     state->scalar_indexings = current->scalar_indexings;
     state->vector_indexings = current->vector_indexings;
     state->vec_binlog_config = current->vec_binlog_config;
-    state->ngram_fields = current->ngram_fields;
-    state->ngram_indexings = current->ngram_indexings;
     state->text_lob_paths = current->text_lob_paths;
     state->text_indexes = current->text_indexes;
-    state->json_indices = current->json_indices;
     state->json_stats = current->json_stats;
     state->reader = current->reader;
     state->timestamps = current->timestamps;
@@ -1559,86 +1702,6 @@ ChunkedSegmentSealedImpl::DropVectorIndexing(RuntimeResourceState& runtime,
     }
 }
 
-std::vector<index::CacheIndexBasePtr>
-ChunkedSegmentSealedImpl::EraseJsonIndexings(RuntimeResourceState& runtime,
-                                             FieldId field_id,
-                                             std::string_view nested_path) {
-    std::vector<index::CacheIndexBasePtr> retired;
-    auto new_end = std::remove_if(runtime.json_indices.begin(),
-                                  runtime.json_indices.end(),
-                                  [&](JsonIndex& index) {
-                                      if (index.field_id != field_id ||
-                                          index.nested_path != nested_path) {
-                                          return false;
-                                      }
-                                      retired.push_back(std::move(index.index));
-                                      return true;
-                                  });
-    runtime.json_indices.erase(new_end, runtime.json_indices.end());
-    return retired;
-}
-
-index::CacheIndexBasePtr
-ChunkedSegmentSealedImpl::EraseJsonNgramIndexing(RuntimeResourceState& runtime,
-                                                 FieldId field_id,
-                                                 std::string_view nested_path) {
-    auto field_it = runtime.ngram_indexings.find(field_id);
-    if (field_it == runtime.ngram_indexings.end()) {
-        return nullptr;
-    }
-
-    auto& path_indexings = field_it->second;
-    auto path_it = path_indexings.find(std::string(nested_path));
-    if (path_it == path_indexings.end()) {
-        return nullptr;
-    }
-
-    auto retired = std::move(path_it->second);
-    path_indexings.erase(path_it);
-    if (path_indexings.empty()) {
-        runtime.ngram_indexings.erase(field_it);
-    }
-    return retired;
-}
-
-std::vector<index::CacheIndexBasePtr>
-ChunkedSegmentSealedImpl::EraseJsonIndexesAtPath(RuntimeResourceState& runtime,
-                                                 FieldId field_id,
-                                                 std::string_view nested_path) {
-    auto retired = EraseJsonIndexings(runtime, field_id, nested_path);
-    if (auto ngram = EraseJsonNgramIndexing(runtime, field_id, nested_path);
-        ngram != nullptr) {
-        retired.push_back(std::move(ngram));
-    }
-    return retired;
-}
-
-bool
-ChunkedSegmentSealedImpl::RuntimeJsonNgramIndexReady(
-    const RuntimeResourceState& runtime, FieldId field_id) {
-    auto it = runtime.ngram_indexings.find(field_id);
-    return it != runtime.ngram_indexings.end() && !it->second.empty();
-}
-
-void
-ChunkedSegmentSealedImpl::SyncJsonNgramIndexState(
-    PublishedSegmentState& state,
-    const RuntimeResourceState& runtime,
-    FieldId field_id) {
-    if (RuntimeJsonNgramIndexReady(runtime, field_id)) {
-        set_bit(state.published_index_ready_bitset, field_id, true);
-        SetPublishedIndexRawDataInState(state, field_id, false);
-        return;
-    }
-
-    clear_bit_if_present(state.published_index_ready_bitset, field_id);
-    clear_bit_if_present(state.index_ready_bitset, field_id);
-    if (!get_bit_if_present(state.published_binlog_index_ready_bitset,
-                            field_id)) {
-        ClearPublishedIndexRawDataInState(state, field_id);
-        ClearIndexRawDataInState(state, field_id);
-    }
-}
 
 std::shared_ptr<ChunkedSegmentSealedImpl::PublishedSegmentState>
 ChunkedSegmentSealedImpl::ClonePublishedState(
@@ -1720,36 +1783,44 @@ ChunkedSegmentSealedImpl::NormalizePublishedState(
                 set_bit(state.field_data_ready_bitset, field_id, true);
             }
 
-            for (const auto& [field_id, _] : state.runtime->scalar_indexings) {
-                if (!field_exists_in_schema(state.schema, field_id)) {
-                    continue;
-                }
-                set_bit(state.index_ready_bitset, field_id, true);
-                auto raw_it = state.published_index_has_raw_data.find(field_id);
-                if (raw_it != state.published_index_has_raw_data.end()) {
-                    state.index_has_raw_data[field_id] = raw_it->second;
-                }
-            }
-
-            for (const auto& field_id : state.runtime->ngram_fields) {
-                if (!field_exists_in_schema(state.schema, field_id)) {
-                    continue;
-                }
-                set_bit(state.index_ready_bitset, field_id, true);
-                auto raw_it = state.published_index_has_raw_data.find(field_id);
-                if (raw_it != state.published_index_has_raw_data.end()) {
-                    state.index_has_raw_data[field_id] = raw_it->second;
-                }
-            }
-
-            for (const auto& [field_id, path_indexings] :
-                 state.runtime->ngram_indexings) {
-                if (path_indexings.empty() ||
+            for (const auto& [field_id, indexings] :
+                 state.runtime->scalar_indexings) {
+                if (indexings.empty() ||
                     !field_exists_in_schema(state.schema, field_id)) {
                     continue;
                 }
+                // Exactly the shapes the old three loops folded in: a plain
+                // scalar index (scalar_indexings, ngram_fields) and a JSON NGRAM
+                // one (ngram_indexings, which also forced index_has_raw_data
+                // false). A JSON path index WITHOUT ngram deliberately stays out,
+                // exactly as json_indices did -- HasIndex() feeds the plan
+                // compiler's sampling and must not start answering true for JSON
+                // fields.
+                bool folds = false;
+                bool json_ngram = false;
+                for (const auto& [index_id, entry] : indexings) {
+                    if (!entry.is_json) {
+                        // Plain scalar (NGRAM or not): always folded.
+                        folds = true;
+                        break;
+                    }
+                    if (entry.is_ngram) {
+                        folds = true;
+                        json_ngram = true;
+                    }
+                }
+                if (!folds) {
+                    continue;
+                }
                 set_bit(state.index_ready_bitset, field_id, true);
-                state.index_has_raw_data[field_id] = false;
+                if (json_ngram) {
+                    state.index_has_raw_data[field_id] = false;
+                    continue;
+                }
+                auto raw_it = state.published_index_has_raw_data.find(field_id);
+                if (raw_it != state.published_index_has_raw_data.end()) {
+                    state.index_has_raw_data[field_id] = raw_it->second;
+                }
             }
         }
 
@@ -1839,11 +1910,8 @@ ChunkedSegmentSealedImpl::FreezeRuntimeResourceState(
     runtime->scalar_indexings = current.scalar_indexings;
     runtime->vector_indexings = current.vector_indexings;
     runtime->vec_binlog_config = current.vec_binlog_config;
-    runtime->ngram_fields = current.ngram_fields;
-    runtime->ngram_indexings = current.ngram_indexings;
     runtime->text_lob_paths = current.text_lob_paths;
     runtime->text_indexes = current.text_indexes;
-    runtime->json_indices = current.json_indices;
     runtime->json_stats = current.json_stats;
     runtime->reader = current.reader;
     runtime->timestamps = current.timestamps;
@@ -2043,10 +2111,10 @@ ChunkedSegmentSealedImpl::HasRawDataFromState(
     const auto& field_meta = state.schema->operator[](field_id);
     if (IsVectorDataType(field_meta.get_data_type())) {
         if (get_bit(state.index_ready_bitset, field_id)) {
-            return HasIndexRawDataFromState(state, field_id);
+            return IndexHasRawDataFromState(state, field_id);
         }
         if (get_bit(state.binlog_index_bitset, field_id)) {
-            return HasIndexRawDataFromState(state, field_id) ||
+            return IndexHasRawDataFromState(state, field_id) ||
                    get_bit(state.field_data_ready_bitset, field_id);
         }
         return true;
@@ -2056,7 +2124,7 @@ ChunkedSegmentSealedImpl::HasRawDataFromState(
     }
     if (get_bit(state.index_ready_bitset, field_id) ||
         get_bit(state.binlog_index_bitset, field_id)) {
-        return HasIndexRawDataFromState(state, field_id);
+        return IndexHasRawDataFromState(state, field_id);
     }
     return true;
 }
@@ -2067,6 +2135,18 @@ ChunkedSegmentSealedImpl::IndexHasRawDataFromState(
     if (!get_bit_if_present(state.index_ready_bitset, field_id) &&
         !get_bit_if_present(state.binlog_index_bitset, field_id)) {
         return false;
+    }
+    // A field with several scalar indexes has no single raw-data answer: the flag
+    // is per-field and describes whichever index was loaded last, while a reader
+    // pins the smallest indexID. Claiming raw data would let it reverse-look-up
+    // through an index that has none (InvertedIndexTantivy throws there), so be
+    // conservative and make the caller fall back to the column.
+    if (state.runtime != nullptr) {
+        auto field_it = state.runtime->scalar_indexings.find(field_id);
+        if (field_it != state.runtime->scalar_indexings.end() &&
+            field_it->second.size() > 1) {
+            return false;
+        }
     }
     return HasIndexRawDataFromState(state, field_id);
 }
@@ -2283,7 +2363,7 @@ ChunkedSegmentSealedImpl::GetJsonStats(milvus::OpContext* op_ctx,
     auto slot = iter->second;
     runtime.reset();
 
-    auto accessor = SemiInlineGet(slot->PinCells(op_ctx, {0}));
+    auto accessor = cachinglayer::SemiInlineGet(slot->PinCells(op_ctx, {0}));
     auto* stats = accessor->get_cell_of(0);
     AssertInfo(stats != nullptr,
                "JSON stats cache returned an empty cell, segment {}, field {}",
@@ -3974,7 +4054,7 @@ ChunkedSegmentSealedImpl::ApplyFieldValidDataByRange(
         auto vector_entry = GetVectorIndexing(snapshot->runtime, field_id);
         if (vector_entry != nullptr) {
             auto ca =
-                SemiInlineGet(vector_entry->indexing_->PinCells(op_ctx, {0}));
+                cachinglayer::SemiInlineGet(vector_entry->indexing_->PinCells(op_ctx, {0}));
             auto vec_index =
                 dynamic_cast<index::VectorIndex*>(ca->get_cell_of(0));
             AssertInfo(vec_index != nullptr, "invalid vector indexing");
@@ -4032,7 +4112,7 @@ ChunkedSegmentSealedImpl::ApplyFieldValidDataByOffsets(
         auto vector_entry = GetVectorIndexing(snapshot->runtime, field_id);
         if (vector_entry != nullptr) {
             auto ca =
-                SemiInlineGet(vector_entry->indexing_->PinCells(op_ctx, {0}));
+                cachinglayer::SemiInlineGet(vector_entry->indexing_->PinCells(op_ctx, {0}));
             auto vec_index =
                 dynamic_cast<index::VectorIndex*>(ca->get_cell_of(0));
             AssertInfo(vec_index != nullptr, "invalid vector indexing");
@@ -4196,20 +4276,135 @@ ChunkedSegmentSealedImpl::chunk_array_value_views_by_offsets(
               "ARRAY column field ");
 }
 
+std::vector<cachinglayer::PinWrapper<const index::IndexBase*>>
+ChunkedSegmentSealedImpl::PinIndex(milvus::OpContext* op_ctx,
+                                   FieldId field_id,
+                                   bool include_ngram) const {
+    auto runtime = CaptureRuntimeResourceState();
+    if (runtime == nullptr) {
+        return {};
+    }
+    auto field_it = runtime->scalar_indexings.find(field_id);
+    if (field_it == runtime->scalar_indexings.end()) {
+        return {};
+    }
+    // The field's plain (non-JSON-path) index. include_ngram=false must pick a
+    // non-NGRAM sibling when one exists rather than merely refuse an NGRAM-only
+    // field -- with several indexes those are different questions. Ties go to the
+    // smallest indexID so the choice never depends on hash order.
+    const ScalarIndexEntry* best = nullptr;
+    for (const auto& [index_id, entry] : field_it->second) {
+        if (entry.is_json) {
+            continue;
+        }
+        if (!include_ngram && entry.is_ngram) {
+            continue;
+        }
+        if (best == nullptr || index_id < best->index_id) {
+            best = &entry;
+        }
+    }
+    if (best == nullptr) {
+        return {};
+    }
+    auto ca = cachinglayer::SemiInlineGet(best->cache_index->PinCells(op_ctx, {0}));
+    auto index = ca->get_cell_of(0);
+    return {cachinglayer::PinWrapper<const index::IndexBase*>(std::move(ca), index)};
+}
+
+std::vector<ScalarIndexCandidate>
+ChunkedSegmentSealedImpl::GetScalarIndexCandidates(FieldId field_id) const {
+    std::vector<ScalarIndexCandidate> candidates;
+    auto runtime = CaptureRuntimeResourceState();
+    if (runtime == nullptr) {
+        return candidates;
+    }
+    auto field_it = runtime->scalar_indexings.find(field_id);
+    if (field_it == runtime->scalar_indexings.end()) {
+        return candidates;
+    }
+    candidates.reserve(field_it->second.size());
+    for (const auto& [index_id, entry] : field_it->second) {
+        candidates.push_back(entry.Candidate());
+    }
+    // Ascending indexID: the unordered_map iteration order must not leak into
+    // which index the selector tries first.
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [](const ScalarIndexCandidate& a, const ScalarIndexCandidate& b) {
+                  return a.index_id < b.index_id;
+              });
+    return candidates;
+}
+
+std::vector<cachinglayer::PinWrapper<const index::IndexBase*>>
+ChunkedSegmentSealedImpl::PinScalarIndex(milvus::OpContext* op_ctx,
+                                         FieldId field_id,
+                                         int64_t index_id) const {
+    auto runtime = CaptureRuntimeResourceState();
+    if (runtime == nullptr) {
+        return {};
+    }
+    auto field_it = runtime->scalar_indexings.find(field_id);
+    if (field_it == runtime->scalar_indexings.end()) {
+        return {};
+    }
+    auto index_it = field_it->second.find(index_id);
+    if (index_it == field_it->second.end()) {
+        return {};
+    }
+    auto ca =
+        cachinglayer::SemiInlineGet(index_it->second.cache_index->PinCells(op_ctx, {0}));
+    auto index = ca->get_cell_of(0);
+    return {cachinglayer::PinWrapper<const index::IndexBase*>(std::move(ca), index)};
+}
+
+// The field's NGRAM index of the given shape, or nullptr. Nothing prevents two
+// NGRAM indexes on one field, so the smallest indexID wins, to keep the choice
+// independent of container iteration order.
+static const ChunkedSegmentSealedImpl::ScalarIndexEntry*
+find_ngram_entry(
+    const std::unordered_map<
+        FieldId,
+        std::unordered_map<int64_t,
+                           ChunkedSegmentSealedImpl::ScalarIndexEntry>>&
+        scalar_indexings,
+    FieldId field_id,
+    std::optional<std::string_view> json_path) {
+    auto field_it = scalar_indexings.find(field_id);
+    if (field_it == scalar_indexings.end()) {
+        return nullptr;
+    }
+    const ChunkedSegmentSealedImpl::ScalarIndexEntry* best = nullptr;
+    for (const auto& [index_id, entry] : field_it->second) {
+        if (!entry.is_ngram) {
+            continue;
+        }
+        if (json_path.has_value()) {
+            if (entry.json_path != *json_path) {
+                continue;
+            }
+        } else if (entry.is_json) {
+            continue;
+        }
+        if (best == nullptr || index_id < best->index_id) {
+            best = &entry;
+        }
+    }
+    return best;
+}
+
 cachinglayer::PinWrapper<index::NgramInvertedIndex*>
 ChunkedSegmentSealedImpl::GetNgramIndex(milvus::OpContext* op_ctx,
                                         FieldId field_id) const {
     auto runtime = CaptureRuntimeResourceState();
-    if (runtime->ngram_fields.find(field_id) == runtime->ngram_fields.end()) {
+    auto ngram = find_ngram_entry(
+        runtime->scalar_indexings, field_id, std::nullopt);
+    if (ngram == nullptr) {
         return cachinglayer::PinWrapper<index::NgramInvertedIndex*>(nullptr);
     }
 
-    auto iter = runtime->scalar_indexings.find(field_id);
-    if (iter == runtime->scalar_indexings.end()) {
-        return cachinglayer::PinWrapper<index::NgramInvertedIndex*>(nullptr);
-    }
-
-    auto ca = cachinglayer::SemiInlineGet(iter->second->PinCells(op_ctx, {0}));
+    auto ca = cachinglayer::SemiInlineGet(ngram->cache_index->PinCells(op_ctx, {0}));
     auto index = dynamic_cast<index::NgramInvertedIndex*>(ca->get_cell_of(0));
     AssertInfo(index != nullptr,
                "ngram index cache is corrupted, field_id: {}",
@@ -4224,17 +4419,13 @@ ChunkedSegmentSealedImpl::GetNgramIndexForJson(
     FieldId field_id,
     const std::string& nested_path) const {
     auto runtime = CaptureRuntimeResourceState();
-    auto iter = runtime->ngram_indexings.find(field_id);
-    if (iter == runtime->ngram_indexings.end()) {
-        return cachinglayer::PinWrapper<index::NgramInvertedIndex*>(nullptr);
-    }
-    auto nested_iter = iter->second.find(nested_path);
-    if (nested_iter == iter->second.end()) {
+    auto ngram = find_ngram_entry(
+        runtime->scalar_indexings, field_id, std::string_view(nested_path));
+    if (ngram == nullptr) {
         return cachinglayer::PinWrapper<index::NgramInvertedIndex*>(nullptr);
     }
 
-    auto ca =
-        cachinglayer::SemiInlineGet(nested_iter->second->PinCells(op_ctx, {0}));
+    auto ca = cachinglayer::SemiInlineGet(ngram->cache_index->PinCells(op_ctx, {0}));
     auto index = dynamic_cast<index::NgramInvertedIndex*>(ca->get_cell_of(0));
     AssertInfo(index != nullptr,
                "ngram index cache for json is corrupted, field_id: {}, "
@@ -4816,12 +5007,10 @@ ChunkedSegmentSealedImpl::DropIndex(const FieldId field_id,
     }
 
     if (runtime != nullptr) {
-        cancel_and_erase_scalar_index(runtime->scalar_indexings, field_id);
-        runtime->ngram_fields.erase(field_id);
+        drop_scalar_indexings(runtime->scalar_indexings, field_id);
     } else {
         auto next_runtime = CloneMutableRuntimeResourceState();
-        cancel_and_erase_scalar_index(next_runtime->scalar_indexings, field_id);
-        next_runtime->ngram_fields.erase(field_id);
+        drop_scalar_indexings(next_runtime->scalar_indexings, field_id);
         DropVectorIndexing(*next_runtime, field_id);
         next_runtime->vec_binlog_config.erase(field_id);
         PublishIndexDroppedLocked(
@@ -5969,21 +6158,14 @@ ChunkedSegmentSealedImpl::ClearData() {
     std::lock_guard<std::mutex> reopen_guard(reopen_mutex_);
     auto runtime_snapshot = CaptureRuntimeResourceState();
     if (runtime_snapshot != nullptr) {
-        for (const auto& [_, indexing] : runtime_snapshot->scalar_indexings) {
-            cancel_warmup(indexing);
+        for (const auto& [_, indexings] : runtime_snapshot->scalar_indexings) {
+            for (const auto& [__, entry] : indexings) {
+                cancel_warmup(entry.cache_index);
+            }
         }
         for (const auto& [_, entry] : runtime_snapshot->vector_indexings) {
             if (entry != nullptr && entry->indexing_ != nullptr) {
                 entry->indexing_->CancelWarmup();
-            }
-        }
-        for (const auto& json_index : runtime_snapshot->json_indices) {
-            cancel_warmup(json_index.index);
-        }
-        for (const auto& [_, path_indexings] :
-             runtime_snapshot->ngram_indexings) {
-            for (const auto& [__, indexing] : path_indexings) {
-                cancel_warmup(indexing);
             }
         }
     }
@@ -6188,18 +6370,42 @@ ChunkedSegmentSealedImpl::CreateTextIndexWithSchema(
                     });
             }
         } else {  // fetch raw data from index.
-            auto field_index_iter =
-                target_runtime->scalar_indexings.find(field_id);
-            AssertInfo(
-                field_index_iter != target_runtime->scalar_indexings.end(),
-                "failed to create text index, neither raw data nor "
-                "index are found");
+            // Only an index that actually carries raw data can source the text
+            // index: NGRAM entries never do, and a field may now carry several
+            // plain indexes (an NGRAM one with a smaller indexID included), so
+            // "the plain entry" is not enough -- pick the smallest indexID that
+            // reports HasRawData().
+            int64_t raw_data_index_id = -1;
+            if (target_runtime != nullptr) {
+                auto field_it =
+                    target_runtime->scalar_indexings.find(field_id);
+                if (field_it != target_runtime->scalar_indexings.end()) {
+                    for (const auto& [index_id, candidate] : field_it->second) {
+                        if (candidate.is_json || candidate.is_ngram) {
+                            continue;
+                        }
+                        if (raw_data_index_id >= 0 &&
+                            index_id >= raw_data_index_id) {
+                            continue;
+                        }
+                        auto accessor = cachinglayer::SemiInlineGet(
+                            candidate.cache_index->PinCells(op_ctx, {0}));
+                        auto candidate_ptr = accessor->get_cell_of(0);
+                        if (candidate_ptr != nullptr &&
+                            candidate_ptr->HasRawData()) {
+                            raw_data_index_id = index_id;
+                        }
+                    }
+                }
+            }
+            AssertInfo(raw_data_index_id >= 0,
+                       "failed to create text index, neither raw data nor an "
+                       "index carrying raw data are found");
+            auto raw_entry = target_runtime->scalar_indexings.at(field_id).at(
+                raw_data_index_id);
             auto accessor = cachinglayer::SemiInlineGet(
-                field_index_iter->second->PinCells(op_ctx, {0}));
+                raw_entry.cache_index->PinCells(op_ctx, {0}));
             auto ptr = accessor->get_cell_of(0);
-            AssertInfo(ptr->HasRawData(),
-                       "text raw data not found, trying to create text index "
-                       "from index, but this index don't contain raw data");
             auto impl = dynamic_cast<index::ScalarIndex<std::string>*>(ptr);
             AssertInfo(impl != nullptr,
                        "failed to create text index, field index cannot be "
@@ -7029,8 +7235,15 @@ ChunkedSegmentSealedImpl::HasJsonIndex(FieldId field_id) const {
     // scalar/vector/binlog readiness bitsets, but their ownership now follows
     // the published runtime snapshot.
     auto runtime = CaptureRuntimeResourceState();
-    for (const auto& index : runtime->json_indices) {
-        if (index.field_id == field_id) {
+    if (runtime == nullptr) {
+        return false;
+    }
+    auto field_it = runtime->scalar_indexings.find(field_id);
+    if (field_it == runtime->scalar_indexings.end()) {
+        return false;
+    }
+    for (const auto& [index_id, entry] : field_it->second) {
+        if (CountsAsJsonIndex(entry.Candidate())) {
             return true;
         }
     }
@@ -8204,34 +8417,62 @@ ChunkedSegmentSealedImpl::FinalizeLoadDiffForReopen(
     const SchemaPtr& schema_snapshot,
     StagedStateCommitter& committer) {
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
-    if (!diff.indexes_to_drop.empty()) {
-        for (auto field_id : diff.indexes_to_drop) {
-            if (diff.indexes_to_replace.count(field_id) > 0 ||
-                diff.indexes_to_load.count(field_id) > 0) {
-                continue;
-            }
-            committer.Commit([&](RuntimeResourceState& runtime,
+    for (const auto& [field_id, index_ids] : diff.indexes_to_drop) {
+        for (const auto& index_id : index_ids) {
+            committer.Commit([&, field_id = field_id, index_id](
+                                 RuntimeResourceState& runtime,
                                  PublishedSegmentState& staged_state) {
-                DropIndex(field_id, schema_snapshot, &runtime);
-                committer.StageVectorIndexDropLocked(field_id);
-                DropIndexFromState(staged_state, field_id);
+                // Whether the entry being dropped was a JSON one: a JSON field's
+                // readiness bit belongs to an NGRAM index only, so dropping one has
+                // to re-sync it. Not derivable from the container afterwards.
+                bool dropped_json = false;
+                {
+                    auto field_it = runtime.scalar_indexings.find(field_id);
+                    if (field_it != runtime.scalar_indexings.end()) {
+                        auto entry_it = field_it->second.find(index_id);
+                        dropped_json = entry_it != field_it->second.end() &&
+                                       entry_it->second.is_json;
+                    }
+                }
+
+                auto retired = erase_scalar_index(
+                    runtime.scalar_indexings, field_id, index_id);
+                if (retired == nullptr) {
+                    return;
+                }
+                committer.RetireCacheIndexingLocked(std::move(retired));
+
+                // NormalizePublishedState only ORs published bits back in, so the
+                // field-level state has to be corrected here:
+                //   - the raw-data flag described the index just removed (whether a
+                //     reader may reverse-look-up through the field's index). With one
+                //     index left the "more than one index" guard no longer applies,
+                //     so a stale true would send a reader through an index that has
+                //     no raw data. Clear it and let the reader fall back to the
+                //     column.
+                //   - a JSON field's readiness bit is NGRAM-only; the old path did
+                //     this through SyncJsonNgramIndexState.
+                ClearPublishedIndexRawDataInState(staged_state, field_id);
+                ClearIndexRawDataInState(staged_state, field_id);
+                if (dropped_json) {
+                    SyncJsonIndexReadyBits(staged_state, runtime, field_id);
+                }
             });
         }
     }
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
-    for (const auto& [field_id, nested_paths] : diff.json_indexes_to_drop) {
-        for (const auto& nested_path : nested_paths) {
-            committer.Commit([&, field_id = field_id, nested_path](
-                                 RuntimeResourceState& runtime,
-                                 PublishedSegmentState& staged_state) {
-                for (auto& retired :
-                     EraseJsonIndexesAtPath(runtime, field_id, nested_path)) {
-                    committer.RetireCacheIndexingLocked(std::move(retired));
-                }
-                SyncJsonNgramIndexState(staged_state, runtime, field_id);
-            });
+    for (const auto& field_id : diff.fields_index_fully_dropped) {
+        if (diff.indexes_to_replace.count(field_id) > 0 ||
+            diff.indexes_to_load.count(field_id) > 0) {
+            continue;
         }
+        committer.Commit([&](RuntimeResourceState& runtime,
+                             PublishedSegmentState& staged_state) {
+            DropIndex(field_id, schema_snapshot, &runtime);
+            committer.StageVectorIndexDropLocked(field_id);
+            DropIndexFromState(staged_state, field_id);
+        });
     }
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
@@ -8595,7 +8836,7 @@ ChunkedSegmentSealedImpl::FillDefaultValueFields(
             continue;
         }
         if (get_bit_if_present(visible_state.index_ready_bitset, field_id) &&
-            HasIndexRawDataFromState(visible_state, field_id)) {
+            IndexHasRawDataFromState(visible_state, field_id)) {
             continue;
         }
         if (schema_snapshot->is_function_output(field_id)) {
@@ -8649,7 +8890,7 @@ ChunkedSegmentSealedImpl::FillDefaultValueFields(
             continue;
         }
         if (get_bit_if_present(staged_state->index_ready_bitset, field_id) &&
-            HasIndexRawDataFromState(*staged_state, field_id)) {
+            IndexHasRawDataFromState(*staged_state, field_id)) {
             continue;
         }
         if (schema_snapshot->is_function_output(field_id)) {
@@ -9444,9 +9685,13 @@ ChunkedSegmentSealedImpl::LoadBatchFieldData(
                                     child_field_id) ||
                  get_bit_if_present(visible_state.binlog_index_bitset,
                                     child_field_id))) {
+                // Guarded predicate on purpose: it must agree with what readers
+                // see (IndexHasRawDataFromState returns false while the field has
+                // several scalar indexes), otherwise the column would be skipped
+                // here and every fallback-to-column path would fail later.
                 index_has_raw_data =
                     index_has_raw_data &&
-                    HasIndexRawDataFromState(visible_state, child_field_id);
+                    IndexHasRawDataFromState(visible_state, child_field_id);
             } else {
                 index_has_raw_data = false;
             }

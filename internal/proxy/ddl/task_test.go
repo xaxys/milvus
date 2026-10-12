@@ -3431,6 +3431,96 @@ func Test_loadCollectionTask_Execute(t *testing.T) {
 	})
 }
 
+// Test_loadCollectionTask_Execute_SmallestIndexIDPerField pins the load-config
+// rule: a field may now carry several indexes but the load config still carries a
+// single indexID per field, so it must always be the SMALLEST one (the earliest
+// created) and must stay put across repeated Load calls: DescribeIndex returns the
+// indexes in map order, and a flapping fieldIndexID would re-broadcast the load
+// config and reset an already-loaded collection back to Loading.
+func Test_loadCollectionTask_Execute_SmallestIndexIDPerField(t *testing.T) {
+	const (
+		dbName         = "db"
+		collectionName = "multi_index_collection"
+		collectionID   = UniqueID(100)
+		fieldID        = UniqueID(10)
+		vecFieldID     = UniqueID(11)
+		vecIndexID     = UniqueID(1000)
+		firstIndexID   = UniqueID(1100)
+		secondIndexID  = UniqueID(1200)
+	)
+
+	cache := NewMockCache(t)
+	cache.EXPECT().GetCollectionID(mock.Anything, dbName, collectionName).Return(collectionID, nil)
+	cache.EXPECT().GetCollectionSchema(mock.Anything, dbName, collectionName).Return(
+		mustNewSchemaInfo(&schemapb.CollectionSchema{
+			Name: collectionName,
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: fieldID, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+				{FieldID: vecFieldID, Name: "vec", DataType: schemapb.DataType_FloatVector},
+			},
+		}), nil)
+
+	indexInfo := func(fieldID, indexID UniqueID) *indexpb.IndexInfo {
+		return &indexpb.IndexInfo{
+			CollectionID: collectionID,
+			FieldID:      fieldID,
+			IndexID:      indexID,
+			IndexName:    funcutil.GenRandomStr(),
+			State:        commonpb.IndexState_Finished,
+		}
+	}
+
+	// The first field carries two indexes (the second one was created later); the
+	// order they come back in alternates between the two calls, standing in for the
+	// map iteration order of a real DescribeIndex.
+	describeCalls := 0
+	mixCoord := mocks.NewMockMixCoordClient(t)
+	mixCoord.EXPECT().DescribeIndex(mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ *indexpb.DescribeIndexRequest, _ ...grpc.CallOption) (*indexpb.DescribeIndexResponse, error) {
+			describeCalls++
+			infos := []*indexpb.IndexInfo{
+				indexInfo(fieldID, firstIndexID),
+				indexInfo(fieldID, secondIndexID),
+				indexInfo(vecFieldID, vecIndexID),
+			}
+			if describeCalls%2 == 0 {
+				infos[0], infos[1] = infos[1], infos[0]
+			}
+			return &indexpb.DescribeIndexResponse{Status: merr.Success(), IndexInfos: infos}, nil
+		}).Times(2)
+
+	loaded := make([]map[int64]int64, 0, 2)
+	mixCoord.EXPECT().LoadCollection(mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, req *querypb.LoadCollectionRequest, _ ...grpc.CallOption) (*commonpb.Status, error) {
+			loaded = append(loaded, req.GetFieldIndexID())
+			return merr.Success(), nil
+		}).Times(2)
+
+	ctx := context.Background()
+	task := &LoadCollectionTask{
+		baseTask: baseTask{MetaCache: cache},
+		LoadCollectionRequest: &milvuspb.LoadCollectionRequest{
+			Base:           commonpbutil.NewMsgBase(),
+			DbName:         dbName,
+			CollectionName: collectionName,
+		},
+		ctx:      ctx,
+		mixCoord: mixCoord,
+	}
+
+	for i := 0; i < 2; i++ {
+		require.NoError(t, task.Execute(ctx))
+	}
+
+	require.Len(t, loaded, 2)
+	assert.Equal(t, int64(vecIndexID), loaded[0][int64(vecFieldID)])
+	for i, fieldIndexIDs := range loaded {
+		assert.Equal(t, int64(firstIndexID), fieldIndexIDs[int64(fieldID)],
+			"call %d must take the smallest indexID of the field", i)
+	}
+	assert.Equal(t, loaded[0], loaded[1])
+}
+
 func TestLoadCollectionTaskExecuteTextRequiresStorageV3(t *testing.T) {
 	paramtable.Get().Save(paramtable.Get().CommonCfg.UseLoonFFI.Key, "false")
 	t.Cleanup(func() {

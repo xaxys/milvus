@@ -136,8 +136,8 @@ const (
 	//   such a segment, so creation is gated on the whole cluster reporting >= 5
 	//   (see MinScalarIndexVersionForFMINDEX).
 	MinimalScalarIndexEngineVersion = int32(0)
-	CurrentScalarIndexEngineVersion = int32(5)
-	MaximumScalarIndexEngineVersion = int32(5)
+	CurrentScalarIndexEngineVersion = int32(6)
+	MaximumScalarIndexEngineVersion = int32(6)
 
 	// MinScalarIndexVersionForJsonPathMultiType is the minimum scalar index
 	// engine version that supports STL_SORT / BITMAP / HYBRID on JSON fields.

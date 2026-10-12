@@ -217,6 +217,7 @@ func (p *ComponentParam) versionGateItems() []*ParamItem {
 		&p.FunctionCfg.EnableWriteBeforeMaterialization,
 		&p.DataCoordCfg.ImportEnableIDRangeMsg,
 		&p.ProxyCfg.RLSImportEnforcementEnabled,
+		&p.DataCoordCfg.EnableMultiScalarIndexPerField,
 	}
 }
 
@@ -6341,6 +6342,7 @@ type dataCoordConfig struct {
 	TargetVecIndexVersion          ParamItem `refreshable:"true"`
 	ForceRebuildScalarSegmentIndex ParamItem `refreshable:"true"`
 	TargetScalarIndexVersion       ParamItem `refreshable:"true"`
+	EnableMultiScalarIndexPerField ParamItem `refreshable:"true"`
 	SegmentFlushInterval           ParamItem `refreshable:"true"`
 	BlockingL0EntryNum             ParamItem `refreshable:"true"`
 	BlockingL0SizeInMB             ParamItem `refreshable:"true"`
@@ -7771,6 +7773,47 @@ if param targetScalarIndexVersion is not set, the default value is -1, which mea
 		Doc:          "the minimal interval duration(unit: Seconds) between flushing operation on same segment",
 		Export:       true,
 	}
+	// Version-gated capability switch, following the pattern of
+	// dataCoord.import.enableIDRangeMsg (a ParamItem whose default is a sentinel
+	// that flips to the target value only after the whole cluster has been
+	// confirmed upgraded): while the gate is closed the capability is off, so a
+	// rolling upgrade never produces a shape an online node cannot load, and the
+	// gate closes again by itself if a node is rolled back.
+	//
+	// The upstream machinery for that pattern (ParamItem.VersionGateSwitcher, driven
+	// by a cluster-wide confirmator over etcd) does not exist in this tree, so the
+	// confirmation signal here is the scalar index engine version that every
+	// QueryNode already reports through its session -- which is also exactly the
+	// precondition the C++ segment asserts on.
+	// EnableMultiScalarIndexPerField gates several indexes on one scalar field.
+	// It is version-gated on purpose: a load config that carries two indexes on one
+	// field makes an older QueryNode assert while loading the segment (segcore's
+	// LoadScalarIndex used to refuse the second one outright). Until the gate flips,
+	// the config resolves to "false" and creation stays on the one-index-per-field
+	// shape, which every version understands.
+	p.EnableMultiScalarIndexPerField = ParamItem{
+		Key:          "dataCoord.enableMultiScalarIndexPerField",
+		Version:      "3.0.4-beta",
+		Export:       false,
+		PanicIfEmpty: false,
+		Doc: "Whether one scalar field may carry several indexes. " +
+			"auto: switch on automatically once the whole cluster has reached the gate version, " +
+			"every QueryNode reports a scalar index engine version that can load such a segment " +
+			"(see common.MinScalarIndexVersionForScalarMultiIndex), and the stability window elapses; " +
+			"false: never allowed (escape hatch, and the safe value while older QueryNodes are still " +
+			"online); true: force enable and bypass the version gate (use with caution). An older " +
+			"QueryNode asserts while loading a segment whose load config carries two indexes on one field.",
+		DefaultValue: "auto",
+		VersionGateSwitcher: &VersionGateSwitcher{
+			EnableAutoSwitchValue: "auto",
+			PreSwitchValue:        "false",
+			GateVersion:           "3.0.4-beta",
+			TargetValue:           "true",
+			SwitchDelay:           1 * time.Minute,
+		},
+	}
+	p.EnableMultiScalarIndexPerField.Init(base.mgr)
+
 	p.SegmentFlushInterval.Init(base.mgr)
 
 	p.FilesPerPreImportTask = ParamItem{

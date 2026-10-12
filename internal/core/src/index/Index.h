@@ -78,6 +78,25 @@ class IndexBase {
                   "UploadUnified is not supported for this index type");
     }
 
+    // Whether this index can serve `op` for a query that carries `pattern`.
+    //
+    // Declared on IndexBase so the expression layer can ask a *pinned* index --
+    // which it reaches through IndexBase, not through ScalarIndex<T> -- before
+    // committing an execution path to it: with several indexes on one field the
+    // ordering of candidates is only a preference, and this is the decision (see
+    // ScalarIndex::ShouldUseOp for the scalar narrowing).
+    //
+    // Permissive by default: most index types answer any op their value type
+    // supports, and a false answer here only costs a fall back to raw data.
+    // Keep the `= ""` default identical to the scalar override -- a differing
+    // default on a virtual is the classic static-binding trap.
+    virtual bool
+    ShouldUseOp(proto::plan::OpType op, const std::string& pattern = "") const {
+        (void)op;
+        (void)pattern;
+        return true;
+    }
+
     virtual const bool
     HasRawData() const = 0;
 

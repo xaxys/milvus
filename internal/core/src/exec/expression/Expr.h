@@ -530,26 +530,141 @@ class SegmentExpr : public Expr {
         null_rejecting_ = true;
     }
 
+    // The operator this leaf would ask a scalar index to serve, when it knows one
+    // at compile time -- UnaryExpr and BinaryRangeExpr carry their op as a
+    // template parameter, so their override is one line. Used by the selector in
+    // EnsurePinnedIndex(): the candidate ordering there is a preference, and this
+    // is the probe that turns it into a decision. std::nullopt means "no probe",
+    // and the first candidate then wins -- which is exactly what a field with a
+    // single index used to do.
+    virtual std::optional<std::pair<proto::plan::OpType, std::string>>
+    ScalarIndexProbe() const {
+        return std::nullopt;
+    }
+
     // Pin the scalar index cell. Called by DetermineExecPath() only after the
     // expression has committed to ExprExecPath::ScalarIndex, so the pin's
     // lifetime matches real usage: short-circuit paths
     // (TextIndex/PkIndex/JsonStats) and the RawData path never call it and
     // the scalar index cell stays cold in tiered storage. Idempotent.
+    //
+    // A field can carry several scalar indexes now, so this picks one instead of
+    // reading "the field's index": candidates are ordered by what this leaf looks
+    // able to use, and the first one the index itself accepts (ShouldUseOp) is
+    // kept. An empty pinned_index_ is a valid outcome -- DetermineExecPath()
+    // falls back to RawData when that happens.
     void
     EnsurePinnedIndex() {
         if (pinned_index_initialized_) {
             return;
         }
         pinned_index_initialized_ = true;
-        auto schema = segment_->get_schema_snapshot();
-        auto& field_meta = (*schema)[field_id_];
-        pinned_index_ = PinIndex(op_ctx_,
-                                 segment_,
-                                 field_meta,
-                                 nested_path_,
-                                 value_type_,
-                                 allow_any_json_cast_type_,
-                                 is_json_contains_);
+        const auto probe = ScalarIndexProbe();
+        auto accepts =
+            [&probe](const std::vector<PinWrapper<const index::IndexBase*>>&
+                         pinned) {
+                if (pinned.empty()) {
+                    return false;
+                }
+                if (!probe.has_value()) {
+                    return true;
+                }
+                return pinned[0].get() != nullptr &&
+                       pinned[0].get()->ShouldUseOp(probe->first,
+                                                    probe->second);
+            };
+
+        if (field_type_ == DataType::JSON) {
+            // JSON path and cast matching is path-specific, so the segment's
+            // PinJsonIndex keeps owning the choice (it scans the unified
+            // container by indexID now). The probe only gets to reject it.
+            auto schema = segment_->get_schema_snapshot();
+            auto& field_meta = (*schema)[field_id_];
+            auto pinned = PinIndex(op_ctx_,
+                                   segment_,
+                                   field_meta,
+                                   nested_path_,
+                                   value_type_,
+                                   allow_any_json_cast_type_,
+                                   is_json_contains_);
+            if (accepts(pinned)) {
+                pinned_index_ = std::move(pinned);
+            }
+            num_index_chunk_ = pinned_index_.size();
+            return;
+        }
+
+        auto candidates = segment_->GetScalarIndexCandidates(field_id_);
+        if (candidates.empty()) {
+            // A segment can report an index the container does not own: a growing
+            // segment's interim index (an RTree on a geometry field, for one) is
+            // built by IndexingRecord rather than loaded through LoadScalarIndex,
+            // and its field type is not JSON. Ask the segment directly, exactly as
+            // this did before the container existed -- returning an empty pin here
+            // sent every such leaf to raw data
+            // (ExprTest.GISFilterGrowingIndexConjunctSkipKeepsCursorInSync).
+            auto schema = segment_->get_schema_snapshot();
+            auto& field_meta = (*schema)[field_id_];
+            auto pinned = PinIndex(op_ctx_,
+                                   segment_,
+                                   field_meta,
+                                   nested_path_,
+                                   value_type_,
+                                   allow_any_json_cast_type_,
+                                   is_json_contains_);
+            if (accepts(pinned)) {
+                pinned_index_ = std::move(pinned);
+            }
+            num_index_chunk_ = pinned_index_.size();
+            return;
+        }
+        const bool ngram_allowed = CanUseNgramIndex();
+        // Rank, not filter: a candidate whose capability this leaf's operator
+        // looks unlikely to fit goes later but stays in the running, because
+        // HYBRID and AUTOINDEX only reveal what they implement once pinned.
+        auto rank = [ngram_allowed](
+                        const milvus::segcore::ScalarIndexCandidate& c) {
+            switch (c.capability) {
+                case milvus::segcore::ScalarIndexCapability::PatternIndexed:
+                    return ngram_allowed ? 0 : 2;
+                case milvus::segcore::ScalarIndexCapability::TermIndexed:
+                    return ngram_allowed ? 2 : 0;
+                default:
+                    return 1;
+            }
+        };
+        std::stable_sort(
+            candidates.begin(),
+            candidates.end(),
+            [&rank](const auto& a, const auto& b) { return rank(a) < rank(b); });
+        // The probe is a preference, never a veto: a leaf that could execute on an
+        // index before this selection layer existed must keep being able to, so the
+        // first index that pins at all is kept as a fallback and only replaced by a
+        // candidate the probe prefers. Without this, an index type whose
+        // ShouldUseOp() is stricter than the old unconditional use would silently
+        // lose its index path (FMIndex's regex/match leaves, for one).
+        decltype(segment_->PinScalarIndex(op_ctx_, field_id_, 0)) fallback;
+        for (const auto& candidate : candidates) {
+            if (candidate.is_ngram && !ngram_allowed) {
+                // An NGRAM index answers pattern operators and nothing else.
+                // Handing it to another leaf would be a silent behaviour change;
+                // the deleted ngram_fields set used to prevent exactly this.
+                continue;
+            }
+            auto pinned = segment_->PinScalarIndex(
+                op_ctx_, field_id_, candidate.index_id);
+            if (fallback.empty() && !pinned.empty() &&
+                pinned[0].get() != nullptr) {
+                fallback = pinned;
+            }
+            if (accepts(pinned)) {
+                pinned_index_ = std::move(pinned);
+                break;
+            }
+        }
+        if (pinned_index_.empty()) {
+            pinned_index_ = std::move(fallback);
+        }
         num_index_chunk_ = pinned_index_.size();
     }
 
