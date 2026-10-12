@@ -3129,16 +3129,35 @@ func storedIndex(collID, fieldID, indexID int64, name string, params ...*commonp
 	}
 }
 
+// setMultiScalarIndexPerField toggles the operator switch that allows a second
+// scalar index on one field (dataCoord.enableMultiScalarIndexPerField), restoring the
+// previous value when the (sub)test ends. Same SwapTempValue pattern the
+// neighbouring datacoord tests use to flip a ParamItem.
+// setMultiScalarIndexPerField sets the three-valued capability switch that allows
+// a second scalar index on one field: "auto" resolves from the scalar index engine
+// version the cluster reports, "false" refuses it outright and "true" forces it on.
+func setMultiScalarIndexPerField(t *testing.T, value string) {
+	orig := Params.DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue(value)
+	t.Cleanup(func() {
+		Params.DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue(orig)
+	})
+}
+
 // TestServer_checkIndexCreationPolicy covers G1 and G2 of the implementation plan
 // (docs/design-docs/multi-index-per-field-scalar-v1-plan-cn.md, §S5):
 //
-//   - a second index on the same SCALAR field is accepted once the whole cluster
-//     reports scalar index engine version >= MinScalarIndexVersionForScalarMultiIndex
-//     (an older QueryNode asserts while loading two scalar indexes on one field);
+//   - a second index on the same SCALAR field needs BOTH the operator switch
+//     (dataCoord.enableMultiScalarIndexPerField, three-valued: auto/false/true) and a whole
+//     cluster reporting scalar
+//     index engine version >= MinScalarIndexVersionForScalarMultiIndex (an older
+//     QueryNode asserts while loading two scalar indexes on one field);
+//   - with the switch off the second scalar index is rejected even when the
+//     version is new enough, and the refusal names the config key and is not
+//     retriable (only an operator can clear it);
 //   - below that version the second scalar index is rejected and the error is
 //     merr.ErrServiceNotReady, so the caller can retry after the upgrade;
 //   - a second index on a VECTOR field is rejected unconditionally as an
-//     input-class error, without consulting the version;
+//     input-class error, without consulting the version or the switch;
 //   - a second JSON index on the SAME path is gated, a JSON index on a DIFFERENT
 //     path is not (the pre-existing multi-path capability).
 func TestServer_checkIndexCreationPolicy(t *testing.T) {
@@ -3183,14 +3202,40 @@ func TestServer_checkIndexCreationPolicy(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	t.Run("second scalar index accepted at the required version", func(t *testing.T) {
+	t.Run("second scalar index rejected while the switch is off", func(t *testing.T) {
+		// the version is new enough, so the explicit "false" is the only reason to
+		// refuse: the escape hatch has to work even on a fully upgraded cluster
+		setMultiScalarIndexPerField(t, "false")
+		version := common.MinScalarIndexVersionForScalarMultiIndex
+		s := serverWithVersion(&version)
+		err := s.checkIndexCreationPolicy(ctx, req(100, invertedParams...), false, schemapb.DataType_Int64)
+		assert.Error(t, err)
+		assert.NotErrorIs(t, err, merr.ErrServiceNotReady)
+		assert.Equal(t, merr.Code(merr.ErrOperationNotSupported), merr.Code(err))
+		assert.Contains(t, err.Error(), "dataCoord.enableMultiScalarIndexPerField")
+		// an operator condition, not a transient one: a client retry cannot clear it
+		assert.False(t, merr.Status(err).GetRetriable())
+	})
+
+	t.Run("second scalar index accepted once auto resolves and the version is enough", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
 		version := common.MinScalarIndexVersionForScalarMultiIndex
 		s := serverWithVersion(&version)
 		err := s.checkIndexCreationPolicy(ctx, req(100, invertedParams...), false, schemapb.DataType_Int64)
 		assert.NoError(t, err)
 	})
 
+	t.Run("switch true bypasses the readiness check", func(t *testing.T) {
+		// "true" is the documented force-enable path: it must not depend on what the
+		// cluster reports, so an empty version still passes.
+		setMultiScalarIndexPerField(t, "true")
+		s := serverWithVersion(nil)
+		err := s.checkIndexCreationPolicy(ctx, req(100, invertedParams...), false, schemapb.DataType_Int64)
+		assert.NoError(t, err)
+	})
+
 	t.Run("second scalar index rejected below the required version", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
 		for _, version := range []int32{0, common.MinScalarIndexVersionForScalarMultiIndex - 1} {
 			v := version
 			s := serverWithVersion(&v)
@@ -3222,6 +3267,7 @@ func TestServer_checkIndexCreationPolicy(t *testing.T) {
 	})
 
 	t.Run("json index on the same path is gated", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
 		version := common.MinScalarIndexVersionForScalarMultiIndex - 1
 		s := serverWithVersion(&version)
 		err := s.checkIndexCreationPolicy(ctx, req(102, jsonPathA...), true, schemapb.DataType_JSON)
@@ -3375,8 +3421,14 @@ const (
 // multi-index test schema. The returned setter changes the scalar index engine
 // version the (mocked) version manager resolves, so a test can simulate a cluster
 // that still has a QueryNode from before the upgrade.
+//
+// It leaves the capability switch at its "auto" default (restored when the test
+// ends): a second scalar index on one field is then allowed exactly when the
+// cluster reports a new enough version, which is the half of the gate these tests
+// cover.
 func newMultiIndexPolicyTestServer(t *testing.T) (*Server, func(int32)) {
 	initStreamingSystem(t)
+	setMultiScalarIndexPerField(t, "auto")
 
 	catalog := catalogmocks.NewDataCoordCatalog(t)
 	catalog.EXPECT().CreateIndex(mock.Anything, mock.Anything).Return(nil).Maybe()
@@ -3464,6 +3516,20 @@ func TestServer_CreateIndex_MultiIndexPolicy(t *testing.T) {
 	t.Run("second index on the scalar field accepted at version 6", func(t *testing.T) {
 		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "scalar_stl_sort", multiIndexIndexType("STL_SORT"), nil))
 		assert.NoError(t, merr.CheckRPCCall(resp, err))
+		assert.Len(t, s.meta.indexMeta.GetFieldIndexes(multiIndexCollID, multiIndexScalarFID, ""), 2)
+	})
+
+	t.Run("second index on the scalar field rejected while the switch is off", func(t *testing.T) {
+		// version 6, so the explicit "false" is the only reason to refuse
+		setResolvedVersion(common.MinScalarIndexVersionForScalarMultiIndex)
+		setMultiScalarIndexPerField(t, "false")
+
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "scalar_bitmap_off", multiIndexIndexType("BITMAP"), nil))
+		assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrOperationNotSupported)
+		assert.Contains(t, resp.GetReason(), "dataCoord.enableMultiScalarIndexPerField")
+		// an operator condition, not a transient one: a client retry cannot clear it
+		assert.False(t, resp.GetRetriable())
+		// nothing was written
 		assert.Len(t, s.meta.indexMeta.GetFieldIndexes(multiIndexCollID, multiIndexScalarFID, ""), 2)
 	})
 

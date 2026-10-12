@@ -5446,6 +5446,7 @@ type dataCoordConfig struct {
 	TargetVecIndexVersion          ParamItem `refreshable:"true"`
 	ForceRebuildScalarSegmentIndex ParamItem `refreshable:"true"`
 	TargetScalarIndexVersion       ParamItem `refreshable:"true"`
+	EnableMultiScalarIndexPerField ParamItem `refreshable:"true"`
 	SegmentFlushInterval           ParamItem `refreshable:"true"`
 	BlockingL0EntryNum             ParamItem `refreshable:"true"`
 	BlockingL0SizeInMB             ParamItem `refreshable:"true"`
@@ -6823,6 +6824,32 @@ if param targetScalarIndexVersion is not set, the default value is -1, which mea
 		Doc:          "the minimal interval duration(unit: Seconds) between flushing operation on same segment",
 		Export:       true,
 	}
+	// Version-gated capability switch, following the pattern of
+	// dataCoord.import.enableIDRangeMsg (a ParamItem whose default is a sentinel
+	// that flips to the target value only after the whole cluster has been
+	// confirmed upgraded): while the gate is closed the capability is off, so a
+	// rolling upgrade never produces a shape an online node cannot load, and the
+	// gate closes again by itself if a node is rolled back.
+	//
+	// The upstream machinery for that pattern (ParamItem.VersionGateSwitcher, driven
+	// by a cluster-wide confirmator over etcd) does not exist in this tree, so the
+	// confirmation signal here is the scalar index engine version that every
+	// QueryNode already reports through its session -- which is also exactly the
+	// precondition the C++ segment asserts on.
+	p.EnableMultiScalarIndexPerField = ParamItem{
+		Key:          "dataCoord.enableMultiScalarIndexPerField",
+		Version:      "3.0.0",
+		DefaultValue: "auto",
+		PanicIfEmpty: true,
+		Export:       true,
+		Doc: `Whether one scalar field may carry several indexes.
+auto: allowed only once every QueryNode reports a scalar index engine version that can load such a segment (see common.MinScalarIndexVersionForScalarMultiIndex); the capability turns itself on when the upgrade finishes and off again if a QueryNode is rolled back.
+false: never allowed -- the escape hatch, and the safe value while older QueryNodes are still online.
+true: always allowed, bypassing the readiness check; use with caution.
+An older QueryNode asserts (crashes the load) while loading a segment whose load config carries two indexes on one field.`,
+	}
+	p.EnableMultiScalarIndexPerField.Init(base.mgr)
+
 	p.SegmentFlushInterval.Init(base.mgr)
 
 	p.FilesPerPreImportTask = ParamItem{

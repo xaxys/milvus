@@ -163,15 +163,21 @@ func checkFMIndexEngineVersion(indexParams []*commonpb.KeyValuePair, resolvedSca
 //     outright (internal/querynodev2/services.go), so this stays rejected
 //     unconditionally.
 //
-//   - a second index under the same (field, json_path) SCALAR identity while the
-//     cluster still has a QueryNode reporting a lower scalar index engine version.
-//     An older QueryNode keeps at most one scalar index per field and its
+//   - a second index under the same (field, json_path) SCALAR identity. This one
+//     is gated by dataCoord.enableMultiScalarIndexPerField, which is three-valued:
+//     "auto" (the default) allows it only once the cluster reports scalar index
+//     engine version >= common.MinScalarIndexVersionForScalarMultiIndex -- i.e. once
+//     every QueryNode can load such a segment, which also means the capability turns
+//     itself off again if a QueryNode is rolled back; "false" refuses it outright
+//     (the escape hatch, and the safe value while older QueryNodes are online);
+//     "true" forces it on and bypasses the readiness check. An older QueryNode keeps
+//     at most one scalar index per field and its
 //     ChunkedSegmentSealedImpl::LoadScalarIndex asserts while loading a segment
-//     that carries two (see common.MinScalarIndexVersionForScalarMultiIndex).
+//     that carries two. See checkMultiScalarIndexPerField for the details.
 //
 // JSON indexes under DIFFERENT paths are the pre-existing multi-path capability,
 // which an older QueryNode loads correctly, so they are deliberately allowed
-// without any version check.
+// without any check.
 func (s *Server) checkIndexCreationPolicy(
 	ctx context.Context,
 	req *indexpb.CreateIndexRequest,
@@ -219,23 +225,64 @@ func (s *Server) checkIndexCreationPolicy(
 			continue
 		}
 
-		// An unknown version (no manager, e.g. a bare Server in a unit test) counts
-		// as the oldest one, mirroring snapshot_manager's nil guard.
-		resolved := int32(0)
-		if s.indexEngineVersionManager != nil {
-			resolved = s.indexEngineVersionManager.ResolveScalarIndexVersion()
-		}
-		if resolved < common.MinScalarIndexVersionForScalarMultiIndex {
-			return merr.WrapErrServiceNotReadyMsg(
-				"creating a second index on field %d requires scalar index engine version >= %d, current resolved version: %d (a rolling upgrade may still be in progress)",
-				req.GetFieldID(), common.MinScalarIndexVersionForScalarMultiIndex, resolved)
+		if err := s.checkMultiScalarIndexPerField(req.GetFieldID()); err != nil {
+			return err
 		}
 		mlog.Info(ctx, "allowing a second index on one field",
 			mlog.Int64("collectionID", req.GetCollectionID()),
 			mlog.Int64("fieldID", req.GetFieldID()),
-			mlog.String("jsonPath", jsonPath),
-			mlog.Int32("resolvedScalarVersion", resolved))
+			mlog.String("jsonPath", jsonPath))
 		return nil
+	}
+	return nil
+}
+
+// checkMultiScalarIndexPerField decides whether this cluster may create a second
+// scalar index on one field.
+//
+// The config is three-valued, following the version-gated switch pattern
+// (dataCoord.import.enableIDRangeMsg upstream):
+//
+//   - "false": never. The operator's escape hatch, and the safe value while older
+//     QueryNodes are still online. Not retriable -- only a config change clears it.
+//   - "true": always, bypassing the readiness check. Use with caution.
+//   - "auto" (the default): only once every QueryNode reports a scalar index engine
+//     version that can load such a segment. That is the same precondition the C++
+//     segment asserts on (ChunkedSegmentSealedImpl::LoadScalarIndex), so the
+//     capability turns itself on when the rolling upgrade finishes and turns back
+//     off if a QueryNode is rolled back: a half-upgraded cluster never creates a
+//     shape an online node cannot load. The condition is temporary by
+//     construction, so the refusal is retriable.
+//
+// In a cross-cluster replication the creation is replicated, so the gate has to be
+// producer-side only: the standby applies the broadcast unconditionally, exactly as
+// #53544's secondary applies ImportIDRange. A local check on the apply path would
+// let clusters diverge and break the CDC stream; the standby's own gate (auto, on
+// its own, newer QueryNodes) is what makes the replicated name safe there.
+func (s *Server) checkMultiScalarIndexPerField(fieldID int64) error {
+	item := &Params.DataCoordCfg.EnableMultiScalarIndexPerField
+	switch strings.ToLower(strings.TrimSpace(item.GetValue())) {
+	case "true":
+		return nil
+	case "false":
+		return merr.WrapErrOperationNotSupportedMsg(
+			"creating a second index on field %d is disabled on this cluster: %s is false "+
+				"(an older QueryNode cannot load a segment whose load config carries two indexes on one field)",
+			fieldID, item.Key)
+	}
+
+	// "auto": the cluster itself decides, from the versions its QueryNodes report.
+	// An unknown version (no manager, e.g. a bare Server in a unit test) counts as
+	// the oldest cluster, mirroring snapshot_manager's nil guard.
+	resolved := int32(0)
+	if s.indexEngineVersionManager != nil {
+		resolved = s.indexEngineVersionManager.ResolveScalarIndexVersion()
+	}
+	if resolved < common.MinScalarIndexVersionForScalarMultiIndex {
+		return merr.WrapErrServiceNotReadyMsg(
+			"creating a second index on field %d requires scalar index engine version >= %d, current resolved version: %d "+
+				"(a rolling upgrade may still be in progress; set %s=false to refuse the capability explicitly instead)",
+			fieldID, common.MinScalarIndexVersionForScalarMultiIndex, resolved, item.Key)
 	}
 	return nil
 }

@@ -771,6 +771,17 @@ dataCoord:
   # if param forceRebuildScalarSegmentIndex is not enabled, the newly created scalar index will be aligned with the newer one of scalar index engine's version and targetScalarIndexVersion.
   # if param targetScalarIndexVersion is not set, the default value is -1, which means no target scalar index version, then the scalar index will be aligned with scalar index engine's version
   targetScalarIndexVersion: -1
+  # Whether one scalar field may carry several indexes.
+  # auto: allowed only once every QueryNode reports a scalar index engine version that can load such a
+  #   segment (common.MinScalarIndexVersionForScalarMultiIndex) -- the capability turns itself on when the
+  #   rolling upgrade finishes, and off again if a QueryNode is rolled back, so a half-upgraded cluster
+  #   never creates a shape an online node cannot load.
+  # false: never allowed; the escape hatch, and the safe value while older QueryNodes are still online.
+  # true: always allowed, bypassing the readiness check; use with caution.
+  # A QueryNode from before this feature asserts while loading a segment whose load config carries two
+  # indexes on one field. In a cross-cluster replication the creation is replicated, so the standby
+  # cluster must be upgraded first -- its own gate then opens on its own QueryNode versions.
+  enableMultiScalarIndexPerField: auto
   segmentFlushInterval: 2 # the minimal interval duration(unit: Seconds) between flushing operation on same segment
   # Switch value to control if to enable segment compaction.
   # Compaction merges small-size segments into a large segment, and clears the entities deleted beyond the rentention duration of Time Travel.
