@@ -404,6 +404,29 @@ class SegmentExpr : public Expr {
         }
 
         auto candidates = segment_->GetScalarIndexCandidates(field_id_);
+        if (candidates.empty()) {
+            // A segment can report an index the container does not own: a growing
+            // segment's interim index (an RTree on a geometry field, for one) is
+            // built by IndexingRecord rather than loaded through LoadScalarIndex,
+            // and its field type is not JSON. Ask the segment directly, exactly as
+            // this did before the container existed -- returning an empty pin here
+            // sent every such leaf to raw data
+            // (ExprTest.GISFilterGrowingIndexConjunctSkipKeepsCursorInSync).
+            auto schema = segment_->get_schema_snapshot();
+            auto& field_meta = (*schema)[field_id_];
+            auto pinned = PinIndex(op_ctx_,
+                                   segment_,
+                                   field_meta,
+                                   nested_path_,
+                                   value_type_,
+                                   allow_any_json_cast_type_,
+                                   is_json_contains_);
+            if (accepts(pinned)) {
+                pinned_index_ = std::move(pinned);
+            }
+            num_index_chunk_ = pinned_index_.size();
+            return;
+        }
         const bool ngram_allowed = CanUseNgramIndex();
         // Rank, not filter: a candidate whose capability this leaf's operator
         // looks unlikely to fit goes later but stays in the running, because
