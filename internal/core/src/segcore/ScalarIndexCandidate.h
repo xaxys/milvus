@@ -40,8 +40,9 @@ enum class ScalarIndexCapability {
 struct ScalarIndexCandidate {
     int64_t index_id{0};
     std::string index_type;
-    std::string json_path;  // empty => not a JSON path index
+    std::string json_path;  // the JSON path; may be empty for a root-path index
     JsonCastType json_cast_type{JsonCastType::UNKNOWN};
+    bool is_json{false};
     bool is_ngram{false};
     ScalarIndexCapability capability{ScalarIndexCapability::Unknown};
 };
@@ -51,16 +52,21 @@ struct ScalarIndexCandidate {
 // ngram_fields/ngram_indexings used to set). A JSON path index without NGRAM
 // deliberately stays out, exactly as json_indices did -- HasIndex() is sampled
 // by the plan compiler and must not widen for JSON fields.
+//
+// This is keyed on is_json, NOT on json_path being empty: a flat JSON index on
+// the ROOT path legitimately has an empty path, and treating that as "plain
+// scalar" both widened HasIndex() for such a field and made HasJsonIndex()
+// answer false (see the root-path case in ExprJsonIndexTest).
 inline bool
 FoldsIntoIndexReadyBit(const ScalarIndexCandidate& candidate) {
-    return candidate.json_path.empty() || candidate.is_ngram;
+    return !candidate.is_json || candidate.is_ngram;
 }
 
 // HasJsonIndex() stays what it was when it scanned json_indices: the presence
 // of a JSON path index that is NOT an NGRAM one.
 inline bool
 CountsAsJsonIndex(const ScalarIndexCandidate& candidate) {
-    return !candidate.json_path.empty() && !candidate.is_ngram;
+    return candidate.is_json && !candidate.is_ngram;
 }
 
 }  // namespace milvus::segcore

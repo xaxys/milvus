@@ -320,8 +320,9 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     struct ScalarIndexEntry {
         int64_t index_id{0};
         std::string index_type;
-        std::string json_path;  // empty => not a JSON path index
+        std::string json_path;  // the JSON path; may be empty for a root-path index
         JsonCastType json_cast_type{JsonCastType::UNKNOWN};
+        bool is_json{false};
         bool is_ngram{false};
         ScalarIndexCapability capability{ScalarIndexCapability::Unknown};
         index::CacheIndexBasePtr cache_index;
@@ -332,6 +333,7 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                                         index_type,
                                         json_path,
                                         json_cast_type,
+                                        is_json,
                                         is_ngram,
                                         capability};
         }

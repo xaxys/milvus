@@ -321,7 +321,7 @@ find_plain_scalar_entry(const ScalarIndexings& scalar_indexings,
     }
     const ChunkedSegmentSealedImpl::ScalarIndexEntry* best = nullptr;
     for (const auto& [index_id, entry] : field_it->second) {
-        if (!entry.json_path.empty()) {
+        if (entry.is_json) {
             continue;
         }
         if (best == nullptr || index_id < best->index_id) {
@@ -967,11 +967,15 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(LoadIndexInfo& info,
         entry.is_ngram = entry.index_type == index::NGRAM_INDEX_TYPE;
     }
     entry.capability = ResolveScalarIndexCapability(entry.index_type);
+    // is_json -- not json_path being empty -- is what marks a JSON path index: a
+    // flat index on the ROOT path has an empty path yet is still a JSON index, and
+    // both HasJsonIndex() and the readiness-bit fold key on that distinction.
+    entry.is_json = is_json_index;
     if (is_json_index) {
-        // A path index always carries its path. The cast type is optional in
-        // older metadata -- a JSON NGRAM index that predates the multi-cast work
-        // does not carry one -- and reading it with at() would make such a
-        // segment unloadable, so a missing cast type stays UNKNOWN.
+        // A path index always carries its path, possibly the root (""). The cast
+        // type is optional in older metadata -- a JSON NGRAM index that predates
+        // the multi-cast work does not carry one -- and reading it with at() would
+        // make such a segment unloadable, so a missing cast type stays UNKNOWN.
         entry.json_path = info.index_params.at(JSON_PATH);
         if (auto it = info.index_params.find(JSON_CAST_TYPE);
             it != info.index_params.end()) {
@@ -1375,7 +1379,8 @@ ChunkedSegmentSealedImpl::NormalizePublishedState(
                 bool folds = false;
                 bool json_ngram = false;
                 for (const auto& [index_id, entry] : indexings) {
-                    if (entry.json_path.empty()) {
+                    if (!entry.is_json) {
+                        // Plain scalar (NGRAM or not): always folded.
                         folds = true;
                         break;
                     }
@@ -3594,7 +3599,7 @@ ChunkedSegmentSealedImpl::PinIndex(milvus::OpContext* op_ctx,
     // smallest indexID so the choice never depends on hash order.
     const ScalarIndexEntry* best = nullptr;
     for (const auto& [index_id, entry] : field_it->second) {
-        if (!entry.json_path.empty()) {
+        if (entry.is_json) {
             continue;
         }
         if (!include_ngram && entry.is_ngram) {
@@ -3684,7 +3689,7 @@ find_ngram_entry(
             if (entry.json_path != *json_path) {
                 continue;
             }
-        } else if (!entry.json_path.empty()) {
+        } else if (entry.is_json) {
             continue;
         }
         if (best == nullptr || index_id < best->index_id) {
