@@ -670,3 +670,34 @@ factory 询问资源（恢复旧行为），JSON 走默认资源。
   生产路径总会填；测试里若未填则是未定义值。加默认值要动 `Types.h`（全量重编），本轮未改。
 - 测试侧一处收窄：`internal/core/unittest/test_sealed.cpp` 的 3 个 fixture 增加了显式 indexID；
   其余约 30 处 `LoadIndexInfo` 局部变量仍不设 index_id（同文件内没有同字段两次加载，故行为中性）。
+
+### 9.6 最终全量结果（三处修复之后）
+
+`all_tests`：**8244 用例 / 465 套件，8218 通过，16 失败**。16 个全部是
+`AzureChunkManagerTest.*` / `GcpNativeChunkManagerTest.*`（需要云端凭据的环境性失败，与本改动无关）。
+**与本改动相关的失败：0。**
+
+§9.4 那个"归因未定"的失败已归因并修复，真因有两个（都在本分支内）：
+
+1. **root path 的 flat JSON 索引被误判**：`json_path.empty()` 被当作"不是 JSON 索引"的哨兵，而 flat
+   JSON 索引在 root path 上路径本来就是空 → `HasJsonIndex()` 变 false（叶子回退去读段里不存在的列，
+   正是 §9.4 观察到的现象），**同时** `HasIndex()` 由 false 变 true —— 即 §3 的 I1/I2 不变量在
+   root path 这个场景被破坏（计划编译器会采样 `HasIndex`）。改用显式 `is_json` 标志
+   （`ScalarIndexEntry`/`ScalarIndexCandidate`），所有哨兵点（plain/ngram 查找、`PinIndex` 的 plain 扫描、
+   就绪位折叠）都改成按它判断。
+2. **growing 段的 interim 索引**：`EnsurePinnedIndex` 只看容器候选，而 GEOMETRY 字段上的 RTree 由
+   growing 段的 `IndexingRecord` 构建、**从不经过 `LoadScalarIndex`** → 该字段容器候选为空 →
+   所有这类叶子回退 raw data（RTree 剪枝消失）：
+   `ExprTest.GISFilterGrowingIndexConjunctSkipKeepsCursorInSync`、
+   `GISCoarseRefineExprTest.EquivalenceFusionGrowingSegmentWithRTreeIndex`。
+   修法：容器无候选时回退到改动前的 `PinIndex(...)`。
+
+另外新增**真数据行为测试** `ExprMultiScalarIndexTest`：同一 VARCHAR 上真实的 `INVERTED` + `NGRAM`
+（`Equal` / `LIKE`），同一 INT64 上 `STL_SORT` + `INVERTED`（`>` / `<` / `in`，两种加载顺序），
+结果都与"无索引段"逐位比对一致 —— 这是两个索引在同一字段共存并各自服务对应算子的首次端到端（C++ 层）证明。
+
+### 9.7 仍然没有做的
+
+- **standalone / 集群端到端未跑**（本机无 etcd/minio/docker）：协调者→节点链路（多 indexID 的 load
+  config、QueryNode 加载、drop/reload）只有单测覆盖。
+- §9.3 的 S4 probe 覆盖范围、§9.5 的 `index_id` 默认值两条遗留未变。
