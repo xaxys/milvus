@@ -701,3 +701,54 @@ factory 询问资源（恢复旧行为），JSON 走默认资源。
 - **standalone / 集群端到端未跑**（本机无 etcd/minio/docker）：协调者→节点链路（多 indexID 的 load
   config、QueryNode 加载、drop/reload）只有单测覆盖。
 - §9.3 的 S4 probe 覆盖范围、§9.5 的 `index_id` 默认值两条遗留未变。
+
+---
+
+## 10. 升级开关（消除升级顺序问题）与三项专项审查
+
+### 10.1 开关：`dataCoord.enableMultiScalarIndexPerField`（三值，默认 `auto`）
+
+照 `dataCoord.import.enableIDRangeMsg`（#53544）的**版本门禁开关**模式：参数默认是哨兵值，等整个集群确认升级到位后自动切到目标值；门禁关闭期间能力就是关的，所以滚动升级过程中**永远不会**产生"在线节点加载不了"的形状，而且节点回滚时门禁会自己关上。
+
+| 值 | 语义 | 拒绝时的错误类别 |
+|---|---|---|
+| `auto`（默认） | 只有当每个 QueryNode 都上报了能加载该形状的标量引擎版本（`common.MinScalarIndexVersionForScalarMultiIndex`）才允许 | 临时条件 → `ErrServiceNotReady`（**可重试**，门禁会自己打开） |
+| `false` | 永不允许（逃生舱；也是老 QueryNode 在线时的安全值） | 运维条件 → `ErrOperationNotSupported`（**不可重试**，靠改配置解除） |
+| `true` | 总是允许，跳过就绪检查（谨慎使用） | — |
+
+**为什么用 QueryNode 版本聚合当确认信号**：它正是 C++ 断言（`ChunkedSegmentSealedImpl::LoadScalarIndex`）的**同一个前置条件** —— 比"构建版本号"更精确，而且已经存在（DataCoord 聚合各 QueryNode 会话上报的值）。上游那套 `ParamItem.VersionGateSwitcher` + etcd `confirmator` 的机制在这棵树里**还没有**（#53544 晚于本树的基线），所以没有照搬；契约（三值 + 自动开关 + 回滚自动关）一致，等将来 rebase 到带该机制的分支时可以直接换成 `VersionGateSwitcher`。
+
+**门禁只在生产侧**（`Server.CreateIndex`）。`createIndexV2AckCallback`（复制/广播的应用路径）**不做任何本地检查**：同一条 DDL 必须在每个集群都被无条件应用，否则一个集群应用、另一个拒绝就会让元数据分叉、CDC 流断裂 —— 这正是 #53544 "secondary 不做自己的决策" 的做法。备集群先升级（ground truth）→ 它自己的 `auto` 也已满足。
+
+### 10.2 故障恢复
+
+| 场景 | 结论 |
+|---|---|
+| 崩溃在"容器变更"与"发布"之间 | 安全：变更先落在 clone（staged 或 owned runtime），再由 `NormalizePublishedState`/`PublishIndexReadyLocked` 一次性发布；发布前崩溃 = 什么都没发生，重启按 load config 重新加载 |
+| 替换（`is_replace`）中途崩溃 | 安全：先 retire 该 indexID 再 insert，且都在 clone 上；已发布状态始终有"旧"或"新"的一个，不会两个都没有 |
+| load 重试 / reopen 重列同一 indexID | 幂等：`is_replace=false` 且已加载 → 跳过；`is_replace=true` → retire+insert，重复执行结果相同 |
+| DDL 至少一次投递（含 CDC 重放） | 幂等：内存 `m.indexes[col][indexID]` 与存储 `BuildIndexKey(col, indexID)` **都以 (collection, indexID) 为主键**，重复应用是覆盖写 |
+| drop 与在途查询并发 | 无 use-after-free：查询持有 `PinWrapper` 的引用计数，被 erase 的索引在 pin 存活期内不释放；新查询看到 `HasIndex=false` 则回退原始列 |
+| 段 load 中途崩溃 | 段级的成功/失败由协调者判定，加载未完成的段不会被使用（既有机制，未实测） |
+
+### 10.3 分布式 race
+
+| 场景 | 结论 |
+|---|---|
+| 同字段并发 CreateIndex | 策略在 RPC 读、在 ack 回调写，之间是广播的异步窗口 → 两个请求可以都通过（这正是本特性想要的）；同名冲突由 `CanCreateIndex` 在 `fieldIndexLock` 下兜住，失败方拿到明确错误，重试后要么幂等命中、要么拿到新名 |
+| CreateIndex 与 DropIndex 并发 | 策略可能看到正被 drop 的索引而**保守拒绝**（客户端重试即可）；反向放行也不会损坏状态 |
+| 升级/回滚与门禁 | `auto` 随 QueryNode 版本聚合自动开/关；**已存在**的同字段多索引在回滚后不会被主动清理 → 文档要求回滚前先 drop（这是"数据面已产生"的固有约束，开关无法消除） |
+| 各集群的确定性 | Proxy 取最小 indexID、选择器 tie-break、`GetNgramIndex` 的选择都按 indexID 排序 → 不依赖 map 顺序 → 各集群一致 |
+| 未验证 | `ResolveScalarIndexVersion()` 在"部分 QueryNode 重启中"的窗口内若短暂下降，只会让门禁闪断（拒绝新创建），不会放行危险形状 —— 未实测该窗口 |
+
+### 10.4 CDC 正确性
+
+- **单侧决策**：创建由主集群决策（RPC 门禁），复制/广播的应用路径无条件执行 → 各集群按同一条广播确定性地收敛；`createIndexV2AckCallback` 里加了注释说明这一点，避免后人"顺手"在那里加校验。
+- **顺序**：ack 回调按 control-channel time tick 排序（#53544 修过这个顺序问题）→ CreateIndex / DropIndex / AlterIndex 在各集群应用顺序一致。
+- **load config 一致性**：由各集群自己的 meta + 同一广播驱动 → 一致；且按 indexID 幂等 → 重复/乱序重投不会产生第二个身份。
+- **约束（文档化，非代码兜底）**：主备集群必须"备先升"；回滚前先 drop 掉多出来的索引；`false`/降级只影响**新创建**，不影响已存在的形状。
+
+### 10.5 顺手核实的两个隐式契约（已在代码注释里点明）
+
+1. `LoadScalarIndex` 的幂等跳过只看 `(field, indexID)`、不看内容 → 依赖"同一 indexID 的内容变化必须走 `is_replace`"这一契约（当前 diff 满足：看内容变化一律进 `indexes_to_replace`）。如果将来出现"同 indexID 不同内容且 `is_replace=false`"的加载路径，会保留旧内容。
+2. `LoadIndexInfo::index_id` 是无默认值的 `int64_t`，而它现在是容器键与幂等键；生产路径总会填，测试里未初始化则是未定义值（未改 `Types.h`，避免全量重编）。
