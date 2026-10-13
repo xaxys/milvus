@@ -24,6 +24,12 @@ import (
 )
 
 func (s *DDLCallbacks) createIndexV2AckCallback(ctx context.Context, result message.BroadcastResultCreateIndexMessageV2) error {
+	// The apply path is deliberately unconditional: no version gate and no
+	// common.enableMultiScalarIndexPerField check here. Every cluster applies the
+	// same broadcast, so the decision must be made once, on the producer
+	// (Server.CreateIndex, checkIndexCreationPolicy). A local-state check would let
+	// clusters diverge -- one applies the message while another refuses it -- and
+	// break the CDC stream.
 	index := result.Message.MustBody().FieldIndex
 	if err := s.meta.indexMeta.CreateIndex(ctx, model.UnmarshalIndexModel(index)); err != nil {
 		return err

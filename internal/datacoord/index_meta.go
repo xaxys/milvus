@@ -504,33 +504,13 @@ func (m *indexMeta) canCreateIndex(req *indexpb.CreateIndexRequest, isJSON bool)
 				/*only check json params when it is json index*/ (!isJSON || checkIdenticalJSON(index, req)) {
 				return index.IndexID, errIndexOperationIgnored
 			}
-			errMsg := "at most one distinct index is allowed per field"
-			mlog.Warn(context.TODO(), errMsg,
-				mlog.String("source index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
-					index.IndexName, index.FieldID, index.IndexParams, index.UserIndexParams, index.TypeParams)),
-				mlog.String("current index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
-					req.GetIndexName(), req.GetFieldID(), req.GetIndexParams(), req.GetUserIndexParams(), req.GetTypeParams())))
-			return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
-		}
-		if req.FieldID == index.FieldID {
-			if isJSON {
-				// Skip error handling since json path existence is guaranteed in CreateIndex
-				jsonPath1, _ := getIndexParam(index.IndexParams, common.JSONPathKey)
-				jsonPath2, _ := getIndexParam(req.GetIndexParams(), common.JSONPathKey)
-
-				if jsonPath1 != jsonPath2 {
-					// if json path is not same, create index is allowed
-					continue
-				}
-			}
-			// creating multiple indexes on same field is not supported
-			errMsg := "CreateIndex failed: creating multiple indexes on same field is not supported"
-			mlog.Warn(context.TODO(), errMsg)
-			// Client-caused conflict, same family as the "one distinct index per
-			// field" case above: return an input-class error rather than
-			// ServiceInternal (code 5, "never return out of Milvus") so the
-			// caller is not blamed with a system error / counted as a system-caused failure.
-			return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
+			// The index name is the only conflict this layer can decide: whether a
+			// second index is allowed on a field depends on the field type and on the
+			// cluster's scalar index engine version, and both live in the Server's
+			// policy (checkIndexCreationPolicy), which sees the schema and the version
+			// manager that this meta does not.
+			return 0, merr.WrapErrParameterInvalidMsg(
+				"index name is already used by another index in this collection")
 		}
 	}
 	return 0, nil
