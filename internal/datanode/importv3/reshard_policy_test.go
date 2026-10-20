@@ -109,6 +109,14 @@ func TestGetReshardPolicySnapshotBudgets(t *testing.T) {
 
 	fullBudget := int64(3) * reshardmem.MemoryPerSlot(bt.DataNodeCfg.WorkerSlotUnit.GetAsInt64(), bt.DataNodeCfg.BuildParallel.GetAsInt64())
 	require.Equal(t, fullBudget-deleteBudget-bitmapBudget, policy.memory.budget)
+
+	t.Run("missing snapshot budget", func(t *testing.T) {
+		missing := fix.plan([]*internalpb.ImportFile{source}, 8<<20)
+		missing.Options = plan.Options
+		missing.SnapshotL0Sources = plan.SnapshotL0Sources
+		_, err := getReshardPolicy(fix.request(missing, 3), missing)
+		require.Error(t, err)
+	})
 }
 
 // TestGetReshardPolicyClampsSlotAndRejectsBadTarget covers the two boundary

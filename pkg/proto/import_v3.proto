@@ -32,7 +32,6 @@ message ReshardTaskPlan {
   // and bitmap builder. DataCoord charges the same values in the task slot, so
   // a per-component config difference cannot make charge and enforcement drift.
   SnapshotBudget snapshot_budget = 12;
-  reserved 13; // was snapshot_bitmap_budget before the budgets were grouped.
 }
 
 // SnapshotBudget groups every memory reservation one reshard task needs for

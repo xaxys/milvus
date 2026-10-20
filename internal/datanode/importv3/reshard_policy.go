@@ -137,14 +137,8 @@ func getReshardPolicy(req *datapb.ReshardTaskRequest, plan *importv3pb.ReshardTa
 	}
 	budget := plan.GetSnapshotBudget()
 	deleteBudget, bitmapBudget := budget.GetDeleteBudget(), budget.GetBitmapBudget()
-	if typedSnapshot && deleteBudget <= 0 {
-		// Older in-memory plans did not carry the reservation. Fall back to the
-		// live config rather than handing the merger a zero budget; DataCoord and
-		// the DataNode are upgraded together for Reshard dispatch.
-		deleteBudget = max(paramtable.Get().DataNodeCfg.ImportDeleteBufferSize.GetAsInt64(), 1)
-	}
-	if hasSnapshotL0 && bitmapBudget <= 0 {
-		bitmapBudget = deleteBudget
+	if typedSnapshot && (deleteBudget <= 0 || (hasSnapshotL0 && bitmapBudget <= 0)) {
+		return nil, merr.WrapErrImportSysFailedMsg("snapshot reshard plan is missing its delete/bitmap budget")
 	}
 	// The task's slot budget is charged in the node's own slot unit, the same one
 	// DataCoord estimated the slot with (reshardmem.MemoryPerSlot), not the
