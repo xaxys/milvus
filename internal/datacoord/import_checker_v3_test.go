@@ -378,26 +378,25 @@ func TestSnapshotL0Budgets(t *testing.T) {
 		Options: options,
 		Files:   []*internalpb.ImportFile{{Paths: []string{"metadata.json"}}},
 	}}
-	deleteBudget, bitmapBudget := snapshotL0Budgets(baseline)
-	require.Zero(t, deleteBudget)
-	require.Zero(t, bitmapBudget)
+	budgets := snapshotBudgets(baseline)
+	require.Nil(t, budgets)
 
 	typed := &importJob{ImportJob: &datapb.ImportJob{
 		Options: options,
 		Files:   []*internalpb.ImportFile{{SnapshotSource: &internalpb.SnapshotImportSource{Version: 1}}},
 	}}
-	deleteBudget, bitmapBudget = snapshotL0Budgets(typed)
-	require.Equal(t, budget, deleteBudget)
-	require.Zero(t, bitmapBudget)
+	budgets = snapshotBudgets(typed)
+	require.Equal(t, budget, budgets.GetDeleteBudget())
+	require.Zero(t, budgets.GetBitmapBudget())
 
 	shared := &importJob{ImportJob: &datapb.ImportJob{
 		Options:           options,
 		Files:             []*internalpb.ImportFile{{SnapshotSource: &internalpb.SnapshotImportSource{Version: 5}}},
 		SnapshotL0Sources: []*internalpb.SnapshotImportL0Source{{SourceChannel: "ch", SourcePartitionId: 10}},
 	}}
-	deleteBudget, bitmapBudget = snapshotL0Budgets(shared)
-	require.Equal(t, budget, deleteBudget)
-	require.Equal(t, budget, bitmapBudget)
+	budgets = snapshotBudgets(shared)
+	require.Equal(t, budget, budgets.GetDeleteBudget())
+	require.Equal(t, budget, budgets.GetBitmapBudget())
 }
 
 // TestPendingHandlerBackupCreatesPreImportV3Tasks pins the backup flow: a backup

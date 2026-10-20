@@ -23,6 +23,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
 	"github.com/milvus-io/milvus/internal/util/importutilv2/reshardmem"
+	"github.com/milvus-io/milvus/pkg/v3/proto/importv3pb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
@@ -98,8 +99,7 @@ func TestGetReshardPolicySnapshotBudgets(t *testing.T) {
 	}
 	plan.SnapshotL0Sources = []*internalpb.SnapshotImportL0Source{{SourceChannel: "ch", SourcePartitionId: 10}}
 	const deleteBudget, bitmapBudget = int64(1 << 20), int64(2 << 20)
-	plan.SnapshotDeleteBudget = deleteBudget
-	plan.SnapshotBitmapBudget = bitmapBudget
+	plan.SnapshotBudget = &importv3pb.SnapshotBudget{DeleteBudget: deleteBudget, BitmapBudget: bitmapBudget}
 
 	policy, err := getReshardPolicy(fix.request(plan, 3), plan)
 	require.NoError(t, err)

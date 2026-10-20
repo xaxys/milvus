@@ -135,7 +135,8 @@ func getReshardPolicy(req *datapb.ReshardTaskRequest, plan *importv3pb.ReshardTa
 			}
 		}
 	}
-	deleteBudget, bitmapBudget := plan.GetSnapshotDeleteBudget(), plan.GetSnapshotBitmapBudget()
+	budget := plan.GetSnapshotBudget()
+	deleteBudget, bitmapBudget := budget.GetDeleteBudget(), budget.GetBitmapBudget()
 	if typedSnapshot && deleteBudget <= 0 {
 		// Older in-memory plans did not carry the reservation. Fall back to the
 		// live config rather than handing the merger a zero budget; DataCoord and

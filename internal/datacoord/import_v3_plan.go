@@ -174,30 +174,30 @@ func reshardPlan(job ImportJob, p *datapb.ReshardTask, cfg importV3Config) (*imp
 	if err != nil {
 		return nil, err
 	}
-	deleteBudget, bitmapBudget := snapshotL0Budgets(job)
+	budgets := snapshotBudgets(job)
 	return &importv3pb.ReshardTaskPlan{
-		CollectionId:         job.GetCollectionID(),
-		CollectionSchema:     job.GetSchema(),
-		Vchannels:            append([]string(nil), job.GetVchannels()...),
-		PartitionIds:         partitions,
-		Files:                append([]*internalpb.ImportFile(nil), files...),
-		Options:              append([]*commonpb.KeyValuePair(nil), job.GetOptions()...),
-		FragmentSize:         fragmentSize,
-		RlsCheckPredicate:    job.GetRlsCheckPredicate(),
-		SnapshotL0Sources:    snapshotL0Sources,
-		SnapshotDeleteBudget: deleteBudget,
-		SnapshotBitmapBudget: bitmapBudget,
+		CollectionId:      job.GetCollectionID(),
+		CollectionSchema:  job.GetSchema(),
+		Vchannels:         append([]string(nil), job.GetVchannels()...),
+		PartitionIds:      partitions,
+		Files:             append([]*internalpb.ImportFile(nil), files...),
+		Options:           append([]*commonpb.KeyValuePair(nil), job.GetOptions()...),
+		FragmentSize:      fragmentSize,
+		RlsCheckPredicate: job.GetRlsCheckPredicate(),
+		SnapshotL0Sources: snapshotL0Sources,
+		SnapshotBudget:    budgets,
 	}, nil
 }
 
-// snapshotL0Budgets returns the exact delete-map and bitmap reservations for a
+// snapshotBudgets returns the exact delete-map and bitmap reservations for a
 // snapshot job. Both are frozen into the reshard plan so DataCoord's slot charge
 // and the DataNode's enforcement use one value. A typed descriptor always needs
 // the delete map for its manifest-local deltalog; only a job with a shared L0
-// inventory needs the bitmap used to merge it.
-func snapshotL0Budgets(job ImportJob) (int64, int64) {
+// inventory needs the bitmap used to merge it. New snapshot budgets belong in
+// the message instead of new ReshardTaskPlan fields.
+func snapshotBudgets(job ImportJob) *importv3pb.SnapshotBudget {
 	if !importutilv2.IsSnapshotSource(job.GetOptions()) {
-		return 0, 0
+		return nil
 	}
 	// Baseline snapshots carry no typed descriptor and therefore read no
 	// delete data. A typed descriptor without shared L0 still reads its
@@ -210,13 +210,14 @@ func snapshotL0Budgets(job ImportJob) (int64, int64) {
 		}
 	}
 	if !typed {
-		return 0, 0
+		return nil
 	}
 	budget := max(Params.DataNodeCfg.ImportDeleteBufferSize.GetAsInt64(), 1)
+	budgets := &importv3pb.SnapshotBudget{DeleteBudget: budget}
 	if len(job.GetSnapshotL0Sources()) > 0 {
-		return budget, budget
+		budgets.BitmapBudget = budget
 	}
-	return budget, 0
+	return budgets
 }
 
 // reshardTaskPartitions returns the partition set one reshard task may route
@@ -289,14 +290,14 @@ func reshardSlot(job ImportJob, cfg importV3Config) int64 {
 		// later refresh to an invalid value must still yield a positive charge.
 		return 1
 	}
-	deleteBudget, bitmapBudget := snapshotL0Budgets(job)
+	budgets := snapshotBudgets(job)
 	return calculateReshardTaskSlot(reshardmem.Model{
 		ReadBuffer:           cfg.importBaseBufferSize,
 		FragmentTarget:       fragmentSize,
 		FlushConcurrency:     cfg.reshardFlushConcurrency,
 		ExpansionFactor:      cfg.reshardMemoryExpansionFactor,
-		SnapshotDeleteBudget: deleteBudget,
-		SnapshotBitmapBudget: bitmapBudget,
+		SnapshotDeleteBudget: budgets.GetDeleteBudget(),
+		SnapshotBitmapBudget: budgets.GetBitmapBudget(),
 	}, reshardmem.MemoryPerSlot(cfg.workerSlotUnit, cfg.buildParallel),
 		int64(len(job.GetVchannels())*len(job.GetPartitionIDs())),
 		cfg.reshardResidentBucketCap,
