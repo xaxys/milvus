@@ -206,21 +206,19 @@ func (RateType) EnumDescriptor() ([]byte, []int) {
 type ImportJobState int32
 
 const (
-	ImportJobState_None             ImportJobState = 0
-	ImportJobState_Pending          ImportJobState = 1
-	ImportJobState_PreImporting     ImportJobState = 2
-	ImportJobState_Importing        ImportJobState = 3
-	ImportJobState_Failed           ImportJobState = 4
-	ImportJobState_Completed        ImportJobState = 5
-	ImportJobState_IndexBuilding    ImportJobState = 6
-	ImportJobState_Sorting          ImportJobState = 7
-	ImportJobState_Uncommitted      ImportJobState = 8
-	ImportJobState_Committing       ImportJobState = 9
-	ImportJobState_AssigningIDRange ImportJobState = 10
-	ImportJobState_Planning         ImportJobState = 11
-	ImportJobState_Resharding       ImportJobState = 12
-	// SnapshotPreparing expands a snapshot job's metadata into its executable
-	// file plan. It is V3-only: V2 keeps its legacy in-flight jobs in Pending.
+	ImportJobState_None              ImportJobState = 0
+	ImportJobState_Pending           ImportJobState = 1
+	ImportJobState_PreImporting      ImportJobState = 2
+	ImportJobState_Importing         ImportJobState = 3
+	ImportJobState_Failed            ImportJobState = 4
+	ImportJobState_Completed         ImportJobState = 5
+	ImportJobState_IndexBuilding     ImportJobState = 6
+	ImportJobState_Sorting           ImportJobState = 7
+	ImportJobState_Uncommitted       ImportJobState = 8
+	ImportJobState_Committing        ImportJobState = 9
+	ImportJobState_AssigningIDRange  ImportJobState = 10
+	ImportJobState_Planning          ImportJobState = 11
+	ImportJobState_Resharding        ImportJobState = 12
 	ImportJobState_SnapshotPreparing ImportJobState = 13
 )
 
@@ -3412,7 +3410,7 @@ type SnapshotImportSource struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	// Version 9 is a coordinator-only Pending marker, never a worker file.
+	// Version 9 is a coordinator-only preparation marker, never a worker file.
 	// The metadata URI and layout are stored in job options. Expansion
 	// atomically replaces this marker with executable segment descriptors.
 	Version               uint32 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
@@ -3519,7 +3517,7 @@ func (x *SnapshotImportSource) GetSourcePartitionId() int64 {
 	return 0
 }
 
-// Stored once per source scope in the job after Pending preparation.
+// Stored once per source scope in the job after snapshot preparation.
 // Channel-wide deletes use the all-partitions sentinel. Each worker task
 // receives the merged exact scope.
 type SnapshotImportL0Source struct {

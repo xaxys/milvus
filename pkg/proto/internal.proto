@@ -401,8 +401,6 @@ enum ImportJobState {
   AssigningIDRange = 10;
   Planning = 11;
   Resharding = 12;
-  // SnapshotPreparing expands a snapshot job's metadata into its executable
-  // file plan. It is V3-only: V2 keeps its legacy in-flight jobs in Pending.
   SnapshotPreparing = 13;
 }
 
