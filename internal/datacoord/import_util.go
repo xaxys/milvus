@@ -366,15 +366,15 @@ func AssemblePreImportRequest(task ImportTask, job ImportJob) (*datapb.PreImport
 		func(fileStats *datapb.ImportFileStats, _ int) *internalpb.ImportFile {
 			return fileStats.GetImportFile()
 		})
-	return assemblePreImportRequest(task, job, importFiles)
+	return assemblePreImportRequest(task, job, importFiles, true)
 }
 
 // AssemblePreImportV3Request builds the count-only preimport request for an
 // Import V3 task. The V3 record carries only ImportV3FileStats (file IDs, no
 // ImportFile), so its files are resolved against the frozen job; using the
 // shared AssemblePreImportRequest would send an empty import_files list.
-// Snapshot-sourced imports never reach V3, so the shared snapshot L0 lookup
-// below resolves to nil for these files.
+// V3 preimport is size-only and never folds L0, so the L0 inventory is omitted:
+// the task may also span several source scopes for BFD packing.
 func AssemblePreImportV3Request(task *preImportV3Task, job ImportJob) (*datapb.PreImportRequest, error) {
 	jobFiles := lo.KeyBy(job.GetFiles(), func(file *internalpb.ImportFile) int64 { return file.GetId() })
 	importFiles := lo.FilterMap(task.GetV3FileStats(),
@@ -382,13 +382,17 @@ func AssemblePreImportV3Request(task *preImportV3Task, job ImportJob) (*datapb.P
 			file, ok := jobFiles[stat.GetFileId()]
 			return file, ok
 		})
-	return assemblePreImportRequest(task, job, importFiles)
+	return assemblePreImportRequest(task, job, importFiles, false)
 }
 
-func assemblePreImportRequest(task ImportTask, job ImportJob, importFiles []*internalpb.ImportFile) (*datapb.PreImportRequest, error) {
-	l0Source, err := importutilv2.SnapshotTaskL0Source(importFiles, job.GetSnapshotL0Sources())
-	if err != nil {
-		return nil, err
+func assemblePreImportRequest(task ImportTask, job ImportJob, importFiles []*internalpb.ImportFile, includeSnapshotL0 bool) (*datapb.PreImportRequest, error) {
+	var l0Source *internalpb.SnapshotImportL0Source
+	if includeSnapshotL0 {
+		var err error
+		l0Source, err = importutilv2.SnapshotTaskL0Source(importFiles, job.GetSnapshotL0Sources())
+		if err != nil {
+			return nil, err
+		}
 	}
 	req := &datapb.PreImportRequest{
 		JobID:            task.GetJobID(),
@@ -907,6 +911,9 @@ func getV2JobProgress(ctx context.Context, job ImportJob, importMeta ImportMeta,
 func getV3JobProgress(ctx context.Context, job ImportJob, importMeta ImportMeta, meta *meta) (int64, internalpb.ImportJobState, int64, int64, string) {
 	jobID := job.GetJobID()
 	switch job.GetState() {
+	case internalpb.ImportJobState_SnapshotPreparing:
+		return 0, internalpb.ImportJobState_SnapshotPreparing, 0, 0, ""
+
 	case internalpb.ImportJobState_Pending:
 		progress := getPendingProgress(ctx, jobID, importMeta)
 		return int64(progress * 10), internalpb.ImportJobState_Pending, 0, 0, ""

@@ -181,12 +181,12 @@ func TestBroadcastSnapshotImportMultipleTargetPartitions(t *testing.T) {
 	patchSnapshotImportWAL(t)
 	ctx := context.Background()
 	// Exercise the real broadcast path while replacing external validation,
-	// metadata I/O, and WAL transport. Source expansion does not select targets.
+	// metadata I/O, and WAL transport. Source preparation does not select targets.
 	validation := mockey.Mock((*Server).validateImportRequest).Return(nil).Build()
 	defer validation.UnPatch()
-	expansion := mockey.Mock(prepareSnapshotImportFiles).Return(
+	preparation := mockey.Mock(prepareSnapshotImportFiles).Return(
 		[]*internalpb.ImportFile{{Paths: []string{"root/data/manifest"}}}, snapshotImportTestOptions(), nil).Build()
-	defer expansion.UnPatch()
+	defer preparation.UnPatch()
 	replication := mockey.Mock((*Server).validateImportReplication).Return(nil).Build()
 	defer replication.UnPatch()
 	api := newMockBroadcastAPIImpl()
@@ -216,11 +216,11 @@ func TestBroadcastSnapshotImportMultipleTargetPartitions(t *testing.T) {
 	require.False(t, duplicated)
 	require.Equal(t, partitionIDs, received)
 	require.True(t, api.closeCalled.Load())
-	expansion.UnPatch()
-	invalidExpansion := mockey.Mock(prepareSnapshotImportFiles).Return([]*internalpb.ImportFile{{SnapshotSource: &internalpb.SnapshotImportSource{
+	preparation.UnPatch()
+	invalidPreparation := mockey.Mock(prepareSnapshotImportFiles).Return([]*internalpb.ImportFile{{SnapshotSource: &internalpb.SnapshotImportSource{
 		Version: 5, ManifestPath: packed.MarshalManifestPath("root/data", 1), SourceChannel: "source", SourcePartitionId: 10,
 	}}}, snapshotImportTestOptions(), nil).Build()
-	defer invalidExpansion.UnPatch()
+	defer invalidPreparation.UnPatch()
 	received = nil
 	_, _, err = server.broadcastImport(ctx, 100, partitionIDs,
 		[]*internalpb.ImportFile{{Paths: []string{"s3://source/root/snapshots/1/metadata/2.json"}}},
@@ -255,8 +255,8 @@ func TestBroadcastImportBoundaryFailures(t *testing.T) {
 			}
 			validation := mockey.Mock((*Server).validateImportRequest).Return(nil).Build()
 			defer validation.UnPatch()
-			expansion := mockey.Mock(prepareSnapshotImportFiles).Return(files, opts, errFor("prepare")).Build()
-			defer expansion.UnPatch()
+			preparation := mockey.Mock(prepareSnapshotImportFiles).Return(files, opts, errFor("prepare")).Build()
+			defer preparation.UnPatch()
 			replication := mockey.Mock((*Server).validateImportReplication).Return(errFor("replication")).Build()
 			defer replication.UnPatch()
 			partitions := mockey.Mock((*Server).validateSnapshotPartitionTargets).Return(errFor("partition_targets")).Build()

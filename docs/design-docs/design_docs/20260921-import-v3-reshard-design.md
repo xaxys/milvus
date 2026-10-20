@@ -73,14 +73,20 @@ Non-goals:
 ## Architecture Overview
 
 ```text
-Pending ▶ PreImporting
-  ├─ ordinary import ──▶ AssigningIDRange ─┐
-  └─ backup import ────────────────────────┴─▶ Resharding
-        ─▶ Planning ─▶ Importing ─▶ IndexBuilding
-        ─▶ Uncommitted ─▶ Committing ─▶ Completed
+Pending ─┬─ snapshot import ──▶ SnapshotPreparing ─┐
+         ├─ ordinary import ──▶ PreImporting ─▶ AssigningIDRange ─┤
+         └─ backup import ────▶ PreImporting ──────────────────────┴─▶ Resharding
+               ─▶ Planning ─▶ Importing ─▶ IndexBuilding
+               ─▶ Uncommitted ─▶ Committing ─▶ Completed
 
 any state before Committing ─▶ Failed
 ```
+
+- **Snapshot imports** first prepare their metadata into one executable
+  `ImportFile` per source segment in `SnapshotPreparing`, then run the same
+  size-only preimport as backup imports. The preparation runs inline on the V3
+  checker goroutine (it reads metadata and lists manifests, never row data);
+  legacy V2 in-flight snapshot jobs keep the bounded scheduler in `Pending`.
 
 - **Ordinary imports** must know the exact per-file row count before Reshard can
   generate deterministic PK/RowID, so they first run a count-only preimport,
@@ -540,6 +546,7 @@ has two extra internal stages (`Resharding`, `Planning`).
 // 10%: Completed
 // ImportVersionV3:
 // 10%: Pending
+//  0%: SnapshotPreparing  (constant; metadata expansion has no sub-progress)
 //  5%: PreImporting/AssigningIDRange
 // 30%: Resharding
 //  5%: Planning
@@ -553,6 +560,7 @@ Sub-progress within each weighted band:
 | State | V2 | V3 |
 | --- | --- | --- |
 | Pending | files covered by a `PreImportTask` / total files | same `pendingFileProgress` (legacy `PreImportTask` only, so effectively 0 until the job advances) |
+| SnapshotPreparing | — | constant `0%` (metadata expansion has no sub-progress) |
 | PreImporting / AssigningIDRange | completed `PreImportTask`s / total | completed count-only `PreImportTaskV3` tasks / total |
 | Resharding | — | completed ReshardTasks / total (100% if none) |
 | Planning | — | constant band (no sub-progress); instant stage |
@@ -571,6 +579,6 @@ Notes:
   reached.
 - `Planning` always reports its full band constant (no finer signal), because
   the stage is a single fast catalog write.
-- Every internal V3 stage except `Pending`, `Uncommitted`, `Committing`,
-  `Completed`, `Failed` is projected to the external `Importing` state; the
-  real stage is preserved only in logs and metrics.
+- Every internal V3 stage except `Pending`, `SnapshotPreparing`, `Uncommitted`,
+  `Committing`, `Completed`, `Failed` is projected to the external `Importing`
+  state; the real stage is preserved only in logs and metrics.

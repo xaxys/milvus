@@ -23,6 +23,16 @@ message ReshardTaskPlan {
   repeated common.KeyValuePair options = 7;
   int64 fragment_size = 8;
   plan.Expr rls_check_predicate = 10;
+  // Snapshot L0 inventories needed by this task's files. A task may span
+  // several source scopes so BFD can pack without fragmenting the snapshot
+  // into one task per (source channel, source partition); each inventory is
+  // matched to its files by the descriptor's source scope.
+  repeated internal.SnapshotImportL0Source snapshot_l0_sources = 11;
+  // Exact reservations the DataNode must hand to the snapshot delete merger
+  // and bitmap builder. DataCoord charges the same values in the task slot, so
+  // a per-component config difference cannot make charge and enforcement drift.
+  int64 snapshot_delete_budget = 12;
+  int64 snapshot_bitmap_budget = 13;
 }
 
 message FragmentDescriptor {

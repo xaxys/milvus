@@ -458,70 +458,84 @@ func (r *reader) initStorageV3Manifest(manifestPath string, tsStart, tsEnd uint6
 }
 
 func (r *reader) collectStorageV3Files(manifestPath string) error {
-	r.storageV3LobSize = 0
-	files := make(map[string]struct{})
-	fragments, err := packed.ReadFragmentsFromManifest(manifestPath, r.storageConfig, nil)
+	files, lobSize, err := StorageV3ManifestFiles(r.ctx, r.cm, r.storageConfig, r.schema, manifestPath, r.validatePath)
 	if err != nil {
-		return merr.Wrap(err, "failed to read StorageV3 data files from manifest")
+		return err
+	}
+	r.storageV3Files = files
+	r.storageV3LobSize = lobSize
+	return nil
+}
+
+// StorageV3ManifestFiles lists the physical data files a StorageV3 manifest
+// references (plus out-of-line TEXT LOBs) without reading any row. It is shared
+// by the row reader and the Import V3 size-only preimport.
+func StorageV3ManifestFiles(ctx context.Context, cm storage.ChunkManager, cfg *indexpb.StorageConfig,
+	schema *schemapb.CollectionSchema, manifestPath string, validate func(string) error,
+) ([]string, int64, error) {
+	files := make(map[string]struct{})
+	fragments, err := packed.ReadFragmentsFromManifest(manifestPath, cfg, nil)
+	if err != nil {
+		return nil, 0, merr.Wrap(err, "failed to read StorageV3 data files from manifest")
 	}
 	for _, fragment := range fragments {
 		if strings.TrimSpace(fragment.FilePath) == "" {
-			return merr.WrapErrDataIntegrityMsg(
+			return nil, 0, merr.WrapErrDataIntegrityMsg(
 				"StorageV3 manifest %s contains a data fragment without a path",
 				manifestPath,
 			)
 		}
-		if r.validatePath != nil {
-			if err := r.validatePath(fragment.FilePath); err != nil {
-				return err
+		if validate != nil {
+			if err := validate(fragment.FilePath); err != nil {
+				return nil, 0, err
 			}
 		}
 		files[snapshotstorage.NormalizeSnapshotObjectPath(fragment.FilePath)] = struct{}{}
 	}
 	textFields := typeutil.NewSet[int64]()
-	for _, field := range r.schema.GetFields() {
+	for _, field := range schema.GetFields() {
 		if field.GetDataType() == schemapb.DataType_Text {
 			textFields.Insert(field.GetFieldID())
 		}
 	}
 	if textFields.Len() == 0 {
-		r.storageV3Files = lo.Keys(files)
-		return nil
+		return lo.Keys(files), 0, nil
 	}
 
-	lobFiles, err := packed.GetManifestLobFiles(manifestPath, r.storageConfig)
+	lobFiles, err := packed.GetManifestLobFiles(manifestPath, cfg)
 	if err != nil {
-		return merr.Wrap(err, "failed to read StorageV3 LOB files from manifest")
+		return nil, 0, merr.Wrap(err, "failed to read StorageV3 LOB files from manifest")
 	}
+	var lobSize int64
 	for _, lobFile := range lobFiles {
-		// r.schema has already been projected by physical FieldID. Ignore LOBs
+		// schema has already been projected by physical FieldID. Ignore LOBs
 		// of omitted fields before validation and size accounting: they are not
 		// read, even when another TEXT field still requires LOB resolution.
 		if !textFields.Contain(lobFile.FieldID) {
 			continue
 		}
-		if r.validatePath != nil {
-			if err := r.validatePath(lobFile.Path); err != nil {
-				return err
+		if validate != nil {
+			if err := validate(lobFile.Path); err != nil {
+				return nil, 0, err
 			}
 			// Positive manifest-reported sizes bypass Size() object lookups.
 			// Check these too, even if all rows referencing the LOB are deleted.
-			exists, err := r.cm.Exist(r.ctx, snapshotstorage.NormalizeSnapshotObjectPath(lobFile.Path))
+			exists, err := cm.Exist(ctx, snapshotstorage.NormalizeSnapshotObjectPath(lobFile.Path))
 			if err != nil {
-				return merr.Wrap(err, "failed to check snapshot LOB")
+				return nil, 0, merr.Wrap(err, "failed to check snapshot LOB")
 			}
 			if !exists {
-				return merr.WrapErrDataIntegrityMsg("snapshot LOB does not exist: %s", lobFile.Path)
+				return nil, 0, merr.WrapErrDataIntegrityMsg("snapshot LOB does not exist: %s", lobFile.Path)
 			}
 		}
 		if strings.TrimSpace(lobFile.Path) == "" {
-			return merr.WrapErrDataIntegrityMsg(
+			return nil, 0, merr.WrapErrDataIntegrityMsg(
 				"StorageV3 manifest %s contains a LOB file without a path",
 				manifestPath,
 			)
 		}
 		if lobFile.FileSizeBytes < 0 {
-			return merr.WrapErrDataIntegrityMsg(
+			return nil, 0, merr.WrapErrDataIntegrityMsg(
 				"StorageV3 manifest %s contains LOB file %s with negative size %d",
 				manifestPath,
 				lobFile.Path,
@@ -529,13 +543,12 @@ func (r *reader) collectStorageV3Files(manifestPath string) error {
 			)
 		}
 		if lobFile.FileSizeBytes > 0 {
-			r.storageV3LobSize += lobFile.FileSizeBytes
+			lobSize += lobFile.FileSizeBytes
 			continue
 		}
 		files[snapshotstorage.NormalizeSnapshotObjectPath(lobFile.Path)] = struct{}{}
 	}
-	r.storageV3Files = lo.Keys(files)
-	return nil
+	return lo.Keys(files), lobSize, nil
 }
 
 func (r *reader) readDelete(deltaLogs []string, tsStart, tsEnd uint64) (map[any]typeutil.Timestamp, error) {
