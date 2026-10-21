@@ -1718,7 +1718,7 @@ gate. The public Import request reuses its existing options and file fields.
    failure-path audit are complete. Record unrun CDC/backend/plugin scenarios
    explicitly; neither compilation nor a no-L0 happy-path E2E proves L0 support.
 
-Implemented change areas include `handler.go`, `import_snapshot.go`,
+Implemented change areas include `handler.go`, `import_snapshot_prep.go`,
 `ddl_callbacks_import.go`, internal protobufs, `snapshotio`, the Import reader
 dispatch and binlog reader/filter, and the two task entry points' memory
 admission. There is no new public SDK API, target L0 task, source compaction

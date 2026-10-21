@@ -22,8 +22,10 @@ package datacoord
 // a tick does to one job lives in import_v3_handler.go and the
 // import_v3_handler_<state>.go files (with the generic helpers in
 // import_v3_job_context.go), the preimport stage in import_v3_preimport.go, the
-// reshard and planning stages in import_v3_reshard.go and
-// import_v3_planning.go, and the job-to-plan derivation in import_v3_plan.go.
+// snapshot expansion shared with V2 in import_snapshot_prep.go (the legacy V2
+// scheduler lives in import_snapshot_prep_scheduler.go), the reshard and
+// planning stages in import_v3_reshard.go and import_v3_planning.go, and the
+// job-to-plan derivation in import_v3_plan.go.
 
 import (
 	"context"

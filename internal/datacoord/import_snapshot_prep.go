@@ -18,21 +18,24 @@ package datacoord
 
 import (
 	"context"
+	"errors"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/snapshotio/storage"
 	milvusstorage "github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/internal/util/hookutil"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
 	"github.com/milvus-io/milvus/pkg/v3/common"
-	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
@@ -42,115 +45,81 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
-// cancelInactiveSnapshotPreparations is called each checker tick, including
-// for jobs whose channels are not ready. A terminal job must not keep doing I/O.
-func (c *importChecker) cancelInactiveSnapshotPreparations() {
-	c.prepareMu.Lock()
-	defer c.prepareMu.Unlock()
-	for id, cancel := range c.preparing {
-		job := c.importMeta.GetJob(c.ctx, id)
-		if job == nil || job.GetState() != internalpb.ImportJobState_Pending || !importutilv2.IsSnapshotPreparation(job.GetFiles()) {
-			cancel()
-		}
-	}
-}
+// errSnapshotExpansionRetry marks an expansion failure that must be retried
+// without failing the job. File-ID allocation is the only such step: the plan
+// has not been published yet, so the next tick retries from scratch.
+var errSnapshotExpansionRetry = errors.New("snapshot expansion retry")
 
-func (c *importChecker) scheduleSnapshotPreparation(job ImportJob) {
-	c.prepareMu.Lock()
-	// A fixed small bound prevents a backlog from creating one goroutine and
-	// source client per pending job. The next checker tick admits queued work.
-	if c.prepareClosed || c.preparing[job.GetJobID()] != nil || len(c.preparing) >= 4 {
-		c.prepareMu.Unlock()
-		return
-	}
-	ctx, cancel := context.WithCancel(c.ctx)
-	if job.GetTimeoutTs() != 0 {
-		cancel()
-		deadline, _ := tsoutil.ParseTS(job.GetTimeoutTs())
-		ctx, cancel = context.WithDeadline(c.ctx, deadline)
-	}
-	if c.preparing == nil {
-		c.preparing = make(map[int64]context.CancelFunc)
-	}
-	c.preparing[job.GetJobID()] = cancel
-	c.prepareWG.Add(1)
-	c.prepareMu.Unlock()
-	go func() {
-		defer c.prepareWG.Done()
-		defer func() {
-			cancel()
-			c.prepareMu.Lock()
-			delete(c.preparing, job.GetJobID())
-			c.prepareMu.Unlock()
-		}()
-		c.prepareSnapshotJob(ctx, job)
-	}()
-}
-
-func (c *importChecker) prepareSnapshotJob(ctx context.Context, job ImportJob) {
+// expandSnapshotJob expands a pending snapshot job's metadata reference into
+// its executable file plan. It performs source I/O and allocates file IDs but
+// persists nothing: callers own the durability boundary and the failure
+// transition. The returned plan is fully validated, including the allocated
+// IDs, before it is handed back.
+func expandSnapshotJob(ctx context.Context, meta *meta, alloc allocator.Allocator, job ImportJob) ([]*internalpb.ImportFile, importutilv2.Options, []*internalpb.SnapshotImportL0Source, error) {
 	// Recovered jobs must validate the reference before doing source I/O.
-	err := importutilv2.ValidateSnapshotImportPlan(job.GetFiles(), job.GetOptions(), nil)
-	var files []*internalpb.ImportFile
-	var options importutilv2.Options
-	var sources []*internalpb.SnapshotImportL0Source
-	if err == nil {
-		var metadata *datapb.SnapshotMetadata
-		metadata, err = readSnapshotImportMetadata(ctx, c.meta.chunkManager, job.GetOptions())
-		uri, _ := funcutil.GetAttrByKeyFromRepeatedKV(importutilv2.SnapshotSourceURI, job.GetOptions())
-		if err == nil {
-			files, options, sources, err = expandSnapshotImportFiles(ctx, job.GetPartitionIDs(), c.meta.chunkManager, job.GetSchema(),
-				uri, job.GetOptions(), metadata)
-		}
+	if err := importutilv2.ValidateSnapshotImportPlan(job.GetFiles(), job.GetOptions(), nil); err != nil {
+		return nil, nil, nil, err
+	}
+	metadata, err := readSnapshotImportMetadata(ctx, meta.chunkManager, job.GetOptions())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	uri, _ := funcutil.GetAttrByKeyFromRepeatedKV(importutilv2.SnapshotSourceURI, job.GetOptions())
+	files, options, sources, err := expandSnapshotImportFiles(ctx, job.GetPartitionIDs(), meta.chunkManager,
+		job.GetSchema(), uri, job.GetOptions(), metadata)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	if ctx.Err() != nil {
-		return // Cancellation/leadership loss never publishes a partial plan.
+		return nil, nil, nil, ctx.Err()
 	}
-	if err == nil {
-		start, _, allocErr := c.alloc.AllocN(int64(len(files)))
-		if allocErr != nil {
-			mlog.Warn(ctx, "failed to allocate snapshot import file IDs", mlog.FieldJobID(job.GetJobID()), mlog.Err(allocErr))
-			return // Retry preparation on the next tick; nothing was dispatched.
-		}
-		for i, file := range files {
-			file.Id = start + int64(i)
-		}
-		// Expansion can rebase paths and add external/routing descriptors after
-		// its intermediate checks. Validate the complete durable plan, including
-		// allocated IDs, before publishing any executable files to the checker.
-		err = importutilv2.ValidateSnapshotImportPlan(files, options, sources)
-	}
-	if ctx.Err() != nil {
-		return
-	}
+	start, _, err := alloc.AllocN(int64(len(files)))
 	if err != nil {
-		if saveErr := c.importMeta.UpdateJob(ctx, job.GetJobID(), func(current ImportJob) {
-			if current.GetState() != internalpb.ImportJobState_Pending || !importutilv2.IsSnapshotPreparation(current.GetFiles()) {
-				return
-			}
-			UpdateJobState(internalpb.ImportJobState_Failed)(current)
-			UpdateJobReason(err.Error())(current)
-		}); saveErr != nil {
-			mlog.Warn(ctx, "failed to persist snapshot preparation failure", mlog.FieldJobID(job.GetJobID()), mlog.Err(saveErr))
-		}
-		return
+		return nil, nil, nil, errors.Join(errSnapshotExpansionRetry, err)
 	}
-	err = c.importMeta.UpdateJob(ctx, job.GetJobID(), func(current ImportJob) {
-		// UpdateJob holds the metadata lock and refuses terminal updates. Keep
-		// the preparation/expanded transition atomic with files and inventories;
-		// replay after a failed save is safe and never creates duplicate tasks.
-		if current.GetState() != internalpb.ImportJobState_Pending || !importutilv2.IsSnapshotPreparation(current.GetFiles()) {
-			return
-		}
-		j := current.(*importJob)
-		j.Files, j.Options, j.SnapshotL0Sources = files, options, sources
-	})
-	if err != nil {
-		mlog.Warn(ctx, "failed to persist expanded snapshot import", mlog.FieldJobID(job.GetJobID()), mlog.Err(err))
+	for i, file := range files {
+		file.Id = start + int64(i)
 	}
+	// Preparation can rebase paths and add external/routing descriptors after
+	// its intermediate checks. Validate the complete durable plan, including
+	// the allocated IDs, before handing it back.
+	if err := importutilv2.ValidateSnapshotImportPlan(files, options, sources); err != nil {
+		return nil, nil, nil, err
+	}
+	return files, options, sources, nil
 }
 
-// readSnapshotImportMetadata reopens the exact reference validated by the
-// Pending job. Callers must keep the snapshot and all referenced objects
+// snapshotExpansionTimeout caps one V3 expansion attempt when the job has no
+// earlier deadline. Expansion runs on the V3 checker goroutine, so an unbounded
+// source read would stall every other V3 job. V2's scheduler runs off the
+// checker goroutine and keeps its original deadline behavior.
+const snapshotExpansionTimeout = 10 * time.Minute
+
+// snapshotExpansionContext bounds one expansion by the earlier of the job
+// deadline and, when capAttempt is set, snapshotExpansionTimeout. capped
+// reports that the cap, not the job's own deadline, fired.
+func snapshotExpansionContext(parent context.Context, job ImportJob, capAttempt bool) (context.Context, context.CancelFunc, bool) {
+	var deadline time.Time
+	capped := false
+	if capAttempt {
+		deadline = time.Now().Add(snapshotExpansionTimeout)
+		capped = true
+	}
+	if timeoutTs := job.GetTimeoutTs(); timeoutTs != 0 && timeoutTs != math.MaxUint64 {
+		if jobDeadline, _ := tsoutil.ParseTS(timeoutTs); deadline.IsZero() || jobDeadline.Before(deadline) {
+			deadline, capped = jobDeadline, false
+		}
+	}
+	if deadline.IsZero() {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, cancel, false
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
+	return ctx, cancel, capped
+}
+
+// readSnapshotImportMetadata reopens the exact reference validated when the
+// job was submitted. Callers must keep the snapshot and all referenced objects
 // unchanged and readable through retries and imports in every cluster. Import
 // does not detect in-place replacement of otherwise valid source objects.
 func readSnapshotImportMetadata(ctx context.Context, cm milvusstorage.ChunkManager, options importutilv2.Options) (*datapb.SnapshotMetadata, error) {
@@ -169,8 +138,9 @@ func readSnapshotImportMetadata(ctx context.Context, cm milvusstorage.ChunkManag
 
 // prepareSnapshotImportFiles records the top-level metadata URI and layout
 // in WAL body options; it never embeds the metadata itself.
-// Segment metadata and physical manifest I/O belong to Pending/PreImport, not the
-// user-facing create RPC. A version-9 descriptor is not executable by a worker.
+// Segment metadata and physical manifest I/O belong to snapshot
+// preparation/PreImport, not the user-facing create RPC. A version-9 descriptor
+// is not executable by a worker.
 // broadcastImport validates the completed descriptor before broadcasting it.
 func prepareSnapshotImportFiles(ctx context.Context, partitions []int64, cm milvusstorage.ChunkManager,
 	schema *schemapb.CollectionSchema, files []*internalpb.ImportFile, options importutilv2.Options,
@@ -244,9 +214,9 @@ func prepareSnapshotImportFiles(ctx context.Context, partitions []int64, cm milv
 }
 
 // expandSnapshotImportFiles converts parsed snapshot metadata into one ImportFile
-// per selected source segment in the Pending phase. Callers must keep source
-// objects immutable; expansion uses their exact manifest versions, never latest.
-// The complete plan is persisted before task creation. Expansion never reopens
+// per selected source segment in the preparation phase. Callers must keep source
+// objects immutable; preparation uses their exact manifest versions, never latest.
+// The complete plan is persisted before task creation. Preparation never reopens
 // the top-level object. Only snapshot preparation jobs reach this
 // function; ordinary Import passthrough belongs to prepareSnapshotImportFiles.
 // Caller-owned options are never modified.
@@ -268,7 +238,7 @@ func expandSnapshotImportFiles(
 
 	metadataPath := strings.TrimSpace(metadataURI)
 	// Keep the captured URI's storage identity when resolving source readers
-	// for pending jobs, including retries and recovery. Already-expanded jobs
+	// for pending jobs, including retries and recovery. Already-prepared jobs
 	// skip preparation and retain their existing representation.
 	bucket, _, _, err := storage.ParseForeignURI(metadataPath)
 	if err != nil {
@@ -559,7 +529,7 @@ func snapshotImportL0Segments(all, data []*datapb.SegmentDescription) ([]*datapb
 // Attach timestamp context per segment, but retain L0 paths once per source
 // scope. Channel-wide deletes stay separate in the durable job and are merged
 // with partition-local deletes only when constructing a worker task.
-// Enforce incremental size limits here; prepareSnapshotJob validates the final
+// Enforce incremental size limits here; expandSnapshotJob validates the final
 // plan with real options after external/routing transforms and ID allocation.
 func attachSnapshotImportSources(ctx context.Context, cm milvusstorage.ChunkManager, metadataPath string,
 	snapshot *storage.SnapshotData, data, deltas []*datapb.SegmentDescription, files []*internalpb.ImportFile,
@@ -753,7 +723,7 @@ func normalizeSnapshotImportEncryption(sourceSchema *schemapb.CollectionSchema, 
 }
 
 // prepareSnapshotImportOptions applies the same schema admission and source-key
-// normalization at RPC admission and Pending recovery. Both boundaries must
+// normalization at RPC admission and preparation recovery. Both boundaries must
 // validate their input; neither requires source/target schema equality.
 func prepareSnapshotImportOptions(target, source *schemapb.CollectionSchema, options importutilv2.Options) (importutilv2.Options, error) {
 	if source == nil {

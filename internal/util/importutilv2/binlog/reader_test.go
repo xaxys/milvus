@@ -131,8 +131,8 @@ func TestSnapshotBitmapTextAndLocalDeletes(t *testing.T) {
 			opens[path]++
 			return false
 		}).Return(false, nil).Build()
-		masks, err := BuildSnapshotDeleteMasks(ctx, cm, schema, cfg, []*internalpb.SnapshotImportSource{source}, input,
-			0, 300, batchBudget, 1<<20, SourceEncryption{}, nil)
+		masks, err := BuildSnapshotDeleteMasks(ctx, cm, schema, cfg, []*internalpb.SnapshotImportSource{source},
+			[]*internalpb.SnapshotImportL0Source{input}, 0, 300, batchBudget, 1<<20, SourceEncryption{}, nil)
 		patch.UnPatch()
 		require.NoError(t, err)
 		require.Equal(t, map[string]int{paths[0]: 1, paths[1]: 1}, opens)
@@ -419,8 +419,8 @@ func TestSnapshotBitmapPreparationFailures(t *testing.T) {
 				}
 				return nil
 			}
-			result, err := BuildSnapshotDeleteMasks(ctx, nil, schema, nil, sources, &internalpb.SnapshotImportL0Source{},
-				0, 300, 1024, limit, SourceEncryption{}, validate)
+			result, err := BuildSnapshotDeleteMasks(ctx, nil, schema, nil, sources,
+				[]*internalpb.SnapshotImportL0Source{{}}, 0, 300, 1024, limit, SourceEncryption{}, validate)
 			if mode == "empty" || mode == "duplicate" {
 				require.NoError(t, err)
 				require.Len(t, result.masks, 1)
@@ -940,7 +940,7 @@ func TestSnapshotL0RealFiles(t *testing.T) {
 			}
 			for _, batchBudget := range []int64{budget - 512 + 129, budget} {
 				masks, err := BuildSnapshotDeleteMasks(ctx, cm, schema, cfg, bitmapSources,
-					&internalpb.SnapshotImportL0Source{LegacyL0Deltalogs: paths[:1], ManifestL0Paths: []string{l0Manifest}},
+					[]*internalpb.SnapshotImportL0Source{{LegacyL0Deltalogs: paths[:1], ManifestL0Paths: []string{l0Manifest}}},
 					0, 450, batchBudget, 1<<20, SourceEncryption{}, nil)
 				require.NoError(t, err)
 				for i, source := range bitmapSources {
@@ -967,7 +967,7 @@ func TestSnapshotL0RealFiles(t *testing.T) {
 					Version: 1, ManifestPath: manifest, SourceCommitTimestamp: commit,
 				}
 				shared, err := BuildSnapshotDeleteMasks(ctx, cm, schema, cfg, []*internalpb.SnapshotImportSource{source},
-					&internalpb.SnapshotImportL0Source{LegacyL0Deltalogs: paths[:1], ManifestL0Paths: []string{l0Manifest}},
+					[]*internalpb.SnapshotImportL0Source{{LegacyL0Deltalogs: paths[:1], ManifestL0Paths: []string{l0Manifest}}},
 					0, 450, budget, 1<<20, SourceEncryption{}, nil)
 				require.NoError(t, err)
 				// Re-open twice to model the identical persisted input used by
@@ -1003,7 +1003,7 @@ func TestSnapshotL0RealFiles(t *testing.T) {
 			// V2 metadata can reference either legacy or packed files; the
 			// legacy inventory must retain its established V1/V2 fallback.
 			shared, err := BuildSnapshotDeleteMasks(ctx, cm, schema, cfg, []*internalpb.SnapshotImportSource{source},
-				&internalpb.SnapshotImportL0Source{LegacyL0Deltalogs: paths}, 0, 450, budget, 1<<20, SourceEncryption{}, nil)
+				[]*internalpb.SnapshotImportL0Source{{LegacyL0Deltalogs: paths}}, 0, 450, budget, 1<<20, SourceEncryption{}, nil)
 			require.NoError(t, err)
 			r, err := NewStorageV3ManifestReaderWithSharedL0(ctx, cm, schema, cfg, manifest, 0, 450, 1024, SourceEncryption{}, source, budget, shared, nil)
 			require.NoError(t, err)

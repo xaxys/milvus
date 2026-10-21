@@ -33,6 +33,7 @@ import (
 	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/bytedance/mockey"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -61,8 +62,40 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
+
+func TestSnapshotExpansionContextCapsUnboundedJob(t *testing.T) {
+	now := time.Now()
+	ctx, cancel, capped := snapshotExpansionContext(context.Background(), &importJob{ImportJob: &datapb.ImportJob{}}, true)
+	defer cancel()
+
+	require.True(t, capped)
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	require.WithinDuration(t, now.Add(snapshotExpansionTimeout), deadline, time.Minute)
+
+	// V2's scheduler runs off the checker goroutine and keeps no cap.
+	ctx, cancel, capped = snapshotExpansionContext(context.Background(), &importJob{ImportJob: &datapb.ImportJob{}}, false)
+	defer cancel()
+	require.False(t, capped)
+	_, ok = ctx.Deadline()
+	require.False(t, ok)
+}
+
+func TestSnapshotExpansionContextUsesShorterJobDeadline(t *testing.T) {
+	job := &importJob{ImportJob: &datapb.ImportJob{
+		TimeoutTs: tsoutil.ComposeTSByTime(time.Now().Add(time.Minute)),
+	}}
+	ctx, cancel, capped := snapshotExpansionContext(context.Background(), job, true)
+	defer cancel()
+
+	require.False(t, capped)
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	require.WithinDuration(t, time.Now().Add(time.Minute), deadline, 5*time.Second)
+}
 
 func TestImportTaskConstructionDependencyErrors(t *testing.T) {
 	paramtable.Init()
@@ -170,7 +203,7 @@ func TestValidateImportRequestInvalidSnapshotOptions(t *testing.T) {
 	require.ErrorIs(t, err, merr.ErrImportFailed)
 }
 
-func TestPrepareSnapshotImportMetadataOnly(t *testing.T) {
+func TestExpandSnapshotImportMetadataOnly(t *testing.T) {
 	paramtable.Init()
 	type sourceCM struct{ milvusstorage.ChunkManager }
 	uri := "s3://source/root/snapshots/1/metadata/2.json"
@@ -230,7 +263,7 @@ func TestPrepareSnapshotImportMetadataOnly(t *testing.T) {
 	}
 }
 
-func TestPrepareSnapshotImportAdmissionErrors(t *testing.T) {
+func TestExpandSnapshotImportAdmissionErrors(t *testing.T) {
 	paramtable.Init()
 	type sourceCM struct{ milvusstorage.ChunkManager }
 	for _, mode := range []string{"ordinary", "legacy_backup", "invalid_options", "nil_cm", "files", "empty_paths", "multiple_files", "multiple_paths", "invalid_uri", "bare_path", "instance", "resolve", "read", "metadata", "location", "boundary", "schema", "external_source", "encryption", "target", "mapping", "layout"} {
@@ -469,11 +502,12 @@ func TestSnapshotPreparationPersistence(t *testing.T) {
 			}).Build()
 			defer ids.UnPatch()
 			checker := &importChecker{ctx: ctx, meta: &meta{chunkManager: &sourceCM{}}, importMeta: m, alloc: &alloc{}}
-			checker.prepareSnapshotJob(ctx, job)
+			checker.snapshotPrepScheduler = newSnapshotPrepScheduler(checker.ctx, checker.meta, checker.alloc, checker.importMeta)
+			checker.snapshotPrepScheduler.expandAndPublish(ctx, job)
 			if mode == "save_retry" || mode == "alloc_retry" || mode == "fail_save" {
 				require.True(t, importutilv2.IsSnapshotPreparation(m.GetJob(ctx, 10).GetFiles()))
 				require.Empty(t, m.tasks.listTasks())
-				checker.prepareSnapshotJob(ctx, m.GetJob(ctx, 10))
+				checker.snapshotPrepScheduler.expandAndPublish(ctx, m.GetJob(ctx, 10))
 			}
 			got := m.GetJob(ctx, 10)
 			switch mode {
@@ -502,6 +536,87 @@ func TestSnapshotPreparationPersistence(t *testing.T) {
 			require.Empty(t, m.tasks.listTasks(), "preparation must not create tasks before durable publication")
 		})
 	}
+}
+
+// TestSnapshotPreparingV3HandlerPreparesAndPublishes pins the V3 contract: the
+// stage prepares synchronously and persists the executable plan as its durable
+// checkpoint, leaving the job in SnapshotPreparing for the next tick.
+func TestSnapshotPreparingV3HandlerPreparesAndPublishes(t *testing.T) {
+	paramtable.Init()
+	type sourceCM struct{ milvusstorage.ChunkManager }
+	type alloc struct{ allocator.Allocator }
+	instance := mockey.Mock(snapshotstorage.ValidateInstanceSnapshotImportURI).Return(nil).Build()
+	defer instance.UnPatch()
+
+	snapshot := snapshotImportTestData(datapb.SnapshotLayout_SnapshotLayoutReferenced)
+	uri := "s3://source/root/snapshots/1/metadata/2.json"
+	metadata := &datapb.SnapshotMetadata{
+		FormatVersion: int32(snapshotstorage.SnapshotFormatVersion),
+		SnapshotInfo:  snapshot.SnapshotInfo,
+		Collection:    snapshot.Collection,
+		Layout:        snapshot.Layout,
+	}
+	objects := map[string][]byte{}
+	for _, segment := range snapshot.Segments {
+		segment.CommitTimestamp = 300
+		key := fmt.Sprintf("root/snapshots/1/manifests/2/%d", segment.SegmentId)
+		payload, err := snapshotio.MarshalSegmentManifest(segment)
+		require.NoError(t, err)
+		objects[key] = payload
+		metadata.ManifestList = append(metadata.ManifestList, key)
+		metadata.SegmentIds = append(metadata.SegmentIds, segment.SegmentId)
+		if segment.ManifestPath != "" {
+			metadata.Storagev2ManifestList = append(metadata.Storagev2ManifestList, &datapb.StorageV2SegmentManifest{
+				SegmentId: segment.SegmentId, Manifest: segment.ManifestPath,
+			})
+		}
+	}
+	payload, err := protojson.Marshal(metadata)
+	require.NoError(t, err)
+	objects["root/snapshots/1/metadata/2.json"] = payload
+	read := mockey.Mock((*sourceCM).Read).To(func(_ *sourceCM, _ context.Context, key string) ([]byte, error) {
+		data, ok := objects[key]
+		if !ok {
+			return nil, merr.ErrIoKeyNotFound
+		}
+		return data, nil
+	}).Build()
+	defer read.UnPatch()
+
+	files, options, err := prepareSnapshotImportFiles(context.Background(), nil, &sourceCM{}, snapshotImportTestSchema(),
+		[]*internalpb.ImportFile{{Paths: []string{uri}}}, snapshotImportTestOptions())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	importMeta := NewMockImportMeta(t)
+	checker := &importCheckerV3{ctx: ctx, meta: &meta{chunkManager: &sourceCM{}}, importMeta: importMeta, alloc: &alloc{}}
+	job := &importJob{ImportJob: &datapb.ImportJob{
+		JobID: 10, State: internalpb.ImportJobState_SnapshotPreparing,
+		Files: files, Options: options, Schema: snapshotImportTestSchema(),
+	}}
+	ids := mockey.Mock((*alloc).AllocN).To(func(_ *alloc, _ int64) (int64, int64, error) {
+		return 100, 200, nil
+	}).Build()
+	defer ids.UnPatch()
+
+	var published ImportJob
+	importMeta.EXPECT().UpdateJob(mock.Anything, int64(10), mock.Anything).RunAndReturn(
+		func(_ context.Context, _ int64, actions ...UpdateJobAction) error {
+			current := job.Clone()
+			for _, a := range actions {
+				a(current)
+			}
+			published = current
+			return nil
+		}).Once()
+
+	require.NoError(t, snapshotPreparingHandler{}.Handle(newImportV3JobContext(checker, job)))
+	require.NotNil(t, published)
+	require.Equal(t, internalpb.ImportJobState_SnapshotPreparing, published.GetState())
+	require.False(t, importutilv2.IsSnapshotPreparation(published.GetFiles()))
+	require.Len(t, published.GetFiles(), 2)
+	require.EqualValues(t, 100, published.GetFiles()[0].GetId())
+	require.NoError(t, importutilv2.ValidateSnapshotImportPlan(published.GetFiles(), published.GetOptions(), published.GetSnapshotL0Sources()))
 }
 
 func TestReadSnapshotImportMetadataStorageErrors(t *testing.T) {
@@ -548,7 +663,7 @@ func TestSnapshotPreparationFinalPlanLimit(t *testing.T) {
 			snapshot := snapshotImportTestData(datapb.SnapshotLayout_SnapshotLayoutSelfContained)
 			snapshot.SnapshotInfo.S3Location = "s3://source/root/snapshots/1/metadata/2.json"
 			// The metadata reference is small, but relocating the bundle repeats
-			// the long root in every expanded file. Zero commit timestamps and no
+			// the long root in every prepared file. Zero commit timestamps and no
 			// L0 deliberately bypass attachSnapshotImportSources' partial checks.
 			newRoot := strings.Repeat("r", 700)
 			uri := "s3://source/" + newRoot + "/snapshots/1/metadata/2.json"
@@ -605,7 +720,7 @@ func TestSnapshotPreparationFinalPlanLimit(t *testing.T) {
 				}
 				if mode != "superseded" {
 					require.Equal(t, internalpb.ImportJobState_Failed, saved.State)
-					require.True(t, importutilv2.IsSnapshotPreparation(saved.Files), "invalid expanded files must never be persisted")
+					require.True(t, importutilv2.IsSnapshotPreparation(saved.Files), "invalid prepared files must never be persisted")
 				}
 				return nil
 			}).Build()
@@ -624,10 +739,11 @@ func TestSnapshotPreparationFinalPlanLimit(t *testing.T) {
 			}).Build()
 			defer ids.UnPatch()
 			checker := &importChecker{ctx: ctx, meta: &meta{chunkManager: &sourceCM{}}, importMeta: m, alloc: &alloc{}}
-			checker.prepareSnapshotJob(ctx, job)
+			checker.snapshotPrepScheduler = newSnapshotPrepScheduler(checker.ctx, checker.meta, checker.alloc, checker.importMeta)
+			checker.snapshotPrepScheduler.expandAndPublish(ctx, job)
 			if mode == "save_retry" {
 				require.Equal(t, internalpb.ImportJobState_Pending, m.GetJob(ctx, 10).GetState())
-				checker.prepareSnapshotJob(ctx, m.GetJob(ctx, 10))
+				checker.snapshotPrepScheduler.expandAndPublish(ctx, m.GetJob(ctx, 10))
 			}
 			got := m.GetJob(ctx, 10)
 			switch mode {
@@ -662,6 +778,7 @@ func TestSnapshotPreparationBoundedAndCanceled(t *testing.T) {
 		&commonpb.KeyValuePair{Key: importutilv2.SnapshotLayout, Value: "referenced"})
 	m := &importMeta{jobs: make(map[int64]ImportJob), tasks: newImportTasks()}
 	checker := &importChecker{ctx: context.Background(), meta: &meta{chunkManager: &sourceCM{}}, importMeta: m, closeChan: make(chan struct{})}
+	checker.snapshotPrepScheduler = newSnapshotPrepScheduler(checker.ctx, checker.meta, checker.alloc, checker.importMeta)
 	defer checker.Close()
 	for i := int64(1); i <= 5; i++ {
 		job := &importJob{ImportJob: &datapb.ImportJob{
@@ -681,9 +798,9 @@ func TestSnapshotPreparationBoundedAndCanceled(t *testing.T) {
 			t.Fatal("snapshot preparation did not start")
 		}
 	}
-	checker.prepareMu.Lock()
-	preparing := len(checker.preparing)
-	checker.prepareMu.Unlock()
+	checker.snapshotPrepScheduler.mu.Lock()
+	preparing := len(checker.snapshotPrepScheduler.preparing)
+	checker.snapshotPrepScheduler.mu.Unlock()
 	require.Equal(t, 4, preparing)
 	// Saturated source I/O must not prevent the same checker from scheduling
 	// ordinary imports. Stop at the task-creation dependency, before catalog I/O.
@@ -698,14 +815,14 @@ func TestSnapshotPreparationBoundedAndCanceled(t *testing.T) {
 	m.mu.Lock()
 	delete(m.jobs, 1)
 	m.mu.Unlock()
-	checker.cancelInactiveSnapshotPreparations()
+	checker.snapshotPrepScheduler.cancelInactive()
 	checker.Close()
-	checker.prepareWG.Wait()
-	require.Empty(t, checker.preparing)
+	checker.snapshotPrepScheduler.wg.Wait()
+	require.Empty(t, checker.snapshotPrepScheduler.preparing)
 	require.Empty(t, m.tasks.listTasks())
 	// A closed checker cannot start a late attempt.
-	checker.scheduleSnapshotPreparation(m.jobs[5])
-	require.Empty(t, checker.preparing)
+	checker.snapshotPrepScheduler.schedule(m.jobs[5])
+	require.Empty(t, checker.snapshotPrepScheduler.preparing)
 }
 
 func TestSnapshotPreparationDeadline(t *testing.T) {
@@ -724,9 +841,10 @@ func TestSnapshotPreparationDeadline(t *testing.T) {
 		Files: []*internalpb.ImportFile{{SnapshotSource: &internalpb.SnapshotImportSource{Version: importutilv2.SnapshotPreparationVersion}}},
 	}}
 	checker := &importChecker{ctx: context.Background(), meta: &meta{chunkManager: &sourceCM{}}, closeChan: make(chan struct{})}
+	checker.snapshotPrepScheduler = newSnapshotPrepScheduler(checker.ctx, checker.meta, checker.alloc, checker.importMeta)
 	defer checker.Close()
-	checker.scheduleSnapshotPreparation(job)
-	checker.prepareWG.Wait()
+	checker.snapshotPrepScheduler.schedule(job)
+	checker.snapshotPrepScheduler.wg.Wait()
 	require.True(t, importutilv2.IsSnapshotPreparation(job.GetFiles()))
 	require.Equal(t, internalpb.ImportJobState_Pending, job.GetState(), "the existing timeout/GC loop owns the terminal transition")
 }
@@ -1457,7 +1575,7 @@ func TestSnapshotSharedL0PlanAndTasks(t *testing.T) {
 	for _, file := range files {
 		require.Empty(t, file.SnapshotSource.LegacyL0Deltalogs)
 	}
-	// Pending preparation persists the expanded plan directly to the catalog;
+	// Pending preparation persists the prepared plan directly to the catalog;
 	// only the metadata URI and options cross the WAL/CDC boundary.
 	require.NoError(t, importutilv2.ValidateSnapshotImportPlan(files, options, sources))
 	encoded, err := proto.Marshal(&datapb.ImportJob{
@@ -2022,7 +2140,7 @@ func snapshotImportTestEZK(ezID int64) string {
 	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"ez_id":%d}`, ezID)))
 }
 
-func TestPrepareSnapshotImportOptions_Encryption(t *testing.T) {
+func TestExpandSnapshotImportOptions_Encryption(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		ezID       string
@@ -2202,7 +2320,7 @@ func TestExpandSnapshotImportFiles(t *testing.T) {
 		assert.Len(t, result, 2)
 	})
 
-	t.Run("all source partitions are expanded", func(t *testing.T) {
+	t.Run("all source partitions are prepared", func(t *testing.T) {
 		snapshot := snapshotImportTestData(datapb.SnapshotLayout_SnapshotLayoutReferenced)
 		snapshot.Collection.Partitions["second"] = 20
 		snapshot.Segments = append(snapshot.Segments, &datapb.SegmentDescription{
@@ -2441,7 +2559,7 @@ func TestExpandSnapshotImportFiles(t *testing.T) {
 	}
 }
 
-func TestPrepareSnapshotImportOptions_Schema(t *testing.T) {
+func TestExpandSnapshotImportOptions_Schema(t *testing.T) {
 	target := snapshotImportTestSchema()
 	source := proto.Clone(target).(*schemapb.CollectionSchema)
 	source.Name = "different_collection"
@@ -2508,7 +2626,7 @@ func TestPrepareSnapshotImportOptions_Schema(t *testing.T) {
 	}
 }
 
-func TestPrepareSnapshotImportOptions_FieldIdentity(t *testing.T) {
+func TestExpandSnapshotImportOptions_FieldIdentity(t *testing.T) {
 	target := snapshotImportTestSchema()
 	target.Fields = append(target.Fields, &schemapb.FieldSchema{
 		FieldID: 102, Name: "other_text", DataType: schemapb.DataType_VarChar,

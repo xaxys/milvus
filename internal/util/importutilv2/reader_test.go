@@ -86,12 +86,12 @@ func TestSnapshotPrepareDeleteMasks(t *testing.T) {
 			want := &binlog.SnapshotL0Deletes{}
 			p := mockey.Mock(binlog.BuildSnapshotDeleteMasks).To(func(_ context.Context, gotCM storage.ChunkManager,
 				_ *schemapb.CollectionSchema, gotCfg *indexpb.StorageConfig, sources []*internalpb.SnapshotImportSource,
-				gotSource *internalpb.SnapshotImportL0Source, _, _ uint64, deletes, bitmaps int64, _ binlog.SourceEncryption, _ func(string) error,
+				gotSources []*internalpb.SnapshotImportL0Source, _, _ uint64, deletes, bitmaps int64, _ binlog.SourceEncryption, _ func(string) error,
 			) (*binlog.SnapshotL0Deletes, error) {
 				require.Same(t, cm, gotCM)
 				require.Same(t, cfg, gotCfg)
 				require.Equal(t, []*internalpb.SnapshotImportSource{file.SnapshotSource}, sources)
-				require.Same(t, source, gotSource)
+				require.Equal(t, []*internalpb.SnapshotImportL0Source{source}, gotSources)
 				require.EqualValues(t, 128, deletes)
 				require.EqualValues(t, 256, bitmaps)
 				if prepareErr != nil {
@@ -254,7 +254,7 @@ func TestSnapshotReaderFactoryConcurrentResolution(t *testing.T) {
 			}).Return(nil, io.EOF).Build()
 			defer withShared.UnPatch()
 			load := mockey.Mock(binlog.BuildSnapshotDeleteMasks).When(func(_ context.Context, cm storage.ChunkManager, _ *schemapb.CollectionSchema, cfg *indexpb.StorageConfig,
-				_ []*internalpb.SnapshotImportSource, _ *internalpb.SnapshotImportL0Source, _, _ uint64, _, _ int64, encryption binlog.SourceEncryption, _ func(string) error,
+				_ []*internalpb.SnapshotImportSource, _ []*internalpb.SnapshotImportL0Source, _, _ uint64, _, _ int64, encryption binlog.SourceEncryption, _ func(string) error,
 			) bool {
 				assert.Same(t, sourceCM, cm)
 				assert.Same(t, foreign, cfg)
@@ -481,7 +481,7 @@ func TestSnapshotReaderFactoryInstanceStorage(t *testing.T) {
 	}}
 	shared := &binlog.SnapshotL0Deletes{}
 	prepare := mockey.Mock(binlog.BuildSnapshotDeleteMasks).When(func(_ context.Context, gotCM storage.ChunkManager, _ *schemapb.CollectionSchema,
-		gotCfg *indexpb.StorageConfig, _ []*internalpb.SnapshotImportSource, _ *internalpb.SnapshotImportL0Source,
+		gotCfg *indexpb.StorageConfig, _ []*internalpb.SnapshotImportSource, _ []*internalpb.SnapshotImportL0Source,
 		_, _ uint64, _, _ int64, _ binlog.SourceEncryption, _ func(string) error,
 	) bool {
 		assert.Same(t, cm, gotCM)
@@ -604,13 +604,13 @@ func TestSnapshotSharedL0StorageAndReader(t *testing.T) {
 	}}
 	shared := &binlog.SnapshotL0Deletes{}
 	loadPatch := mockey.Mock(binlog.BuildSnapshotDeleteMasks).When(func(_ context.Context, gotCM storage.ChunkManager, _ *schemapb.CollectionSchema,
-		cfg *indexpb.StorageConfig, sources []*internalpb.SnapshotImportSource, gotSource *internalpb.SnapshotImportL0Source, _, _ uint64, _, _ int64,
+		cfg *indexpb.StorageConfig, sources []*internalpb.SnapshotImportSource, gotSources []*internalpb.SnapshotImportL0Source, _, _ uint64, _, _ int64,
 		_ binlog.SourceEncryption, _ func(string) error,
 	) bool {
 		require.Same(t, cm, gotCM)
 		require.Same(t, foreign, cfg)
 		require.Equal(t, []*internalpb.SnapshotImportSource{file.SnapshotSource}, sources)
-		require.Same(t, input, gotSource)
+		require.Equal(t, []*internalpb.SnapshotImportL0Source{input}, gotSources)
 		return true
 	}).Return(shared, nil).Build()
 	defer loadPatch.UnPatch()
@@ -1125,6 +1125,107 @@ func TestSnapshotSharedL0Contracts(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, shared)
 	require.NoError(t, ValidateSnapshotImportPlan([]*internalpb.ImportFile{{Paths: []string{strings.Repeat("x", SnapshotSourcePlanMaxBytes+1)}}}, nil, nil), "ordinary imports do not acquire a snapshot plan limit")
+}
+
+func TestSnapshotTaskL0SourcesMultipleScopes(t *testing.T) {
+	manifestA := packed.MarshalManifestPath("snapshot/a", 7)
+	manifestB := packed.MarshalManifestPath("snapshot/b", 9)
+	allPath := packed.MarshalManifestPath("snapshot/all", 3)
+	files := []*internalpb.ImportFile{
+		{Id: 1, SnapshotSource: &internalpb.SnapshotImportSource{
+			Version: 5, SourceChannel: "ch1", SourcePartitionId: 10, ManifestPath: manifestA,
+		}},
+		{Id: 2, SnapshotSource: &internalpb.SnapshotImportSource{
+			Version: 5, SourceChannel: "ch2", SourcePartitionId: 20, ManifestPath: manifestB,
+		}},
+	}
+	inventories := []*internalpb.SnapshotImportL0Source{
+		{SourceChannel: "ch1", SourcePartitionId: 10, LegacyL0Deltalogs: []string{"a-local"}},
+		{SourceChannel: "ch1", SourcePartitionId: common.AllPartitionsID, ManifestL0Paths: []string{allPath}},
+		{SourceChannel: "ch2", SourcePartitionId: 20, LegacyL0Deltalogs: []string{"b-local"}},
+	}
+
+	selected, err := SnapshotTaskL0Sources(files, inventories)
+	require.NoError(t, err)
+	require.Len(t, selected, 3)
+	require.Equal(t, "ch1", selected[0].GetSourceChannel())
+	require.EqualValues(t, common.AllPartitionsID, selected[0].GetSourcePartitionId())
+	require.Equal(t, []string{allPath}, selected[0].GetManifestL0Paths())
+	require.Empty(t, selected[0].GetLegacyL0Deltalogs())
+	require.Equal(t, "ch1", selected[1].GetSourceChannel())
+	require.EqualValues(t, 10, selected[1].GetSourcePartitionId())
+	require.Equal(t, []string{"a-local"}, selected[1].GetLegacyL0Deltalogs())
+	require.Empty(t, selected[1].GetManifestL0Paths(), "channel-wide L0 must not be copied into every exact scope")
+	require.Equal(t, "ch2", selected[2].GetSourceChannel())
+	require.EqualValues(t, 20, selected[2].GetSourcePartitionId())
+	require.Equal(t, []string{"b-local"}, selected[2].GetLegacyL0Deltalogs())
+
+	// The V2 task protocol is single-scope and must keep rejecting a task that
+	// spans scopes; only V3 uses the plural form.
+	_, err = SnapshotTaskL0Source(files, inventories)
+	require.Error(t, err)
+}
+
+func TestSnapshotTaskL0SourceFoldsChannelWide(t *testing.T) {
+	manifestA := packed.MarshalManifestPath("snapshot/a", 7)
+	allPath := packed.MarshalManifestPath("snapshot/all", 3)
+	files := []*internalpb.ImportFile{
+		{Id: 1, SnapshotSource: &internalpb.SnapshotImportSource{
+			Version: 5, SourceChannel: "ch1", SourcePartitionId: 10, ManifestPath: manifestA,
+		}},
+	}
+	inventories := []*internalpb.SnapshotImportL0Source{
+		{SourceChannel: "ch1", SourcePartitionId: 10, LegacyL0Deltalogs: []string{"a-local"}},
+		{SourceChannel: "ch1", SourcePartitionId: common.AllPartitionsID, ManifestL0Paths: []string{allPath}},
+	}
+
+	selected, err := SnapshotTaskL0Source(files, inventories)
+	require.NoError(t, err)
+	require.Equal(t, "ch1", selected.GetSourceChannel())
+	require.EqualValues(t, 10, selected.GetSourcePartitionId())
+	require.Equal(t, []string{"a-local"}, selected.GetLegacyL0Deltalogs())
+	require.Equal(t, []string{allPath}, selected.GetManifestL0Paths())
+}
+
+// TestSnapshotTaskL0SourcesDedupesChannelWide pins the plan-size invariant:
+// one channel-wide inventory serves every partition of that channel, so its
+// paths must not be copied into each exact scope.
+func TestSnapshotTaskL0SourcesDedupesChannelWide(t *testing.T) {
+	const partitions = 8
+	allPath := packed.MarshalManifestPath("snapshot/all", 3)
+	files := make([]*internalpb.ImportFile, 0, partitions)
+	inventories := make([]*internalpb.SnapshotImportL0Source, 0, partitions+1)
+	for i := 0; i < partitions; i++ {
+		partitionID := int64(10 + i)
+		files = append(files, &internalpb.ImportFile{
+			Id: int64(i + 1),
+			SnapshotSource: &internalpb.SnapshotImportSource{
+				Version: 5, SourceChannel: "ch1", SourcePartitionId: partitionID,
+				ManifestPath: packed.MarshalManifestPath(fmt.Sprintf("snapshot/%d", partitionID), 7),
+			},
+		})
+		inventories = append(inventories, &internalpb.SnapshotImportL0Source{
+			SourceChannel: "ch1", SourcePartitionId: partitionID, LegacyL0Deltalogs: []string{fmt.Sprintf("local-%d", partitionID)},
+		})
+	}
+	inventories = append(inventories, &internalpb.SnapshotImportL0Source{
+		SourceChannel: "ch1", SourcePartitionId: common.AllPartitionsID, ManifestL0Paths: []string{allPath},
+	})
+
+	selected, err := SnapshotTaskL0Sources(files, inventories)
+	require.NoError(t, err)
+	require.Len(t, selected, partitions+1)
+	copies := 0
+	for _, source := range selected {
+		for _, path := range source.GetManifestL0Paths() {
+			if path == allPath {
+				copies++
+				require.EqualValues(t, common.AllPartitionsID, source.GetSourcePartitionId())
+			}
+		}
+	}
+	require.Equal(t, 1, copies, "channel-wide inventory must be emitted once, not once per scope")
+	require.NoError(t, ValidateSnapshotImportPlan(files, Options{{Key: BackupFlag, Value: "true"}, {Key: SourceType, Value: SourceTypeSnapshot}}, selected))
 }
 
 func TestSnapshotImportPlanLimitWithoutL0(t *testing.T) {

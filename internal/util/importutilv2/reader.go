@@ -24,6 +24,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/internal/util/hookutil"
 	"github.com/milvus-io/milvus/internal/util/importutilv2/binlog"
 	"github.com/milvus-io/milvus/internal/util/importutilv2/csv"
@@ -134,7 +135,21 @@ func (f *ReaderFactory) NewReader(ctx context.Context, schema *schemapb.Collecti
 func (f *ReaderFactory) PrepareSnapshotDeletes(ctx context.Context, schema *schemapb.CollectionSchema,
 	files []*internalpb.ImportFile, source *internalpb.SnapshotImportL0Source, deleteBudget, bitmapBudget int64,
 ) (*binlog.SnapshotL0Deletes, error) {
-	if err := ValidateSnapshotImportTask(files, f.options, source); err != nil {
+	var sources []*internalpb.SnapshotImportL0Source
+	if source != nil {
+		sources = []*internalpb.SnapshotImportL0Source{source}
+	}
+	return f.PrepareSnapshotDeletesMulti(ctx, schema, files, sources, deleteBudget, bitmapBudget)
+}
+
+// PrepareSnapshotDeletesMulti is the multi-scope form used by Import V3, where
+// one reshard task may pack files from several source scopes to avoid creating
+// one tiny task and fragment set per source channel/partition. Each inventory
+// is folded into only the masks of its own scope.
+func (f *ReaderFactory) PrepareSnapshotDeletesMulti(ctx context.Context, schema *schemapb.CollectionSchema,
+	files []*internalpb.ImportFile, sources []*internalpb.SnapshotImportL0Source, deleteBudget, bitmapBudget int64,
+) (*binlog.SnapshotL0Deletes, error) {
+	if err := ValidateSnapshotImportPlan(files, f.options, sources); err != nil {
 		return nil, err
 	}
 	start, end, err := ParseTimeRange(f.options)
@@ -149,12 +164,58 @@ func (f *ReaderFactory) PrepareSnapshotDeletes(ctx context.Context, schema *sche
 	if err != nil {
 		return nil, err
 	}
-	sources := make([]*internalpb.SnapshotImportSource, len(files))
+	fileSources := make([]*internalpb.SnapshotImportSource, len(files))
 	for i, file := range files {
-		sources[i] = file.GetSnapshotSource()
+		fileSources[i] = file.GetSnapshotSource()
 	}
-	return binlog.BuildSnapshotDeleteMasks(ctx, resolved.cm, schema, resolved.cfg, sources, source,
+	return binlog.BuildSnapshotDeleteMasks(ctx, resolved.cm, schema, resolved.cfg, fileSources, sources,
 		start, end, deleteBudget, bitmapBudget, resolved.encryption, validate)
+}
+
+// SnapshotFileSize sizes one exact snapshot manifest without reading rows or
+// deltalogs. Import V3's preimport is size-only for backup/snapshot jobs, so it
+// must not pay the row-reader initialization that loads segment-local deletes.
+func (f *ReaderFactory) SnapshotFileSize(ctx context.Context, schema *schemapb.CollectionSchema, file *internalpb.ImportFile) (int64, error) {
+	if err := ValidateSnapshotImportFiles([]*internalpb.ImportFile{file}, f.options); err != nil {
+		return 0, err
+	}
+	if IsSnapshotPreparation([]*internalpb.ImportFile{file}) {
+		return 0, merr.WrapErrServiceInternalMsg("snapshot preparation must finish before worker dispatch")
+	}
+	source := file.GetSnapshotSource()
+	manifestPath := source.GetManifestPath()
+	if manifestPath == "" {
+		if len(file.GetPaths()) != 1 {
+			return 0, merr.WrapErrImportFailedMsg("snapshot-source import file requires exactly one manifest path")
+		}
+		manifestPath = file.GetPaths()[0]
+	}
+	base, version, err := packed.UnmarshalManifestPath(manifestPath)
+	if err != nil || base == "" || version == packed.ManifestLatest {
+		return 0, merr.WrapErrImportFailedMsg("snapshot-source import requires an exact StorageV3 manifest version")
+	}
+	resolved, err := f.storage()
+	if err != nil {
+		return 0, err
+	}
+	validate, err := SnapshotPathValidator(f.options, resolved.cm)
+	if err != nil {
+		return 0, err
+	}
+	if validate != nil {
+		if err := validate(base); err != nil {
+			return 0, err
+		}
+	}
+	files, lobSize, err := binlog.StorageV3ManifestFiles(ctx, resolved.cm, resolved.cfg, schema, manifestPath, validate)
+	if err != nil {
+		return 0, err
+	}
+	size, err := storage.GetFilesSize(ctx, files, resolved.cm)
+	if err != nil {
+		return 0, err
+	}
+	return size + lobSize, nil
 }
 
 // NewReader requires the caller's reserved positive delete budget for typed
@@ -207,7 +268,7 @@ func newReader(ctx context.Context, cm storage.ChunkManager, schema *schemapb.Co
 				)
 			}
 			// DataCoord broadcasts a metadata URI, then expands and persists
-			// exact StorageV3 manifests during Pending preparation before dispatch.
+			// exact StorageV3 manifests during snapshot preparation before dispatch.
 			// Do not consult storage_version: snapshot metadata is the source of
 			// truth and ValidateSnapshotSourceOptions rejects that ambiguity.
 			if len(paths) != 1 {

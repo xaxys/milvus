@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -176,7 +177,7 @@ func (s *snapshotMaskScan) apply(ctx context.Context, deletes map[any]typeutil.T
 // No reader may emit rows until shared and segment-local deletes both finish.
 // Both phases rebuild masks from their immutable input; nothing is persisted.
 func BuildSnapshotDeleteMasks(ctx context.Context, cm storage.ChunkManager, schema *schemapb.CollectionSchema,
-	cfg *indexpb.StorageConfig, sources []*internalpb.SnapshotImportSource, l0 *internalpb.SnapshotImportL0Source,
+	cfg *indexpb.StorageConfig, sources []*internalpb.SnapshotImportSource, l0s []*internalpb.SnapshotImportL0Source,
 	start, end uint64, deleteBudget, bitmapBudget int64, encryption SourceEncryption, validate func(string) error,
 ) (*SnapshotL0Deletes, error) {
 	pk, err := typeutil.GetPrimaryFieldSchema(schema)
@@ -219,47 +220,95 @@ func BuildSnapshotDeleteMasks(ctx context.Context, cm storage.ChunkManager, sche
 			}},
 		})
 	}
-	merger, err := loadSnapshotL0Deletes(ctx, cm, schema, cfg, l0, start, end, deleteBudget,
-		func(batch map[any]typeutil.Timestamp) error {
-			for i := range scans {
-				if err := scans[i].apply(ctx, batch, budget); err != nil {
-					return err
-				}
-			}
-			return nil
-		}, validate)
-	if err != nil {
-		return nil, err
-	}
-	for i := range scans {
-		scan := &scans[i]
+	// Fold each scope's shared inventory, then immediately consume that scope's
+	// manifest-local deletes. Processing a scope end to end keeps only one
+	// DeleteMerger (and its path inventory) live at a time; retaining one per
+	// scope would multiply the single delete budget the task reserved.
+	applyLocal := func(merger *DeleteMerger, scan *snapshotMaskScan) error {
 		paths, err := packed.GetDeltaLogPathsFromManifest(scan.source.GetManifestPath(), cfg)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for i, path := range paths {
 			if validate != nil {
 				if err := validate(path); err != nil {
-					return nil, err
+					return err
 				}
 				paths[i] = snapshotstorage.NormalizeSnapshotObjectPath(path)
 			}
 		}
-		// Reuse the emptied batch map and its charged path inventory. Shared
-		// paths are skipped; local batches affect only this segment's bitmap.
 		merger.consume = func(batch map[any]typeutil.Timestamp) error { return scan.apply(ctx, batch, budget) }
 		if _, err := merger.Merge(ctx, paths, start, end, false); err != nil {
-			return nil, err
+			return err
 		}
 		if err := merger.flush(); err != nil {
-			return nil, err
+			return err
 		}
 		if scan.mask.rows < 0 {
 			// Empty/all-out-of-range L0 still needs a physical row count and the
 			// source timestamp invariant checked before emitting any data.
-			if err := scan.apply(ctx, nil, budget); err != nil {
+			return scan.apply(ctx, nil, budget)
+		}
+		return nil
+	}
+	newMerger := func() (*DeleteMerger, error) {
+		return NewDeleteMerger(cm, cfg, pk.GetDataType(),
+			paramtable.Get().CommonCfg.StorageReadRetryAttempts.GetAsUint(), deleteBudget)
+	}
+
+	localDone := make([]bool, len(scans))
+	for _, l0 := range l0s {
+		applicable := make([]int, 0, len(scans))
+		for i := range scans {
+			source := scans[i].source
+			if source.GetSourceChannel() != l0.GetSourceChannel() {
+				continue
+			}
+			if l0.GetSourcePartitionId() != common.AllPartitionsID &&
+				l0.GetSourcePartitionId() != source.GetSourcePartitionId() {
+				continue
+			}
+			applicable = append(applicable, i)
+		}
+		if len(applicable) == 0 {
+			continue
+		}
+		merger, err := loadSnapshotL0Deletes(ctx, cm, schema, cfg, l0, start, end, deleteBudget,
+			func(batch map[any]typeutil.Timestamp) error {
+				for _, i := range applicable {
+					if err := scans[i].apply(ctx, batch, budget); err != nil {
+						return err
+					}
+				}
+				return nil
+			}, validate)
+		if err != nil {
+			return nil, err
+		}
+		for _, i := range applicable {
+			if localDone[i] {
+				continue
+			}
+			// Reuse the shared merger: Merge only skips paths already folded
+			// into every bitmap, so a second merger would double the reserved
+			// delete map without changing the masks.
+			if err := applyLocal(merger, &scans[i]); err != nil {
 				return nil, err
 			}
+			localDone[i] = true
+		}
+	}
+	// A scan without a shared inventory still owns manifest-local deletes.
+	for i := range scans {
+		if localDone[i] {
+			continue
+		}
+		merger, err := newMerger()
+		if err != nil {
+			return nil, err
+		}
+		if err := applyLocal(merger, &scans[i]); err != nil {
+			return nil, err
 		}
 	}
 	return &SnapshotL0Deletes{masks: masks}, nil
