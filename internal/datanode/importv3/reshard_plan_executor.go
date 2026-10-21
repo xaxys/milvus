@@ -37,6 +37,8 @@ import (
 
 	"github.com/milvus-io/milvus/internal/datanode/importv2"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/importutilv2"
+	"github.com/milvus-io/milvus/internal/util/importutilv2/binlog"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	importv3pb "github.com/milvus-io/milvus/pkg/v3/proto/importv3pb"
@@ -177,7 +179,22 @@ func (r *reshardPlanExecutor) execute(ctx context.Context) error {
 	// directory).
 	defer r.writer.close()
 	r.buckets = newBucketTable(&r.fragment, int64(len(r.plan.GetPartitionIds())))
-	source := newReshardSourceStream(r.ctx, &r.source, r.plan.GetFiles(), r.writer, &r.stageTimings)
+	var sharedDeletes *binlog.SnapshotL0Deletes
+	if r.source.snapshot {
+		// Resolve source storage once for the delete-mask builder and every
+		// per-file reader. This is a no-op for the instance storage and handles
+		// external snapshots without ever falling back to the target storage.
+		r.source.factory = importutilv2.NewReaderFactory(ctx, r.source.cm, r.source.storageConfig, r.source.options)
+		if len(r.source.snapshotL0Sources) > 0 {
+			sharedDeletes, err = r.source.factory.PrepareSnapshotDeletesMulti(ctx,
+				r.source.collectionSchema, r.plan.GetFiles(), r.source.snapshotL0Sources,
+				r.source.snapshotDeleteBudget, r.source.snapshotBitmapBudget)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	source := newReshardSourceStream(r.ctx, &r.source, r.plan.GetFiles(), r.writer, &r.stageTimings, sharedDeletes)
 	// Registered last, so a stopped run tears the source down before the writes
 	// it may have starved and before the spill manager its ranges live in.
 	defer source.close()

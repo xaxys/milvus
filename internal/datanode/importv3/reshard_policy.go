@@ -23,6 +23,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/importv3pb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexcgopb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
@@ -77,6 +78,13 @@ type sourceSpec struct {
 	// way.
 	backup       bool
 	runFunctions bool
+	// Snapshot-source L0 folding. factory resolves source storage once per run
+	// and is shared by the delete-mask builder and every file reader.
+	snapshot             bool
+	snapshotL0Sources    []*internalpb.SnapshotImportL0Source
+	snapshotDeleteBudget int64
+	snapshotBitmapBudget int64
+	factory              *importutilv2.ReaderFactory
 }
 
 // reshardPolicy bundles the immutable per-run configuration derived once from
@@ -112,12 +120,37 @@ func getReshardPolicy(req *datapb.ReshardTaskRequest, plan *importv3pb.ReshardTa
 	if slot <= 0 {
 		slot = 1
 	}
+	snapshot := importutilv2.IsSnapshotSource(plan.GetOptions())
+	hasSnapshotL0 := len(plan.GetSnapshotL0Sources()) > 0
+	typedSnapshot := snapshot
+	if typedSnapshot {
+		typedSnapshot = false
+		for _, file := range plan.GetFiles() {
+			if file.GetSnapshotSource() != nil {
+				typedSnapshot = true
+				break
+			}
+		}
+	}
+	budget := plan.GetSnapshotBudget()
+	deleteBudget, bitmapBudget := budget.GetDeleteBudget(), budget.GetBitmapBudget()
+	if typedSnapshot && (deleteBudget <= 0 || (hasSnapshotL0 && bitmapBudget <= 0)) {
+		return nil, merr.WrapErrImportSysFailedMsg("snapshot reshard plan is missing its delete/bitmap budget")
+	}
 	// The task's slot budget is charged in the node's own slot unit, the same one
 	// DataCoord estimated the slot with (reshardmem.MemoryPerSlot), not the
-	// import-specific memoryLimitPerSlot.
+	// import-specific memoryLimitPerSlot. The snapshot delete reservations are
+	// held by the delete merger and masks, so remove them from the budget
+	// available to fragment buffering and sort.
 	memoryBudget := slot * reshardmem.MemoryPerSlot(
 		paramtable.Get().DataNodeCfg.WorkerSlotUnit.GetAsInt64(),
 		paramtable.Get().DataNodeCfg.BuildParallel.GetAsInt64())
+	if typedSnapshot {
+		memoryBudget = max(memoryBudget-deleteBudget, 1)
+	}
+	if hasSnapshotL0 {
+		memoryBudget = max(memoryBudget-bitmapBudget, 1)
+	}
 	// Fixed bucket-to-shard mapping: every range of one bucket lands in the same
 	// spill file, so reading a bucket back never touches the others and the
 	// file/fd count stays at min(buckets, reshardSpillMaxStreams).
@@ -160,12 +193,16 @@ func getReshardPolicy(req *datapb.ReshardTaskRequest, plan *importv3pb.ReshardTa
 			model:          memModel,
 		},
 		source: sourceSpec{
-			collectionSchema: plan.GetCollectionSchema(),
-			options:          plan.GetOptions(),
-			storageConfig:    req.GetStorageConfig(),
-			bufferSize:       bufferSize,
-			backup:           backup,
-			runFunctions:     !backup,
+			collectionSchema:     plan.GetCollectionSchema(),
+			options:              plan.GetOptions(),
+			storageConfig:        req.GetStorageConfig(),
+			bufferSize:           bufferSize,
+			backup:               backup,
+			runFunctions:         !backup,
+			snapshot:             snapshot,
+			snapshotL0Sources:    plan.GetSnapshotL0Sources(),
+			snapshotDeleteBudget: deleteBudget,
+			snapshotBitmapBudget: bitmapBudget,
 		},
 		write: writeSpec{
 			req:            req,

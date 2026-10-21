@@ -86,10 +86,8 @@ type importChecker struct {
 	// Preparation owns no worker tasks until its complete plan is durable.
 	// Bound source I/O separately from the state-machine loop and stop all
 	// attempts before releasing this checker on leadership loss/shutdown.
-	prepareMu     sync.Mutex
-	preparing     map[int64]context.CancelFunc
-	prepareWG     sync.WaitGroup
-	prepareClosed bool
+	// V2-only; Import V3 prepares synchronously in SnapshotPreparing.
+	snapshotPrepScheduler *snapshotPrepScheduler
 }
 
 func NewImportChecker(ctx context.Context,
@@ -102,15 +100,16 @@ func NewImportChecker(ctx context.Context,
 	hooks importCheckerHooks,
 ) ImportChecker {
 	return &importChecker{
-		ctx:        ctx,
-		meta:       meta,
-		broker:     broker,
-		alloc:      alloc,
-		importMeta: importMeta,
-		ci:         ci,
-		handler:    handler,
-		hooks:      hooks,
-		closeChan:  make(chan struct{}),
+		ctx:                   ctx,
+		meta:                  meta,
+		broker:                broker,
+		alloc:                 alloc,
+		importMeta:            importMeta,
+		ci:                    ci,
+		handler:               handler,
+		hooks:                 hooks,
+		closeChan:             make(chan struct{}),
+		snapshotPrepScheduler: newSnapshotPrepScheduler(ctx, meta, alloc, importMeta),
 	}
 }
 
@@ -137,7 +136,9 @@ func (c *importChecker) runStateMachineLoop() {
 			mlog.Info(c.ctx, "import checker state-machine loop exited")
 			return
 		case <-ticker.C:
-			c.cancelInactiveSnapshotPreparations()
+			if c.snapshotPrepScheduler != nil {
+				c.snapshotPrepScheduler.cancelInactive()
+			}
 			jobs := c.importMeta.GetJobBy(c.ctx, WithJobVersions(internalpb.ImportVersion_ImportVersionV2))
 			for _, job := range jobs {
 				if !funcutil.SliceSetEqual[string](job.GetVchannels(), job.GetReadyVchannels()) {
@@ -201,14 +202,10 @@ func (c *importChecker) runGCLoop() {
 
 func (c *importChecker) Close() {
 	c.closeOnce.Do(func() {
-		c.prepareMu.Lock()
-		c.prepareClosed = true
-		for _, cancel := range c.preparing {
-			cancel()
-		}
 		close(c.closeChan)
-		c.prepareMu.Unlock()
-		c.prepareWG.Wait()
+		if c.snapshotPrepScheduler != nil {
+			c.snapshotPrepScheduler.close()
+		}
 	})
 }
 
@@ -284,7 +281,9 @@ func (c *importChecker) getLackFilesForImports(job ImportJob) []*datapb.ImportFi
 
 func (c *importChecker) checkPendingJob(job ImportJob) {
 	if importutilv2.IsSnapshotPreparation(job.GetFiles()) {
-		c.scheduleSnapshotPreparation(job)
+		if c.snapshotPrepScheduler != nil {
+			c.snapshotPrepScheduler.schedule(job)
+		}
 		return
 	}
 	log := mlog.With(mlog.FieldJobID(job.GetJobID()))
