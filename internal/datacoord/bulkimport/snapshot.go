@@ -18,14 +18,19 @@ package bulkimport
 
 import (
 	"context"
+	"errors"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/datacoord/allocator"
+	"github.com/milvus-io/milvus/internal/datacoord/meta"
 	"github.com/milvus-io/milvus/internal/snapshotio/storage"
 	milvusstorage "github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
@@ -41,6 +46,71 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
+
+// errSnapshotExpansionRetry marks an expansion failure that must be retried
+// without failing the job. File-ID allocation is the only such step: the plan
+// has not been published yet, so the next tick retries from scratch.
+var errSnapshotExpansionRetry = errors.New("snapshot expansion retry")
+
+// expandSnapshotJob expands a pending snapshot job's metadata reference into
+// its executable file plan. It performs source I/O and allocates file IDs but
+// persists nothing: callers own the durability boundary and the failure
+// transition. The returned plan is fully validated, including the allocated
+// IDs, before it is handed back.
+func expandSnapshotJob(ctx context.Context, mt *meta.Meta, alloc allocator.Allocator, job ImportJob) ([]*internalpb.ImportFile, importutilv2.Options, []*internalpb.SnapshotImportL0Source, error) {
+	// Recovered jobs must validate the reference before doing source I/O.
+	if err := importutilv2.ValidateSnapshotImportPlan(job.GetFiles(), job.GetOptions(), nil); err != nil {
+		return nil, nil, nil, err
+	}
+	metadata, err := readSnapshotImportMetadata(ctx, mt.ChunkManager, job.GetOptions())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	uri, _ := funcutil.GetAttrByKeyFromRepeatedKV(importutilv2.SnapshotSourceURI, job.GetOptions())
+	files, options, sources, err := expandSnapshotImportFiles(ctx, job.GetPartitionIDs(), mt.ChunkManager,
+		job.GetSchema(), uri, job.GetOptions(), metadata)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if ctx.Err() != nil {
+		return nil, nil, nil, ctx.Err()
+	}
+	start, _, err := alloc.AllocN(int64(len(files)))
+	if err != nil {
+		return nil, nil, nil, errors.Join(errSnapshotExpansionRetry, err)
+	}
+	for i, file := range files {
+		file.Id = start + int64(i)
+	}
+	// Preparation can rebase paths and add external/routing descriptors after
+	// its intermediate checks. Validate the complete durable plan, including
+	// the allocated IDs, before handing it back.
+	if err := importutilv2.ValidateSnapshotImportPlan(files, options, sources); err != nil {
+		return nil, nil, nil, err
+	}
+	return files, options, sources, nil
+}
+
+// snapshotExpansionTimeout caps one V3 expansion attempt when the job has no
+// earlier deadline. Expansion runs on the V3 checker goroutine, so an unbounded
+// source read would stall every other V3 job. V2's scheduler runs off the
+// checker goroutine and keeps its original deadline behavior.
+const snapshotExpansionTimeout = 10 * time.Minute
+
+// snapshotExpansionContext bounds one expansion by the earlier of the job
+// deadline and snapshotExpansionTimeout. capped reports that the cap, not the
+// job's own deadline, fired.
+func snapshotExpansionContext(parent context.Context, job ImportJob) (context.Context, context.CancelFunc, bool) {
+	deadline := time.Now().Add(snapshotExpansionTimeout)
+	capped := true
+	if timeoutTs := job.GetTimeoutTs(); timeoutTs != 0 && timeoutTs != math.MaxUint64 {
+		if jobDeadline, _ := tsoutil.ParseTS(timeoutTs); jobDeadline.Before(deadline) {
+			deadline, capped = jobDeadline, false
+		}
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
+	return ctx, cancel, capped
+}
 
 // cancelInactiveSnapshotPreparations is called each checker tick, including
 // for jobs whose channels are not ready. A terminal job must not keep doing I/O.
