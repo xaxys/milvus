@@ -2178,6 +2178,13 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         expr_->op_type_ == proto::plan::OpType::RegexMatch;
     auto req = MakeIndexRequirement(is_pattern ? RequiredReader::Ngram
                                                : RequiredReader::Predicate);
+    if (is_pattern) {
+        // The literal decides whether an NGRAM index can serve this query at all, so
+        // selection gets it up front instead of discovering it after a pin.
+        req.has_pattern = true;
+        req.pattern = GetValueFromProto<std::string>(expr_->val_);
+        req.pattern_op = ToIndexPatternOp(expr_->op_type_);
+    }
     req.value_type =
         data_type == DataType::ARRAY
             ? expr_->column_.element_type_

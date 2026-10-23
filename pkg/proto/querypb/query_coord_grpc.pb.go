@@ -23,6 +23,7 @@ const _ = grpc.SupportPackageIsVersion7
 
 const (
 	QueryCoord_GetQueryViewLoadInfo_FullMethodName        = "/milvus.proto.query.QueryCoord/GetQueryViewLoadInfo"
+	QueryCoord_GetIndexLoadStatus_FullMethodName          = "/milvus.proto.query.QueryCoord/GetIndexLoadStatus"
 	QueryCoord_ShowLoadCollections_FullMethodName         = "/milvus.proto.query.QueryCoord/ShowLoadCollections"
 	QueryCoord_ShowLoadPartitions_FullMethodName          = "/milvus.proto.query.QueryCoord/ShowLoadPartitions"
 	QueryCoord_LoadPartitions_FullMethodName              = "/milvus.proto.query.QueryCoord/LoadPartitions"
@@ -73,6 +74,10 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type QueryCoordClient interface {
 	GetQueryViewLoadInfo(ctx context.Context, in *GetQueryViewLoadInfoRequest, opts ...grpc.CallOption) (*GetQueryViewLoadInfoResponse, error)
+	// GetIndexLoadStatus reports, per index, whether the replicas that serve the
+	// collection actually carry it on their loaded segments. It answers "is this index
+	// usable right now, and if not why" without exposing the segment distribution.
+	GetIndexLoadStatus(ctx context.Context, in *GetIndexLoadStatusRequest, opts ...grpc.CallOption) (*GetIndexLoadStatusResponse, error)
 	ShowLoadCollections(ctx context.Context, in *ShowCollectionsRequest, opts ...grpc.CallOption) (*ShowCollectionsResponse, error)
 	ShowLoadPartitions(ctx context.Context, in *ShowPartitionsRequest, opts ...grpc.CallOption) (*ShowPartitionsResponse, error)
 	LoadPartitions(ctx context.Context, in *LoadPartitionsRequest, opts ...grpc.CallOption) (*commonpb.Status, error)
@@ -136,6 +141,15 @@ func NewQueryCoordClient(cc grpc.ClientConnInterface) QueryCoordClient {
 func (c *queryCoordClient) GetQueryViewLoadInfo(ctx context.Context, in *GetQueryViewLoadInfoRequest, opts ...grpc.CallOption) (*GetQueryViewLoadInfoResponse, error) {
 	out := new(GetQueryViewLoadInfoResponse)
 	err := c.cc.Invoke(ctx, QueryCoord_GetQueryViewLoadInfo_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *queryCoordClient) GetIndexLoadStatus(ctx context.Context, in *GetIndexLoadStatusRequest, opts ...grpc.CallOption) (*GetIndexLoadStatusResponse, error) {
+	out := new(GetIndexLoadStatusResponse)
+	err := c.cc.Invoke(ctx, QueryCoord_GetIndexLoadStatus_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -538,6 +552,10 @@ func (c *queryCoordClient) EnsureCollectionReady(ctx context.Context, in *Ensure
 // for forward compatibility
 type QueryCoordServer interface {
 	GetQueryViewLoadInfo(context.Context, *GetQueryViewLoadInfoRequest) (*GetQueryViewLoadInfoResponse, error)
+	// GetIndexLoadStatus reports, per index, whether the replicas that serve the
+	// collection actually carry it on their loaded segments. It answers "is this index
+	// usable right now, and if not why" without exposing the segment distribution.
+	GetIndexLoadStatus(context.Context, *GetIndexLoadStatusRequest) (*GetIndexLoadStatusResponse, error)
 	ShowLoadCollections(context.Context, *ShowCollectionsRequest) (*ShowCollectionsResponse, error)
 	ShowLoadPartitions(context.Context, *ShowPartitionsRequest) (*ShowPartitionsResponse, error)
 	LoadPartitions(context.Context, *LoadPartitionsRequest) (*commonpb.Status, error)
@@ -596,6 +614,9 @@ type UnimplementedQueryCoordServer struct {
 
 func (UnimplementedQueryCoordServer) GetQueryViewLoadInfo(context.Context, *GetQueryViewLoadInfoRequest) (*GetQueryViewLoadInfoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetQueryViewLoadInfo not implemented")
+}
+func (UnimplementedQueryCoordServer) GetIndexLoadStatus(context.Context, *GetIndexLoadStatusRequest) (*GetIndexLoadStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetIndexLoadStatus not implemented")
 }
 func (UnimplementedQueryCoordServer) ShowLoadCollections(context.Context, *ShowCollectionsRequest) (*ShowCollectionsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ShowLoadCollections not implemented")
@@ -752,6 +773,24 @@ func _QueryCoord_GetQueryViewLoadInfo_Handler(srv interface{}, ctx context.Conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(QueryCoordServer).GetQueryViewLoadInfo(ctx, req.(*GetQueryViewLoadInfoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QueryCoord_GetIndexLoadStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetIndexLoadStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QueryCoordServer).GetIndexLoadStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QueryCoord_GetIndexLoadStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QueryCoordServer).GetIndexLoadStatus(ctx, req.(*GetIndexLoadStatusRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1540,6 +1579,10 @@ var QueryCoord_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetQueryViewLoadInfo",
 			Handler:    _QueryCoord_GetQueryViewLoadInfo_Handler,
+		},
+		{
+			MethodName: "GetIndexLoadStatus",
+			Handler:    _QueryCoord_GetIndexLoadStatus_Handler,
 		},
 		{
 			MethodName: "ShowLoadCollections",

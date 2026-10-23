@@ -1643,6 +1643,19 @@ MakeSealedIndexCapability(const LoadIndexInfo& info) {
     meta.family = info.index_family;
     meta.value_type = info.index_value_type;
     meta.caps = info.index_caps;
+    // Only the parameters selection actually needs, parsed once at registration.
+    const auto param_of = [&info](const char* key) -> std::string {
+        const auto it = info.index_params.find(key);
+        return it == info.index_params.end() ? std::string{} : it->second;
+    };
+    if (meta.family == "ngram") {
+        if (const auto v = param_of(index::MIN_GRAM); !v.empty()) {
+            meta.params.ngram.min_gram = static_cast<size_t>(std::stoul(v));
+        }
+        if (const auto v = param_of(index::MAX_GRAM); !v.empty()) {
+            meta.params.ngram.max_gram = static_cast<size_t>(std::stoul(v));
+        }
+    }
     return meta;
 }
 

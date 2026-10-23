@@ -346,8 +346,9 @@ NgramIndexReader::ValueType() const {
 }
 
 bool
-NgramIndexReader::CanHandle(std::string_view literal, PatternOp op) const {
-    const auto [min_gram, max_gram] = index_->GramBounds();
+NgramIndexReader::AcceptsLiteral(std::string_view literal,
+                                 PatternOp op,
+                                 size_t min_gram) {
     const auto owned = OwnString(literal);
     switch (op) {
         case PatternOp::Match: {
@@ -371,6 +372,12 @@ NgramIndexReader::CanHandle(std::string_view literal, PatternOp op) const {
             return Utf8LiteralLength(owned) >= min_gram;
     }
     return false;
+}
+
+bool
+NgramIndexReader::CanHandle(std::string_view literal, PatternOp op) const {
+    const auto [min_gram, max_gram] = index_->GramBounds();
+    return AcceptsLiteral(literal, op, min_gram);
 }
 
 bool

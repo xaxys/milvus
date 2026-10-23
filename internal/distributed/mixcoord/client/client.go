@@ -2385,6 +2385,18 @@ func (c *Client) ListClientCommands(ctx context.Context, req *rootcoordpb.ListCl
 	})
 }
 
+// GetIndexLoadStatus reports per-index availability where the index is supposed to be.
+func (c *Client) GetIndexLoadStatus(ctx context.Context, req *querypb.GetIndexLoadStatusRequest, opts ...grpc.CallOption) (*querypb.GetIndexLoadStatusResponse, error) {
+	req = typeutil.Clone(req)
+	commonpbutil.UpdateMsgBase(
+		req.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
+	)
+	return wrapGrpcCall(ctx, c, func(client MixCoordClient) (*querypb.GetIndexLoadStatusResponse, error) {
+		return client.QueryCoordClient.GetIndexLoadStatus(ctx, req, opts...)
+	})
+}
+
 func (c *Client) GetQueryViewLoadInfo(ctx context.Context, req *querypb.GetQueryViewLoadInfoRequest, opts ...grpc.CallOption) (*querypb.GetQueryViewLoadInfoResponse, error) {
 	req = typeutil.Clone(req)
 	commonpbutil.UpdateMsgBase(

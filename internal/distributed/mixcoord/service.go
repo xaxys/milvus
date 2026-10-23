@@ -1264,6 +1264,10 @@ func (s *Server) ListClientCommands(ctx context.Context, req *rootcoordpb.ListCl
 	return s.mixCoord.ListClientCommands(ctx, req)
 }
 
+func (s *Server) GetIndexLoadStatus(ctx context.Context, req *querypb.GetIndexLoadStatusRequest) (*querypb.GetIndexLoadStatusResponse, error) {
+	return s.mixCoord.GetIndexLoadStatus(ctx, req)
+}
+
 func (s *Server) GetQueryViewLoadInfo(ctx context.Context, req *querypb.GetQueryViewLoadInfoRequest) (*querypb.GetQueryViewLoadInfoResponse, error) {
 	return s.mixCoord.GetQueryViewLoadInfo(ctx, req)
 }

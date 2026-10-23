@@ -1596,6 +1596,10 @@ func (s *mixCoordImpl) ListRefreshExternalCollectionJobs(ctx context.Context, re
 	return s.datacoordServer.ListRefreshExternalCollectionJobs(ctx, req)
 }
 
+func (s *mixCoordImpl) GetIndexLoadStatus(ctx context.Context, req *querypb.GetIndexLoadStatusRequest) (*querypb.GetIndexLoadStatusResponse, error) {
+	return s.queryCoordServer.GetIndexLoadStatus(ctx, req)
+}
+
 func (s *mixCoordImpl) GetQueryViewLoadInfo(ctx context.Context, req *querypb.GetQueryViewLoadInfoRequest) (*querypb.GetQueryViewLoadInfoResponse, error) {
 	return s.queryCoordServer.GetQueryViewLoadInfo(ctx, req)
 }

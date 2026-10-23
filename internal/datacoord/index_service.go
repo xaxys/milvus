@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
@@ -98,12 +99,28 @@ func FieldExists(schema *schemapb.CollectionSchema, fieldID int64) bool {
 }
 
 func isJSONField(schema *schemapb.CollectionSchema, fieldID int64) bool {
+	dataType, _ := getFieldDataType(schema, fieldID)
+	return typeutil.IsJSONType(dataType)
+}
+
+// getFieldDataType returns the declared type of a top-level field (or of a struct
+// array's sub-field).
+// The bool reports whether the field was found; a missing field yields
+// DataType_None.
+func getFieldDataType(schema *schemapb.CollectionSchema, fieldID int64) (schemapb.DataType, bool) {
 	for _, f := range schema.Fields {
 		if f.FieldID == fieldID {
-			return typeutil.IsJSONType(f.DataType)
+			return f.DataType, true
 		}
 	}
-	return false
+	for _, structField := range schema.GetStructArrayFields() {
+		for _, subField := range structField.GetFields() {
+			if subField.FieldID == fieldID {
+				return subField.DataType, true
+			}
+		}
+	}
+	return schemapb.DataType_None, false
 }
 
 func setIndexParam(indexParams []*commonpb.KeyValuePair, key, value string) {
@@ -112,6 +129,145 @@ func setIndexParam(indexParams []*commonpb.KeyValuePair, key, value string) {
 			p.Value = value
 		}
 	}
+}
+
+func (s *Server) checkIndexCreationPolicy(
+	ctx context.Context,
+	req *indexpb.CreateIndexRequest,
+	isJSON bool,
+	fieldType schemapb.DataType,
+) error {
+	fieldIndexes := s.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), "")
+	// A named request that repeats an existing definition is the same request again:
+	// it must stay a no-op on every field type, vector included.
+	if name := req.GetIndexName(); name != "" {
+		for _, idx := range fieldIndexes {
+			if idx.IndexName != name {
+				continue
+			}
+			if index.CheckParams(idx, req) && (!isJSON || index.CheckIdenticalJSON(idx, req)) {
+				return nil
+			}
+		}
+	}
+
+	if typeutil.IsVectorType(fieldType) {
+		// A vector field carries one index, so replaying the same request must stay a
+		// no-op. "Same request" means the same name: an unnamed replay matches the
+		// field's index, a named one only matches an index of that name -- two names
+		// are two indexes, and a vector field can only hold one.
+		for _, idx := range fieldIndexes {
+			if idx.IsDeleted {
+				continue
+			}
+			if name := req.GetIndexName(); name != "" && name != idx.IndexName {
+				continue
+			}
+			if index.CheckParams(idx, req) && (!isJSON || index.CheckIdenticalJSON(idx, req)) {
+				return nil
+			}
+		}
+		if len(fieldIndexes) > 0 {
+			errMsg := "CreateIndex failed: creating multiple indexes on a vector field is not supported"
+			mlog.Warn(ctx, errMsg)
+			// Client-caused conflict: return an input-class error rather than
+			// ServiceInternal (code 5, "never return out of Milvus") so the caller
+			// is not blamed with a system error / counted as a system-caused failure.
+			return merr.WrapErrParameterInvalidMsg("%s", errMsg)
+		}
+		return nil
+	}
+
+	// Every field carries at most maxScalarIndexesPerField scalar indexes, named or
+	// not: the cap keeps one field from piling up indexes.
+	existing := make([]*model.Index, 0)
+	for _, idx := range fieldIndexes {
+		if !idx.IsDeleted {
+			existing = append(existing, idx)
+		}
+	}
+	if len(existing) >= maxScalarIndexesPerField {
+		return merr.WrapErrParameterInvalidMsg(
+			"CreateIndex failed: field %d already has %d indexes, the limit is %d",
+			req.GetFieldID(),
+			len(existing),
+			maxScalarIndexesPerField)
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	if isJSON {
+		// Distinct JSON paths were always allowed to coexist on one field; only a
+		// second index on the same path is what the multi-index switch gates.
+		newPath, _ := index.GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
+		samePath := false
+		for _, idx := range existing {
+			if path, _ := index.GetIndexParam(idx.IndexParams, common.JSONPathKey); path == newPath {
+				samePath = true
+				break
+			}
+		}
+		if !samePath {
+			return nil
+		}
+	}
+	return index.CheckMultiScalarIndexPerField(req.GetFieldID(), s.indexEngineVersionManager.ResolveScalarIndexVersion())
+}
+
+// maxScalarIndexesPerField bounds how many scalar indexes one field may carry.
+const maxScalarIndexesPerField = 10
+
+// resolveIndexName derives the name for a request that did not specify one.
+//
+// The derived name is fixed -- <fieldName>, or <fieldName><jsonPath> for a JSON
+// path index -- and a clash is reported instead of being papered over with an
+// ordinal: the name is the only identity a user has for an index, so a silently
+// renamed index is worse than a refused request.
+func (s *Server) resolveIndexName(
+	req *indexpb.CreateIndexRequest,
+	schema *schemapb.CollectionSchema,
+	isJSON bool,
+) (string, error) {
+	fieldName, err := s.defaultIndexNameByID(schema, req.GetFieldID())
+	if err != nil {
+		return "", err
+	}
+	base := fieldName
+	if isJSON {
+		// ignore error, because it's already checked in getIndexParam before
+		jsonPath, _ := index.GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
+		base += jsonPath
+	}
+
+	fieldIndexes := s.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), "")
+	// An unnamed request that repeats an existing definition is the same request
+	// again: reuse that index's name so creation stays a no-op (any name, because
+	// the user did not pick one).
+	for _, idx := range fieldIndexes {
+		if idx.IsDeleted {
+			continue
+		}
+		if index.CheckParams(idx, req) && (!isJSON || index.CheckIdenticalJSON(idx, req)) {
+			return idx.IndexName, nil
+		}
+	}
+
+	// The derived name is fixed: a clash is reported instead of being papered over
+	// with a numeric suffix, which would make the same request produce different
+	// names on different clusters.
+	for _, idx := range fieldIndexes {
+		if !idx.IsDeleted && idx.IndexName == base {
+			return "", merr.WrapErrParameterInvalidMsg(
+				"index name %q derived for field %d is already used by an index with a different definition; specify index_name explicitly",
+				base,
+				req.GetFieldID())
+		}
+	}
+	return base, nil
+}
+
+func (s *Server) indexNameTaken(collectionID int64, name string) bool {
+	return len(s.indexMeta.GetIndexIDByName(collectionID, name)) > 0
 }
 
 // CreateIndex create an index on collection.
@@ -145,7 +301,8 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 	}
 	schema := coll.Schema
 
-	if !FieldExists(schema, req.GetFieldID()) {
+	fieldType, ok := getFieldDataType(schema, req.GetFieldID())
+	if !ok {
 		return merr.Status(merr.WrapErrFieldNotFound(req.GetFieldID())), nil
 	}
 
@@ -159,7 +316,7 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		setIndexParam(req.GetIndexParams(), common.IndexTypeKey, indexparamcheck.IndexINVERTED)
 	}
 
-	isJSON := isJSONField(schema, req.GetFieldID())
+	isJSON := typeutil.IsJSONType(fieldType)
 	if isJSON {
 		// check json_path and json_cast_type exist
 		jsonPath, err := index.GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
@@ -234,31 +391,25 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		}
 	}
 
+	// The shapes the segment runtime cannot serve, checked before anything is
+	// allocated or written: a second index on a vector field is always refused, and a
+	// second index on a scalar field is gated by the version switch
+	// (dataCoord.enableMultiScalarIndexPerField). It runs after the JSON path was
+	// normalized, so the comparison against the indexes already on the field uses
+	// the same spelling.
+	if err := s.checkIndexCreationPolicy(ctx, req, isJSON, fieldType); err != nil {
+		mlog.Warn(ctx, "check index creation policy failed", mlog.Err(err))
+		metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
+		return merr.Status(err), nil
+	}
+
 	if req.GetIndexName() == "" {
-		indexes := s.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), req.GetIndexName())
-		fieldName, err := s.defaultIndexNameByID(schema, req.GetFieldID())
+		name, err := s.resolveIndexName(req, schema, isJSON)
 		if err != nil {
-			mlog.Warn(ctx, "get field name from schema failed", mlog.Int64("fieldID", req.GetFieldID()))
+			mlog.Warn(ctx, "resolve index name failed", mlog.Err(err))
 			return merr.Status(err), nil
 		}
-		defaultIndexName := fieldName
-		if isJSON {
-			// ignore error, because it's already checked in getIndexParam before
-			jsonPath, _ := index.GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
-			// filter indexes by json path, the length of indexes should not be larger than 1
-			// this is guaranteed by CanCreateIndex
-			indexes = lo.Filter(indexes, func(idx *model.Index, i int) bool {
-				path, _ := index.GetIndexParam(idx.IndexParams, common.JSONPathKey)
-				return path == jsonPath
-			})
-
-			defaultIndexName += jsonPath
-		}
-		if len(indexes) == 0 {
-			req.IndexName = defaultIndexName
-		} else if len(indexes) == 1 {
-			req.IndexName = indexes[0].IndexName
-		}
+		req.IndexName = name
 	}
 
 	// Allocate or use provided index ID
@@ -1081,6 +1232,18 @@ func (s *Server) DescribeIndex(ctx context.Context, req *indexpb.DescribeIndexRe
 		s.completeIndexInfo(indexInfo, idx, segments, false, createTs)
 		indexInfos = append(indexInfos, indexInfo)
 	}
+	// Hand out a deterministic order (ascending indexID). The store behind this is
+	// a map, so without sorting the order changes between calls -- anything that
+	// picks "the field's index" from the list (the proxy's load config, for one)
+	// would then flap between reloads. Sorting here is a convenience for every
+	// client; a client that needs a *specific* index must still select it by
+	// indexID rather than by position, since an older coordinator does not sort.
+	sort.Slice(indexInfos, func(i, j int) bool {
+		if indexInfos[i].GetFieldID() != indexInfos[j].GetFieldID() {
+			return indexInfos[i].GetFieldID() < indexInfos[j].GetFieldID()
+		}
+		return indexInfos[i].GetIndexID() < indexInfos[j].GetIndexID()
+	})
 	return &indexpb.DescribeIndexResponse{
 		Status:     merr.Success(),
 		IndexInfos: indexInfos,

@@ -421,12 +421,25 @@ message ScoreOption{
   FunctionMode function_mode = 2;
 }
 
+// One index the query is hinted to use, ordered by priority in PlanOption.
+// The field is carried explicitly so a hint that names an index of another field
+// never changes (or fails) this field's selection.
+message IndexHint {
+   int64 field_id = 1;
+   int64 index_id = 2;
+}
+
 message PlanOption {
    bool expr_use_json_stats = 1;
    // Record which execution features (filter paths, scalar index types,
    // interim index, ...) the request used, for the feature usage report.
    // Set by the Proxy only on requests it counts.
    bool collect_feature_bits = 2;
+   // Ordered by priority: the first entry that is usable on a field wins.
+   repeated IndexHint index_hints = 3;
+   // strict: a hint that names this field's indexes but cannot be used fails the
+   // query instead of falling back to rule-based selection.
+   bool index_hint_strict = 4;
 };
 
 message PlanNode {

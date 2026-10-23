@@ -105,6 +105,11 @@ ProtoParser::PlanOptionsFromProto(
     const proto::plan::PlanOption& plan_option_proto,
     PlanOptions& plan_options) {
     plan_options.expr_use_json_stats = plan_option_proto.expr_use_json_stats();
+    plan_options.index_hint_strict = plan_option_proto.index_hint_strict();
+    plan_options.index_hints.reserve(plan_option_proto.index_hints_size());
+    for (const auto& hint : plan_option_proto.index_hints()) {
+        plan_options.index_hints.emplace_back(hint.field_id(), hint.index_id());
+    }
     if (plan_option_proto.collect_feature_bits()) {
         plan_options.feature_recorder = std::make_shared<FeatureRecorder>();
     }
