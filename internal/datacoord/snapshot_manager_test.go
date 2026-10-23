@@ -2280,6 +2280,80 @@ func TestSnapshotManager_RestoreIndexes_FMINDEXNilVersionManager(t *testing.T) {
 	assert.False(t, broadcasterCalled)
 }
 
+func TestSnapshotManager_RestoreIndexes_MultiIndexPerFieldGate(t *testing.T) {
+	ctx := context.Background()
+	const collectionID = int64(100)
+
+	newSM := func(t *testing.T, version int32, withManager bool) *snapshotManager {
+		mockBroker := broker.NewMockBroker(t)
+		mockBroker.EXPECT().DescribeCollectionInternal(mock.Anything, collectionID).Return(
+			&milvuspb.DescribeCollectionResponse{DbName: "default"}, nil,
+		).Maybe()
+		mockAllocator := allocator.NewMockAllocator(t)
+		mockAllocator.EXPECT().AllocID(mock.Anything).Return(int64(1001), nil).Maybe()
+		var vm IndexEngineVersionManager
+		if withManager {
+			mockVM := NewMockVersionManager(t)
+			mockVM.EXPECT().ResolveScalarIndexVersion().Return(version).Maybe()
+			vm = mockVM
+		}
+		return NewSnapshotManager(nil, nil, nil, mockAllocator, nil, mockBroker, nil, vm)
+	}
+
+	// a snapshot that carries two indexes on one field: the same gate CreateIndex
+	// applies has to hold here, or a restore would hand a segment with two indexes on
+	// one field to a QueryNode that cannot load it
+	twoIndexes := &snapshotstorage.SnapshotData{
+		Indexes: []*indexpb.IndexInfo{
+			{IndexName: "scalar_inverted", FieldID: 101, IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}},
+			{IndexName: "scalar_bitmap", FieldID: 101, IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "BITMAP"}}},
+		},
+	}
+	// Records whether the restore got past the gate. When it does, the fixture stops it
+	// right there with a non-gate error, so the assertions below can tell the two apart.
+	broadcasterCalled := false
+	startBroadcaster := func(context.Context, int64, string) (broadcaster.BroadcastAPI, error) {
+		broadcasterCalled = true
+		return nil, merr.WrapErrServiceInternal("fixture stops the restore here")
+	}
+
+	t.Run("stale engine version refuses the restore", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		broadcasterCalled = false
+		sm := newSM(t, common.MinScalarIndexVersionForScalarMultiIndex-1, true)
+		err := sm.RestoreIndexes(ctx, twoIndexes, collectionID, startBroadcaster, "snapshot")
+		assert.ErrorIs(t, err, merr.ErrServiceNotReady)
+		assert.False(t, broadcasterCalled, "must be refused before broadcasting")
+	})
+
+	t.Run("switch off refuses the restore the way it always did", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "false")
+		broadcasterCalled = false
+		sm := newSM(t, common.CurrentScalarIndexEngineVersion, true)
+		err := sm.RestoreIndexes(ctx, twoIndexes, collectionID, startBroadcaster, "snapshot")
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "creating multiple indexes on same field is not supported")
+		assert.False(t, broadcasterCalled, "must be refused before broadcasting")
+	})
+
+	t.Run("a single index per field is never gated", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "false")
+		sm := newSM(t, 0, false)
+		// the gate must not fire; the restore proceeds to the broadcaster, which this
+		// fixture lets fail by returning a nil API -- reaching it is what matters here.
+		broadcasterCalled = false
+		err := sm.RestoreIndexes(ctx, &snapshotstorage.SnapshotData{
+			Indexes: []*indexpb.IndexInfo{
+				{IndexName: "scalar_inverted", FieldID: 101, IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}},
+			},
+		}, collectionID, startBroadcaster, "snapshot")
+		// it got past the gate: the only error is the fixture's own stop
+		assert.True(t, broadcasterCalled)
+		assert.NotErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.NotErrorIs(t, err, merr.ErrServiceNotReady)
+	})
+}
+
 // --- Test ReadSnapshotData ---
 
 func TestSnapshotManager_ReadSnapshotData_Success(t *testing.T) {

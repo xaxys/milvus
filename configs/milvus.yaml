@@ -886,6 +886,12 @@ dataCoord:
       # exceeds this threshold, the earliest growing segments will be sealed.
       blockingL0SizeInMB: 64
   autoUpgradeSegmentIndex: false # whether auto upgrade segment index to index engine's version
+  # Whether one scalar field may carry several indexes.
+  # Creation additionally waits until every QueryNode reports a scalar index engine version that
+  # can load such a segment; until then a second index on a field is refused as not ready.
+  # Turning this off restores the pre-feature behaviour: a second index on a field is rejected as
+  # an invalid parameter, exactly as before.
+  enableMultiScalarIndexPerField: true
   forceRebuildSegmentIndex: false # force rebuild segment index to specify index engine's version
   # if param forceRebuildSegmentIndex is enabled, the vector index will be rebuilt to aligned with targetVecIndexVersion.
   # if param forceRebuildSegmentIndex is not enabled, the newly created vector index will be aligned with the newer one of index engine's version and targetVecIndexVersion.

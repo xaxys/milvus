@@ -1557,10 +1557,17 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                    milvus::OpContext* op_ctx,
                    FieldId field_id) const;
 
-    static std::vector<IndexInventory::RootSlot>
-    EraseJsonIndexesAtPath(RuntimeResourceState& runtime,
-                           FieldId field_id,
-                           std::string_view nested_path);
+    // Drops exactly one scalar index, identified by its inventory key. A field
+    // may carry several, so the key -- not the field (which would take the
+    // siblings) and not the JSON path (which would take a sibling cast) -- is
+    // what identifies the one to remove. Field-level cleanup, when the field's
+    // last index goes away, is DropIndex() below.
+    void
+    DropScalarIndex(const IndexKey& key,
+                    const SchemaPtr& schema_snapshot,
+                    RuntimeResourceState& runtime,
+                    PublishedSegmentState& staged_state,
+                    StagedStateCommitter& committer);
 
     static void
     SyncJsonIndexState(PublishedSegmentState& state,

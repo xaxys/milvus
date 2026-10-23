@@ -53,8 +53,12 @@
 #include "common/Types.h"
 #include "common/protobuf_utils.h"
 #include "expr/ITypeExpr.h"
+#include "exec/QueryContext.h"
+#include "exec/expression/Expr.h"
 #include "filemanager/InputStream.h"
 #include "gtest/gtest.h"
+#include "exec/expression/ExprBatchTestUtils.h"
+#include "exec/expression/IndexPathSelection.h"
 #include "segcore/test_utils/ConsumerIndexTestUtils.h"
 #include "index/Meta.h"
 #include "knowhere/comp/index_param.h"
@@ -1892,4 +1896,593 @@ TEST(TestTTLFieldFilter, TestMaskWithNullableTTLField) {
     }
 
     EXPECT_EQ(expired_count, test_data_count / 4);
+}
+
+// ---------------------------------------------------------------------------
+// One field, several scalar indexes.
+//
+// A field's indexes live in one inventory keyed by (field, indexID), so a second
+// index on a field neither replaces nor hides its sibling. These cases pin the
+// container and selection contracts that makes that safe:
+//   * two indexes on one field both stay loaded, both are visible as capability
+//     metadata, and each one can be pinned on its own;
+//   * selection picks by static capability: an exact operator takes the predicate
+//     reader, a pattern operator takes the NGRAM candidate, and a field that
+//     cannot serve the operator falls back to the raw column;
+//   * the field-level "the index provides raw data" flag reports false while a
+//     field carries several indexes, so readers fall back to the raw column
+//     instead of reverse-looking-up through an index that may have no raw data.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Installs one already-opened reader under an explicit indexID, so a test can
+// decide which index is the field's smallest and which one is loaded second.
+milvus::segcore::LoadIndexInfo
+MakeMultiIndexLoadInfo(milvus::test::consumer::OpenedIndex opened,
+                       DataType field_type,
+                       FieldId field_id,
+                       int64_t index_id,
+                       std::map<std::string, std::string> extra_params = {}) {
+    auto info = milvus::test::consumer::MakeLoadIndexInfo(
+        std::move(opened), field_type, field_id.get());
+    info.index_id = index_id;
+    for (auto& [key, value] : extra_params) {
+        info.index_params.emplace(std::move(key), std::move(value));
+    }
+    return info;
+}
+
+void
+LoadMultiIndex(milvus::segcore::SegmentSealed& segment,
+               milvus::test::consumer::OpenedIndex opened,
+               DataType field_type,
+               FieldId field_id,
+               int64_t index_id,
+               std::map<std::string, std::string> extra_params = {}) {
+    auto info = MakeMultiIndexLoadInfo(std::move(opened),
+                                       field_type,
+                                       field_id,
+                                       index_id,
+                                       std::move(extra_params));
+    segment.LoadIndex(info);
+}
+
+// A segment that records which inventory entry the expression layer pinned, so a
+// test can assert the selection decision itself and not only the result rows.
+class RecordingScalarIndexSegment
+    : public milvus::segcore::ChunkedSegmentSealedImpl {
+ public:
+    RecordingScalarIndexSegment(SchemaPtr schema, int64_t segment_id)
+        : ChunkedSegmentSealedImpl(
+              std::move(schema),
+              milvus::empty_index_meta,
+              milvus::segcore::SegcoreConfig::default_config(),
+              segment_id,
+              /*is_sorted_by_pk=*/false) {
+    }
+
+    milvus::segcore::IndexPin
+    PinIndex(milvus::OpContext* op_ctx,
+             const milvus::segcore::IndexKey& key) const override {
+        pinned_keys_.push_back(key);
+        return ChunkedSegmentSealedImpl::PinIndex(op_ctx, key);
+    }
+
+    // Only the entries the expression layer pinned, in pin order.
+    mutable std::vector<milvus::segcore::IndexKey> pinned_keys_;
+};
+
+constexpr int64_t kInvertedIndexId = 4001;
+constexpr int64_t kNgramIndexId = 4002;
+
+}  // namespace
+
+// T3: two scalar indexes on one field both load, both are reported as loaded,
+// and each one can be pinned on its own.
+//
+// This case used to be named MultiScalarIndexOnSameFieldAsserts and asserted
+// that loading a second index on a field trips AssertInfo(!has_index)
+// (ChunkedSegmentSealedImpl's LoadScalarIndex before this change). With the
+// inventory keyed by (field, indexID) the second index trips nothing and no
+// longer replaces its sibling: the two coexist as independent entries.
+//
+// The production path is LoadDiff -> LoadBatchIndexes -> committer.Commit ->
+// LoadIndex(is_replace=false); both entries share LoadScalarIndex, and
+// SegmentLoadInfoTest.GetLoadDiffWithTwoScalarIndexesOnSameField proves the two
+// land in the same indexes_to_load[field] vector.
+TEST_P(TestChunkSegment, MultiScalarIndexOnSameFieldLoads) {
+    using namespace milvus::segcore;
+    auto seg = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(seg, nullptr);
+    auto fid = fields.at("int64");
+
+    std::vector<int64_t> data(test_data_count * chunk_num);
+    for (int i = 0; i < chunk_num; i++) {
+        auto pw = seg->chunk_data<int64_t>(nullptr, fid, i);
+        auto d = pw.get();
+        std::copy(d.data(),
+                  d.data() + test_data_count,
+                  data.begin() + i * test_data_count);
+    }
+
+    // indexID -> the reader object itself; the assertions below pin down which
+    // one was handed back.
+    std::map<int64_t, const index::IIndexReaderBase*> raw_readers;
+    auto load_inverted_index = [&](int64_t index_id) {
+        auto opened = milvus::test::consumer::BuildScalarReader<int64_t>(
+            fid,
+            DataType::INT64,
+            index::INVERTED_INDEX_TYPE,
+            data.size(),
+            data.data());
+        raw_readers[index_id] = opened.reader.get();
+        LoadMultiIndex(*seg, std::move(opened), DataType::INT64, fid, index_id);
+    };
+
+    // first index: loads normally, the field turns index_ready
+    ASSERT_NO_THROW(load_inverted_index(1));
+    ASSERT_TRUE(seg->HasIndex(fid));
+
+    // second index (same field, different indexID): AssertInfo(!has_index) is gone
+    ASSERT_NO_THROW(load_inverted_index(2));
+
+    // Two entries in the inventory, reported ascending by index identity so the
+    // container's hash order plays no part.
+    const auto capability = seg->IndexCapability(fid);
+    ASSERT_EQ(capability.entries().size(), 2u);
+    EXPECT_EQ(capability.entries()[0].key,
+              (IndexKey{fid, IndexIdentity::PreBuiltIndex(1)}));
+    EXPECT_EQ(capability.entries()[1].key,
+              (IndexKey{fid, IndexIdentity::PreBuiltIndex(2)}));
+    for (const auto& entry : capability.entries()) {
+        EXPECT_EQ(entry.family, index::families::kInverted);
+        EXPECT_TRUE(entry.json_path.empty());
+        EXPECT_TRUE(entry.caps.predicate);
+        EXPECT_FALSE(entry.caps.ngram_candidates);
+    }
+    EXPECT_TRUE(seg->HasIndex(fid));
+
+    // Both indexes can still be pinned, and each pins its own reader.
+    milvus::OpContext op_ctx;
+    auto pinned_1 =
+        seg->PinIndex(&op_ctx, IndexKey{fid, IndexIdentity::PreBuiltIndex(1)});
+    ASSERT_FALSE(pinned_1.empty());
+    EXPECT_EQ(pinned_1.get(), raw_readers.at(1));
+    auto pinned_2 =
+        seg->PinIndex(&op_ctx, IndexKey{fid, IndexIdentity::PreBuiltIndex(2)});
+    ASSERT_FALSE(pinned_2.empty());
+    EXPECT_EQ(pinned_2.get(), raw_readers.at(2));
+
+    // Loading the same indexID again is a no-op, not a second entry: a reopen
+    // that re-lists the index, or a retried load, must not disturb the field.
+    ASSERT_NO_THROW(load_inverted_index(2));
+    EXPECT_EQ(seg->IndexCapability(fid).entries().size(), 2u);
+}
+
+// D9 + T8: two casts on one JSON path are two different identities (the identity
+// is the indexID, not the path), so both load and each can be pinned on its own.
+// One of them is the flat router (cast JSON) and the other a typed cast on the
+// same path, which is exactly the pair that must never be confused.
+//
+// Also covers I1/I3: a non-NGRAM JSON path index must NOT set the field's
+// index_ready_bitset -- HasIndex() feeds plan sampling and has to stay narrow
+// (see ScalarIndexCandidate.h's FoldsIntoIndexReadyBit / CountsAsJsonIndex).
+TEST(MultiScalarIndexOnSameField, JsonSamePathTwoCastTypesBothLoadAndPin) {
+    using namespace milvus::segcore;
+    auto schema = std::make_shared<Schema>();
+    auto pk_fid = schema->AddDebugField("pk", DataType::INT64);
+    auto json_fid = schema->AddDebugField("json_field", DataType::JSON);
+    schema->set_primary_field_id(pk_fid);
+
+    auto segment = CreateSealedSegment(
+        schema, nullptr, -1, SegcoreConfig::default_config(), false);
+    auto seg = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(seg, nullptr);
+
+    const std::vector<std::string> json_rows = {
+        R"({"a": 1})", R"({"a": 2})", R"({"a": 3})", R"({"a": 4})"};
+    auto json_field = milvus::test::expr_index::JsonField(json_rows);
+
+    auto load_json_cast =
+        [&](int64_t index_id,
+            const std::string& cast) -> const index::IIndexReaderBase* {
+        auto opened = milvus::test::expr_index::BuildIndex(
+            json_fid,
+            DataType::JSON,
+            index::INVERTED_INDEX_TYPE,
+            {json_field},
+            {{JSON_PATH, "/a"}, {JSON_CAST_TYPE, cast}});
+        auto* raw = opened.reader.get();
+        LoadMultiIndex(*seg,
+                       std::move(opened),
+                       DataType::JSON,
+                       json_fid,
+                       index_id,
+                       {{JSON_PATH, "/a"}, {JSON_CAST_TYPE, cast}});
+        return raw;
+    };
+
+    auto* double_reader = load_json_cast(11, "DOUBLE");
+    auto* flat_reader = load_json_cast(12, "JSON");
+
+    const auto capability = seg->IndexCapability(json_fid);
+    ASSERT_EQ(capability.entries().size(), 2u)
+        << "two casts on one path are two identities (different indexIDs)";
+    EXPECT_EQ(capability.entries()[0].json_path, "/a");
+    EXPECT_EQ(capability.entries()[0].json_cast_type.data_type(),
+              JsonCastType::DataType::DOUBLE);
+    EXPECT_EQ(capability.entries()[1].json_path, "/a");
+    EXPECT_EQ(capability.entries()[1].json_cast_type.data_type(),
+              JsonCastType::DataType::JSON);
+
+    // Both pin individually, and each pins its own reader (not the sibling cast).
+    milvus::OpContext op_ctx;
+    auto pinned_double = seg->PinIndex(
+        &op_ctx, IndexKey{json_fid, IndexIdentity::PreBuiltIndex(11)});
+    ASSERT_FALSE(pinned_double.empty());
+    EXPECT_EQ(pinned_double.get(), double_reader);
+    auto pinned_flat = seg->PinIndex(
+        &op_ctx, IndexKey{json_fid, IndexIdentity::PreBuiltIndex(12)});
+    ASSERT_FALSE(pinned_flat.empty());
+    EXPECT_EQ(pinned_flat.get(), flat_reader);
+
+    // I2: HasJsonIndex recognises "a non-NGRAM JSON path index".
+    EXPECT_TRUE(seg->HasJsonIndex(json_fid));
+    // I1/I3: a JSON path index (non-NGRAM) does not go into index_ready_bitset.
+    EXPECT_FALSE(seg->HasIndex(json_fid));
+}
+
+// Regression: with an NGRAM index and a typed index on the same JSON path, an
+// exact operator must select the typed one.
+//
+// A JSON NGRAM's cast type is VARCHAR, so a plain string comparison looks
+// compatible and a term query over n-gram tokens would return wrong rows
+// silently (a row containing "xabcx" matches == "abc", and a literal longer than
+// the max gram never matches). Selection is metadata-only, so the rule is a
+// capability bit: an NGRAM entry is a candidate family (caps.exact == false) and
+// only pattern operators ask for it.
+TEST(MultiScalarIndexOnSameField, JsonPinSkipsNgramAndPicksTyped) {
+    using namespace milvus::segcore;
+    auto schema = std::make_shared<Schema>();
+    auto pk_fid = schema->AddDebugField("pk", DataType::INT64);
+    auto json_fid = schema->AddDebugField("json_field", DataType::JSON);
+    schema->set_primary_field_id(pk_fid);
+
+    auto segment = CreateSealedSegment(
+        schema, nullptr, -1, SegcoreConfig::default_config(), false);
+    auto seg = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(seg, nullptr);
+
+    const std::vector<std::string> json_rows = {R"({"a": "abc"})",
+                                                R"({"a": "xabcx"})",
+                                                R"({"a": "abd"})",
+                                                R"({"a": "ab"})"};
+    auto json_field = milvus::test::expr_index::JsonField(json_rows);
+
+    auto load = [&](int64_t index_id,
+                    const std::string& index_type,
+                    std::map<std::string, std::string> extra_params)
+        -> const index::IIndexReaderBase* {
+        // The JSON identity params are fixed for this field; anything the caller adds
+        // (NGRAM's min_gram/max_gram, for one) has to reach the builder or the reader
+        // cannot be constructed at all.
+        std::map<std::string, std::string> params = {
+            {JSON_PATH, "/a"}, {JSON_CAST_TYPE, "VARCHAR"}};
+        params.insert(extra_params.begin(), extra_params.end());
+        auto opened = milvus::test::expr_index::BuildIndex(
+            json_fid, DataType::JSON, index_type, {json_field}, params);
+        auto* raw = opened.reader.get();
+        LoadMultiIndex(*seg,
+                       std::move(opened),
+                       DataType::JSON,
+                       json_fid,
+                       index_id,
+                       std::move(extra_params));
+        return raw;
+    };
+
+    // NGRAM has the smaller indexID: without the capability rule it would win the
+    // tie for an exact operator.
+    auto* ngram_reader = load(21,
+                              index::NGRAM_INDEX_TYPE,
+                              {{JSON_PATH, "/a"},
+                               {JSON_CAST_TYPE, "VARCHAR"},
+                               {index::MIN_GRAM, "2"},
+                               {index::MAX_GRAM, "4"}});
+    auto* typed_reader = load(22,
+                              index::INVERTED_INDEX_TYPE,
+                              {{JSON_PATH, "/a"}, {JSON_CAST_TYPE, "VARCHAR"}});
+    ASSERT_NE(ngram_reader, typed_reader);
+
+    const auto capability = seg->IndexCapability(json_fid);
+    ASSERT_EQ(capability.entries().size(), 2u);
+    EXPECT_TRUE(capability.entries()[0].caps.ngram_candidates);
+    EXPECT_FALSE(capability.entries()[0].caps.exact);
+    EXPECT_TRUE(capability.entries()[1].caps.predicate);
+
+    // An exact operator on this path must resolve to the typed index.
+    exec::ExprIndexRequirement eq_req{
+        .field_id = json_fid,
+        .reader = exec::RequiredReader::Predicate,
+        .value_type = DataType::VARCHAR,
+        .is_json_field = true,
+        .json_path = "/a",
+        .accepts_candidates = false,
+    };
+    auto eq_decision = exec::DetermineExecPath(eq_req, capability);
+    ASSERT_TRUE(eq_decision.key.has_value());
+    EXPECT_EQ(*eq_decision.key,
+              (IndexKey{json_fid, IndexIdentity::PreBuiltIndex(22)}));
+    milvus::OpContext op_ctx;
+    auto pinned_eq = seg->PinIndex(&op_ctx, *eq_decision.key);
+    ASSERT_FALSE(pinned_eq.empty());
+    EXPECT_EQ(pinned_eq.get(), typed_reader)
+        << "equality/range must hit the typed index; an NGRAM hit returns "
+           "wrong "
+           "rows silently";
+
+    // A pattern operator on the same path does take the NGRAM candidate.
+    exec::ExprIndexRequirement prefix_req{
+        .field_id = json_fid,
+        .reader = exec::RequiredReader::Ngram,
+        .value_type = DataType::VARCHAR,
+        .is_json_field = true,
+        .json_path = "/a",
+        .accepts_candidates = true,
+    };
+    auto prefix_decision = exec::DetermineExecPath(prefix_req, capability);
+    ASSERT_TRUE(prefix_decision.key.has_value());
+    EXPECT_EQ(*prefix_decision.key,
+              (IndexKey{json_fid, IndexIdentity::PreBuiltIndex(21)}));
+}
+
+// Regression (the observable half of the conservative raw-data flag): the
+// field-level flag has to report false while one field carries several indexes.
+//
+// The flag is per-field and written by whichever index was loaded last, while a
+// reader selects and pins one entry -- the two can differ, and a true would let
+// the reader reverse-look-up through an index that has no raw data and fail. With
+// several indexes it reports false, so readers fall back to the raw column.
+TEST(MultiScalarIndexOnSameField, RawDataFlagStaysFalseWithSeveralIndexes) {
+    using namespace milvus::segcore;
+    auto schema = std::make_shared<Schema>();
+    auto pk_fid = schema->AddDebugField("pk", DataType::INT64);
+    auto int_fid = schema->AddDebugField("int64_field", DataType::INT64);
+    schema->set_primary_field_id(pk_fid);
+
+    auto segment = CreateSealedSegment(
+        schema, nullptr, -1, SegcoreConfig::default_config(), false);
+    auto seg = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(seg, nullptr);
+
+    const std::vector<int64_t> values = {1, 2, 3, 4};
+    auto load = [&](int64_t index_id) {
+        auto opened = milvus::test::consumer::BuildScalarReader<int64_t>(
+            int_fid,
+            DataType::INT64,
+            index::INVERTED_INDEX_TYPE,
+            values.size(),
+            values.data());
+        auto info = MakeMultiIndexLoadInfo(
+            std::move(opened), DataType::INT64, int_fid, index_id);
+        // Declare the index as carrying raw data explicitly: otherwise the
+        // field-level flag is false anyway and this case loses its power (it is
+        // about the flag not turning true while several indexes exist).
+        LoadResourceRequest request{};
+        request.has_raw_data = true;
+        info.load_resource_request = request;
+        seg->LoadIndex(info);
+    };
+
+    // Single index: the flag reports what that index says.
+    load(31);
+    EXPECT_TRUE(seg->IndexHasRawData(int_fid));
+
+    // Once the second index arrives the field-level flag loses its single meaning
+    // and must be false.
+    load(32);
+    EXPECT_TRUE(seg->HasIndex(int_fid));
+    EXPECT_FALSE(seg->IndexHasRawData(int_fid))
+        << "with several indexes it must report false, or a reader may "
+           "reverse-look-up through an index without raw data";
+    // Both predicates have to answer the same thing: the load/skip path (the
+    // column-group skip, FillDefaultValueFields) and the read path
+    // (bulk_subscript's fallback) read the same semantics. IndexHasRawData is the
+    // guarded predicate they all go through -- "HasIndexRawDataFromState("
+    // appears only at its definition and inside that guard.
+    //
+    // HasRawData(field) is deliberately not compared here: with no published
+    // index-ready bit it returns true by contract ("the column is the raw data"),
+    // a different layer from this case's staged-only LoadIndex.
+
+    // Both indexes are still there and both pin (the conservative flag hurt
+    // neither).
+    milvus::OpContext op_ctx;
+    EXPECT_FALSE(
+        seg->PinIndex(&op_ctx,
+                      IndexKey{int_fid, IndexIdentity::PreBuiltIndex(31)})
+            .empty());
+    EXPECT_FALSE(
+        seg->PinIndex(&op_ctx,
+                      IndexKey{int_fid, IndexIdentity::PreBuiltIndex(32)})
+            .empty());
+}
+
+// T4/T5/T6: which of a field's several indexes does a filter leaf take? The
+// choice is metadata-only (exec::DetermineExecPath over index::ReaderCaps) and
+// the pinned reader is not reachable from the expression, so a recording segment
+// captures "which inventory entry did the selection layer pin" -- that is the
+// layer's outward contract (IndexCapability(field) -> PinIndex(key)).
+TEST(MultiScalarIndexOnSameField, SelectionPicksByCapabilityPerLeaf) {
+    using namespace milvus::segcore;
+    auto schema = std::make_shared<Schema>();
+    auto varchar_fid = schema->AddDebugField("varchar", DataType::VARCHAR);
+
+    const std::vector<std::string> rows = {
+        "prefix_a", "prefix_b", "other", "prefix_c", "other_d"};
+    auto field = milvus::test::expr_index::StringField(rows);
+
+    milvus::test::expr_index::RawFieldFiles raw_files;
+    auto segment =
+        std::make_unique<RecordingScalarIndexSegment>(schema, /*segment_id=*/1);
+    segment->LoadFieldData(raw_files.Prepare(varchar_fid, {field}));
+
+    LoadMultiIndex(
+        *segment,
+        milvus::test::expr_index::BuildIndex(varchar_fid,
+                                             DataType::VARCHAR,
+                                             index::INVERTED_INDEX_TYPE,
+                                             {field}),
+        DataType::VARCHAR,
+        varchar_fid,
+        kInvertedIndexId);
+    LoadMultiIndex(*segment,
+                   milvus::test::expr_index::BuildIndex(
+                       varchar_fid,
+                       DataType::VARCHAR,
+                       index::NGRAM_INDEX_TYPE,
+                       {field},
+                       {{index::MIN_GRAM, 2}, {index::MAX_GRAM, 4}}),
+                   DataType::VARCHAR,
+                   varchar_fid,
+                   kNgramIndexId);
+
+    // The leaf really has a choice: both entries are reported, ascending by
+    // index identity.
+    const auto capability = segment->IndexCapability(varchar_fid);
+    ASSERT_EQ(capability.entries().size(), 2u);
+    EXPECT_EQ(capability.entries()[0].key,
+              (IndexKey{varchar_fid,
+                        IndexIdentity::PreBuiltIndex(kInvertedIndexId)}));
+    EXPECT_TRUE(capability.entries()[0].caps.predicate);
+    EXPECT_EQ(
+        capability.entries()[1].key,
+        (IndexKey{varchar_fid, IndexIdentity::PreBuiltIndex(kNgramIndexId)}));
+    EXPECT_TRUE(capability.entries()[1].caps.ngram_candidates);
+
+    // T4: equality is not a pattern operator, so the NGRAM candidate is not even
+    // a candidate; INVERTED is pinned and there is no fallback to raw data.
+    proto::plan::GenericValue equal_value;
+    equal_value.set_string_val("prefix_a");
+    auto equal_expr = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(varchar_fid, DataType::VARCHAR),
+        proto::plan::OpType::Equal,
+        equal_value,
+        std::vector<proto::plan::GenericValue>());
+    segment->pinned_keys_.clear();
+    EXPECT_TRUE(milvus::test::CanExprExecuteAllAtOnce(
+        equal_expr, segment.get(), rows.size()))
+        << "Equal must go through an index, not the raw column";
+    ASSERT_EQ(segment->pinned_keys_.size(), 1u)
+        << "only the index actually used is pinned";
+    EXPECT_EQ(
+        segment->pinned_keys_.front(),
+        (IndexKey{varchar_fid, IndexIdentity::PreBuiltIndex(kInvertedIndexId)}))
+        << "Equal must not pin the NGRAM sibling on the same field";
+
+    auto equal_plan =
+        std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID, equal_expr);
+    auto equal_result = query::ExecuteQueryExpr(
+        equal_plan, segment.get(), rows.size(), MAX_TIMESTAMP);
+    EXPECT_EQ(equal_result.count(), 1);
+    EXPECT_TRUE(equal_result[0]);
+
+    // T5: LIKE 'prefix%' becomes PrefixMatch plus the literal "prefix", and that
+    // is exactly what an NGRAM candidate answers -- so the NGRAM entry is pinned
+    // and the INVERTED sibling is not.
+    proto::plan::GenericValue prefix_value;
+    prefix_value.set_string_val("prefix");
+    auto like_expr = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(varchar_fid, DataType::VARCHAR),
+        proto::plan::OpType::PrefixMatch,
+        prefix_value,
+        std::vector<proto::plan::GenericValue>());
+    segment->pinned_keys_.clear();
+    EXPECT_TRUE(milvus::test::CanExprExecuteAllAtOnce(
+        like_expr, segment.get(), rows.size()));
+    ASSERT_EQ(segment->pinned_keys_.size(), 1u);
+    EXPECT_EQ(
+        segment->pinned_keys_.front(),
+        (IndexKey{varchar_fid, IndexIdentity::PreBuiltIndex(kNgramIndexId)}))
+        << "LIKE must take the NGRAM candidate, not the INVERTED sibling";
+
+    auto like_plan =
+        std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID, like_expr);
+    auto like_result = query::ExecuteQueryExpr(
+        like_plan, segment.get(), rows.size(), MAX_TIMESTAMP);
+    // The NGRAM candidate is a SUPERSET, so every row it returns has to be
+    // rechecked; the answer must still be exactly the raw-column answer.
+    EXPECT_EQ(like_result.count(), 3);
+    EXPECT_TRUE(like_result[0]);
+    EXPECT_TRUE(like_result[1]);
+    EXPECT_FALSE(like_result[2]);
+    EXPECT_TRUE(like_result[3]);
+    EXPECT_FALSE(like_result[4]);
+}
+
+// T6: a field with only an NGRAM index and an equality leaf. An NGRAM index
+// serves pattern leaves only, so the leaf must fall back to the raw column rather
+// than borrow it.
+TEST(MultiScalarIndexOnSameField, EqualNeverUsesAnNgramOnlyField) {
+    using namespace milvus::segcore;
+    auto schema = std::make_shared<Schema>();
+    auto varchar_fid = schema->AddDebugField("varchar", DataType::VARCHAR);
+
+    const std::vector<std::string> rows = {"prefix_a", "other"};
+    auto field = milvus::test::expr_index::StringField(rows);
+
+    milvus::test::expr_index::RawFieldFiles raw_files;
+    auto segment =
+        std::make_unique<RecordingScalarIndexSegment>(schema, /*segment_id=*/2);
+    segment->LoadFieldData(raw_files.Prepare(varchar_fid, {field}));
+    LoadMultiIndex(*segment,
+                   milvus::test::expr_index::BuildIndex(
+                       varchar_fid,
+                       DataType::VARCHAR,
+                       index::NGRAM_INDEX_TYPE,
+                       {field},
+                       {{index::MIN_GRAM, 2}, {index::MAX_GRAM, 4}}),
+                   DataType::VARCHAR,
+                   varchar_fid,
+                   kNgramIndexId);
+
+    const auto capability = segment->IndexCapability(varchar_fid);
+    ASSERT_EQ(capability.entries().size(), 1u);
+    EXPECT_TRUE(capability.entries()[0].caps.ngram_candidates);
+    // A whole-field NGRAM index still folds into the field's readiness bit (a
+    // JSON NGRAM one does too; only JSON path indexes without NGRAM stay out), so
+    // the leaf does consider the index path before metadata rules it out.
+    EXPECT_TRUE(segment->HasIndex(varchar_fid));
+
+    // The segment-side half of the rule: metadata alone says no entry can serve
+    // an equality predicate.
+    exec::ExprIndexRequirement eq_req{
+        .field_id = varchar_fid,
+        .reader = exec::RequiredReader::Predicate,
+        .value_type = DataType::VARCHAR,
+        .is_json_field = false,
+        .accepts_candidates = false,
+    };
+    EXPECT_FALSE(exec::DetermineExecPath(eq_req, capability).key.has_value());
+
+    proto::plan::GenericValue equal_value;
+    equal_value.set_string_val("prefix_a");
+    auto equal_expr = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(varchar_fid, DataType::VARCHAR),
+        proto::plan::OpType::Equal,
+        equal_value,
+        std::vector<proto::plan::GenericValue>());
+    segment->pinned_keys_.clear();
+    EXPECT_FALSE(milvus::test::CanExprExecuteAllAtOnce(
+        equal_expr, segment.get(), rows.size()))
+        << "NGRAM cannot serve Equal => fall back to RawData";
+    EXPECT_TRUE(segment->pinned_keys_.empty())
+        << "Equal must not even try to pin the NGRAM index";
+
+    auto equal_plan =
+        std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID, equal_expr);
+    auto equal_result = query::ExecuteQueryExpr(
+        equal_plan, segment.get(), rows.size(), MAX_TIMESTAMP);
+    EXPECT_EQ(equal_result.count(), 1);
+    EXPECT_TRUE(equal_result[0]);
 }
