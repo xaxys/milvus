@@ -861,13 +861,20 @@ func (dit *DescribeIndexTask) Execute(ctx context.Context) error {
 		return merr.Wrap(err, "failed to get collection schema")
 	}
 
-	resp, err := dit.mixCoord.DescribeIndex(ctx, &indexpb.DescribeIndexRequest{CollectionID: dit.collectionID, IndexName: dit.IndexName, Timestamp: dit.Timestamp})
+	// FieldName is not part of the internal request: it is a public-API filter that
+	// this task applies to the response (one field may now carry several indexes).
+	resp, err := dit.mixCoord.DescribeIndex(ctx, &indexpb.DescribeIndexRequest{
+		CollectionID: dit.collectionID,
+		IndexName:    dit.IndexName,
+		Timestamp:    dit.Timestamp,
+	})
 	if err != nil {
 		return err
 	}
 
 	dit.result = &milvuspb.DescribeIndexResponse{}
 	dit.result.Status = resp.GetStatus()
+
 	err = merr.Error(resp.GetStatus())
 	if err != nil {
 		if errors.Is(err, merr.ErrIndexNotFound) && len(dit.GetIndexName()) == 0 {
@@ -876,6 +883,38 @@ func (dit *DescribeIndexTask) Execute(ctx context.Context) error {
 		}
 		return err
 	}
+
+	// A field name narrows the result to that field's indexes: it used to be dropped
+	// on the way in, so every caller got the whole collection back. One scalar field
+	// can now carry several indexes, so "the indexes of this field" has to mean it.
+	// Filtering here rather than in DataCoord also covers the RESTful handlers, which
+	// go through this task.
+	if fieldName := dit.GetFieldName(); fieldName != "" {
+		// SchemaHelper resolves struct-array subfields (clips[embedding]) too, which
+		// schema.GetFields() does not return; CreateIndex resolves the same way.
+		field, err := schema.SchemaHelper.GetFieldFromNameDefaultJSON(fieldName)
+		if err != nil {
+			dit.result.Status = merr.Status(merr.WrapErrParameterInvalidMsg(
+				"field %s not found in collection %s", fieldName, dit.GetCollectionName()))
+			return nil
+		}
+		fieldID := field.FieldID
+		filtered := make([]*indexpb.IndexInfo, 0, len(resp.GetIndexInfos()))
+		for _, info := range resp.GetIndexInfos() {
+			if info.GetFieldID() == fieldID {
+				filtered = append(filtered, info)
+			}
+		}
+		if len(filtered) == 0 {
+			// the field exists but carries no index
+			dit.result.Status = merr.Status(merr.WrapErrIndexNotFound(fieldName))
+			return nil
+		}
+		// narrow the list the enrichment below walks, so the per-index field/params
+		// decoration only runs over this field's indexes
+		resp.IndexInfos = filtered
+	}
+
 	for _, indexInfo := range resp.IndexInfos {
 		field, err := schema.SchemaHelper.GetFieldFromID(indexInfo.FieldID)
 		if err != nil {

@@ -3762,7 +3762,24 @@ class SegmentExpr : public Expr {
                        "selected scalar reader has no null interface");
         }
         num_index_chunk_ = 1;
+        // One line per leaf that commits to an index, naming the entry that was
+        // chosen: with several indexes on one field the choice is the only way
+        // to tell which one served a query.
+        LOG_DEBUG(
+            "scalar index selected, fieldID:{}, indexID:{}, family:{}, "
+            "reader:{}",
+            field_id_.get(),
+            entry->key.identity.ToString(),
+            entry->family,
+            static_cast<int>(req.reader));
         return true;
+    }
+
+    // Ordered comparison leaves (>, >=, <, <=) tell the selector to prefer a
+    // range-friendly family. Purely static: no literal is needed to answer it.
+    virtual bool
+    IsRangeExpr() const {
+        return false;
     }
 
     ExprIndexRequirement
@@ -3778,6 +3795,7 @@ class SegmentExpr : public Expr {
                              : std::string{},
             .json_array_cast = is_json_contains_,
             .accepts_candidates = true,
+            .is_range = IsRangeExpr(),
             .has_offset_input = has_offset_input_,
         };
     }

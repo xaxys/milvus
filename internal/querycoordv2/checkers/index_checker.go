@@ -160,9 +160,9 @@ func (c *IndexChecker) checkReplica(ctx context.Context, collection *meta.Collec
 		}
 		for segmentID, segmentIndexInfo := range segmentIndexInfos {
 			fields := targets[segmentID]
-			missingFields := typeutil.NewSet(fields...)
+			missingIndexes := typeutil.NewSet(fields...)
 			for _, fieldIndexInfo := range segmentIndexInfo {
-				if missingFields.Contain(fieldIndexInfo.GetFieldID()) &&
+				if missingIndexes.Contain(fieldIndexInfo.GetIndexID()) &&
 					fieldIndexInfo.GetEnableIndex() &&
 					len(fieldIndexInfo.GetIndexFilePaths()) > 0 {
 					segmentsToUpdate[segmentID] = idSegments[segmentID]
@@ -201,17 +201,21 @@ func (c *IndexChecker) checkReplica(ctx context.Context, collection *meta.Collec
 	return tasks
 }
 
-func (c *IndexChecker) checkSegment(segment *meta.Segment, indexInfos []*indexpb.IndexInfo) (fieldIDs []int64) {
+// checkSegment returns the indexIDs the segment has not loaded (yet). It has to be the
+// index identity, not the field: one field can carry several indexes, and reporting the
+// field would keep matching the sibling that is already loaded, scheduling a Reopen that
+// can never load the index that is still building.
+func (c *IndexChecker) checkSegment(segment *meta.Segment, indexInfos []*indexpb.IndexInfo) (indexIDs []int64) {
 	var result []int64
 	for _, indexInfo := range indexInfos {
-		fieldID, indexID := indexInfo.FieldID, indexInfo.IndexID
+		indexID := indexInfo.IndexID
 		info, ok := segment.IndexInfo[indexID]
 		if !ok {
-			result = append(result, fieldID)
+			result = append(result, indexID)
 			continue
 		}
 		if indexID != info.GetIndexID() || !info.GetEnableIndex() {
-			result = append(result, fieldID)
+			result = append(result, indexID)
 		}
 	}
 	return result
@@ -235,6 +239,12 @@ func (c *IndexChecker) checkRedundantIndices(segment *meta.Segment, indexInfos [
 	return redundant
 }
 
+// createSegmentUpdateTask refreshes a loaded segment because its index set changed.
+//
+// Today the caller is this checker, which watches index build progress. In the planned
+// "manifest owns the index files" shape an index change is a storage-layer change: the
+// view version moves and the view apply issues the same Reopen, so this function keeps
+// its job and only its caller changes.
 func (c *IndexChecker) createSegmentUpdateTask(ctx context.Context, segment *meta.Segment, replica *meta.Replica) (task.Task, bool) {
 	action := task.NewSegmentActionWithScope(segment.Node, task.ActionTypeReopen, segment.GetInsertChannel(), segment.GetID(), querypb.DataScope_Historical, int(segment.GetNumOfRows()))
 	t, err := task.NewSegmentTask(

@@ -72,6 +72,14 @@ IndexIdentity::operator<(const IndexIdentity& other) const {
     return std::get<uint64_t>(value_) < std::get<uint64_t>(other.value_);
 }
 
+std::string
+IndexIdentity::ToString() const {
+    if (value_.index() == 0) {
+        return std::to_string(std::get<int64_t>(value_));
+    }
+    return "local:" + std::to_string(std::get<uint64_t>(value_));
+}
+
 size_t
 IndexKeyHash::operator()(const IndexKey& key) const {
     size_t identity_hash;

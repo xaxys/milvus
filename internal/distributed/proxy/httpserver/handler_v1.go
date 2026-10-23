@@ -39,7 +39,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metric"
 	"github.com/milvus-io/milvus/pkg/v3/util/requestutil"
-	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 var RestRequestInterceptorErr = errors.New("interceptor error placeholder")
@@ -403,17 +402,12 @@ func (h *HandlersV1) getCollectionDetails(c *gin.Context) {
 	} else {
 		collLoadState = stateResp.State.String()
 	}
-	vectorField := ""
-	for _, field := range coll.Schema.Fields {
-		if typeutil.IsVectorType(field.DataType) {
-			vectorField = field.Name
-			break
-		}
-	}
+	// DescribeCollection returns every index of the collection, so do not narrow the
+	// request to a field -- it used to pass the first vector field's name and rely on
+	// the server ignoring it.
 	indexResp, err := h.proxy.DescribeIndex(ctx, &milvuspb.DescribeIndexRequest{
 		DbName:         dbName,
 		CollectionName: collectionName,
-		FieldName:      vectorField,
 	})
 	if err == nil {
 		err = merr.Error(indexResp.GetStatus())
@@ -423,7 +417,6 @@ func (h *HandlersV1) getCollectionDetails(c *gin.Context) {
 		indexDesc = []gin.H{}
 		mlog.Warn(ctx, "get indexes description fail",
 			mlog.String("collection", collectionName),
-			mlog.String("vectorField", vectorField),
 			mlog.Err(err),
 		)
 	} else {

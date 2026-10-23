@@ -1173,6 +1173,36 @@ func (sm *snapshotManager) RestoreIndexes(
 		return merr.Wrapf(err, "failed to describe collection %d", collectionID)
 	}
 
+	// A snapshot can carry a field with several indexes. Restoring broadcasts the same
+	// CreateIndex DDL Server.CreateIndex does, so a field that is about to get its second
+	// index has to pass the same gate here -- otherwise the restore could hand a segment
+	// with two indexes on one field to a QueryNode that cannot load it.
+	// Identity is (field, json_path), exactly like creation: several indexes on distinct
+	// paths of one JSON field are a long-standing shape and must not be gated here.
+	type indexIdentity struct {
+		fieldID  int64
+		jsonPath string
+	}
+	indexesPerIdentity := make(map[indexIdentity]int)
+	for _, indexInfo := range snapshotData.Indexes {
+		path, _ := funcutil.GetAttrByKeyFromRepeatedKV(common.JSONPathKey, indexInfo.GetIndexParams())
+		indexesPerIdentity[indexIdentity{indexInfo.GetFieldID(), path}]++
+	}
+	{
+		resolved := int32(0)
+		if sm.indexEngineVersionManager != nil {
+			resolved = sm.indexEngineVersionManager.ResolveScalarIndexVersion()
+		}
+		for identity, count := range indexesPerIdentity {
+			if count < 2 {
+				continue
+			}
+			if err := checkMultiScalarIndexPerField(identity.fieldID, resolved); err != nil {
+				return merr.Wrapf(err, "failed to validate indexes on field %d", identity.fieldID)
+			}
+		}
+	}
+
 	for _, indexInfo := range snapshotData.Indexes {
 		// Allocate new index ID
 		indexID, err := sm.allocator.AllocID(ctx)

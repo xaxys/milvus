@@ -60,9 +60,11 @@ func TestManifestIndexLegacyBaseRoundTrip(t *testing.T) {
 			cfg := &indexpb.StorageConfig{StorageType: "local", RootPath: t.TempDir()}
 			base := cfg.RootPath + "/" + suffix
 			segment := &datapb.SegmentInfo{ID: 3, CollectionID: 1, PartitionID: 2}
-			version := packed.ManifestEarliest
+			// The commit API derives the revision from the base manifest now, so it takes
+			// no explicit version and the loop only varies the build id. Unmarshal still
+			// returns the revision, where it is asserted.
 			for _, buildID := range []int64{100, 200} {
-				manifest, err := packed.CommitManifestUpdates(base, version, cfg, &packed.ManifestUpdates{
+				manifest, err := packed.CommitManifestUpdates(base, cfg, &packed.ManifestUpdates{
 					Indexes: []packed.ManifestIndexInfo{{
 						ColumnName: "vector", IndexName: "index", IndexType: "HNSW",
 						Path: fmt.Sprintf("%d/1", buildID), IndexID: buildID, BuildID: buildID,
@@ -72,7 +74,7 @@ func TestManifestIndexLegacyBaseRoundTrip(t *testing.T) {
 				})
 				require.NoError(t, err)
 				segment.ManifestPath = manifest
-				_, version, err = packed.UnmarshalManifestPath(manifest)
+				_, _, err = packed.UnmarshalManifestPath(manifest)
 				require.NoError(t, err)
 				entries, err := packed.GetManifestIndexInfos(manifest, cfg)
 				require.NoError(t, err)

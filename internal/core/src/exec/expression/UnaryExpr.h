@@ -881,6 +881,16 @@ class ShreddingArrayBsonExecutor {
 
 class PhyUnaryRangeFilterExpr : public SegmentExpr {
  public:
+
+    bool
+    IsRangeExpr() const override {
+        const auto op = expr_->op_type_;
+        return op == proto::plan::OpType::GreaterThan ||
+               op == proto::plan::OpType::GreaterEqual ||
+               op == proto::plan::OpType::LessThan ||
+               op == proto::plan::OpType::LessEqual;
+    }
+
     PhyUnaryRangeFilterExpr(
         std::vector<std::shared_ptr<Expr>> input,
         const std::shared_ptr<const milvus::expr::UnaryRangeFilterExpr>& expr,

@@ -96,6 +96,12 @@ struct ExprIndexRequirement {
     // caps.exact == false is unusable and selection must fall back to RawData.
     bool accepts_candidates{true};
 
+    // Ordered comparison (>, >=, <, <=), as opposed to equality / IN / NotIn. Both
+    // arrive as RequiredReader::Predicate, but the family priority differs: a range
+    // wants SORT (binary search) over BITMAP, while equality wants BITMAP over the
+    // rest. Set by the leaf through Expr::IsRangeExpr().
+    bool is_range{false};
+
     // Short-circuit paths bypass the inventory; do not pin unrelated scalar cells.
     bool is_pk_compare{false};
     bool json_stats_eligible{false};
@@ -264,6 +270,74 @@ NeedsCandidateRefine(RequiredReader required, const index::ReaderCaps& caps) {
                            required == RequiredReader::Spatial);
 }
 
+// Static family preference within one capability class, from the design doc's
+// priority table (docs/design-docs/design_docs/multi-index-scalar-v1-plan.md,
+// section "三"). It only breaks ties between entries that are equally good by
+// path specificity, exactness and lookup cost, so it can never make the selector
+// choose a reader for an operator it cannot serve -- the capability filters above
+// already ran. Indexes are compared by the registry family key carried in the
+// metadata, so no payload is opened to answer this.
+//
+// The table distinguishes prefix matching from inner/suffix/regex matches; both
+// reach here as RequiredReader::PatternMatch, so this ranking uses the coarser
+// class the requirement exposes: sort/marisa first for patterns, then inverted,
+// then the candidate families. A literal-dependent refinement would have to run
+// after pinning.
+inline int
+FamilyPriority(RequiredReader reader,
+               bool is_range,
+               const std::string& family) {
+    const bool is_bitmap = family == "bitmap";
+    const bool is_inverted = family == "inverted";
+    const bool is_sort = family == "sort";
+    const bool is_marisa = family == "marisa";
+    const bool is_hybrid = family == "hybrid";
+    const bool is_fmindex = family == "fmindex";
+    const bool is_ngram = family == "ngram";
+    switch (reader) {
+        case RequiredReader::Predicate:
+            if (is_range) {
+                // ordered comparison: sort > hybrid > inverted > bitmap
+                if (is_sort) return 3;
+                if (is_hybrid) return 2;
+                if (is_inverted) return 1;
+                return 0;
+            }
+            // equality / IN / NotIn: bitmap > inverted > hybrid > sort / marisa
+            if (is_bitmap) return 3;
+            if (is_inverted) return 2;
+            if (is_hybrid) return 1;
+            return 0;
+        case RequiredReader::ValueLookup:
+            // reverse lookup (retrieve / output_fields / group-by): the cheapest
+            // reader wins; cheap_value_lookup already contributes a point, so only
+            // prefer a stable order here.
+            if (is_sort) return 3;
+            if (is_hybrid) return 2;
+            if (is_inverted) return 1;
+            return 0;
+        case RequiredReader::PatternMatch:
+            // Deliberately neutral. The design doc ranks prefix matches differently
+            // from inner/suffix/regex ones (inverted first vs ngram first), and this
+            // requirement does not say which it is: both arrive as PatternMatch. Rank
+            // by family here and one of the two rows is wrong, so the pattern family
+            // keeps the precedence it had before this table existed (an ngram-capable
+            // candidate is what pattern leaves are matched against).
+            return 0;
+        case RequiredReader::Ngram:
+            // the candidate family was asked for explicitly: prefer ngram, then fmindex
+            if (is_ngram) return 3;
+            if (is_fmindex) return 2;
+            return 0;
+        case RequiredReader::TextMatch:
+            return family == "text" ? 3 : 0;
+        case RequiredReader::Spatial:
+            return family == "rtree" ? 3 : 0;
+        default:
+            return 0;
+    }
+}
+
 }  // namespace index_path_detail
 
 inline ExecPathDecision
@@ -278,6 +352,11 @@ DetermineExecPath(const ExprIndexRequirement& req,
 
     const segcore::IndexCapabilityEntry* selected = nullptr;
     int selected_score = -1;
+    // A flat JSON index covers a whole subtree, so several of them can prefix one
+    // query path. The longest prefix is the more specific one, and that used to
+    // be the rule when these indexes lived one-per-path. It only refines a tie:
+    // it never outranks a typed index on the exact path, which scores higher.
+    size_t selected_prefix_len = 0;
     for (const auto& entry : capabilities.entries()) {
         const bool needs_refine =
             index_path_detail::NeedsCandidateRefine(req.reader, entry.caps);
@@ -292,14 +371,27 @@ DetermineExecPath(const ExprIndexRequirement& req,
         if (path_score < 0) {
             continue;
         }
-        const int score = path_score * 4 + (!needs_refine ? 2 : 0) +
+        // Family preference is the last tie-break: path specificity, exactness and
+        // lookup cost keep their weights above it, so it only decides between two
+        // indexes that can both serve this operator equally well.
+        const int family_rank = index_path_detail::FamilyPriority(
+            req.reader, req.is_range, entry.family);
+        const int score = path_score * 16 + (!needs_refine ? 8 : 0) +
                           (req.reader == RequiredReader::ValueLookup &&
                                    entry.caps.cheap_value_lookup
-                               ? 1
-                               : 0);
-        if (selected == nullptr || score > selected_score) {
+                               ? 4
+                               : 0) +
+                          family_rank;
+        const size_t prefix_len = entry.json_path.size();
+        // capabilities.entries() is ordered by index identity, and a strictly
+        // greater score is required to displace the current choice, so the
+        // remaining tie-break is the lowest indexID -- deterministic across
+        // segments and reload orders.
+        if (selected == nullptr || score > selected_score ||
+            (score == selected_score && prefix_len > selected_prefix_len)) {
             selected = &entry;
             selected_score = score;
+            selected_prefix_len = prefix_len;
         }
     }
     if (selected == nullptr) {
