@@ -135,9 +135,28 @@ const (
 	//   An older QueryNode does not recognize FMINDEX and would fail to load
 	//   such a segment, so creation is gated on the whole cluster reporting >= 5
 	//   (see MinScalarIndexVersionForFMINDEX).
+	// Scalar index engine version 6:
+	// - Several scalar indexes on one field (see
+	//   MinScalarIndexVersionForScalarMultiIndex and
+	//   dataCoord.enableMultiScalarIndexPerField).
+	//   Raising the engine version also makes every segment whose scalar indexes
+	//   were built at an older version look outdated: with
+	//   dataCoord.autoUpgradeSegmentIndex enabled, dataCoord schedules the
+	//   bump-schema-version compaction for those segments and DataNode rebuilds
+	//   their scalar indexes. That is the intended upgrade path, but it is a
+	//   cluster-wide job, so it is worth knowing about before this version ships
+	//   (see the design doc for its interaction with several indexes on a field).
 	MinimalScalarIndexEngineVersion = int32(0)
-	CurrentScalarIndexEngineVersion = int32(5)
-	MaximumScalarIndexEngineVersion = int32(5)
+	CurrentScalarIndexEngineVersion = int32(6)
+	MaximumScalarIndexEngineVersion = int32(6)
+
+	// MinScalarIndexVersionForScalarMultiIndex is the minimum scalar index engine
+	// version that can load a segment whose load config carries several scalar
+	// indexes on one field. Below it, ChunkedSegmentSealedImpl::LoadScalarIndex
+	// asserts ("scalar index has been exist at ..."), so creating a second index
+	// on a field has to be refused until every QueryNode reports at least this
+	// version -- see dataCoord.enableMultiScalarIndexPerField.
+	MinScalarIndexVersionForScalarMultiIndex = int32(6)
 
 	// MinScalarIndexVersionForJsonPathMultiType is the minimum scalar index
 	// engine version that supports STL_SORT / BITMAP / HYBRID on JSON fields.

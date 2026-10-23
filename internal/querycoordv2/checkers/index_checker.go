@@ -235,6 +235,12 @@ func (c *IndexChecker) checkRedundantIndices(segment *meta.Segment, indexInfos [
 	return redundant
 }
 
+// createSegmentUpdateTask refreshes a loaded segment because its index set changed.
+//
+// Today the caller is this checker, which watches index build progress. In the planned
+// "manifest owns the index files" shape an index change is a storage-layer change: the
+// view version moves and the view apply issues the same Reopen, so this function keeps
+// its job and only its caller changes.
 func (c *IndexChecker) createSegmentUpdateTask(ctx context.Context, segment *meta.Segment, replica *meta.Replica) (task.Task, bool) {
 	action := task.NewSegmentActionWithScope(segment.Node, task.ActionTypeReopen, segment.GetInsertChannel(), segment.GetID(), querypb.DataScope_Historical, int(segment.GetNumOfRows()))
 	t, err := task.NewSegmentTask(

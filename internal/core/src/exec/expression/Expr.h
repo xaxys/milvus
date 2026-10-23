@@ -3745,6 +3745,16 @@ class SegmentExpr : public Expr {
                        "selected scalar reader has no null interface");
         }
         num_index_chunk_ = 1;
+        // One line per leaf that commits to an index, naming the entry that was
+        // chosen: with several indexes on one field the choice is the only way
+        // to tell which one served a query.
+        LOG_DEBUG(
+            "scalar index selected, fieldID:{}, indexID:{}, family:{}, "
+            "reader:{}",
+            field_id_.get(),
+            entry->key.identity.ToString(),
+            entry->family,
+            static_cast<int>(req.reader));
         return true;
     }
 

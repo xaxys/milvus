@@ -498,7 +498,12 @@ TEST_F(SegmentLoadInfoTest,
     auto diff = current_info.ComputeDiff(new_info);
     EXPECT_TRUE(diff.indexes_to_load.empty());
     EXPECT_TRUE(diff.indexes_to_replace.empty());
-    EXPECT_EQ(diff.indexes_to_drop, std::set<FieldId>({FieldId(101)}));
+    // Field 101 is gone from the new schema, so its index is dropped by indexID
+    // and the field is dropped at field level too (the path that also retires the
+    // vector index and clears the field's bits). 102 keeps its index.
+    ASSERT_EQ(diff.indexes_to_drop.count(FieldId(101)), 1u);
+    EXPECT_FALSE(diff.indexes_to_drop.at(FieldId(101)).empty());
+    EXPECT_EQ(diff.fields_index_fully_dropped, std::set<FieldId>({FieldId(101)}));
 
     SegmentLoadInfo next_info(new_info);
     next_info.ReplaceSchemaForReopen(new_schema);
@@ -2324,10 +2329,12 @@ TEST_F(SegmentLoadInfoTest, ComputeDiffIndexReplaceDropConflict) {
     // Verify the replacement has the correct new index_id
     EXPECT_EQ(diff.indexes_to_replace[FieldId(101)][0].index_id, 2001);
 
-    // Simulate the ApplyLoadDiff filter: fields with replace should be skipped
-    // in the drop loop
+    // Simulate the ApplyLoadDiff filter: a field whose index is being replaced is
+    // skipped by the field-level drop loop (the replacement load re-establishes
+    // it), and with indexes dropped by indexID the field is not dropped at field
+    // level at all while it still has an index in the new config.
     std::vector<FieldId> actually_dropped;
-    for (auto field_id : diff.indexes_to_drop) {
+    for (auto field_id : diff.fields_index_fully_dropped) {
         if (diff.indexes_to_replace.count(field_id) > 0 ||
             diff.indexes_to_load.count(field_id) > 0) {
             continue;
@@ -2336,9 +2343,10 @@ TEST_F(SegmentLoadInfoTest, ComputeDiffIndexReplaceDropConflict) {
     }
     // Field 101 has a replacement, so it should NOT be dropped
     EXPECT_TRUE(actually_dropped.empty());
+    EXPECT_TRUE(diff.fields_index_fully_dropped.empty());
 }
 
-TEST_F(SegmentLoadInfoTest, ComputeDiffDropsJsonIndexByNestedPath) {
+TEST_F(SegmentLoadInfoTest, ComputeDiffDropsOneJsonIndexByIndexId) {
     auto add_json_index = [](proto::segcore::SegmentLoadInfo& proto,
                              int64_t index_id,
                              const std::string& nested_path) {
@@ -2381,10 +2389,13 @@ TEST_F(SegmentLoadInfoTest, ComputeDiffDropsJsonIndexByNestedPath) {
     EXPECT_EQ(current_info.GetIndexInfoCount(), 0);
     auto diff = current_info.ComputeDiff(new_info);
 
-    ASSERT_EQ(diff.json_indexes_to_drop.count(FieldId(102)), 1);
-    EXPECT_EQ(diff.json_indexes_to_drop.at(FieldId(102)).count("a"), 1);
-    EXPECT_EQ(diff.json_indexes_to_drop.at(FieldId(102)).count("b"), 0);
-    EXPECT_EQ(diff.indexes_to_drop.count(FieldId(102)), 0);
+    // Dropped by indexID: path "a"'s index (5001) is no longer listed, while
+    // "b"'s (5002) stays -- so the field is NOT dropped at field level, which is
+    // what keeps its sibling alive (identity is the indexID now, not the path).
+    ASSERT_EQ(diff.indexes_to_drop.count(FieldId(102)), 1u);
+    EXPECT_EQ(diff.indexes_to_drop.at(FieldId(102)).count(5001), 1u);
+    EXPECT_EQ(diff.indexes_to_drop.at(FieldId(102)).count(5002), 0u);
+    EXPECT_TRUE(diff.fields_index_fully_dropped.empty());
 }
 
 TEST_F(SegmentLoadInfoTest, ComputeDiffBinlogReplace) {
@@ -3952,4 +3963,156 @@ TEST(IndexFactoryRawDataTest,
         milvus::index::CanUseIndexRawDataForField(DataType::INT64, false));
     EXPECT_FALSE(
         milvus::index::CanUseIndexRawDataForField(DataType::JSON, false));
+}
+
+// Counterexample (one field, several indexes v1): two indexes on one scalar field both
+// land in indexes_to_load[field], rather than one load plus one replace.
+//
+// This is the precondition for the AssertInfo trip in
+// ChunkedSegmentSealedImpl::LoadScalarIndex: LoadBatchIndexes commits one
+// LoadIndex(..., is_replace=false) per element of the field's vector, and
+// StagedStateCommitter::Commit is exclusive, so the second one is guaranteed to
+// observe the first.
+// has_index == true。
+TEST_F(SegmentLoadInfoTest, GetLoadDiffWithTwoScalarIndexesOnSameField) {
+    proto::segcore::SegmentLoadInfo test_proto;
+    test_proto.set_segmentid(100);
+    test_proto.set_num_of_rows(1000);
+
+    constexpr int64_t kFieldId = 103;  // varchar scalar field
+    for (int64_t index_id : {1001LL, 1002LL}) {
+        auto* index_info = test_proto.add_index_infos();
+        index_info->set_fieldid(kFieldId);
+        index_info->set_indexid(index_id);
+        index_info->add_index_file_paths("/path/to/index" +
+                                         std::to_string(index_id));
+        auto* index_param = index_info->add_index_params();
+        index_param->set_key("index_type");
+        index_param->set_value(milvus::index::INVERTED_INDEX_TYPE);
+    }
+
+    SegmentLoadInfo info(test_proto, schema_);
+    auto diff = info.GetLoadDiff();
+
+    ASSERT_TRUE(diff.HasChanges());
+    // the key assertion: both indexes are in indexes_to_load (a two-element vector)
+    ASSERT_TRUE(diff.indexes_to_load.count(FieldId(kFieldId)) > 0);
+    EXPECT_EQ(diff.indexes_to_load[FieldId(kFieldId)].size(), 2);
+    // no replace branch today: the field had no index before
+    EXPECT_TRUE(diff.indexes_to_replace.empty());
+    EXPECT_TRUE(diff.indexes_to_drop.empty());
+}
+
+// One field, several indexes v1 / T7: drop is per (field, indexID), not per field.
+//
+// Two indexes on a field and a load config missing one: only that indexID is dropped, and
+// fields_index_fully_dropped must stay empty (a field-level cleanup would also clear the
+// field's index_ready and make the surviving sibling invisible). Only when both are gone
+// does the field-level path apply.
+// fields_index_fully_dropped。
+TEST_F(SegmentLoadInfoTest, ComputeDiffDropOneOfTwoScalarIndexesOnSameField) {
+    constexpr int64_t kFieldId = 108;  // int64 scalar field (extra_field1)
+    constexpr int64_t kFirstIndexId = 1001;
+    constexpr int64_t kSecondIndexId = 1002;
+
+    auto make_proto = [&](const std::vector<int64_t>& index_ids) {
+        proto::segcore::SegmentLoadInfo p;
+        p.set_segmentid(100);
+        p.set_num_of_rows(1000);
+        for (int64_t index_id : index_ids) {
+            auto* index_info = p.add_index_infos();
+            index_info->set_fieldid(kFieldId);
+            index_info->set_indexid(index_id);
+            index_info->add_index_file_paths("/path/to/index" +
+                                             std::to_string(index_id));
+            auto* index_param = index_info->add_index_params();
+            index_param->set_key("index_type");
+            index_param->set_value(milvus::index::INVERTED_INDEX_TYPE);
+        }
+        return p;
+    };
+
+    // current state (two indexes) versus a config that keeps only the second
+    SegmentLoadInfo current_info(
+        make_proto({kFirstIndexId, kSecondIndexId}), schema_);
+    SegmentLoadInfo new_info(make_proto({kSecondIndexId}), schema_);
+    auto diff = current_info.ComputeDiff(new_info);
+
+    // only the dropped indexID goes away
+    ASSERT_EQ(diff.indexes_to_drop.count(FieldId(kFieldId)), 1u);
+    ASSERT_EQ(diff.indexes_to_drop.at(FieldId(kFieldId)).size(), 1u);
+    EXPECT_EQ(*diff.indexes_to_drop.at(FieldId(kFieldId)).begin(),
+              kFirstIndexId);
+    // the survivor is neither reloaded nor replaced -- it stays on the segment, still usable
+    EXPECT_TRUE(diff.indexes_to_load.empty());
+    EXPECT_TRUE(diff.indexes_to_replace.empty());
+    // the field-level cleanup must not fire
+    EXPECT_TRUE(diff.fields_index_fully_dropped.empty())
+        << "the field still has an index and must not be treated as a whole-field drop";
+
+    // both gone: now fields_index_fully_dropped applies (with both indexIDs dropped)
+    SegmentLoadInfo empty_info(make_proto({}), schema_);
+    auto drop_all = current_info.ComputeDiff(empty_info);
+    ASSERT_EQ(drop_all.indexes_to_drop.count(FieldId(kFieldId)), 1u);
+    EXPECT_EQ(drop_all.indexes_to_drop.at(FieldId(kFieldId)).size(), 2u);
+    EXPECT_EQ(drop_all.indexes_to_drop.at(FieldId(kFieldId)).count(
+                  kFirstIndexId),
+              1u);
+    EXPECT_EQ(drop_all.indexes_to_drop.at(FieldId(kFieldId)).count(
+                  kSecondIndexId),
+              1u);
+    EXPECT_EQ(drop_all.fields_index_fully_dropped.count(FieldId(kFieldId)), 1u);
+}
+
+TEST_F(SegmentLoadInfoTest, ComputeDiffReloadsColumnWhenSecondIndexJoinsInPlace) {
+    // The in-place path (the gap the adversarial review pointed out): a loaded segment
+    // whose field carries a single STL_SORT index had its column skipped as "the index has
+    // raw data"; a second index (INVERTED) is then built on the same field and the index
+    // checker issues Reopen. The runtime guard (IndexHasRawDataFromState: more than one
+    // index on a field => false) then makes readers fall back to the column, so the diff
+    // must put the field back into the reload set -- same predicate as the guard: a field
+    // with more than one scalar index does not count as "the index provides raw data".
+    auto scalar_schema = std::make_shared<Schema>();
+    scalar_schema->AddField(
+        FieldName("pk"), FieldId(100), DataType::INT64, false, std::nullopt);
+    scalar_schema->AddField(
+        FieldName("scalar"), FieldId(103), DataType::INT64, false, std::nullopt);
+    scalar_schema->set_primary_field_id(FieldId(100));
+
+    // binlog mode (no manifest path): reload goes through binlogs_to_replace
+    proto::segcore::SegmentLoadInfo current_proto;
+    current_proto.set_segmentid(1);
+    current_proto.set_collectionid(200);
+    current_proto.set_partitionid(100);
+    current_proto.set_num_of_rows(10);
+    auto* field_binlog = current_proto.add_binlog_paths();
+    field_binlog->set_fieldid(103);
+    field_binlog->add_binlogs();
+    AddScalarIndex(current_proto,
+                   103,
+                   7001,
+                   milvus::index::ASCENDING_SORT);  // carries raw data
+
+    auto new_proto = current_proto;
+    AddScalarIndex(new_proto,
+                   103,
+                   7002,
+                   milvus::index::INVERTED_INDEX_TYPE);  // the second index
+
+    SegmentLoadInfo current_info(current_proto, scalar_schema);
+    SegmentLoadInfo new_info(new_proto, scalar_schema);
+
+    // precondition: with a single index the field counts as "the index provides raw data" (so the column was skipped)
+    EXPECT_TRUE(current_info.HasFieldInSchema(FieldId(103)));
+    auto diff = current_info.ComputeDiff(new_info);
+
+    bool field_binlog_reloaded = false;
+    for (const auto& [fields, reload_binlog] : diff.binlogs_to_replace) {
+        if (reload_binlog.fieldid() == 103) {
+            field_binlog_reloaded = true;
+        }
+    }
+    EXPECT_TRUE(field_binlog_reloaded)
+        << "once a second index joins the field, Reopen must load the column back, "
+           "otherwise the reader's fallback hits AssertInfo(column != nullptr)";
 }

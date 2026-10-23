@@ -83,14 +83,15 @@ struct LoadDiff {
 
     std::vector<FieldId> fields_to_reload;
 
-    // Indexes that need to be dropped (field_id set)
-    std::set<FieldId> indexes_to_drop;
+    // Scalar indexes that need to be dropped, by (field, indexID). A field may
+    // keep some of its indexes, so the indexID -- not the field, and not the JSON
+    // path -- is what identifies the single one to remove.
+    std::unordered_map<FieldId, std::unordered_set<int64_t>> indexes_to_drop;
 
-    // JSON indexes that need to be dropped, keyed by field and nested path.
-    // JSON fields may have multiple indexes, so a field-only drop loses the
-    // identity needed to preserve sibling paths.
-    std::unordered_map<FieldId, std::unordered_set<std::string>>
-        json_indexes_to_drop;
+    // Fields whose load config no longer lists any index at all. Indexes are
+    // dropped by indexID (above); this is the separate field-level cleanup that
+    // also retires the vector index and clears the field's bits.
+    std::set<FieldId> fields_index_fully_dropped;
 
     // Field data that need to be dropped (field_id set)
     // Only populated when both current and new use binlog mode
@@ -142,7 +143,8 @@ struct LoadDiff {
                !column_groups_to_lazyload.empty() ||
                !column_groups_to_lazyreplace.empty() ||
                !fields_to_reload.empty() || !indexes_to_drop.empty() ||
-               !json_indexes_to_drop.empty() || !field_data_to_drop.empty() ||
+               !fields_index_fully_dropped.empty() ||
+               !field_data_to_drop.empty() ||
                !fields_to_fill_default.empty() ||
                !text_indexes_to_load.empty() || !json_stats_to_load.empty() ||
                !json_stats_to_replace.empty() || !json_stats_to_drop.empty() ||
@@ -283,24 +285,24 @@ struct LoadDiff {
         // indexes_to_drop
         oss << "indexes_to_drop=[";
         first = true;
-        for (const auto& field_id : indexes_to_drop) {
+        for (const auto& [field_id, index_ids] : indexes_to_drop) {
+            for (const auto& index_id : index_ids) {
+                if (!first)
+                    oss << ", ";
+                first = false;
+                oss << field_id.get() << ":" << index_id;
+            }
+        }
+        oss << "], ";
+
+        // fields_index_fully_dropped
+        oss << "fields_index_fully_dropped=[";
+        first = true;
+        for (const auto& field_id : fields_index_fully_dropped) {
             if (!first)
                 oss << ", ";
             first = false;
             oss << field_id.get();
-        }
-        oss << "], ";
-
-        // json_indexes_to_drop
-        oss << "json_indexes_to_drop=[";
-        first = true;
-        for (const auto& [field_id, paths] : json_indexes_to_drop) {
-            for (const auto& path : paths) {
-                if (!first)
-                    oss << ", ";
-                first = false;
-                oss << field_id.get() << ":" << path;
-            }
         }
         oss << "], ";
 
@@ -439,7 +441,6 @@ class SegmentLoadInfo {
           schema_(other.schema_),
           converted_field_index_cache_(other.converted_field_index_cache_),
           field_index_id_cache_(other.field_index_id_cache_),
-          json_index_path_cache_(other.json_index_path_cache_),
           field_index_has_raw_data_(other.field_index_has_raw_data_),
           fields_filled_with_default_(other.fields_filled_with_default_),
           column_groups_(other.column_groups_),
@@ -456,7 +457,6 @@ class SegmentLoadInfo {
           converted_field_index_cache_(
               std::move(other.converted_field_index_cache_)),
           field_index_id_cache_(std::move(other.field_index_id_cache_)),
-          json_index_path_cache_(std::move(other.json_index_path_cache_)),
           field_index_has_raw_data_(std::move(other.field_index_has_raw_data_)),
           fields_filled_with_default_(
               std::move(other.fields_filled_with_default_)),
@@ -477,7 +477,6 @@ class SegmentLoadInfo {
             schema_ = other.schema_;
             converted_field_index_cache_ = other.converted_field_index_cache_;
             field_index_id_cache_ = other.field_index_id_cache_;
-            json_index_path_cache_ = other.json_index_path_cache_;
             field_index_has_raw_data_ = other.field_index_has_raw_data_;
             column_groups_ = other.column_groups_;
             fields_filled_with_default_ = other.fields_filled_with_default_;
@@ -498,7 +497,6 @@ class SegmentLoadInfo {
             converted_field_index_cache_ =
                 std::move(other.converted_field_index_cache_);
             field_index_id_cache_ = std::move(other.field_index_id_cache_);
-            json_index_path_cache_ = std::move(other.json_index_path_cache_);
             field_index_has_raw_data_ =
                 std::move(other.field_index_has_raw_data_);
             fields_filled_with_default_ =
@@ -632,6 +630,40 @@ class SegmentLoadInfo {
     }
 
     // ==================== Index Info ====================
+
+    // Which indexes this segment has, by field -- the single source of index identity
+    // for the diff below. Today it is populated by BuildCache from the segment's index
+    // infos; the planned shape ("the segment manifest owns the index files") populates
+    // it from the manifest instead, and every consumer keeps working unchanged.
+    [[nodiscard]] const std::unordered_map<FieldId, std::vector<int64_t>>&
+    IndexIdsByField() const {
+        return field_index_id_cache_;
+    }
+
+    // Paths of one index's files. Every consumer reads index files through here, so the
+    // planned switch of the *source* (index infos -> segment manifest) is a change in
+    // this accessor alone.
+    [[nodiscard]] std::vector<std::string>
+    GetIndexFilePaths(FieldId field_id, int64_t index_id) const {
+        auto it = converted_field_index_cache_.find(field_id);
+        if (it == converted_field_index_cache_.end()) {
+            return {};
+        }
+        for (const auto& info : it->second) {
+            if (info.index_id == index_id) {
+                return info.index_files;
+            }
+        }
+        return {};
+    }
+
+    // False until the storage side lets the segment manifest carry index files. Once it
+    // does, BuildCache takes index identity from the manifest and GetIndexFilePaths reads
+    // the files from there; this flips to true and nothing else changes.
+    [[nodiscard]] bool
+    ManifestCarriesIndexes() const {
+        return false;
+    }
 
     [[nodiscard]] int
     GetIndexInfoCount() const {
@@ -1134,7 +1166,6 @@ class SegmentLoadInfo {
 
         prune_map(converted_field_index_cache_);
         prune_map(field_index_id_cache_);
-        prune_map(json_index_path_cache_);
         prune_set(field_index_has_raw_data_);
         prune_set(fields_filled_with_default_);
         prune_set(created_text_indexes_);
@@ -1155,10 +1186,14 @@ class SegmentLoadInfo {
     BuildCache() {
         BuildFieldBinlogCache();
 
+        // Single derivation point for index identity: field_index_id_cache_ (which
+        // indexes exist) and converted_field_index_cache_ (what they are, and where
+        // their files are). When the segment manifest carries the index files, this is
+        // the only place that has to learn to read them from there.
+
         // Convert index infos to LoadIndexInfo and build per-field cache
         converted_field_index_cache_.clear();
         field_index_id_cache_.clear();
-        json_index_path_cache_.clear();
         field_index_has_raw_data_.clear();
         for (int i = 0; i < info_.index_infos_size(); i++) {
             const auto& index_info = info_.index_infos(i);
@@ -1187,15 +1222,27 @@ class SegmentLoadInfo {
                     load_index_info.field_type, request.has_raw_data)) {
                 field_index_has_raw_data_.insert(field_id);
             }
-            if (load_index_info.field_type == DataType::JSON) {
-                auto path_it = load_index_info.index_params.find(JSON_PATH);
-                if (path_it != load_index_info.index_params.end()) {
-                    json_index_path_cache_[field_id][index_info.indexid()] =
-                        path_it->second;
-                }
-            }
             converted_field_index_cache_[field_id].push_back(
                 std::move(load_index_info));
+        }
+
+        // A field that carries several scalar indexes has no single raw-data
+        // answer: the runtime guard (IndexHasRawDataFromState) reports false for
+        // it, so the load diff must not treat it as "the index provides raw
+        // data" either. Otherwise a Reopen that adds a second index in place
+        // would leave the raw column skipped while every reader -- retrieve,
+        // expression fallback -- now goes to get_column, which asserts that the
+        // column exists. Being absent here puts such a field into
+        // fields_to_reload, so the diff loads the column instead.
+        for (auto it = field_index_has_raw_data_.begin();
+             it != field_index_has_raw_data_.end();) {
+            auto cache_it = field_index_id_cache_.find(*it);
+            if (cache_it != field_index_id_cache_.end() &&
+                cache_it->second.size() > 1) {
+                it = field_index_has_raw_data_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 
@@ -1235,12 +1282,6 @@ class SegmentLoadInfo {
     // can drop converted_field_index_cache_ after load, but reopen diff still
     // needs to know which index ids are already present per field.
     std::unordered_map<FieldId, std::vector<int64_t>> field_index_id_cache_;
-
-    // Lightweight JSON index identity retained after manifest load-info
-    // compaction so reopen can drop one nested path without affecting sibling
-    // indexes on the same JSON field.
-    std::unordered_map<FieldId, std::unordered_map<int64_t, std::string>>
-        json_index_path_cache_;
 
     // set of field ids that corresponding index has raw data
     std::set<FieldId> field_index_has_raw_data_;
