@@ -20,8 +20,6 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/cockroachdb/errors"
-
 	"github.com/milvus-io/milvus/internal/storagecommon"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
@@ -45,12 +43,7 @@ func RestoreColumnGroupsFromManifest(ctx context.Context, manifestPath string, s
 	}
 	groups, err := readColumnGroupsFromManifest(manifestPath, config)
 	if err != nil {
-		// The FFI markers have no wire code of their own. Keep their identity
-		// for retry classification while giving them the storage wire code.
-		if errors.Is(err, ErrLoonTransient) || errors.Is(err, ErrLoonPermanent) {
-			return nil, merr.WrapErrStorage(err, "read column-group layout")
-		}
-		return nil, merr.Wrap(err, "read column-group layout")
+		return nil, wrapStorageErr(err, "read column-group layout")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

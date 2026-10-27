@@ -1145,6 +1145,20 @@ func WrapErrStorage(err error, format string, args ...any) error {
 	return wrapInner(ErrStorage, formatMsg(format, args...), err)
 }
 
+// WrapErrStorageTransient is the retryable counterpart of WrapErrStorage.
+// Use it only when the producer has classified the storage failure as
+// transient; merr.IsRetryableErr reports true for the result.
+func WrapErrStorageTransient(err error, format string, args ...any) error {
+	if err == nil {
+		return WrapErrStorageTransientMsg(format, args...)
+	}
+	return wrapInner(ErrStorageTransient, formatMsg(format, args...), err)
+}
+
+func WrapErrStorageTransientMsg(format string, args ...any) error {
+	return wrapMsg(ErrStorageTransient, format, args...)
+}
+
 // WrapErrFunctionFailedMsg creates a new ErrFunctionFailed (code 2400) with a
 // detail message. Use when a function / BM25 / MinHash / analyzer runner
 // returns a malformed output (wrong type, empty, unexpected shape) and there

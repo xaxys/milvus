@@ -92,14 +92,24 @@ func TestRestoreColumnGroupsFromManifest(t *testing.T) {
 }
 
 func TestRestoreColumnGroupsPreservesReadFailures(t *testing.T) {
-	for _, failure := range []error{ErrLoonTransient, ErrLoonPermanent} {
+	t.Run("transient", func(t *testing.T) {
+		failure := merr.WrapErrStorageTransientMsg("throttled")
 		mockey.PatchConvey("read failure", t, func() {
 			mockey.Mock(readColumnGroupsFromManifest).Return(nil, failure).Build()
 			_, err := RestoreColumnGroupsFromManifest(context.Background(), MarshalManifestPath("segment", 1), nil, &indexpb.StorageConfig{})
-			require.ErrorIs(t, err, failure)
-			require.ErrorIs(t, err, merr.ErrStorage)
+			require.ErrorIs(t, err, merr.ErrStorageTransient)
+			require.NotErrorIs(t, err, merr.ErrStorage)
 		})
-	}
+	})
+	t.Run("permanent", func(t *testing.T) {
+		failure := merr.WrapErrStorageMsg("read failed")
+		mockey.PatchConvey("read failure", t, func() {
+			mockey.Mock(readColumnGroupsFromManifest).Return(nil, failure).Build()
+			_, err := RestoreColumnGroupsFromManifest(context.Background(), MarshalManifestPath("segment", 1), nil, &indexpb.StorageConfig{})
+			require.ErrorIs(t, err, merr.ErrStorage)
+			require.NotErrorIs(t, err, merr.ErrStorageTransient)
+		})
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := RestoreColumnGroupsFromManifest(ctx, "", nil, nil)
@@ -117,8 +127,8 @@ func TestRestoreColumnGroupsRejectsUnreadableManifest(t *testing.T) {
 			}
 			_, err := RestoreColumnGroupsFromManifest(context.Background(), MarshalManifestPath(root, 1), nil,
 				&indexpb.StorageConfig{StorageType: "local", RootPath: root})
-			require.ErrorIs(t, err, ErrLoonPermanent)
-			require.NotErrorIs(t, err, ErrLoonTransient)
+			require.ErrorIs(t, err, merr.ErrStorage)
+			require.NotErrorIs(t, err, merr.ErrStorageTransient)
 		})
 	}
 }

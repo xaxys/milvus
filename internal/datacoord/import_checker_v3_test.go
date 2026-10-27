@@ -811,13 +811,13 @@ func TestGroupSourcesBFDInvariants(t *testing.T) {
 // exhaustion: the terminal codes fail the job immediately, while retriable
 // errors (service not ready, a bare timeout) are left for the next tick.
 func TestIsTerminalImportV3JobErr(t *testing.T) {
-	require.True(t, importcommon.IsTerminalImportV3Err(merr.WrapErrDataIntegrityMsg("bad data")))
-	require.True(t, importcommon.IsTerminalImportV3Err(merr.WrapErrImportSysFailedMsg("system failure")))
-	require.True(t, importcommon.IsTerminalImportV3Err(merr.WrapErrImportFailedMsg("input defect")))
-	require.True(t, importcommon.IsTerminalImportV3Err(merr.WrapErrServiceQuotaExceeded("disk quota exceeded")))
-	require.False(t, importcommon.IsTerminalImportV3Err(merr.WrapErrServiceNotReadyMsg("collection cache warming")))
-	require.False(t, importcommon.IsTerminalImportV3Err(context.DeadlineExceeded))
-	require.False(t, importcommon.IsTerminalImportV3Err(nil))
+	require.True(t, importcommon.IsTerminalImportV3JobErr(merr.WrapErrDataIntegrityMsg("bad data")))
+	require.True(t, importcommon.IsTerminalImportV3JobErr(merr.WrapErrImportSysFailedMsg("system failure")))
+	require.True(t, importcommon.IsTerminalImportV3JobErr(merr.WrapErrImportFailedMsg("input defect")))
+	require.True(t, importcommon.IsTerminalImportV3JobErr(merr.WrapErrServiceQuotaExceeded("disk quota exceeded")))
+	require.False(t, importcommon.IsTerminalImportV3JobErr(merr.WrapErrServiceNotReadyMsg("collection cache warming")))
+	require.False(t, importcommon.IsTerminalImportV3JobErr(context.DeadlineExceeded))
+	require.False(t, importcommon.IsTerminalImportV3JobErr(nil))
 }
 
 // TestImportCheckerV3CheckJobNonPlanningDispatch pins checkJob's shared error

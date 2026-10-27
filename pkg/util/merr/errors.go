@@ -183,6 +183,13 @@ var (
 	// when they fit; reach for ErrStorage only when none of those describe the failure.
 	ErrStorage = newMilvusError("storage internal error", 1008, false, WithErrorType(SystemError))
 
+	// ErrStorageTransient is the retryable counterpart of ErrStorage: a
+	// transient storage failure (throttling, timeout, connection reset) that
+	// the producer classified as retryable. Keep it a distinct code from
+	// ErrStorage; milvusError.Is compares codes, so reusing 1008 would make
+	// ErrStorageTransient match the terminal ErrStorage sentinel.
+	ErrStorageTransient = newMilvusError("storage transient error", 1013, true, WithErrorType(SystemError))
+
 	// Permanent errors - resource doesn't exist or access denied
 	ErrIoPermissionDenied   = newMilvusError("permission denied", 1005, false)
 	ErrIoBucketNotFound     = newMilvusError("bucket not found", 1006, false)

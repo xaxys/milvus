@@ -227,7 +227,7 @@ func openFFIPackedReader(
 	status = C.GetFFIReaderStream(cPackedReader, C.int64_t(8196), (*C.struct_ArrowArrayStream)(unsafe.Pointer(&cStream)))
 	if err := ConsumeCStatusIntoError(&status); err != nil {
 		C.CloseFFIReader(cPackedReader)
-		return nil, merr.WrapErrStorage(err, "failed to get reader stream")
+		return nil, wrapStorageErr(err, "failed to get reader stream")
 	}
 
 	// Import the stream as a RecordReader

@@ -339,7 +339,7 @@ func TestReshardCreateRPCErrorVerdict(t *testing.T) {
 					}).Return(nil).Once()
 			}
 
-			if importcommon.IsTerminalImportV3Err(c.err) {
+			if importcommon.IsTerminalImportV3CreateErr(c.err) {
 				task.fail(c.err.Error())
 			} else {
 				task.prepareRetry(cluster)

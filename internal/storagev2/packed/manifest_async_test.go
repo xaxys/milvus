@@ -190,7 +190,7 @@ func TestAsyncManifestNativeQueueDeadline(t *testing.T) {
 			<-time.After(time.Until(ctx.deadline) + 20*time.Millisecond)
 			unblock.Do(func() { close(release) })
 			err := <-done
-			require.ErrorIs(t, err, ErrLoonTransient)
+			require.ErrorIs(t, err, merr.ErrStorageTransient)
 			require.ErrorContains(t, err, "did not start")
 			if operation == "commit" {
 				var commitErr *ManifestCommitError
@@ -251,16 +251,16 @@ func TestAsyncManifestAdmissionRejection(t *testing.T) {
 	require.NoError(t, err)
 	_, err = GetManifestIndexInfosAsync(context.Background(), io, MarshalManifestPath(path.Join(cfg.RootPath, "rejected"), 0), cfg)
 	require.Error(t, err)
-	require.ErrorIs(t, err, ErrLoonTransient)
+	require.ErrorIs(t, err, merr.ErrStorageTransient)
 	called := false
 	err = SubmitManifestIndexInfos(context.Background(), io, MarshalManifestPath(path.Join(cfg.RootPath, "rejected"), 0), cfg,
 		func([]ManifestIndexInfo, error) { called = true })
-	require.ErrorIs(t, err, ErrLoonTransient)
+	require.ErrorIs(t, err, merr.ErrStorageTransient)
 	require.False(t, called, "rejected submissions must not deliver a callback")
 	err = SubmitManifestUpdates(context.Background(), io, path.Join(cfg.RootPath, "rejected"), 0, cfg,
 		&ManifestUpdates{DeltaLogs: []DeltaLogEntry{{Path: "delta", NumEntries: 1}}},
 		func(ManifestUpdateResult, error) { called = true })
-	require.ErrorIs(t, err, ErrLoonTransient)
+	require.ErrorIs(t, err, merr.ErrStorageTransient)
 	require.False(t, called, "rejected commits must not deliver a callback")
 	require.Empty(t, io.slots, "rejected submission must release admission")
 }
@@ -302,7 +302,7 @@ func TestAsyncManifestCommitOutcomeSurvivesCancellation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(42), version)
 	for _, outcome := range []ManifestCommitOutcome{ManifestNotCommitted, ManifestCommitUnknown} {
-		_, err := (manifestCommitResult{outcome: outcome, version: -1, err: ErrLoonTransient}).finish(ctx)
+		_, err := (manifestCommitResult{outcome: outcome, version: -1, err: merr.ErrStorageTransient}).finish(ctx)
 		var commitErr *ManifestCommitError
 		require.True(t, errors.As(merr.Wrap(err, "coordinator commit"), &commitErr))
 		require.Equal(t, outcome, commitErr.Outcome)
@@ -310,7 +310,7 @@ func TestAsyncManifestCommitOutcomeSurvivesCancellation(t *testing.T) {
 			require.ErrorIs(t, err, context.Canceled)
 		} else {
 			require.NotErrorIs(t, err, context.Canceled)
-			require.ErrorIs(t, err, ErrLoonTransient)
+			require.ErrorIs(t, err, merr.ErrStorageTransient)
 		}
 	}
 }

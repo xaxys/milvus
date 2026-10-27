@@ -215,7 +215,7 @@ func (t *reshardTask) CreateTaskOnWorker(nodeID int64, cluster session.Cluster) 
 		mlog.Warn(context.TODO(), "create reshard task failed", WrapTaskLog(t, mlog.Err(err))...)
 		// Raw transport errors are not terminal and retry; a deterministic
 		// rejection fails the task.
-		if importcommon.IsTerminalImportV3Err(err) {
+		if importcommon.IsTerminalImportV3CreateErr(err) {
 			t.fail(err.Error())
 		} else {
 			t.prepareRetry(cluster)
@@ -257,7 +257,7 @@ func (t *reshardTask) QueryTaskOnWorker(cluster session.Cluster) {
 			return
 		}
 		if err := t.acceptResult(); err != nil {
-			if importcommon.IsTerminalImportV3Err(err) {
+			if importcommon.IsTerminalImportV3AcceptErr(err) {
 				t.fail(err.Error())
 				return
 			}

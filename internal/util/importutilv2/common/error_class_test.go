@@ -25,7 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/allocator"
-	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
@@ -68,11 +67,17 @@ func TestWrapDecodeErr(t *testing.T) {
 	})
 }
 
-// A loon FFI failure whose producer marked the code permanent (access denied,
-// malformed input, corrupt data) must fail the task: retrying reruns the whole
-// reshard and cannot change the outcome.
+// The Import V3 verdict is stage-specific. A typed non-retriable storage
+// error fails everywhere; the retryable counterpart retries everywhere; raw
+// errors follow the stage default (task: fail, Create/accept/job: retry).
+func TestStorageTransientIsRetryable(t *testing.T) {
+	err := merr.WrapErrStorageTransientMsg("throttled")
+	require.True(t, merr.IsRetryableErr(err))
+	require.False(t, errors.Is(err, merr.ErrStorage), "transient must not match the terminal ErrStorage sentinel")
+	require.Equal(t, int32(1013), merr.Code(err))
+}
 
-func TestIsTerminalImportV3Err(t *testing.T) {
+func TestIsTerminalImportV3TaskErr(t *testing.T) {
 	for _, c := range []struct {
 		name     string
 		err      error
@@ -87,18 +92,70 @@ func TestIsTerminalImportV3Err(t *testing.T) {
 		{"permanent io", merr.WrapErrIoKeyNotFound("manifest", "missing"), true},
 		{"quota", merr.WrapErrServiceQuotaExceeded("disk quota"), true},
 		{"service unimplemented", merr.ErrServiceUnimplemented, true},
-		{"loon permanent", packed.ErrLoonPermanent, true},
 		{"typed io failure", merr.WrapErrIoFailed("manifest", errors.New("reset")), true},
 		{"service unavailable", merr.ErrServiceUnavailable, false},
 		{"service internal", merr.WrapErrServiceInternalMsg("internal"), true},
 		{"storage", merr.WrapErrStorage(errors.New("storage"), "write"), true},
-		{"storage wrapping loon transient", merr.WrapErrStorage(packed.ErrLoonTransient, "write"), false},
+		{"storage transient", merr.WrapErrStorageTransientMsg("throttled"), false},
 		{"node not found", merr.ErrNodeNotFound, false},
 		{"deadline", context.DeadlineExceeded, false},
-		{"raw", errors.New("connection reset"), false},
-		{"loon transient", packed.ErrLoonTransient, false},
+		{"raw", errors.New("connection reset"), true},
 		{"id exhausted", allocator.NewIDExhaustedError(0, 10, 5), false},
 	} {
-		require.Equal(t, c.terminal, IsTerminalImportV3Err(c.err), c.name)
+		require.Equal(t, c.terminal, IsTerminalImportV3TaskErr(c.err), c.name)
+	}
+}
+
+func TestIsTerminalImportV3CreateErr(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		err      error
+		terminal bool
+	}{
+		{"nil", nil, false},
+		{"data integrity", merr.WrapErrDataIntegrityMsg("bad manifest"), true},
+		{"import failed", merr.WrapErrImportFailedMsg("bad input"), true},
+		{"import sys failed", merr.WrapErrImportSysFailedMsg("config"), true},
+		{"parameter invalid", merr.WrapErrParameterInvalidMsg("bad request"), true},
+		{"privilege denied", merr.WrapErrPrivilegeNotPermitted("denied"), true},
+		{"permanent io", merr.WrapErrIoKeyNotFound("manifest", "missing"), true},
+		{"quota", merr.WrapErrServiceQuotaExceeded("disk quota"), true},
+		{"service unimplemented", merr.ErrServiceUnimplemented, true},
+		{"typed io failure", merr.WrapErrIoFailed("manifest", errors.New("reset")), true},
+		{"service unavailable", merr.ErrServiceUnavailable, false},
+		{"service internal", merr.WrapErrServiceInternalMsg("internal"), true},
+		{"storage", merr.WrapErrStorage(errors.New("storage"), "write"), true},
+		{"storage transient", merr.WrapErrStorageTransientMsg("throttled"), false},
+		{"node not found", merr.ErrNodeNotFound, false},
+		{"raw", errors.New("connection reset"), false},
+	} {
+		require.Equal(t, c.terminal, IsTerminalImportV3CreateErr(c.err), c.name)
+	}
+}
+
+func TestIsTerminalImportV3AcceptErr(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		err      error
+		terminal bool
+	}{
+		{"nil", nil, false},
+		{"data integrity", merr.WrapErrDataIntegrityMsg("bad manifest"), true},
+		{"import failed", merr.WrapErrImportFailedMsg("bad input"), true},
+		{"import sys failed", merr.WrapErrImportSysFailedMsg("config"), true},
+		{"parameter invalid", merr.WrapErrParameterInvalidMsg("bad request"), true},
+		{"privilege denied", merr.WrapErrPrivilegeNotPermitted("denied"), true},
+		{"permanent io", merr.WrapErrIoKeyNotFound("manifest", "missing"), true},
+		{"quota", merr.WrapErrServiceQuotaExceeded("disk quota"), true},
+		{"service unimplemented", merr.ErrServiceUnimplemented, true},
+		{"typed io failure", merr.WrapErrIoFailed("manifest", errors.New("reset")), true},
+		{"service unavailable", merr.ErrServiceUnavailable, false},
+		{"service internal", merr.WrapErrServiceInternalMsg("internal"), true},
+		{"storage", merr.WrapErrStorage(errors.New("storage"), "write"), true},
+		{"storage transient", merr.WrapErrStorageTransientMsg("throttled"), false},
+		{"node not found", merr.ErrNodeNotFound, false},
+		{"raw", errors.New("connection reset"), false},
+	} {
+		require.Equal(t, c.terminal, IsTerminalImportV3AcceptErr(c.err), c.name)
 	}
 }

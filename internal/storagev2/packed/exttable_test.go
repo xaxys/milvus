@@ -76,8 +76,8 @@ func TestExploreFiles_InvalidDirectory(t *testing.T) {
 	// A nonexistent directory is LOON_FILE_NOT_FOUND (code 12): the FFI
 	// err_code now survives into the classification, so this is a permanent
 	// failure -- retrying a 404 cannot succeed -- not a transient one.
-	assert.ErrorIs(t, err, ErrLoonPermanent)
-	assert.NotErrorIs(t, err, ErrLoonTransient)
+	assert.ErrorIs(t, err, merr.ErrStorage)
+	assert.NotErrorIs(t, err, merr.ErrStorageTransient)
 	assert.Nil(t, files)
 }
 
@@ -2111,7 +2111,7 @@ func TestMilvusTableSnapshotMetadataInvalid(t *testing.T) {
 }
 
 func TestReadMilvusTableSnapshotMetadata_ReadFailureIsNotInvalidMetadata(t *testing.T) {
-	for _, readErr := range []error{context.DeadlineExceeded, ErrLoonTransient} {
+	for _, readErr := range []error{context.DeadlineExceeded, merr.ErrStorageTransient} {
 		t.Run(readErr.Error(), func(t *testing.T) {
 			read := mockey.Mock(readExternalSourceFile).Return(nil, readErr).Build()
 			defer read.UnPatch()

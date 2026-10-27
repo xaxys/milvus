@@ -215,7 +215,7 @@ func addOneColumnGroupEntry(handle C.LoonTransactionHandle, entry ColumnGroupEnt
 	cg.num_of_files = C.uint32_t(len(entry.Files))
 
 	if err := HandleLoonFFIResult(C.loon_transaction_add_column_group(handle, &cg)); err != nil {
-		return merr.WrapErrStorage(err, "commit manifest add_column_group")
+		return merr.Wrap(err, "commit manifest add_column_group")
 	}
 	return nil
 }

@@ -1616,11 +1616,9 @@ func TestExternalCollectionRefreshManager_SubmitRefreshJobWithID(t *testing.T) {
 
 	t.Run("ffi_explore_error_marks_job_failed_non_retriable", func(t *testing.T) {
 		// Regression for #49233: any FFI failure during explore (NoSuchBucket,
-		// AccessDenied, DNS NXDOMAIN, malformed URI, ...) is wrapped by the
-		// loon FFI layer as ErrLoonTransient. Without classification this
-		// looped forever as RefreshPending. Treat all FFI explore failures
-		// as terminal so the job transitions to RefreshFailed and the user
-		// gets a clear signal.
+		// AccessDenied, DNS NXDOMAIN, malformed URI, ...) is a hard source
+		// failure. Treat all FFI explore failures as terminal so the job
+		// transitions to RefreshFailed and the user gets a clear signal.
 		refreshMeta := createTestRefreshMeta(t)
 		alloc := &stubAllocator{nextID: 1000}
 		scheduler := newStubScheduler()
@@ -1639,7 +1637,7 @@ func TestExternalCollectionRefreshManager_SubmitRefreshJobWithID(t *testing.T) {
 		mockIsExternal := mockey.Mock(typeutil.IsExternalCollection).Return(true).Build()
 		defer mockIsExternal.UnPatch()
 
-		ffiErr := errors.Wrap(packed.ErrLoonTransient, "FFI operation failed: AWS Error NO_SUCH_BUCKET during ListObjectsV2")
+		ffiErr := merr.WrapErrStorageTransientMsg("FFI operation failed: AWS Error NO_SUCH_BUCKET during ListObjectsV2")
 		mockExplore := mockey.Mock((*externalCollectionRefreshManager).exploreExternalFiles).
 			Return(nil, "", ffiErr).Build()
 		defer mockExplore.UnPatch()

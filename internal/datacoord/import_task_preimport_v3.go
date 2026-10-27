@@ -181,7 +181,7 @@ func (p *preImportV3Task) CreateTaskOnWorker(nodeID int64, cluster session.Clust
 		mlog.Warn(context.TODO(), "preimport v3 failed", WrapTaskLog(p, mlog.Err(err))...)
 		// Raw transport errors are not terminal and retry; a deterministic
 		// rejection fails the task.
-		if importcommon.IsTerminalImportV3Err(err) {
+		if importcommon.IsTerminalImportV3CreateErr(err) {
 			p.fail(err.Error())
 			return
 		}

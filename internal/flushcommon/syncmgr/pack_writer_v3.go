@@ -22,8 +22,6 @@ import (
 	"path"
 	"strconv"
 
-	"github.com/cockroachdb/errors"
-
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/flushcommon/metacache"
@@ -221,17 +219,17 @@ func (bw *BulkPackWriterV3) Write(ctx context.Context, pack *SyncPack) (
 
 	// Phase 2: commit the assembled updates. CommitManifestUpdates short-
 	// circuits to the unchanged manifest path when updates carry nothing.
-	// The outer retry.Do handles transient FFI errors classified as
-	// packed.ErrLoonTransient; loon's own optimistic retry covers
+	// The outer retry.Do retries only errors the storage boundary marked as
+	// retryable (ErrStorageTransient); loon's own optimistic retry covers
 	// manifest-version conflicts within a single attempt.
 	err = retry.Do(ctx, func() error {
 		newPath, commitErr := packed.CommitManifestUpdates(basePath, baseVersion, bw.storageConfig, updates)
 		if commitErr != nil {
-			return classifyLoonErr(commitErr)
+			return commitErr
 		}
 		bw.manifestPath = newPath
 		return nil
-	}, bw.writeRetryOpts...)
+	}, append(bw.writeRetryOpts, retry.RetryErr(merr.IsRetryableErr))...)
 	if err != nil {
 		return
 	}
@@ -245,23 +243,6 @@ func (bw *BulkPackWriterV3) Write(ctx context.Context, pack *SyncPack) (
 	// returns no stats array); finalizeStats produces the cumulative Statistics.
 	segmentStats, err = bw.finalizeStats(pack, digested, inserts, deltas, bw.statsBlobSize)
 	return
-}
-
-// classifyLoonErr maps loon FFI failures to retryable errors and everything
-// else to retry.Unrecoverable so the outer retry loop terminates immediately.
-//
-// HandleLoonFFIResult now classifies by the FFI err_code (the producer's
-// loon_ffi_is_retryable_errcode): only genuinely transient failures carry
-// packed.ErrLoonTransient; access-denied/corrupt-data/malformed-input carry
-// packed.ErrLoonPermanent and terminate the loop via retry.Unrecoverable.
-func classifyLoonErr(err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, packed.ErrLoonTransient) {
-		return err
-	}
-	return retry.Unrecoverable(err)
 }
 
 // writeInserts writes the insert data files for the SyncPack and returns

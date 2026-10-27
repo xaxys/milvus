@@ -17,10 +17,11 @@
 package common
 
 import (
+	"context"
+
 	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/internal/allocator"
-	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
@@ -73,50 +74,102 @@ func WrapDecodeErr(err error, what string) error {
 	return merr.WrapErrImportFailedMsg("%s, err=%v", what, err)
 }
 
-// terminalImportV3ErrSentinels are the import-specific codes that cannot
-// recover by replaying the same request, input or result. InputError
-// (ErrParameterInvalid, ErrPrivilegeNotPermitted, ErrImportFailed) and the
-// permanent IO family are checked separately.
-var terminalImportV3ErrSentinels = []error{
-	merr.ErrDataIntegrity,
-	merr.ErrIoFailed,
-	merr.ErrImportSysFailed,
-	merr.ErrServiceQuotaExceeded,
-	merr.ErrServiceUnimplemented,
-	merr.ErrServiceInternal,
-	merr.ErrStorage,
-	packed.ErrLoonPermanent,
+// The Import V3 verdict is stage-specific: an error that is terminal for a
+// task execution can be transient for a Create RPC (whose outcome is unknown)
+// or for an acceptResult poll (catalog/transport can recover). Each predicate
+// therefore uses the same two semantic properties -- InputError and the
+// producer's retriable flag -- and a different default for unclassified
+// errors. No per-error denylist is needed as long as the storage/FFI boundary
+// maps transient failures to merr.ErrStorageTransient (retriable) and
+// permanent ones to merr.ErrStorage (or a more specific permanent code).
+
+// isContextTransientNotFound reports errors that mean "metadata has not
+// propagated yet" rather than "the object is permanently gone". DataCoord must
+// keep retrying these through the transient not-found path; the proxy stamps
+// the user-facing variants as InputError before they reach a client.
+func isContextTransientNotFound(err error) bool {
+	return errors.IsAny(err,
+		merr.ErrCollectionNotFound,
+		merr.ErrPartitionNotFound,
+		merr.ErrDatabaseNotFound,
+		merr.ErrSegmentNotFound,
+		merr.ErrNodeNotFound)
 }
 
-// IsTerminalImportV3Err reports whether an error is a deterministic failure of
-// the request, input or result. A nil error is not terminal.
-//
-// Raw (non-Milvus) errors are deliberately not classified here: the same
-// transport failure retries at Create, an unclassified execution error fails
-// the task, and a catalog failure retries at acceptResult, so each caller
-// decides what a raw error means before relying on this verdict.
-func IsTerminalImportV3Err(err error) bool {
+// IsTerminalImportV3TaskErr is the DataNode execution verdict. It is
+// default-deny: an unclassified execution error fails the task, while only
+// errors explicitly marked retriable (or context-transient not-found) retry.
+func IsTerminalImportV3TaskErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	// The producer already classified this as retryable; a storage wrapper must
-	// not turn it terminal.
-	if errors.Is(err, packed.ErrLoonTransient) {
+	if errors.IsAny(err, context.Canceled, context.DeadlineExceeded) {
 		return false
 	}
 	// ID exhaustion is recoverable: DataCoord's prepareRetry re-derives the
-	// per-file ID width before the next run. The sentinel is wrapped as
-	// ServiceInternal, which is otherwise terminal.
+	// per-file ID width before the next run.
 	if allocator.IsIDExhausted(err) {
 		return false
 	}
-	if merr.IsNonRetryableErr(err) || merr.GetErrorType(err) == merr.InputError {
+	if merr.GetErrorType(err) == merr.InputError {
 		return true
 	}
-	for _, sentinel := range terminalImportV3ErrSentinels {
-		if errors.Is(err, sentinel) {
-			return true
-		}
+	// A raw error has no classification; the execution default is failure.
+	if !merr.IsMilvusError(err) {
+		return true
 	}
-	return false
+	if isContextTransientNotFound(err) {
+		return false
+	}
+	return !merr.IsRetryableErr(err)
+}
+
+// IsTerminalImportV3CreateErr is the DataCoord Create* verdict. It is
+// default-retry for raw transport errors (the RPC outcome is unknown) and for
+// errors explicitly marked retriable; a typed non-retriable rejection fails.
+func IsTerminalImportV3CreateErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if merr.GetErrorType(err) == merr.InputError {
+		return true
+	}
+	if !merr.IsMilvusError(err) {
+		return false
+	}
+	if merr.IsRetryableErr(err) {
+		return false
+	}
+	// The node may have disappeared, or the collection/partition metadata may
+	// not have propagated yet; a new run can be routed elsewhere.
+	if isContextTransientNotFound(err) {
+		return false
+	}
+	return true
+}
+
+// IsTerminalImportV3AcceptErr is the DataCoord acceptResult verdict. It is
+// default-retry for raw catalog/transport errors and for typed retriable
+// errors; a typed non-retriable error (or InputError) fails.
+func IsTerminalImportV3AcceptErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if merr.GetErrorType(err) == merr.InputError {
+		return true
+	}
+	if !merr.IsMilvusError(err) {
+		return false
+	}
+	if isContextTransientNotFound(err) {
+		return false
+	}
+	return !merr.IsRetryableErr(err)
+}
+
+// IsTerminalImportV3JobErr is the DataCoord job-handler verdict. Like
+// acceptResult, control-plane failures default to retry; only InputError or a
+// typed non-retriable error fails the job.
+func IsTerminalImportV3JobErr(err error) bool {
+	return IsTerminalImportV3AcceptErr(err)
 }

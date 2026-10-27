@@ -196,7 +196,7 @@ func (t *importTaskV3) CreateTaskOnWorker(nodeID int64, cluster session.Cluster)
 		mlog.Warn(context.TODO(), "create import v3 task failed", WrapTaskLog(t, mlog.Err(err))...)
 		// Raw transport errors are not terminal and retry; a deterministic
 		// rejection fails the task.
-		if importcommon.IsTerminalImportV3Err(err) {
+		if importcommon.IsTerminalImportV3CreateErr(err) {
 			t.fail(err.Error())
 		} else {
 			t.prepareRetry(cluster)
@@ -242,7 +242,7 @@ func (t *importTaskV3) QueryTaskOnWorker(cluster session.Cluster) {
 			oldRows = segment.GetNumOfRows()
 		}
 		if err := t.acceptResult(resp.GetSegments()); err != nil {
-			if importcommon.IsTerminalImportV3Err(err) {
+			if importcommon.IsTerminalImportV3AcceptErr(err) {
 				t.fail(err.Error())
 				return
 			}

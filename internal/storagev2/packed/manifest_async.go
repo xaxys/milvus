@@ -243,7 +243,8 @@ func milvusManifestCommitDone(token C.uintptr_t, result C.LoonFFIResult, outcome
 func handleManifestAsyncResult(result C.LoonFFIResult) error {
 	if result.err_code == C.loon_errcode_async_overloaded || result.err_code == C.loon_errcode_async_deadline {
 		defer C.loon_ffi_free_result(&result)
-		return merr.Wrapf(ErrLoonTransient, "manifest async operation did not start (code=%d): %s", int(result.err_code), C.GoString(result.message))
+		return merr.WrapErrStorageTransientMsg(
+			"manifest async operation did not start (code=%d): %s", int(result.err_code), C.GoString(result.message))
 	}
 	return HandleLoonFFIResult(result)
 }
@@ -285,7 +286,7 @@ func (io *ManifestIOContext) submitOpen(ctx context.Context, base string, versio
 			}
 			result = manifestOpenResult{err: err}
 		} else if result.err != nil {
-			result.err = merr.WrapErrStorage(result.err, "async manifest open")
+			result.err = merr.Wrap(result.err, "async manifest open")
 		}
 		complete(result)
 	})
@@ -295,7 +296,7 @@ func (io *ManifestIOContext) submitOpen(ctx context.Context, base string, versio
 	if err := handleManifestAsyncResult(res); err != nil {
 		mu.Unlock()
 		token.Delete() // Rejected submissions never invoke a callback.
-		return merr.WrapErrStorage(err, "async manifest open")
+		return merr.Wrap(err, "async manifest open")
 	}
 	stopCancel = context.AfterFunc(ctx, func() {
 		mu.Lock()
@@ -367,7 +368,7 @@ func (io *ManifestIOContext) submitCommit(ctx context.Context, txn C.LoonTransac
 	if err := handleManifestAsyncResult(res); err != nil {
 		mu.Unlock()
 		token.Delete()
-		return &ManifestCommitError{ManifestNotCommitted, merr.WrapErrStorage(err, "submit manifest commit")}
+		return &ManifestCommitError{ManifestNotCommitted, merr.Wrap(err, "submit manifest commit")}
 	}
 	stopCancel = context.AfterFunc(ctx, func() {
 		mu.Lock()
@@ -380,7 +381,7 @@ func (io *ManifestIOContext) submitCommit(ctx context.Context, txn C.LoonTransac
 
 func (result manifestCommitResult) finish(ctx context.Context) (int64, error) {
 	if result.err != nil {
-		err := merr.WrapErrStorage(result.err, "async manifest commit")
+		err := merr.Wrap(result.err, "async manifest commit")
 		if result.outcome == ManifestNotCommitted && ctx.Err() != nil {
 			err = ctx.Err()
 		}
@@ -427,7 +428,7 @@ func getManifestAsync(ctx context.Context, io *ManifestIOContext, manifestPath s
 	defer C.loon_transaction_destroy(txn)
 	var manifest *C.LoonManifest
 	if err := HandleLoonFFIResult(C.loon_transaction_get_manifest(txn, &manifest)); err != nil {
-		return nil, merr.WrapErrStorage(err, "get loaded manifest")
+		return nil, merr.Wrap(err, "get loaded manifest")
 	}
 	return manifest, nil
 }
@@ -435,7 +436,7 @@ func getManifestAsync(ctx context.Context, io *ManifestIOContext, manifestPath s
 func transactionIndexInfos(txn C.LoonTransactionHandle, manifestPath string) ([]ManifestIndexInfo, error) {
 	var manifest *C.LoonManifest
 	if err := HandleLoonFFIResult(C.loon_transaction_get_manifest(txn, &manifest)); err != nil {
-		return nil, merr.WrapErrStorage(err, "get loaded manifest")
+		return nil, merr.Wrap(err, "get loaded manifest")
 	}
 	defer C.loon_manifest_destroy(manifest)
 	return manifestIndexInfos(manifest, manifestPath)

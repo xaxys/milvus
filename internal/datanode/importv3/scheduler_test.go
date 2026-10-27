@@ -15,7 +15,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/allocator"
-	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
@@ -332,8 +331,8 @@ func TestSchedulerClassifiesWithTaskPolicy(t *testing.T) {
 		{"ErrServiceInternal fails", merr.WrapErrServiceInternalMsg("internal"), datapb.ImportTaskStateV2_Failed, false},
 		{"ErrStorage fails", merr.WrapErrStorage(errors.New("storage"), "write"), datapb.ImportTaskStateV2_Failed, false},
 		// Loon transients are classified retryable by their producer.
-		{"Loon transient retries", merr.Wrapf(packed.ErrLoonTransient, "FFI operation failed: simulated transient"), datapb.ImportTaskStateV2_Retry, false},
-		{"Loon transient storage error retries", merr.WrapErrStorage(packed.ErrLoonTransient, "commit manifest begin"), datapb.ImportTaskStateV2_Retry, false},
+		{"storage transient retries", merr.WrapErrStorageTransientMsg("FFI operation failed: simulated transient"), datapb.ImportTaskStateV2_Retry, false},
+		{"storage transient wrapped with context retries", merr.Wrap(merr.WrapErrStorageTransientMsg("simulated transient"), "commit manifest begin"), datapb.ImportTaskStateV2_Retry, false},
 		{"ErrImportFailed fails", merr.WrapErrImportFailedMsg("parquet: invalid magic"), datapb.ImportTaskStateV2_Failed, false},
 		{"ErrImportSysFailed fails", merr.ErrImportSysFailed, datapb.ImportTaskStateV2_Failed, false},
 		{"ErrIoKeyNotFound fails", merr.WrapErrIoKeyNotFound("manifest", "not found"), datapb.ImportTaskStateV2_Failed, false},

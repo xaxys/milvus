@@ -33,5 +33,5 @@ func TestCreateVerdictSeesMappedStorageErrorAsTerminal(t *testing.T) {
 	// survive that round trip as a terminal typed IO error (ErrIoFailed).
 	mapped := storage.ToMilvusIoError("bucket", errors.New("connection reset by peer"))
 	round := merr.Error(merr.Status(mapped))
-	require.True(t, importcommon.IsTerminalImportV3Err(round), "%v", round)
+	require.True(t, importcommon.IsTerminalImportV3CreateErr(round), "%v", round)
 }

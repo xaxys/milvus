@@ -195,21 +195,21 @@ func CreateManifestForSegment(
 	var transactionHandle C.LoonTransactionHandle
 	result := C.loon_transaction_open(cBasePath, cProperties, C.int64_t(0), C.int64_t(-1), C.LOON_TRANSACTION_RESOLVE_OVERWRITE /* resolve_id */, getRetryLimit() /* retry_limit */, &transactionHandle)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return "", merr.WrapErrStorage(err, "loon_transaction_open failed")
+		return "", merr.Wrap(err, "loon_transaction_open failed")
 	}
 	defer C.loon_transaction_destroy(transactionHandle)
 
 	// Append files to transaction
 	result = C.loon_transaction_append_files(transactionHandle, columnGroups)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return "", merr.WrapErrStorage(err, "loon_transaction_append_files failed")
+		return "", merr.Wrap(err, "loon_transaction_append_files failed")
 	}
 
 	// Commit transaction
 	var committedVersion C.int64_t
 	result = C.loon_transaction_commit(transactionHandle, &committedVersion, nil)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return "", merr.WrapErrStorage(err, "loon_transaction_commit failed")
+		return "", merr.Wrap(err, "loon_transaction_commit failed")
 	}
 
 	// Return manifest path using the helper function

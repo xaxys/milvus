@@ -19,9 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/errors"
-
-	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	importcommon "github.com/milvus-io/milvus/internal/util/importutilv2/common"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -518,14 +515,8 @@ func (s *Scheduler) runClosure(rec *taskEntry) func() (any, error) {
 				// a job that was already superseded.
 				rec.state = datapb.ImportTaskStateV2_Retry
 				rec.reason = rec.ctx.Err().Error()
-			case importcommon.IsTerminalImportV3Err(err):
+			case importcommon.IsTerminalImportV3TaskErr(err):
 				// A deterministic request/input/result error fails.
-				rec.state = datapb.ImportTaskStateV2_Failed
-				rec.reason = err.Error()
-			case !merr.IsMilvusError(err) && !errors.Is(err, packed.ErrLoonTransient):
-				// An unclassified execution error fails. A bare loon
-				// transient sentinel is the exception: its producer already
-				// classified it as retryable, it just carries no Milvus code.
 				rec.state = datapb.ImportTaskStateV2_Failed
 				rec.reason = err.Error()
 			default:

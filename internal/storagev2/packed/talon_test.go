@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 func newTestTalonClient(t *testing.T) *TalonClient {
@@ -67,7 +68,7 @@ func TestTalonPartialLoadPayload(t *testing.T) {
 		{Index: 2, Uncertain: false, Diagnostic: "object not found"},
 		{Index: 7, Uncertain: true, Diagnostic: "worker timeout: completion unknown"},
 	}, partial.Failures)
-	require.ErrorIs(t, partial, ErrLoonTransient)
+	require.ErrorIs(t, partial, merr.ErrStorageTransient)
 	require.Contains(t, partial.Error(), "batch failed")
 	require.Nil(t, result.loads, "native partial failures do not identify successful results")
 }
@@ -118,10 +119,10 @@ func TestTalonEmptyObjectOperations(t *testing.T) {
 func TestTalonReadRejectsInvalidArguments(t *testing.T) {
 	c := newTestTalonClient(t)
 	_, err := c.Read(context.Background(), TalonReadRequest{URI: "s3://bucket/object", Length: ^uint64(0)})
-	require.ErrorIs(t, err, ErrLoonPermanent)
+	require.ErrorIs(t, err, merr.ErrStorage)
 	require.Nil(t, c.io.native, "unrepresentable lengths must fail before allocation or dispatch")
 	_, err = c.Read(context.Background(), TalonReadRequest{URI: "s3://bucket/object", Length: 8, Version: "etag"})
-	require.ErrorIs(t, err, ErrLoonPermanent, "a version without its object size is invalid")
+	require.ErrorIs(t, err, merr.ErrStorage, "a version without its object size is invalid")
 	require.Empty(t, c.io.slots)
 }
 

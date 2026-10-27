@@ -141,7 +141,7 @@ func (c *importCheckerV3) checkJob(job ImportJob) {
 	jc := newImportV3JobContext(c, job)
 	if err := handler.Handle(jc); err != nil {
 		jc.log.Warn(jc.ctx, "import v3 job state handle failed", mlog.String("state", job.GetState().String()), mlog.Err(err))
-		if importcommon.IsTerminalImportV3Err(err) {
+		if importcommon.IsTerminalImportV3JobErr(err) {
 			jc.failJob(err.Error())
 		}
 	}

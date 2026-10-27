@@ -130,7 +130,7 @@ func GetFileInfo(
 
 	result := C.loon_exttable_get_file_info(cFormat, cFilePath, cProperties, &numRows)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return nil, merr.WrapErrStorage(err, "loon_exttable_get_file_info failed")
+		return nil, merr.Wrap(err, "loon_exttable_get_file_info failed")
 	}
 
 	return &FileInfo{
@@ -426,7 +426,7 @@ func ExploreFilesReturnManifestPath(
 		&numFiles, &outColumnGroupsPath,
 	)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return nil, "", merr.WrapErrStorage(err, "loon_exttable_explore failed")
+		return nil, "", merr.Wrap(err, "loon_exttable_explore failed")
 	}
 	if outColumnGroupsPath == nil {
 		return nil, "", merr.WrapErrServiceInternalMsg("loon_exttable_explore returned nil column groups path")
@@ -471,7 +471,7 @@ func ReadFileInfosFromManifestPath(
 	var manifest *C.LoonManifest
 	result := C.loon_exttable_read_manifest(cManifestPath, cProperties, &manifest)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return nil, merr.WrapErrStorage(err, "loon_exttable_read_manifest failed")
+		return nil, merr.Wrap(err, "loon_exttable_read_manifest failed")
 	}
 	defer C.loon_manifest_destroy(manifest)
 

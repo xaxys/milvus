@@ -296,6 +296,9 @@ func HandleLoonFFIResult(ffiResult C.LoonFFIResult) error {
 		if errMsg != nil {
 			errStr = C.GoString(errMsg)
 		}
+		if C.loon_ffi_is_retryable_errcode(C.int(errCode)) != 0 {
+			return merr.WrapErrStorageTransientMsg("loon FFI error (code %d): %s", errCode, errStr)
+		}
 		return merr.WrapErrStorageMsg("loon FFI error (code %d): %s", errCode, errStr)
 	}
 	return nil

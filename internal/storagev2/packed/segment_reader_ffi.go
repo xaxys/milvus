@@ -164,7 +164,7 @@ func (r *FFISegmentReader) ReadNext() (arrow.Record, error) {
 		if err == io.EOF {
 			return nil, io.EOF
 		}
-		return nil, merr.WrapErrStorage(err, "failed to read TEXT-decoded segment batch")
+		return nil, wrapStorageErr(err, "failed to read TEXT-decoded segment batch")
 	}
 	return record, nil
 }

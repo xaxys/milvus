@@ -44,6 +44,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
@@ -871,7 +872,7 @@ func (s *PackWriterV3Suite) TestWrite_RetryDoesNotLeakVersionBumps() {
 	patched := mockey.Mock(packed.CommitManifestUpdates).
 		To(func(basePath string, baseVersion int64, cfg *indexpb.StorageConfig, updates *packed.ManifestUpdates) (string, error) {
 			if atomic.AddInt32(&calls, 1) == 1 {
-				return "", packed.ErrLoonTransient
+				return "", merr.WrapErrStorageTransientMsg("simulated transient")
 			}
 			return origin(basePath, baseVersion, cfg, updates)
 		}).

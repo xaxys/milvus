@@ -243,7 +243,7 @@ func stageIndexInfo(handle C.LoonTransactionHandle, index ManifestIndexInfo) err
 		num_properties:               C.uint32_t(len(propertyNames)),
 	}
 	if err := HandleLoonFFIResult(C.loon_transaction_add_index_info(handle, &cIndex)); err != nil {
-		return merr.WrapErrStorage(err, "commit manifest add_index_info")
+		return merr.Wrap(err, "commit manifest add_index_info")
 	}
 	return nil
 }
@@ -252,7 +252,7 @@ func stageIndexInfo(handle C.LoonTransactionHandle, index ManifestIndexInfo) err
 // The lifecycle caller owns the ordering of file deletion and metadata retraction.
 func stageDropIndex(handle C.LoonTransactionHandle, indexID int64) error {
 	if err := HandleLoonFFIResult(C.loon_transaction_drop_index(handle, C.int64_t(indexID))); err != nil {
-		return merr.WrapErrStorage(err, "commit manifest drop_index")
+		return merr.Wrap(err, "commit manifest drop_index")
 	}
 	return nil
 }

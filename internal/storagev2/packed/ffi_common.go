@@ -17,8 +17,6 @@ import (
 	"strconv"
 	"unsafe"
 
-	"github.com/cockroachdb/errors"
-
 	"github.com/milvus-io/milvus/internal/storagev2"
 	_ "github.com/milvus-io/milvus/internal/util/cgo"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexcgopb"
@@ -26,24 +24,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
-
-// ErrLoonTransient marks any failure surfaced by the loon FFI layer. Some
-// milvus-storage paths can still lose their structured error detail and fall
-// back to a generic error code, so callers cannot reliably distinguish a
-// transient failure from a permanent one. Treat all loon failures as retryable
-// for now and rely on a bounded retry budget plus outer error handling to keep
-// the worst case finite.
-//
-// TODO(storage v3): once every milvus-storage FFI path preserves explicit error
-// codes end-to-end, narrow this sentinel to the retryable cases and let other
-// errors propagate immediately as retry.Unrecoverable.
-var ErrLoonTransient = errors.New("loon FFI transient error")
-
-// ErrLoonPermanent marks a loon FFI failure whose err_code the producer
-// itself reports as non-retryable (loon_ffi_is_retryable_errcode == 0):
-// access denied, malformed input, corrupt data. Retrying cannot succeed;
-// callers' retry guards must terminate on it.
-var ErrLoonPermanent = errors.New("loon FFI permanent error")
 
 // Property keys exported by milvus-storage/ffi_c.h.
 var (
@@ -317,7 +297,7 @@ func MakePropertiesFromStorageConfig(storageConfig *indexpb.StorageConfig, extra
 
 	err := HandleLoonFFIResult(result)
 	if err != nil {
-		return nil, merr.WrapErrStorage(err, "loon properties_create failed")
+		return nil, merr.Wrap(err, "loon properties_create failed")
 	}
 	return properties, nil
 }
@@ -395,9 +375,23 @@ func injectExternalSpecProperties(properties *C.LoonProperties, collectionID int
 		C.uint32_t(params.CommonCfg.StorageIopsMaxRate.GetAsUint32()),
 	)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return merr.WrapErrStorage(err, "loon inject_external_spec failed")
+		return merr.Wrap(err, "loon inject_external_spec failed")
 	}
 	return nil
+}
+
+// wrapStorageErr adds context while preserving the storage retry class: a
+// retryable cause becomes ErrStorageTransient, everything else ErrStorage.
+// Use it for CStatus / already-classified storage errors; for a raw local
+// error, WrapErrStorage is still the right choice.
+func wrapStorageErr(err error, format string, args ...any) error {
+	if err == nil {
+		return nil
+	}
+	if merr.IsRetryableErr(err) {
+		return merr.WrapErrStorageTransient(err, format, args...)
+	}
+	return merr.WrapErrStorage(err, format, args...)
 }
 
 func HandleLoonFFIResult(ffiResult C.LoonFFIResult) error {
@@ -414,10 +408,10 @@ func HandleLoonFFIResult(ffiResult C.LoonFFIResult) error {
 		// corrupt-data failure stops retry loops instead of spinning them.
 		code := int32(ffiResult.err_code)
 		if C.loon_ffi_is_retryable_errcode(C.int(code)) != 0 {
-			return merr.Wrapf(ErrLoonTransient,
+			return merr.WrapErrStorageTransientMsg(
 				"FFI operation failed (code=%d): %s", code, errStr)
 		}
-		return merr.Wrapf(ErrLoonPermanent,
+		return merr.WrapErrStorageMsg(
 			"FFI operation failed (code=%d): %s", code, errStr)
 	}
 	return nil
@@ -510,7 +504,7 @@ func AddLobFilesToTransaction(basePath string, version int64, storageConfig *ind
 	var cTransactionHandle C.LoonTransactionHandle
 	result := C.loon_transaction_open(cBasePath, cProperties, C.int64_t(version), C.int64_t(-1), C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return 0, merr.WrapErrStorage(err, "failed to begin transaction")
+		return 0, merr.Wrap(err, "failed to begin transaction")
 	}
 	defer C.loon_transaction_destroy(cTransactionHandle)
 
@@ -530,7 +524,7 @@ func AddLobFilesToTransaction(basePath string, version int64, storageConfig *ind
 		C.free(unsafe.Pointer(cPath))
 
 		if err := HandleLoonFFIResult(result); err != nil {
-			return 0, merr.WrapErrStorage(err, "failed to add LOB file %s", lobFile.Path)
+			return 0, merr.Wrapf(err, "failed to add LOB file %s", lobFile.Path)
 		}
 	}
 
@@ -538,7 +532,7 @@ func AddLobFilesToTransaction(basePath string, version int64, storageConfig *ind
 	var committedVersion C.int64_t
 	result = C.loon_transaction_commit(cTransactionHandle, &committedVersion, nil)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return 0, merr.WrapErrStorage(err, "failed to commit transaction")
+		return 0, merr.Wrap(err, "failed to commit transaction")
 	}
 
 	return int64(committedVersion), nil
@@ -565,7 +559,7 @@ func GetManifestLobFiles(manifestPath string, storageConfig *indexpb.StorageConf
 	var cTransactionHandle C.LoonTransactionHandle
 	result := C.loon_transaction_open(cBasePath, cProperties, C.int64_t(version), C.int64_t(-1), C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return nil, merr.WrapErrStorage(err, "failed to begin transaction")
+		return nil, merr.Wrap(err, "failed to begin transaction")
 	}
 	defer C.loon_transaction_destroy(cTransactionHandle)
 
@@ -573,7 +567,7 @@ func GetManifestLobFiles(manifestPath string, storageConfig *indexpb.StorageConf
 	var cManifest *C.LoonManifest
 	result = C.loon_transaction_get_manifest(cTransactionHandle, &cManifest)
 	if err := HandleLoonFFIResult(result); err != nil {
-		return nil, merr.WrapErrStorage(err, "failed to get manifest")
+		return nil, merr.Wrap(err, "failed to get manifest")
 	}
 	defer C.loon_manifest_destroy(cManifest)
 

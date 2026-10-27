@@ -312,7 +312,8 @@ func (c *TalonClient) Read(ctx context.Context, request TalonReadRequest) ([]byt
 		return nil, err
 	}
 	if request.Length > uint64(^uint(0)>>1) {
-		return nil, merr.Wrapf(ErrLoonPermanent, "Talon read length exceeds Go buffer capacity: %d", request.Length)
+		return nil, merr.WrapErrStorageMsg(
+			"Talon read length exceeds Go buffer capacity: %d", request.Length)
 	}
 	done, err := c.submit(ctx, talonRequest{operation: C.LOON_TALON_READ, uri: request.URI, read: &request})
 	if err != nil {
