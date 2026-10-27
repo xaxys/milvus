@@ -16,9 +16,11 @@
 package datacoord
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/util/importutilv2"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -40,6 +42,8 @@ func handlerFor(state internalpb.ImportJobState) importV3StateHandler {
 	switch state {
 	case internalpb.ImportJobState_Pending:
 		return pendingHandler{}
+	case internalpb.ImportJobState_SnapshotPreparing:
+		return snapshotPreparingHandler{}
 	case internalpb.ImportJobState_PreImporting:
 		return preImportingHandler{}
 	case internalpb.ImportJobState_AssigningIDRange:
@@ -201,16 +205,60 @@ func (h indexBuildingHandler) Handle(jc *importV3JobContext) error {
 	return nil
 }
 
-// pendingHandler is the first V3 state. Every import runs the count-only
-// preimport phase first: an ordinary import needs the exact per-file row count
-// before Reshard can generate deterministic PK/RowID (the exact ID ranges are
-// then allocated and broadcast in AssigningIDRange), while a backup import,
-// which carries its own PK/RowID and needs no ranges, runs the same stage in a
-// size-only mode so DataCoord has the per-file packing size for BFD.
+// pendingHandler is the first V3 state. Snapshot jobs hand off to
+// SnapshotPreparing for the coordinator-only source expansion; every other
+// import runs the count-only preimport phase first: an ordinary import needs
+// the exact per-file row count before Reshard can generate deterministic
+// PK/RowID (the exact ID ranges are then allocated and broadcast in
+// AssigningIDRange), while a backup import, which carries its own PK/RowID and
+// needs no ranges, runs the same stage in a size-only mode so DataCoord has the
+// per-file packing size for BFD.
 type pendingHandler struct{}
 
 func (h pendingHandler) Handle(jc *importV3JobContext) error {
+	// Snapshot-sourced jobs first resolve their metadata into the executable
+	// file plan. That preparation does source I/O, so it runs in its own state
+	// instead of blocking this tick.
+	if importutilv2.IsSnapshotPreparation(jc.job.GetFiles()) {
+		return jc.transitionTo(internalpb.ImportJobState_SnapshotPreparing)
+	}
 	return createPreImportV3Tasks(jc)
+}
+
+// snapshotPreparingHandler expands a snapshot job's metadata into its
+// executable file plan. The expansion runs inline on the checker goroutine: it
+// reads metadata and lists manifests but never reads row data, and a job is
+// expanded once. The expanded plan is the durable checkpoint; the next tick
+// creates the PreImportV3 tasks.
+type snapshotPreparingHandler struct{}
+
+func (h snapshotPreparingHandler) Handle(jc *importV3JobContext) error {
+	if !importutilv2.IsSnapshotPreparation(jc.job.GetFiles()) {
+		return createPreImportV3Tasks(jc)
+	}
+	ctx, cancel := snapshotExpansionContext(jc.ctx, jc.job)
+	defer cancel()
+	files, options, sources, err := expandSnapshotJob(ctx, jc.meta, jc.alloc, jc.job)
+	if ctx.Err() != nil {
+		return nil // Leadership loss or job timeout: the job GC owns the transition.
+	}
+	if err != nil {
+		if errors.Is(err, errSnapshotExpansionRetry) {
+			jc.log.Warn(jc.ctx, "failed to allocate snapshot import file IDs", mlog.Err(err))
+			return nil // Retry on the next tick; nothing was published.
+		}
+		return err
+	}
+	return jc.importMeta.UpdateJob(jc.ctx, jc.job.GetJobID(), func(current ImportJob) {
+		// UpdateJob holds the metadata lock and refuses terminal updates. The
+		// state/marker check keeps the prepared plan atomic with the job; replay
+		// after a failed save retries preparation, which is idempotent.
+		if current.GetState() != internalpb.ImportJobState_SnapshotPreparing || !importutilv2.IsSnapshotPreparation(current.GetFiles()) {
+			return
+		}
+		j := current.(*importJob)
+		j.Files, j.Options, j.SnapshotL0Sources = files, options, sources
+	})
 }
 
 // planningHandler reads the completed ReshardTasks' manifests, packs fragments

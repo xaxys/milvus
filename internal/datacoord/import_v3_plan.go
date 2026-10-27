@@ -161,15 +161,87 @@ func reshardPlan(job ImportJob, p *datapb.ReshardTask, cfg importV3Config) (*imp
 	if err != nil {
 		return nil, err
 	}
+	partitions, err := reshardTaskPartitions(job, files)
+	if err != nil {
+		return nil, err
+	}
+	if err := importutilv2.ValidateSnapshotTaskPartitions(files, partitions); err != nil {
+		return nil, err
+	}
+	// A task may span source scopes; select and merge only the inventories its
+	// files need. The DataNode matches each inventory to files by source scope.
+	snapshotL0Sources, err := importutilv2.SnapshotTaskL0Sources(files, job.GetSnapshotL0Sources())
+	if err != nil {
+		return nil, err
+	}
+	budgets := snapshotBudgets(job)
 	return &importv3pb.ReshardTaskPlan{
-		CollectionId:     job.GetCollectionID(),
-		CollectionSchema: job.GetSchema(),
-		Vchannels:        append([]string(nil), job.GetVchannels()...),
-		PartitionIds:     append([]int64(nil), job.GetPartitionIDs()...),
-		Files:            append([]*internalpb.ImportFile(nil), files...),
-		Options:          append([]*commonpb.KeyValuePair(nil), job.GetOptions()...),
-		FragmentSize:     fragmentSize,
+		CollectionId:      job.GetCollectionID(),
+		CollectionSchema:  job.GetSchema(),
+		Vchannels:         append([]string(nil), job.GetVchannels()...),
+		PartitionIds:      partitions,
+		Files:             append([]*internalpb.ImportFile(nil), files...),
+		Options:           append([]*commonpb.KeyValuePair(nil), job.GetOptions()...),
+		FragmentSize:      fragmentSize,
+		SnapshotL0Sources: snapshotL0Sources,
+		SnapshotBudget:    budgets,
 	}, nil
+}
+
+// snapshotBudgets returns the exact delete-map and bitmap reservations for a
+// snapshot job. Both are frozen into the reshard plan so DataCoord's slot charge
+// and the DataNode's enforcement use one value. A typed descriptor always needs
+// the delete map for its manifest-local deltalog; only a job with a shared L0
+// inventory needs the bitmap used to merge it. New snapshot budgets belong in
+// the message instead of new ReshardTaskPlan fields.
+func snapshotBudgets(job ImportJob) *importv3pb.SnapshotBudget {
+	if !importutilv2.IsSnapshotSource(job.GetOptions()) {
+		return nil
+	}
+	// Baseline snapshots carry no typed descriptor and therefore read no
+	// delete data. A typed descriptor without shared L0 still reads its
+	// manifest-local deltalog, so it needs the delete-map budget.
+	typed := false
+	for _, file := range job.GetFiles() {
+		if file.GetSnapshotSource() != nil {
+			typed = true
+			break
+		}
+	}
+	if !typed {
+		return nil
+	}
+	budget := max(Params.DataNodeCfg.ImportDeleteBufferSize.GetAsInt64(), 1)
+	budgets := &importv3pb.SnapshotBudget{DeleteBudget: budget}
+	if len(job.GetSnapshotL0Sources()) > 0 {
+		budgets.BitmapBudget = budget
+	}
+	return budgets
+}
+
+// reshardTaskPartitions returns the partition set one reshard task may route
+// into. A snapshot file bound to an explicit target partition (partition
+// mapping) makes the task single-partition; otherwise the task routes across
+// the job's complete target partition list.
+func reshardTaskPartitions(job ImportJob, files []*internalpb.ImportFile) ([]int64, error) {
+	var target int64
+	for _, file := range files {
+		id := file.GetSnapshotSource().GetTargetPartitionId()
+		if id == 0 {
+			continue
+		}
+		if target != 0 && target != id {
+			return nil, merr.WrapErrDataIntegrityMsg("import v3 reshard task mixes snapshot target partitions")
+		}
+		target = id
+	}
+	if target == 0 {
+		return append([]int64(nil), job.GetPartitionIDs()...), nil
+	}
+	if !lo.Contains(job.GetPartitionIDs(), target) {
+		return nil, merr.WrapErrDataIntegrityMsg("snapshot target partition %d is outside the job", target)
+	}
+	return []int64{target}, nil
 }
 
 // importPlan re-derives the complete execution input of one ImportTaskV3 and
@@ -217,11 +289,14 @@ func reshardSlot(job ImportJob, cfg importV3Config) int64 {
 		// later refresh to an invalid value must still yield a positive charge.
 		return 1
 	}
+	budgets := snapshotBudgets(job)
 	return calculateReshardTaskSlot(reshardmem.Model{
-		ReadBuffer:       cfg.importBaseBufferSize,
-		FragmentTarget:   fragmentSize,
-		FlushConcurrency: cfg.reshardFlushConcurrency,
-		ExpansionFactor:  cfg.reshardMemoryExpansionFactor,
+		ReadBuffer:           cfg.importBaseBufferSize,
+		FragmentTarget:       fragmentSize,
+		FlushConcurrency:     cfg.reshardFlushConcurrency,
+		ExpansionFactor:      cfg.reshardMemoryExpansionFactor,
+		SnapshotDeleteBudget: budgets.GetDeleteBudget(),
+		SnapshotBitmapBudget: budgets.GetBitmapBudget(),
 	}, reshardmem.MemoryPerSlot(cfg.workerSlotUnit, cfg.buildParallel),
 		int64(len(job.GetVchannels())*len(job.GetPartitionIDs())),
 		cfg.reshardResidentBucketCap,
