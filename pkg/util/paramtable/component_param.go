@@ -6278,6 +6278,7 @@ type dataCoordConfig struct {
 	BlockingL0EntryNum             ParamItem `refreshable:"true"`
 	BlockingL0SizeInMB             ParamItem `refreshable:"true"`
 	DVForceAllIndexReady           ParamItem `refreshable:"true"`
+	EnableMultiScalarIndexPerField ParamItem `refreshable:"true"`
 
 	ManifestCommitConcurrency ParamItem `refreshable:"false"`
 
@@ -7786,6 +7787,30 @@ if param targetScalarIndexVersion is not set, the default value is -1, which mea
 		Doc:          "the minimal interval duration(unit: Seconds) between flushing operation on same segment",
 		Export:       true,
 	}
+
+	// A plain switch, on by default, and NOT version-gated by the config machinery:
+	// creation waits on the cluster itself instead, through every QueryNode's
+	// reported scalar index engine version (common.MinScalarIndexVersionForScalarMultiIndex,
+	// see Server.checkMultiScalarIndexPerField), so a half-upgraded cluster refuses
+	// on its own and starts accepting as soon as the rolling upgrade finishes.
+	// Off restores the pre-feature behaviour: a second index on a field is rejected
+	// as an invalid parameter, exactly as before.
+	p.EnableMultiScalarIndexPerField = ParamItem{
+		Key:          "dataCoord.enableMultiScalarIndexPerField",
+		Version:      "3.0.6",
+		Export:       true,
+		PanicIfEmpty: false,
+		Doc: "Whether one scalar field may carry several indexes. Enabled by default. " +
+			"Creation is additionally gated on every QueryNode reporting a scalar index engine " +
+			"version that can load such a segment (common.MinScalarIndexVersionForScalarMultiIndex); " +
+			"until then a second index on a field is refused as not ready and the client can retry. " +
+			"Turn it off to disable the capability outright -- that restores the previous behaviour, " +
+			"where a second index on a field is rejected as an invalid parameter. An older QueryNode " +
+			"asserts while loading a segment whose load config carries two indexes on one field.",
+		DefaultValue: "true",
+	}
+	p.EnableMultiScalarIndexPerField.Init(base.mgr)
+
 	p.SegmentFlushInterval.Init(base.mgr)
 
 	p.FilesPerPreImportTask = ParamItem{

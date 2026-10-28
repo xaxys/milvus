@@ -47,7 +47,7 @@ ThrowGcpNativeError(const std::string& func,
     LOG_WARN("{}", error_message);
     const auto* segcore_error = dynamic_cast<const SegcoreError*>(&err);
     throw SegcoreError(segcore_error == nullptr
-                           ? ErrorCode::UnexpectedError
+                           ? milvus::ErrorCode::UnexpectedError
                            : segcore_error->get_error_code(),
                        error_message);
 }

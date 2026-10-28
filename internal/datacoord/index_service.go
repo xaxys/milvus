@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
+	"strings"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
@@ -96,12 +98,28 @@ func FieldExists(schema *schemapb.CollectionSchema, fieldID int64) bool {
 }
 
 func isJSONField(schema *schemapb.CollectionSchema, fieldID int64) bool {
+	dataType, _ := getFieldDataType(schema, fieldID)
+	return typeutil.IsJSONType(dataType)
+}
+
+// getFieldDataType returns the declared type of a top-level field (or of a struct
+// array's sub-field).
+// The bool reports whether the field was found; a missing field yields
+// DataType_None.
+func getFieldDataType(schema *schemapb.CollectionSchema, fieldID int64) (schemapb.DataType, bool) {
 	for _, f := range schema.Fields {
 		if f.FieldID == fieldID {
-			return typeutil.IsJSONType(f.DataType)
+			return f.DataType, true
 		}
 	}
-	return false
+	for _, structField := range schema.GetStructArrayFields() {
+		for _, subField := range structField.GetFields() {
+			if subField.FieldID == fieldID {
+				return subField.DataType, true
+			}
+		}
+	}
+	return schemapb.DataType_None, false
 }
 
 func getIndexParam(indexParams []*commonpb.KeyValuePair, key string) (string, error) {
@@ -185,6 +203,245 @@ func checkFMIndexEngineVersion(indexParams []*commonpb.KeyValuePair, resolvedSca
 	return nil
 }
 
+// checkIndexCreationPolicy rejects the shapes of CreateIndex that the segment
+// runtime cannot serve, before any metadata is written.
+//
+// Two shapes are rejected, and both need the field to already carry an index:
+//
+//   - a second index on a VECTOR field. The segment keeps one vector index per
+//     field, search does not carry an indexID, and QueryNode rejects a second one
+//     outright (internal/querynodev2/services.go), so this stays rejected
+//     unconditionally.
+//
+//   - a second index under the same (field, json_path) SCALAR identity. This one
+//     is gated by dataCoord.enableMultiScalarIndexPerField, which is three-valued:
+//     "auto" (the default) is resolved by VersionGateSwitcher: until the whole
+//     cluster has reached the gate version it reads as "false" here, so the
+//     capability turns itself on when the upgrade finishes (every role confirmed
+//     plus a stability window) and off again if a node is rolled back; "false"
+//     refuses it outright (the escape hatch, and the safe value while older
+//     QueryNodes are online); "true" forces it on and bypasses the version gate.
+//     An older QueryNode asserts while loading a segment whose load config carries
+//     two indexes on one field, which is why the capability must not leak to a
+//     cluster that still has one.
+//
+// resolveScalarIndexVersion reports the scalar index engine version the cluster
+// supports right now; an unknown version (no manager, e.g. a bare Server in a unit
+// test) counts as the oldest cluster, mirroring snapshot_manager's nil guard.
+func (s *Server) resolveScalarIndexVersion() int32 {
+	if s.indexEngineVersionManager == nil {
+		return 0
+	}
+	return s.indexEngineVersionManager.ResolveScalarIndexVersion()
+}
+
+// checkMultiScalarIndexEnabled is the operator-switch half of the multi-index gate.
+// With the switch off the capability does not exist on this cluster, so the refusal is
+// the one every version has always produced -- same error class, same text -- and a
+// client sees no difference from the pre-feature behaviour.
+func checkMultiScalarIndexEnabled(fieldID int64) error {
+	item := &Params.DataCoordCfg.EnableMultiScalarIndexPerField
+	if item.GetAsBool() {
+		return nil
+	}
+	errMsg := "CreateIndex failed: creating multiple indexes on same field is not supported"
+	mlog.Warn(context.TODO(), errMsg, mlog.Int64("fieldID", fieldID))
+	return merr.WrapErrParameterInvalidMsg("%s", errMsg)
+}
+
+// checkMultiScalarIndexEngineVersion is the version half: a second index on a field may
+// only be created once every QueryNode reports a scalar index engine version that can
+// load such a segment (an older one asserts in LoadScalarIndex). Unknown counts as the
+// oldest cluster, mirroring snapshot_manager's nil guard. Retriable on purpose: the
+// answer changes as a rolling upgrade progresses.
+func checkMultiScalarIndexEngineVersion(fieldID int64, resolved int32) error {
+	if resolved >= common.MinScalarIndexVersionForScalarMultiIndex {
+		return nil
+	}
+	return merr.WrapErrServiceNotReadyMsg(
+		"creating a second index on field %d requires scalar index engine version >= %d, "+
+			"current resolved version: %d (a rolling upgrade may still be in progress)",
+		fieldID, common.MinScalarIndexVersionForScalarMultiIndex, resolved)
+}
+
+// checkMultiScalarIndexPerField gates the creation of a second index on one field. The
+// switch and the engine version are checked separately, and both helpers are also used
+// by the paths that broadcast CreateIndex themselves (snapshot restore), which is why
+// they are package-level.
+func checkMultiScalarIndexPerField(fieldID int64, resolved int32) error {
+	if err := checkMultiScalarIndexEnabled(fieldID); err != nil {
+		return err
+	}
+	return checkMultiScalarIndexEngineVersion(fieldID, resolved)
+}
+
+// checkIndexCreationPolicy rejects the shapes of CreateIndex that the segment
+// runtime cannot serve, before any metadata is written.
+//
+// Two shapes are rejected, and both need the field to already carry an index:
+//
+//   - a second index on a VECTOR field. The segment keeps one vector index per
+//     field, search does not carry an indexID, and QueryNode rejects a second one
+//     outright (internal/querynodev2/services.go), so this stays rejected
+//     unconditionally.
+//
+//   - a second index under the same (field, json_path) SCALAR identity. This one
+//     is gated by dataCoord.enableMultiScalarIndexPerField, which is three-valued:
+//     "auto" (the default) allows it only once the cluster reports scalar index
+//     engine version >= common.MinScalarIndexVersionForScalarMultiIndex -- i.e. once
+//     every QueryNode can load such a segment, which also means the capability turns
+//     itself off again if a QueryNode is rolled back; "false" refuses it outright
+//     (the escape hatch, and the safe value while older QueryNodes are online);
+//     "true" forces it on and bypasses the readiness check. An older QueryNode keeps
+//     at most one scalar index per field and its
+//     ChunkedSegmentSealedImpl::LoadScalarIndex asserts while loading a segment
+//     that carries two. See checkMultiScalarIndexPerField for the details.
+//
+// JSON indexes under DIFFERENT paths are the pre-existing multi-path capability,
+// which an older QueryNode loads correctly, so they are deliberately allowed
+// without any check.
+func (s *Server) checkIndexCreationPolicy(
+	ctx context.Context,
+	req *indexpb.CreateIndexRequest,
+	isJSON bool,
+	fieldType schemapb.DataType,
+) error {
+	isVector := typeutil.IsVectorType(fieldType)
+
+	jsonPath := ""
+	if isJSON {
+		// Presence is already validated by the caller.
+		jsonPath, _ = getIndexParam(req.GetIndexParams(), common.JSONPathKey)
+	}
+
+	indexes := s.meta.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), "")
+
+	// First pass on its own, and only this pass: an identical request creates
+	// nothing new. canCreateIndex reports it as errIndexOperationIgnored, and for an
+	// unnamed request resolveIndexName reuses this index's name.
+	//
+	// It has to be a separate pass because GetFieldIndexes ranges over a map: taking
+	// the identical-match early return inside the policy loop below would make an
+	// identical replay's outcome depend on iteration order -- accepted when the
+	// matching index is visited first, refused once the gate is closed otherwise.
+	// The name is part of the check: identical parameters under a DIFFERENT name
+	// really do create a second index and must stay rejected.
+	for _, index := range indexes {
+		if index.IsDeleted {
+			continue
+		}
+		if checkParams(index, req) && (!isJSON || checkIdenticalJSON(index, req)) &&
+			(req.GetIndexName() == "" || req.GetIndexName() == index.IndexName) {
+			return nil
+		}
+	}
+
+	// Second pass: the shapes the segment runtime cannot serve.
+	for _, index := range indexes {
+		if index.IsDeleted {
+			continue
+		}
+		if isVector {
+			errMsg := "CreateIndex failed: creating multiple indexes on a vector field is not supported"
+			mlog.Warn(ctx, errMsg)
+			// Client-caused conflict: return an input-class error rather than
+			// ServiceInternal (code 5, "never return out of Milvus") so the caller
+			// is not blamed with a system error / counted as a system-caused failure.
+			return merr.WrapErrParameterInvalidMsg("%s", errMsg)
+		}
+		existingPath := ""
+		if isJSON {
+			existingPath, _ = getIndexParam(index.IndexParams, common.JSONPathKey)
+		}
+		if existingPath != jsonPath {
+			// A different JSON path is the pre-existing multi-path capability.
+			continue
+		}
+
+		if err := checkMultiScalarIndexPerField(req.GetFieldID(), s.resolveScalarIndexVersion()); err != nil {
+			return err
+		}
+		mlog.Info(ctx, "allowing a second index on one field",
+			mlog.Int64("collectionID", req.GetCollectionID()),
+			mlog.Int64("fieldID", req.GetFieldID()),
+			mlog.String("jsonPath", jsonPath))
+		return nil
+	}
+	return nil
+}
+
+// maxAutoIndexNameOrdinal bounds how many ordinal suffixes resolveIndexName tries
+// before asking the caller to name the index itself.
+const maxAutoIndexNameOrdinal = 100
+
+// resolveIndexName picks the index name for a request that did not specify one.
+//
+// The name is the only identity a user has for an index, so resolution has to stay
+// idempotent: replaying the same request must resolve to the SAME name, otherwise a
+// retry would create a second index on the field. Only when no index with identical
+// parameters already exists do we mint a unique name, because one field may now
+// carry several indexes.
+func (s *Server) resolveIndexName(
+	req *indexpb.CreateIndexRequest,
+	schema *schemapb.CollectionSchema,
+	isJSON bool,
+) (string, error) {
+	// 1. Idempotent replay: reuse the name of an identical index on this field.
+	for _, index := range s.meta.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), "") {
+		if index.IsDeleted {
+			continue
+		}
+		if checkParams(index, req) && (!isJSON || checkIdenticalJSON(index, req)) {
+			return index.IndexName, nil
+		}
+	}
+
+	fieldName, err := s.defaultIndexNameByID(schema, req.GetFieldID())
+	if err != nil {
+		return "", err
+	}
+	base := fieldName
+	if isJSON {
+		// ignore error, because it's already checked in getIndexParam before
+		jsonPath, _ := getIndexParam(req.GetIndexParams(), common.JSONPathKey)
+		base += jsonPath
+	}
+	if !s.indexNameTaken(req.GetCollectionID(), base) {
+		return base, nil
+	}
+
+	// 2. Mint a unique name. The index type disambiguates the common case; the
+	// ordinal covers indexes that differ only in their parameters, and is the only
+	// option when the request carries no usable index type.
+	indexType := strings.ToLower(common.GetIndexType(req.GetIndexParams()))
+	if indexType != "" {
+		if candidate := base + "_" + indexType; !s.indexNameTaken(req.GetCollectionID(), candidate) {
+			return candidate, nil
+		}
+		for n := 2; n <= maxAutoIndexNameOrdinal; n++ {
+			candidate := fmt.Sprintf("%s_%s_%d", base, indexType, n)
+			if !s.indexNameTaken(req.GetCollectionID(), candidate) {
+				return candidate, nil
+			}
+		}
+	} else {
+		for n := 2; n <= maxAutoIndexNameOrdinal; n++ {
+			candidate := fmt.Sprintf("%s_%d", base, n)
+			if !s.indexNameTaken(req.GetCollectionID(), candidate) {
+				return candidate, nil
+			}
+		}
+	}
+
+	return "", merr.WrapErrParameterInvalidMsg(
+		"cannot derive a unique index name for field %d; please specify index_name explicitly",
+		req.GetFieldID())
+}
+
+func (s *Server) indexNameTaken(collectionID int64, name string) bool {
+	return len(s.meta.indexMeta.GetIndexIDByName(collectionID, name)) > 0
+}
+
 // CreateIndex create an index on collection.
 // Index building is asynchronous, so when an index building request comes, an IndexID is assigned to the task and
 // will get all flushed segments from DataCoord and record tasks with these segments. The background process
@@ -216,7 +473,8 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 	}
 	schema := coll.GetSchema()
 
-	if !FieldExists(schema, req.GetFieldID()) {
+	fieldType, ok := getFieldDataType(schema, req.GetFieldID())
+	if !ok {
 		return merr.Status(merr.WrapErrFieldNotFound(req.GetFieldID())), nil
 	}
 
@@ -230,7 +488,7 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		setIndexParam(req.GetIndexParams(), common.IndexTypeKey, indexparamcheck.IndexINVERTED)
 	}
 
-	isJSON := isJSONField(schema, req.GetFieldID())
+	isJSON := typeutil.IsJSONType(fieldType)
 	if isJSON {
 		// check json_path and json_cast_type exist
 		jsonPath, err := getIndexParam(req.GetIndexParams(), common.JSONPathKey)
@@ -305,31 +563,25 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		}
 	}
 
+	// The shapes the segment runtime cannot serve, checked before anything is
+	// allocated or written: a second index on a vector field is always refused, and a
+	// second index on a scalar field is gated by the version switch
+	// (dataCoord.enableMultiScalarIndexPerField). It runs after the JSON path was
+	// normalized, so the comparison against the indexes already on the field uses
+	// the same spelling.
+	if err := s.checkIndexCreationPolicy(ctx, req, isJSON, fieldType); err != nil {
+		mlog.Warn(ctx, "check index creation policy failed", mlog.Err(err))
+		metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
+		return merr.Status(err), nil
+	}
+
 	if req.GetIndexName() == "" {
-		indexes := s.meta.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), req.GetIndexName())
-		fieldName, err := s.defaultIndexNameByID(schema, req.GetFieldID())
+		name, err := s.resolveIndexName(req, schema, isJSON)
 		if err != nil {
-			mlog.Warn(ctx, "get field name from schema failed", mlog.Int64("fieldID", req.GetFieldID()))
+			mlog.Warn(ctx, "resolve index name failed", mlog.Err(err))
 			return merr.Status(err), nil
 		}
-		defaultIndexName := fieldName
-		if isJSON {
-			// ignore error, because it's already checked in getIndexParam before
-			jsonPath, _ := getIndexParam(req.GetIndexParams(), common.JSONPathKey)
-			// filter indexes by json path, the length of indexes should not be larger than 1
-			// this is guaranteed by CanCreateIndex
-			indexes = lo.Filter(indexes, func(index *model.Index, i int) bool {
-				path, _ := getIndexParam(index.IndexParams, common.JSONPathKey)
-				return path == jsonPath
-			})
-
-			defaultIndexName += jsonPath
-		}
-		if len(indexes) == 0 {
-			req.IndexName = defaultIndexName
-		} else if len(indexes) == 1 {
-			req.IndexName = indexes[0].IndexName
-		}
+		req.IndexName = name
 	}
 
 	// Allocate or use provided index ID
@@ -1171,6 +1423,18 @@ func (s *Server) DescribeIndex(ctx context.Context, req *indexpb.DescribeIndexRe
 		s.completeIndexInfo(indexInfo, index, segments, false, createTs)
 		indexInfos = append(indexInfos, indexInfo)
 	}
+	// Hand out a deterministic order (ascending indexID). The store behind this is
+	// a map, so without sorting the order changes between calls -- anything that
+	// picks "the field's index" from the list (the proxy's load config, for one)
+	// would then flap between reloads. Sorting here is a convenience for every
+	// client; a client that needs a *specific* index must still select it by
+	// indexID rather than by position, since an older coordinator does not sort.
+	sort.Slice(indexInfos, func(i, j int) bool {
+		if indexInfos[i].GetFieldID() != indexInfos[j].GetFieldID() {
+			return indexInfos[i].GetFieldID() < indexInfos[j].GetFieldID()
+		}
+		return indexInfos[i].GetIndexID() < indexInfos[j].GetIndexID()
+	})
 	return &indexpb.DescribeIndexResponse{
 		Status:     merr.Success(),
 		IndexInfos: indexInfos,

@@ -59,6 +59,12 @@ class IndexIdentity {
     bool
     operator<(const IndexIdentity& other) const;
 
+    // Renders the identity for logs: the pre-built index id as it was persisted,
+    // or "local:<n>" for a segment-local registration. The two namespaces are
+    // kept apart so a logged id always names the same index.
+    std::string
+    ToString() const;
+
  private:
     explicit IndexIdentity(std::variant<int64_t, uint64_t> value);
 

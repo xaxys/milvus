@@ -5598,9 +5598,13 @@ TEST(SealedSegmentCowState, ReplaceScalarIndexStagesRuntimeUntilFinalPublish) {
     auto* sealed = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
     ASSERT_NE(sealed, nullptr);
 
+    // A field carries one entry per indexID: reusing the id of the loaded index is
+    // what makes the second load replace it instead of adding a sibling.
+    constexpr int64_t kPayloadIndexId = 1;
     LoadIndexInfo first_index{};
     first_index.field_id = payload.get();
     first_index.field_type = DataType::INT64;
+    first_index.index_id = kPayloadIndexId;
     first_index.index_params["index_type"] = "STL_SORT";
     auto payload_data = dataset.get_col<int64_t>(payload);
     auto first_impl = GenScalarIndexing<int64_t>(dataset.raw_->num_rows(),
@@ -5629,6 +5633,7 @@ TEST(SealedSegmentCowState, ReplaceScalarIndexStagesRuntimeUntilFinalPublish) {
     LoadIndexInfo replacement_index{};
     replacement_index.field_id = payload.get();
     replacement_index.field_type = DataType::INT64;
+    replacement_index.index_id = kPayloadIndexId;
     replacement_index.index_params["index_type"] = "STL_SORT";
     auto replacement_impl = GenScalarIndexing<int64_t>(dataset.raw_->num_rows(),
                                                        payload_data.data());
@@ -5904,9 +5909,11 @@ TEST(SealedSegmentCowState, JsonIndexStagesAndFollowsSnapshotLifetime) {
     std::array<double, 4> values = {1, 2, 3, 4};
     auto indexing = BuildTestScalarIndex<double>(
         index::families::kInverted, values.size(), values.data());
+    constexpr int64_t kJsonIndexId = 1;
     LoadIndexInfo load_info{};
     load_info.field_id = json.get();
     load_info.field_type = DataType::JSON;
+    load_info.index_id = kJsonIndexId;
     load_info.index_params = {
         {index::INDEX_TYPE, index::INVERTED_INDEX_TYPE},
         {JSON_PATH, "a"},
@@ -5976,19 +5983,26 @@ TEST(SealedSegmentCowState, JsonIndexReplaceScalarWithNgramErasesScalarPath) {
     ASSERT_NE(sealed, nullptr);
 
     std::array<double, 4> values = {1, 2, 3, 4};
+    // The indexID is the identity of a loaded index: replacing one means loading
+    // the new index under the id of the index it displaces.
+    constexpr int64_t kSiblingIndexId = 1;
+    constexpr int64_t kReplacedIndexId = 2;
     auto make_load_info = [&](std::string key,
+                              int64_t index_id,
                               std::string path,
                               bool is_ngram) {
         LoadIndexInfo info{};
         info.field_id = json.get();
         info.field_type = DataType::JSON;
+        info.index_id = index_id;
         info.index_params = {
             {index::INDEX_TYPE,
              is_ngram ? index::NGRAM_INDEX_TYPE : index::INVERTED_INDEX_TYPE},
             {JSON_PATH, std::move(path)},
+            // A JSON path index always carries a cast type; an ngram one is
+            // VARCHAR by construction.
+            {JSON_CAST_TYPE, is_ngram ? "VARCHAR" : "DOUBLE"},
         };
-        info.index_id = info.index_params.at(JSON_PATH) == "a" ? 1001 : 1002;
-        info.index_params[JSON_CAST_TYPE] = is_ngram ? "VARCHAR" : "DOUBLE";
         const std::array<std::string, 4> text_values = {
             "alpha", "beta", "gamma", "delta"};
         auto indexing =
@@ -6012,11 +6026,12 @@ TEST(SealedSegmentCowState, JsonIndexReplaceScalarWithNgramErasesScalarPath) {
         return info;
     };
 
-    auto sibling = make_load_info("json-scalar-b", "b", false);
+    auto sibling = make_load_info("json-scalar-b", kSiblingIndexId, "b", false);
     auto sibling_index = sibling.cache_index;
     sealed->LoadIndex(sibling);
 
-    auto original = make_load_info("json-scalar-a", "a", false);
+    auto original =
+        make_load_info("json-scalar-a", kReplacedIndexId, "a", false);
     auto original_index = original.cache_index;
     sealed->LoadIndex(original);
 
@@ -6038,7 +6053,10 @@ TEST(SealedSegmentCowState, JsonIndexReplaceScalarWithNgramErasesScalarPath) {
     initial_delta.commit_ts = current->commit_ts;
     auto staged = sealed->TestBuildNextPublishedState(current, initial_delta);
 
-    auto replacement = make_load_info("json-ngram-a", "a", true);
+    // The same indexID as the index at path "a": with is_replace this load
+    // retires that entry instead of adding a sibling.
+    auto replacement =
+        make_load_info("json-ngram-a", kReplacedIndexId, "a", true);
     auto replacement_index = replacement.cache_index;
     ChunkedSegmentSealedImpl::StateDelta final_delta;
     final_delta.schema = current->schema;
@@ -6133,19 +6151,26 @@ TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
     ASSERT_NE(sealed, nullptr);
 
     std::array<double, 4> values = {1, 2, 3, 4};
+    // The indexID is the identity of a loaded index: replacing one means loading
+    // the new index under the id of the index it displaces.
+    constexpr int64_t kSiblingIndexId = 1;
+    constexpr int64_t kReplacedIndexId = 2;
     auto make_load_info = [&](std::string key,
+                              int64_t index_id,
                               std::string path,
                               bool is_ngram) {
         LoadIndexInfo info{};
         info.field_id = json.get();
         info.field_type = DataType::JSON;
+        info.index_id = index_id;
         info.index_params = {
             {index::INDEX_TYPE,
              is_ngram ? index::NGRAM_INDEX_TYPE : index::INVERTED_INDEX_TYPE},
             {JSON_PATH, std::move(path)},
+            // A JSON path index always carries a cast type; an ngram one is
+            // VARCHAR by construction.
+            {JSON_CAST_TYPE, is_ngram ? "VARCHAR" : "DOUBLE"},
         };
-        info.index_id = info.index_params.at(JSON_PATH) == "a" ? 1001 : 1002;
-        info.index_params[JSON_CAST_TYPE] = is_ngram ? "VARCHAR" : "DOUBLE";
         const std::array<std::string, 4> text_values = {
             "alpha", "beta", "gamma", "delta"};
         auto indexing =
@@ -6169,11 +6194,11 @@ TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
         return info;
     };
 
-    auto sibling = make_load_info("json-scalar-b", "b", false);
+    auto sibling = make_load_info("json-scalar-b", kSiblingIndexId, "b", false);
     auto sibling_index = sibling.cache_index;
     sealed->LoadIndex(sibling);
 
-    auto original = make_load_info("json-ngram-a", "a", true);
+    auto original = make_load_info("json-ngram-a", kReplacedIndexId, "a", true);
     auto original_index = original.cache_index;
     sealed->LoadIndex(original);
 
@@ -6200,7 +6225,10 @@ TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
     initial_delta.commit_ts = current->commit_ts;
     auto staged = sealed->TestBuildNextPublishedState(current, initial_delta);
 
-    auto replacement = make_load_info("json-scalar-a", "a", false);
+    // The scalar index takes the indexID of the NGRAM one it displaces, so no
+    // NGRAM entry is left on the field.
+    auto replacement =
+        make_load_info("json-scalar-a", kReplacedIndexId, "a", false);
     auto replacement_index = replacement.cache_index;
     ChunkedSegmentSealedImpl::StateDelta final_delta;
     final_delta.schema = current->schema;

@@ -3073,6 +3073,25 @@ func (t *LoadCollectionTask) GetLoadPriority() commonpb.LoadPriority {
 	return loadPriority
 }
 
+// fieldIndexIDByField derives the legacy one-index-per-field map a load request still
+// carries, taking the field's first index as DescribeIndex returns them (ascending by
+// indexID, so the first is the smallest -- the same one segcore pins when it reads).
+//
+// This is a shim for the single-valued load config, not a source of truth: a segment's
+// real index set is its index list, and in the planned "manifest owns the index files"
+// shape it will be the segment manifest. A second index on a field is only not lost
+// here because the segment's own index infos carry it; do not extend this map into a
+// list-per-field without changing the load protocol with it.
+func fieldIndexIDByField(infos []*indexpb.IndexInfo) map[int64]int64 {
+	fieldIndexIDs := make(map[int64]int64)
+	for _, index := range infos {
+		if _, ok := fieldIndexIDs[index.GetFieldID()]; !ok {
+			fieldIndexIDs[index.GetFieldID()] = index.GetIndexID()
+		}
+	}
+	return fieldIndexIDs
+}
+
 func (t *LoadCollectionTask) Execute(ctx context.Context) (err error) {
 	collID, err := t.GetMetaCache().GetCollectionID(ctx, t.GetDbName(), t.CollectionName)
 
@@ -3114,11 +3133,7 @@ func (t *LoadCollectionTask) Execute(ctx context.Context) (err error) {
 		return err
 	}
 
-	// not support multiple indexes on one field
-	fieldIndexIDs := make(map[int64]int64)
-	for _, index := range indexResponse.IndexInfos {
-		fieldIndexIDs[index.FieldID] = index.IndexID
-	}
+	fieldIndexIDs := fieldIndexIDByField(indexResponse.GetIndexInfos())
 
 	loadFieldsSet := typeutil.NewSet(loadFields...)
 	unindexedVecFields := make([]string, 0)
@@ -3381,11 +3396,7 @@ func (t *LoadPartitionsTask) Execute(ctx context.Context) error {
 		return err
 	}
 
-	// not support multiple indexes on one field
-	fieldIndexIDs := make(map[int64]int64)
-	for _, index := range indexResponse.IndexInfos {
-		fieldIndexIDs[index.FieldID] = index.IndexID
-	}
+	fieldIndexIDs := fieldIndexIDByField(indexResponse.GetIndexInfos())
 
 	loadFieldsSet := typeutil.NewSet(loadFields...)
 	unindexedVecFields := make([]string, 0)
