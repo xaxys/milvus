@@ -92,21 +92,12 @@ func (c *IndexChecker) Check(ctx context.Context) []task.Task {
 		}
 
 		collection := c.meta.GetCollection(ctx, collectionID)
-		schema := c.meta.GetCollectionSchema(ctx, collectionID)
 		if collection == nil {
 			mlog.Warn(ctx, "collection released during check index", mlog.Int64("collection", collectionID))
 			continue
 		}
-		// A nil schema means the collection is not in the shared store yet
-		// (created after boot, not yet lazily loaded by DataCoord). Fetch it
-		// for this round only -- caching it in QueryCoord would just be a
-		// second copy that nothing invalidates.
-		if schema == nil && paramtable.Get().CommonCfg.EnabledJSONKeyStats.GetAsBool() {
-			collectionSchema, err1 := c.broker.DescribeCollection(ctx, collectionID)
-			if err1 == nil {
-				schema = collectionSchema.GetSchema()
-			}
-		}
+		// A nil schema means RootCoord no longer has the collection.
+		schema := c.meta.GetCollectionSchema(ctx, collectionID)
 		replicas := c.meta.GetByCollection(ctx, collectionID)
 		for _, replica := range replicas {
 			tasks = append(tasks, c.checkReplica(ctx, collection, replica, indexInfos, schema)...)
@@ -160,9 +151,9 @@ func (c *IndexChecker) checkReplica(ctx context.Context, collection *meta.Collec
 		}
 		for segmentID, segmentIndexInfo := range segmentIndexInfos {
 			fields := targets[segmentID]
-			missingFields := typeutil.NewSet(fields...)
+			missingIndexes := typeutil.NewSet(fields...)
 			for _, fieldIndexInfo := range segmentIndexInfo {
-				if missingFields.Contain(fieldIndexInfo.GetFieldID()) &&
+				if missingIndexes.Contain(fieldIndexInfo.GetIndexID()) &&
 					fieldIndexInfo.GetEnableIndex() &&
 					len(fieldIndexInfo.GetIndexFilePaths()) > 0 {
 					segmentsToUpdate[segmentID] = idSegments[segmentID]
@@ -201,17 +192,21 @@ func (c *IndexChecker) checkReplica(ctx context.Context, collection *meta.Collec
 	return tasks
 }
 
-func (c *IndexChecker) checkSegment(segment *meta.Segment, indexInfos []*indexpb.IndexInfo) (fieldIDs []int64) {
+// checkSegment returns the indexIDs the segment has not loaded (yet). It has to be the
+// index identity, not the field: one field can carry several indexes, and reporting the
+// field would keep matching the sibling that is already loaded, scheduling a Reopen that
+// can never load the index that is still building.
+func (c *IndexChecker) checkSegment(segment *meta.Segment, indexInfos []*indexpb.IndexInfo) (indexIDs []int64) {
 	var result []int64
 	for _, indexInfo := range indexInfos {
-		fieldID, indexID := indexInfo.FieldID, indexInfo.IndexID
+		indexID := indexInfo.IndexID
 		info, ok := segment.IndexInfo[indexID]
 		if !ok {
-			result = append(result, fieldID)
+			result = append(result, indexID)
 			continue
 		}
 		if indexID != info.GetIndexID() || !info.GetEnableIndex() {
-			result = append(result, fieldID)
+			result = append(result, indexID)
 		}
 	}
 	return result
@@ -235,6 +230,12 @@ func (c *IndexChecker) checkRedundantIndices(segment *meta.Segment, indexInfos [
 	return redundant
 }
 
+// createSegmentUpdateTask refreshes a loaded segment because its index set changed.
+//
+// Today the caller is this checker, which watches index build progress. In the planned
+// "manifest owns the index files" shape an index change is a storage-layer change: the
+// view version moves and the view apply issues the same Reopen, so this function keeps
+// its job and only its caller changes.
 func (c *IndexChecker) createSegmentUpdateTask(ctx context.Context, segment *meta.Segment, replica *meta.Replica) (task.Task, bool) {
 	action := task.NewSegmentActionWithScope(segment.Node, task.ActionTypeReopen, segment.GetInsertChannel(), segment.GetID(), querypb.DataScope_Historical, int(segment.GetNumOfRows()))
 	t, err := task.NewSegmentTask(

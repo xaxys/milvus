@@ -4885,6 +4885,80 @@ func (_c *MockMixCoordClient_DropVirtualChannel_Call) RunAndReturn(run func(cont
 	return _c
 }
 
+// EnsureCollectionReady provides a mock function with given fields: ctx, in, opts
+func (_m *MockMixCoordClient) EnsureCollectionReady(ctx context.Context, in *querypb.EnsureCollectionReadyRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	_va := make([]interface{}, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, in)
+	_ca = append(_ca, _va...)
+	ret := _m.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for EnsureCollectionReady")
+	}
+
+	var r0 *commonpb.Status
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.EnsureCollectionReadyRequest, ...grpc.CallOption) (*commonpb.Status, error)); ok {
+		return rf(ctx, in, opts...)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.EnsureCollectionReadyRequest, ...grpc.CallOption) *commonpb.Status); ok {
+		r0 = rf(ctx, in, opts...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*commonpb.Status)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *querypb.EnsureCollectionReadyRequest, ...grpc.CallOption) error); ok {
+		r1 = rf(ctx, in, opts...)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockMixCoordClient_EnsureCollectionReady_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'EnsureCollectionReady'
+type MockMixCoordClient_EnsureCollectionReady_Call struct {
+	*mock.Call
+}
+
+// EnsureCollectionReady is a helper method to define mock.On call
+//   - ctx context.Context
+//   - in *querypb.EnsureCollectionReadyRequest
+//   - opts ...grpc.CallOption
+func (_e *MockMixCoordClient_Expecter) EnsureCollectionReady(ctx interface{}, in interface{}, opts ...interface{}) *MockMixCoordClient_EnsureCollectionReady_Call {
+	return &MockMixCoordClient_EnsureCollectionReady_Call{Call: _e.mock.On("EnsureCollectionReady",
+		append([]interface{}{ctx, in}, opts...)...)}
+}
+
+func (_c *MockMixCoordClient_EnsureCollectionReady_Call) Run(run func(ctx context.Context, in *querypb.EnsureCollectionReadyRequest, opts ...grpc.CallOption)) *MockMixCoordClient_EnsureCollectionReady_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		variadicArgs := make([]grpc.CallOption, len(args)-2)
+		for i, a := range args[2:] {
+			if a != nil {
+				variadicArgs[i] = a.(grpc.CallOption)
+			}
+		}
+		run(args[0].(context.Context), args[1].(*querypb.EnsureCollectionReadyRequest), variadicArgs...)
+	})
+	return _c
+}
+
+func (_c *MockMixCoordClient_EnsureCollectionReady_Call) Return(_a0 *commonpb.Status, _a1 error) *MockMixCoordClient_EnsureCollectionReady_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockMixCoordClient_EnsureCollectionReady_Call) RunAndReturn(run func(context.Context, *querypb.EnsureCollectionReadyRequest, ...grpc.CallOption) (*commonpb.Status, error)) *MockMixCoordClient_EnsureCollectionReady_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ExportSnapshot provides a mock function with given fields: ctx, in, opts
 func (_m *MockMixCoordClient) ExportSnapshot(ctx context.Context, in *datapb.ExportSnapshotRequest, opts ...grpc.CallOption) (*datapb.ExportSnapshotResponse, error) {
 	_va := make([]interface{}, len(opts))
@@ -4955,6 +5029,80 @@ func (_c *MockMixCoordClient_ExportSnapshot_Call) Return(_a0 *datapb.ExportSnaps
 }
 
 func (_c *MockMixCoordClient_ExportSnapshot_Call) RunAndReturn(run func(context.Context, *datapb.ExportSnapshotRequest, ...grpc.CallOption) (*datapb.ExportSnapshotResponse, error)) *MockMixCoordClient_ExportSnapshot_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// FetchFileResources provides a mock function with given fields: ctx, in, opts
+func (_m *MockMixCoordClient) FetchFileResources(ctx context.Context, in *rootcoordpb.FetchFileResourcesRequest, opts ...grpc.CallOption) (*rootcoordpb.FetchFileResourcesResponse, error) {
+	_va := make([]interface{}, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, in)
+	_ca = append(_ca, _va...)
+	ret := _m.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for FetchFileResources")
+	}
+
+	var r0 *rootcoordpb.FetchFileResourcesResponse
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *rootcoordpb.FetchFileResourcesRequest, ...grpc.CallOption) (*rootcoordpb.FetchFileResourcesResponse, error)); ok {
+		return rf(ctx, in, opts...)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *rootcoordpb.FetchFileResourcesRequest, ...grpc.CallOption) *rootcoordpb.FetchFileResourcesResponse); ok {
+		r0 = rf(ctx, in, opts...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*rootcoordpb.FetchFileResourcesResponse)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *rootcoordpb.FetchFileResourcesRequest, ...grpc.CallOption) error); ok {
+		r1 = rf(ctx, in, opts...)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockMixCoordClient_FetchFileResources_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FetchFileResources'
+type MockMixCoordClient_FetchFileResources_Call struct {
+	*mock.Call
+}
+
+// FetchFileResources is a helper method to define mock.On call
+//   - ctx context.Context
+//   - in *rootcoordpb.FetchFileResourcesRequest
+//   - opts ...grpc.CallOption
+func (_e *MockMixCoordClient_Expecter) FetchFileResources(ctx interface{}, in interface{}, opts ...interface{}) *MockMixCoordClient_FetchFileResources_Call {
+	return &MockMixCoordClient_FetchFileResources_Call{Call: _e.mock.On("FetchFileResources",
+		append([]interface{}{ctx, in}, opts...)...)}
+}
+
+func (_c *MockMixCoordClient_FetchFileResources_Call) Run(run func(ctx context.Context, in *rootcoordpb.FetchFileResourcesRequest, opts ...grpc.CallOption)) *MockMixCoordClient_FetchFileResources_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		variadicArgs := make([]grpc.CallOption, len(args)-2)
+		for i, a := range args[2:] {
+			if a != nil {
+				variadicArgs[i] = a.(grpc.CallOption)
+			}
+		}
+		run(args[0].(context.Context), args[1].(*rootcoordpb.FetchFileResourcesRequest), variadicArgs...)
+	})
+	return _c
+}
+
+func (_c *MockMixCoordClient_FetchFileResources_Call) Return(_a0 *rootcoordpb.FetchFileResourcesResponse, _a1 error) *MockMixCoordClient_FetchFileResources_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockMixCoordClient_FetchFileResources_Call) RunAndReturn(run func(context.Context, *rootcoordpb.FetchFileResourcesRequest, ...grpc.CallOption) (*rootcoordpb.FetchFileResourcesResponse, error)) *MockMixCoordClient_FetchFileResources_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -6365,6 +6513,80 @@ func (_c *MockMixCoordClient_GetIndexInfos_Call) RunAndReturn(run func(context.C
 	return _c
 }
 
+// GetIndexLoadStatus provides a mock function with given fields: ctx, in, opts
+func (_m *MockMixCoordClient) GetIndexLoadStatus(ctx context.Context, in *querypb.GetIndexLoadStatusRequest, opts ...grpc.CallOption) (*querypb.GetIndexLoadStatusResponse, error) {
+	_va := make([]interface{}, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, in)
+	_ca = append(_ca, _va...)
+	ret := _m.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetIndexLoadStatus")
+	}
+
+	var r0 *querypb.GetIndexLoadStatusResponse
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetIndexLoadStatusRequest, ...grpc.CallOption) (*querypb.GetIndexLoadStatusResponse, error)); ok {
+		return rf(ctx, in, opts...)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetIndexLoadStatusRequest, ...grpc.CallOption) *querypb.GetIndexLoadStatusResponse); ok {
+		r0 = rf(ctx, in, opts...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*querypb.GetIndexLoadStatusResponse)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *querypb.GetIndexLoadStatusRequest, ...grpc.CallOption) error); ok {
+		r1 = rf(ctx, in, opts...)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockMixCoordClient_GetIndexLoadStatus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetIndexLoadStatus'
+type MockMixCoordClient_GetIndexLoadStatus_Call struct {
+	*mock.Call
+}
+
+// GetIndexLoadStatus is a helper method to define mock.On call
+//   - ctx context.Context
+//   - in *querypb.GetIndexLoadStatusRequest
+//   - opts ...grpc.CallOption
+func (_e *MockMixCoordClient_Expecter) GetIndexLoadStatus(ctx interface{}, in interface{}, opts ...interface{}) *MockMixCoordClient_GetIndexLoadStatus_Call {
+	return &MockMixCoordClient_GetIndexLoadStatus_Call{Call: _e.mock.On("GetIndexLoadStatus",
+		append([]interface{}{ctx, in}, opts...)...)}
+}
+
+func (_c *MockMixCoordClient_GetIndexLoadStatus_Call) Run(run func(ctx context.Context, in *querypb.GetIndexLoadStatusRequest, opts ...grpc.CallOption)) *MockMixCoordClient_GetIndexLoadStatus_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		variadicArgs := make([]grpc.CallOption, len(args)-2)
+		for i, a := range args[2:] {
+			if a != nil {
+				variadicArgs[i] = a.(grpc.CallOption)
+			}
+		}
+		run(args[0].(context.Context), args[1].(*querypb.GetIndexLoadStatusRequest), variadicArgs...)
+	})
+	return _c
+}
+
+func (_c *MockMixCoordClient_GetIndexLoadStatus_Call) Return(_a0 *querypb.GetIndexLoadStatusResponse, _a1 error) *MockMixCoordClient_GetIndexLoadStatus_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockMixCoordClient_GetIndexLoadStatus_Call) RunAndReturn(run func(context.Context, *querypb.GetIndexLoadStatusRequest, ...grpc.CallOption) (*querypb.GetIndexLoadStatusResponse, error)) *MockMixCoordClient_GetIndexLoadStatus_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetIndexState provides a mock function with given fields: ctx, in, opts
 func (_m *MockMixCoordClient) GetIndexState(ctx context.Context, in *indexpb.GetIndexStateRequest, opts ...grpc.CallOption) (*indexpb.GetIndexStateResponse, error) {
 	_va := make([]interface{}, len(opts))
@@ -7101,6 +7323,80 @@ func (_c *MockMixCoordClient_GetQueryViewLoadInfo_Call) Return(_a0 *querypb.GetQ
 }
 
 func (_c *MockMixCoordClient_GetQueryViewLoadInfo_Call) RunAndReturn(run func(context.Context, *querypb.GetQueryViewLoadInfoRequest, ...grpc.CallOption) (*querypb.GetQueryViewLoadInfoResponse, error)) *MockMixCoordClient_GetQueryViewLoadInfo_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetQueryViewSegmentLoadInfo provides a mock function with given fields: ctx, in, opts
+func (_m *MockMixCoordClient) GetQueryViewSegmentLoadInfo(ctx context.Context, in *querypb.GetQueryViewSegmentLoadInfoRequest, opts ...grpc.CallOption) (*querypb.GetQueryViewSegmentLoadInfoResponse, error) {
+	_va := make([]interface{}, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, in)
+	_ca = append(_ca, _va...)
+	ret := _m.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetQueryViewSegmentLoadInfo")
+	}
+
+	var r0 *querypb.GetQueryViewSegmentLoadInfoResponse
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetQueryViewSegmentLoadInfoRequest, ...grpc.CallOption) (*querypb.GetQueryViewSegmentLoadInfoResponse, error)); ok {
+		return rf(ctx, in, opts...)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetQueryViewSegmentLoadInfoRequest, ...grpc.CallOption) *querypb.GetQueryViewSegmentLoadInfoResponse); ok {
+		r0 = rf(ctx, in, opts...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*querypb.GetQueryViewSegmentLoadInfoResponse)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *querypb.GetQueryViewSegmentLoadInfoRequest, ...grpc.CallOption) error); ok {
+		r1 = rf(ctx, in, opts...)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetQueryViewSegmentLoadInfo'
+type MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call struct {
+	*mock.Call
+}
+
+// GetQueryViewSegmentLoadInfo is a helper method to define mock.On call
+//   - ctx context.Context
+//   - in *querypb.GetQueryViewSegmentLoadInfoRequest
+//   - opts ...grpc.CallOption
+func (_e *MockMixCoordClient_Expecter) GetQueryViewSegmentLoadInfo(ctx interface{}, in interface{}, opts ...interface{}) *MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call {
+	return &MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call{Call: _e.mock.On("GetQueryViewSegmentLoadInfo",
+		append([]interface{}{ctx, in}, opts...)...)}
+}
+
+func (_c *MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call) Run(run func(ctx context.Context, in *querypb.GetQueryViewSegmentLoadInfoRequest, opts ...grpc.CallOption)) *MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		variadicArgs := make([]grpc.CallOption, len(args)-2)
+		for i, a := range args[2:] {
+			if a != nil {
+				variadicArgs[i] = a.(grpc.CallOption)
+			}
+		}
+		run(args[0].(context.Context), args[1].(*querypb.GetQueryViewSegmentLoadInfoRequest), variadicArgs...)
+	})
+	return _c
+}
+
+func (_c *MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call) Return(_a0 *querypb.GetQueryViewSegmentLoadInfoResponse, _a1 error) *MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call) RunAndReturn(run func(context.Context, *querypb.GetQueryViewSegmentLoadInfoRequest, ...grpc.CallOption) (*querypb.GetQueryViewSegmentLoadInfoResponse, error)) *MockMixCoordClient_GetQueryViewSegmentLoadInfo_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -9099,80 +9395,6 @@ func (_c *MockMixCoordClient_ListDatabases_Call) Return(_a0 *milvuspb.ListDataba
 }
 
 func (_c *MockMixCoordClient_ListDatabases_Call) RunAndReturn(run func(context.Context, *milvuspb.ListDatabasesRequest, ...grpc.CallOption) (*milvuspb.ListDatabasesResponse, error)) *MockMixCoordClient_ListDatabases_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// FetchFileResources provides a mock function with given fields: ctx, in, opts
-func (_m *MockMixCoordClient) FetchFileResources(ctx context.Context, in *rootcoordpb.FetchFileResourcesRequest, opts ...grpc.CallOption) (*rootcoordpb.FetchFileResourcesResponse, error) {
-	_va := make([]interface{}, len(opts))
-	for _i := range opts {
-		_va[_i] = opts[_i]
-	}
-	var _ca []interface{}
-	_ca = append(_ca, ctx, in)
-	_ca = append(_ca, _va...)
-	ret := _m.Called(_ca...)
-
-	if len(ret) == 0 {
-		panic("no return value specified for FetchFileResources")
-	}
-
-	var r0 *rootcoordpb.FetchFileResourcesResponse
-	var r1 error
-	if rf, ok := ret.Get(0).(func(context.Context, *rootcoordpb.FetchFileResourcesRequest, ...grpc.CallOption) (*rootcoordpb.FetchFileResourcesResponse, error)); ok {
-		return rf(ctx, in, opts...)
-	}
-	if rf, ok := ret.Get(0).(func(context.Context, *rootcoordpb.FetchFileResourcesRequest, ...grpc.CallOption) *rootcoordpb.FetchFileResourcesResponse); ok {
-		r0 = rf(ctx, in, opts...)
-	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(*rootcoordpb.FetchFileResourcesResponse)
-		}
-	}
-
-	if rf, ok := ret.Get(1).(func(context.Context, *rootcoordpb.FetchFileResourcesRequest, ...grpc.CallOption) error); ok {
-		r1 = rf(ctx, in, opts...)
-	} else {
-		r1 = ret.Error(1)
-	}
-
-	return r0, r1
-}
-
-// MockMixCoordClient_FetchFileResources_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FetchFileResources'
-type MockMixCoordClient_FetchFileResources_Call struct {
-	*mock.Call
-}
-
-// FetchFileResources is a helper method to define mock.On call
-//   - ctx context.Context
-//   - in *rootcoordpb.FetchFileResourcesRequest
-//   - opts ...grpc.CallOption
-func (_e *MockMixCoordClient_Expecter) FetchFileResources(ctx interface{}, in interface{}, opts ...interface{}) *MockMixCoordClient_FetchFileResources_Call {
-	return &MockMixCoordClient_FetchFileResources_Call{Call: _e.mock.On("FetchFileResources",
-		append([]interface{}{ctx, in}, opts...)...)}
-}
-
-func (_c *MockMixCoordClient_FetchFileResources_Call) Run(run func(ctx context.Context, in *rootcoordpb.FetchFileResourcesRequest, opts ...grpc.CallOption)) *MockMixCoordClient_FetchFileResources_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		variadicArgs := make([]grpc.CallOption, len(args)-2)
-		for i, a := range args[2:] {
-			if a != nil {
-				variadicArgs[i] = a.(grpc.CallOption)
-			}
-		}
-		run(args[0].(context.Context), args[1].(*rootcoordpb.FetchFileResourcesRequest), variadicArgs...)
-	})
-	return _c
-}
-
-func (_c *MockMixCoordClient_FetchFileResources_Call) Return(_a0 *rootcoordpb.FetchFileResourcesResponse, _a1 error) *MockMixCoordClient_FetchFileResources_Call {
-	_c.Call.Return(_a0, _a1)
-	return _c
-}
-
-func (_c *MockMixCoordClient_FetchFileResources_Call) RunAndReturn(run func(context.Context, *rootcoordpb.FetchFileResourcesRequest, ...grpc.CallOption) (*rootcoordpb.FetchFileResourcesResponse, error)) *MockMixCoordClient_FetchFileResources_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -14073,9 +14295,4 @@ func NewMockMixCoordClient(t interface {
 	t.Cleanup(func() { mock.AssertExpectations(t) })
 
 	return mock
-}
-
-// GetQueryViewSegmentLoadInfo is patched with mockey by QueryView tests.
-func (_m *MockMixCoordClient) GetQueryViewSegmentLoadInfo(ctx context.Context, req *querypb.GetQueryViewSegmentLoadInfoRequest, opts ...grpc.CallOption) (*querypb.GetQueryViewSegmentLoadInfoResponse, error) {
-	panic("patch GetQueryViewSegmentLoadInfo with mockey")
 }

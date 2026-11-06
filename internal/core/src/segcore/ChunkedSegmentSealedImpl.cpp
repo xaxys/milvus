@@ -96,11 +96,11 @@
 #include "index/LoadResource.h"
 #include "index/Meta.h"
 #include "index/skipindex_stats/SkipIndexStats.h"
-#include "index/contracts/build/IReaderConvertible.h"
 #include "index/contracts/build/ScalarBuildInput.h"
 #include "index/contracts/query/IScalarValueReader.h"
 #include "segcore/json_stats/JsonKeyStats.h"
 #include "index/scalar/text/TextIndexBuilder.h"
+#include "index/scalar/text/TextIndexReader.h"
 #include "index/Utils.h"
 #include "index/contracts/query/IVectorReader.h"
 #include "index/vector/VectorLoadResource.h"
@@ -142,8 +142,9 @@
 #include "segcore/storagev1translator/ChunkTranslator.h"
 #include "segcore/storagev1translator/DefaultValueChunkTranslator.h"
 #include "segcore/storagev2translator/SystemIndexTranslator.h"
-#include "segcore/storagev1translator/InterimSealedIndexTranslator.h"
-#include "segcore/storagev1translator/TextMatchIndexTranslator.h"
+#include "segcore/indexing/InterimSealedIndexTranslator.h"
+#include "index/vector/VectorIndexReader.h"
+#include "segcore/indexing/TextMatchIndexLoader.h"
 #include "segcore/storagev2translator/AsyncChunkReader.h"
 #include "segcore/storagev2translator/GroupChunkTranslator.h"
 #include "segcore/storagev2translator/JsonStatsTranslator.h"
@@ -153,6 +154,7 @@
 #include "storage/FileManager.h"
 #include "storage/StatusToErrorCode.h"
 #include "storage/KeyRetriever.h"
+#include "storage/PluginLoader.h"
 #include "storage/LocalChunkManager.h"
 #include "storage/LocalChunkManagerSingleton.h"
 #include "storage/MmapManager.h"
@@ -659,7 +661,7 @@ clear_bit_if_present(BitsetType& bitset, FieldId field_id) {
 }
 
 static inline void
-cancel_warmup(const IndexInventory::RootSlot& slot) {
+cancel_warmup(const std::shared_ptr<IndexInventory::Entry>& slot) {
     if (slot) {
         slot->CancelWarmup();
     }
@@ -687,11 +689,11 @@ is_text_registration(const IndexRegistration& entry) {
 }
 
 template <typename Predicate>
-std::vector<IndexInventory::RootSlot>
+std::vector<std::shared_ptr<IndexInventory::Entry>>
 erase_index_entries(IndexInventory& inventory,
                     FieldId field_id,
                     Predicate&& predicate) {
-    std::vector<IndexInventory::RootSlot> retired;
+    std::vector<std::shared_ptr<IndexInventory::Entry>> retired;
     auto entries = inventory.Entries(field_id);
     retired.reserve(entries.size());
     for (const auto& entry : entries) {
@@ -708,36 +710,36 @@ erase_index_entries(IndexInventory& inventory,
 
 std::shared_ptr<IndexInventory::Entry>
 make_persisted_index_entry(LoadIndexInfo& info) {
-    AssertInfo(
-        info.cache_index != nullptr || info.lazy_index_factory != nullptr,
-        "loaded index for field {} has no cache slot",
-        info.field_id);
+    AssertInfo(info.index != nullptr || info.lazy_index_factory != nullptr,
+               "loaded index for field {} has no index owner",
+               info.field_id);
     if (info.lazy_index_factory != nullptr) {
         return std::make_shared<IndexInventory::Entry>(
             MakeSealedIndexRegistration(info),
             std::move(info.lazy_index_factory));
     }
     return std::make_shared<IndexInventory::Entry>(
-        MakeSealedIndexCapability(info), std::move(info.cache_index));
+        MakeSealedIndexCapability(info), std::move(info.index));
 }
 
 // Installs an already completed local artifact into the ordinary one-cell
-// cache without adding a second reader-owning wrapper. Eviction is disabled:
+// cache without adding a second storage-owning wrapper. Eviction is disabled:
 // the one-shot builder and its borrowed input are gone after construction, so
 // this translator cannot recreate the generation.
-class CompletedIndexTranslator final
-    : public cachinglayer::Translator<index::IIndexReaderBase> {
+class CompletedTextStorageTranslator final
+    : public cachinglayer::Translator<index::TextIndexStorage> {
  public:
-    CompletedIndexTranslator(index::IIndexReaderBasePtr reader,
-                             std::string key,
-                             int64_t segment_id,
-                             bool file_backed,
-                             const std::string& shard)
-        : reader_(std::move(reader)),
+    CompletedTextStorageTranslator(
+        std::unique_ptr<index::TextIndexStorage> storage,
+        std::string key,
+        int64_t segment_id,
+        bool file_backed,
+        const std::string& shard)
+        : storage_(std::move(storage)),
           key_(std::move(key)),
           segment_id_(segment_id),
-          usage_(reader_ != nullptr ? reader_->CellByteSize()
-                                    : cachinglayer::ResourceUsage{}),
+          usage_(storage_ != nullptr ? storage_->CellByteSize()
+                                     : cachinglayer::ResourceUsage{}),
           meta_(file_backed ? cachinglayer::StorageType::DISK
                             : cachinglayer::StorageType::MEMORY,
                 cachinglayer::CellIdMappingMode::ALWAYS_ZERO,
@@ -746,8 +748,8 @@ class CompletedIndexTranslator final
                 /* support_eviction */ false,
                 std::nullopt,
                 MetricAttributionFromShard(shard)) {
-        AssertInfo(reader_ != nullptr,
-                   "completed index translator requires a reader");
+        AssertInfo(storage_ != nullptr,
+                   "completed index translator requires storage");
     }
 
     size_t
@@ -781,16 +783,16 @@ class CompletedIndexTranslator final
     }
 
     std::vector<std::pair<cachinglayer::cid_t,
-                          std::unique_ptr<index::IIndexReaderBase>>>
+                          std::unique_ptr<index::TextIndexStorage>>>
     get_cells(milvus::OpContext* ctx,
               const std::vector<cachinglayer::cid_t>&) override {
-        CheckCancellation(ctx, segment_id_, "CompletedIndexTranslator");
-        AssertInfo(reader_ != nullptr,
-                   "completed index reader was already transferred");
+        CheckCancellation(ctx, segment_id_, "CompletedTextStorageTranslator");
+        AssertInfo(storage_ != nullptr,
+                   "completed text storage was already transferred");
         std::vector<std::pair<cachinglayer::cid_t,
-                              std::unique_ptr<index::IIndexReaderBase>>>
+                              std::unique_ptr<index::TextIndexStorage>>>
             result;
-        result.emplace_back(0, std::move(reader_));
+        result.emplace_back(0, std::move(storage_));
         return result;
     }
 
@@ -800,7 +802,7 @@ class CompletedIndexTranslator final
     }
 
  private:
-    index::IIndexReaderBasePtr reader_;
+    std::unique_ptr<index::TextIndexStorage> storage_;
     std::string key_;
     int64_t segment_id_;
     cachinglayer::ResourceUsage usage_;
@@ -896,15 +898,15 @@ ChunkedSegmentSealedImpl::IndexRegistrations(FieldId field_id) const {
                               : std::vector<IndexRegistration>{};
 }
 
-IndexPin
-ChunkedSegmentSealedImpl::PinIndex(milvus::OpContext* op_ctx,
-                                   const IndexKey& key) const {
+index::IIndexReaderBasePtr
+ChunkedSegmentSealedImpl::CreateIndexReader(milvus::OpContext* op_ctx,
+                                            const IndexKey& key) const {
     // Search/Retrieve holds the segment read lease across metadata selection
-    // and this pin, so publication cannot change the runtime generation between
-    // the two calls.
+    // and reader creation, so publication cannot change the runtime generation
+    // between the two calls.
     auto runtime = CaptureRuntimeResourceState();
-    return runtime != nullptr ? runtime->indexes.PinIndex(op_ctx, key)
-                              : IndexPin{};
+    return runtime != nullptr ? runtime->indexes.CreateIndexReader(op_ctx, key)
+                              : index::IIndexReaderBasePtr{};
 }
 
 bool
@@ -1181,7 +1183,7 @@ ChunkedSegmentSealedImpl::LoadVecIndex(
         NormalizePublishedState(*staged_state);
     } else {
         auto next_runtime = CloneRuntimeResourceState(snapshot->runtime);
-        std::vector<IndexInventory::RootSlot> retired_indexings;
+        std::vector<std::shared_ptr<IndexInventory::Entry>> retired_indexings;
         if (drop_existing) {
             retired_indexings = erase_index_entries(
                 next_runtime->indexes, field_id, is_vector_registration);
@@ -1221,18 +1223,19 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(
 
     RuntimeResourceState* target_runtime = runtime;
     std::shared_ptr<RuntimeResourceState> owned_runtime;
-    std::vector<IndexInventory::RootSlot> retired_indexings;
+    std::vector<std::shared_ptr<IndexInventory::Entry>> retired_indexings;
 
-    auto retire_indexing = [&](IndexInventory::RootSlot indexing) {
-        if (indexing == nullptr) {
-            return;
-        }
-        if (committer != nullptr) {
-            committer->RetireCacheIndexingLocked(std::move(indexing));
-        } else if (owned_runtime != nullptr) {
-            retired_indexings.push_back(std::move(indexing));
-        }
-    };
+    auto retire_indexing =
+        [&](std::shared_ptr<IndexInventory::Entry> indexing) {
+            if (indexing == nullptr) {
+                return;
+            }
+            if (committer != nullptr) {
+                committer->RetireCacheIndexingLocked(std::move(indexing));
+            } else if (owned_runtime != nullptr) {
+                retired_indexings.push_back(std::move(indexing));
+            }
+        };
 
     auto cancel_retired_indexings = [&] {
         for (auto& indexing : retired_indexings) {
@@ -1254,35 +1257,53 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(
         return;
     }
 
-    const auto& visible_state =
-        staged_state != nullptr ? *staged_state : *snapshot;
-    bool has_index =
-        get_bit_if_present(visible_state.index_ready_bitset, field_id);
+    // A field may carry several scalar indexes now, so a load never displaces a
+    // sibling: the entry is keyed by its own indexID. This is where the old
+    // AssertInfo(!has_index) went -- with one index per field it could never fire
+    // twice, and with several it would refuse every second index on the field.
+    const IndexKey key{field_id, IndexIdentity::PreBuiltIndex(info.index_id)};
 
     std::unique_lock lck(mutex_);
+    // Idempotent per index identity: a reopen that re-lists an index, or a retried
+    // load, is a no-op. A sibling index of the same field holds a different key.
+    if (!is_replace && snapshot->runtime != nullptr) {
+        const auto registrations = snapshot->runtime->indexes.Entries(field_id);
+        const bool already_loaded =
+            std::any_of(registrations.begin(),
+                        registrations.end(),
+                        [&](const IndexRegistration& registration) {
+                            return registration.key == key;
+                        });
+        if (already_loaded) {
+            LOG_INFO(
+                "scalar index {} already loaded for field {} in segment {}, "
+                "skipping",
+                info.index_id,
+                field_id.get(),
+                id_);
+            return;
+        }
+    }
     if (is_replace) {
         if (target_runtime == nullptr) {
             owned_runtime = CloneRuntimeResourceState(snapshot->runtime);
             target_runtime = owned_runtime.get();
         }
-        LOG_INFO("Replacing scalar index for field {} in segment {}",
+        LOG_INFO("Replacing scalar index {} for field {} in segment {}",
+                 info.index_id,
                  field_id.get(),
                  id_);
-    } else {
-        AssertInfo(
-            !has_index,
-            "scalar index has been exist at " + std::to_string(field_id.get()));
     }
 
     if (field_meta.get_data_type() == DataType::JSON) {
-        auto path = info.index_params.at(JSON_PATH);
         if (target_runtime == nullptr) {
             owned_runtime = CloneRuntimeResourceState(snapshot->runtime);
             target_runtime = owned_runtime.get();
         }
-        for (auto& retired :
-             EraseJsonIndexesAtPath(*target_runtime, field_id, path)) {
-            retire_indexing(std::move(retired));
+        // Drop exactly this indexID: erasing by path would take a sibling cast
+        // type on the same path with it.
+        if (is_replace) {
+            retire_indexing(target_runtime->indexes.Drop(key));
         }
         auto entry = make_persisted_index_entry(info);
         const bool is_ngram = entry->registration().kind == IndexKind::Ngram;
@@ -1329,14 +1350,32 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(
         target_runtime = owned_runtime.get();
     }
     if (is_replace) {
-        for (auto& retired :
-             erase_index_entries(target_runtime->indexes,
-                                 field_id,
-                                 [](const IndexRegistration& entry) {
-                                     return !is_vector_registration(entry) &&
-                                            !is_text_registration(entry);
-                                 })) {
-            retire_indexing(std::move(retired));
+        // One scalar index per field: a replacement replaces that index, which is what
+        // the caller means when the field carries a single entry. Several indexes: the
+        // diff drops the outgoing indexID itself (indexes_to_drop), so a load must not
+        // touch the field's siblings.
+        // Registrations, not capabilities: a lazy index has no resolved reader yet,
+        // and the count is only asked here to tell the two shapes apart.
+        size_t scalar_entries = 0;
+        for (const auto& registration :
+             target_runtime->indexes.Entries(field_id)) {
+            if (!is_vector_registration(registration) &&
+                !is_text_registration(registration)) {
+                ++scalar_entries;
+            }
+        }
+        if (scalar_entries <= 1) {
+            for (auto& retired :
+                 erase_index_entries(target_runtime->indexes,
+                                     field_id,
+                                     [](const IndexRegistration& entry) {
+                                         return !is_vector_registration(entry) &&
+                                                !is_text_registration(entry);
+                                     })) {
+                retire_indexing(std::move(retired));
+            }
+        } else {
+            retire_indexing(target_runtime->indexes.Drop(key));
         }
     }
     retire_indexing(
@@ -1820,12 +1859,13 @@ ChunkedSegmentSealedImpl::RuntimeVectorIndexReady(
     return std::any_of(entries.begin(), entries.end(), is_vector_registration);
 }
 
-std::optional<IndexKey>
-ChunkedSegmentSealedImpl::GetVectorIndexKey(
+index::IIndexReaderBasePtr
+ChunkedSegmentSealedImpl::CreateIndexReader(
+    milvus::OpContext* op_ctx,
     const std::shared_ptr<const RuntimeResourceState>& runtime,
     FieldId field_id) {
     if (runtime == nullptr) {
-        return std::nullopt;
+        return {};
     }
     std::optional<IndexKey> result;
     auto entries = runtime->indexes.Entries(field_id);
@@ -1838,30 +1878,11 @@ ChunkedSegmentSealedImpl::GetVectorIndexKey(
                    field_id.get());
         result = entry.key;
     }
-    return result;
+    return result.has_value()
+               ? runtime->indexes.CreateIndexReader(op_ctx, *result)
+               : index::IIndexReaderBasePtr{};
 }
 
-IndexPin
-ChunkedSegmentSealedImpl::PinVectorIndex(
-    const std::shared_ptr<const RuntimeResourceState>& runtime,
-    milvus::OpContext* op_ctx,
-    FieldId field_id) const {
-    auto key = GetVectorIndexKey(runtime, field_id);
-    return key.has_value() ? runtime->indexes.PinIndex(op_ctx, *key)
-                           : IndexPin{};
-}
-
-std::vector<IndexInventory::RootSlot>
-ChunkedSegmentSealedImpl::EraseJsonIndexesAtPath(RuntimeResourceState& runtime,
-                                                 FieldId field_id,
-                                                 std::string_view nested_path) {
-    return erase_index_entries(
-        runtime.indexes, field_id, [&](const IndexRegistration& entry) {
-            return entry.json_cast_type.data_type() !=
-                       JsonCastType::DataType::UNKNOWN &&
-                   entry.json_path == nested_path;
-        });
-}
 
 void
 ChunkedSegmentSealedImpl::SyncJsonIndexState(
@@ -2255,12 +2276,50 @@ ChunkedSegmentSealedImpl::HasRawDataFromState(
     return true;
 }
 
+// Which scalar families carry the original values inside the index payload. This is
+// the same set ScalarIndexLoadResource marks has_raw_data=true for (sort family and
+// marisa); inverted / ngram / fmindex / bitmap / hybrid / rtree all report false even
+// though several of them can still answer a value lookup.
+inline bool
+ScalarFamilyCarriesRawData(const std::string& family) {
+    return family == "sort" || family == "marisa";
+}
+
 bool
 ChunkedSegmentSealedImpl::IndexHasRawDataFromState(
     const PublishedSegmentState& state, FieldId field_id) const {
     if (!get_bit_if_present(state.index_ready_bitset, field_id) &&
         !get_bit_if_present(state.binlog_index_bitset, field_id)) {
         return false;
+    }
+    // With several scalar indexes the field-level flag describes whichever index was
+    // loaded last, while a reader pins one entry. The only safe "yes" is therefore
+    // "every entry can provide raw data", using the same per-index rules the loader
+    // applies. Anything else falls back to the column.
+    if (state.runtime != nullptr) {
+        int scalar_entries = 0;
+        bool all_can_provide = true;
+        for (const auto& entry : state.runtime->indexes
+                                      .ResolveCapability(nullptr, field_id)
+                                      .entries()) {
+            if (is_vector_entry(entry) || is_text_entry(entry)) {
+                continue;
+            }
+            ++scalar_entries;
+            if (!ScalarFamilyCarriesRawData(entry.family)) {
+                all_can_provide = false;
+            }
+        }
+        if (scalar_entries > 1) {
+            if (!all_can_provide) {
+                return false;
+            }
+            if (!field_exists_in_schema(state.fields, field_id)) {
+                return false;
+            }
+            return milvus::index::CanUseIndexRawDataForField(
+                state.fields->operator[](field_id).get_data_type(), true);
+        }
     }
     return HasIndexRawDataFromState(state, field_id);
 }
@@ -2681,6 +2740,13 @@ ChunkedSegmentSealedImpl::LoadColumnGroups(
                                             /*arrow_schema=*/nullptr,
                                             needed_columns,
                                             *properties));
+    // QueryNode registers the collection's cipher context before loading.
+    // Resolve encrypted Parquet keys through that context when opening files.
+    if (storage::PluginLoader::GetInstance().getCipherPlugin()) {
+        reader->set_keyretriever([](const std::string& key_metadata) {
+            return storage::KeyRetriever().GetKey(key_metadata);
+        });
+    }
     committer.Commit([reader](RuntimeResourceState& runtime,
                               PublishedSegmentState&) mutable {
         runtime.reader = std::move(reader);
@@ -3354,6 +3420,7 @@ ChunkedSegmentSealedImpl::load_column_group_data_internal(
                 GroupChunkType::DEFAULT,
                 field_metas,
                 column_group_info,
+                fs,
                 std::move(insert_files),
                 std::move(packing.row_group_meta_list),
                 info.enable_mmap,
@@ -3802,10 +3869,11 @@ ChunkedSegmentSealedImpl::ApplyFieldValidDataByRange(
     }
 
     if (IsOrdinaryVectorDataType(field_meta.get_data_type())) {
-        auto vector_pin = PinVectorIndex(snapshot->runtime, op_ctx, field_id);
-        if (vector_pin) {
+        auto index_reader =
+            CreateIndexReader(op_ctx, snapshot->runtime, field_id);
+        if (index_reader) {
             const auto* vec_index =
-                dynamic_cast<const index::IVectorReader*>(vector_pin.get());
+                dynamic_cast<const index::IVectorReader*>(index_reader.get());
             AssertInfo(vec_index != nullptr, "invalid vector reader");
             if (vec_index->HasValidData()) {
                 vec_index->ApplyValidDataByRange(
@@ -3858,10 +3926,11 @@ ChunkedSegmentSealedImpl::ApplyFieldValidDataByOffsets(
     }
 
     if (IsOrdinaryVectorDataType(field_meta.get_data_type())) {
-        auto vector_pin = PinVectorIndex(snapshot->runtime, op_ctx, field_id);
-        if (vector_pin) {
+        auto index_reader =
+            CreateIndexReader(op_ctx, snapshot->runtime, field_id);
+        if (index_reader) {
             const auto* vec_index =
-                dynamic_cast<const index::IVectorReader*>(vector_pin.get());
+                dynamic_cast<const index::IVectorReader*>(index_reader.get());
             AssertInfo(vec_index != nullptr, "invalid vector reader");
             if (vec_index->HasValidData()) {
                 vec_index->ApplyValidDataByOffsets(
@@ -4164,12 +4233,12 @@ ChunkedSegmentSealedImpl::vector_search(SearchInfo& search_info,
                    "The binlog params is not generate.");
         auto binlog_search_info = config_it->second->GetSearchConf(search_info);
 
-        auto vector_pin = PinVectorIndex(runtime, op_context, field_id);
-        AssertInfo(vector_pin,
+        auto index_reader = CreateIndexReader(op_context, runtime, field_id);
+        AssertInfo(index_reader,
                    "vector indexes isn't ready for field " +
                        std::to_string(field_id.get()));
         auto* reader =
-            dynamic_cast<const index::IVectorReader*>(vector_pin.get());
+            dynamic_cast<const index::IVectorReader*>(index_reader.get());
         AssertInfo(reader != nullptr,
                    "vector reader capabilities are incomplete for field {}",
                    field_id.get());
@@ -4180,11 +4249,9 @@ ChunkedSegmentSealedImpl::vector_search(SearchInfo& search_info,
                                    query_offsets,
                                    query_count,
                                    bitset,
-                                   op_context,
                                    output);
         if (output.vector_iterators_.has_value()) {
-            output.resource_pins_.emplace_back(
-                std::move(vector_pin).IntoSharedLifetime());
+            output.resource_pins_.emplace_back(std::move(index_reader));
         }
         output.used_interim_index_ = true;
         milvus::tracer::AddEvent(
@@ -4194,12 +4261,12 @@ ChunkedSegmentSealedImpl::vector_search(SearchInfo& search_info,
             IsIndexRefineEnabledLocked(op_context, field_id, runtime)) {
             search_info.topk_ = GetEffectiveSearchTopk(search_info);
         }
-        auto vector_pin = PinVectorIndex(runtime, op_context, field_id);
-        AssertInfo(vector_pin,
+        auto index_reader = CreateIndexReader(op_context, runtime, field_id);
+        AssertInfo(index_reader,
                    "vector indexes isn't ready for field " +
                        std::to_string(field_id.get()));
         auto* reader =
-            dynamic_cast<const index::IVectorReader*>(vector_pin.get());
+            dynamic_cast<const index::IVectorReader*>(index_reader.get());
         AssertInfo(reader != nullptr,
                    "vector reader capabilities are incomplete for field {}",
                    field_id.get());
@@ -4210,11 +4277,9 @@ ChunkedSegmentSealedImpl::vector_search(SearchInfo& search_info,
                                    query_offsets,
                                    query_count,
                                    bitset,
-                                   op_context,
                                    output);
         if (output.vector_iterators_.has_value()) {
-            output.resource_pins_.emplace_back(
-                std::move(vector_pin).IntoSharedLifetime());
+            output.resource_pins_.emplace_back(std::move(index_reader));
         }
         milvus::tracer::AddEvent("finish_searching_vector_index");
     } else {
@@ -4268,8 +4333,10 @@ ChunkedSegmentSealedImpl::FilterVectorValidOffsetsFromIndex(
     // offsets stay in logical row space and only null rows are dropped.
     result.valid_data = std::make_unique<bool[]>(count);
     result.valid_offsets.reserve(count);
+    TargetBitmap valid(count, true);
+    reader.ApplyValidDataByOffsets(seg_offsets, count, valid.view());
     for (int64_t i = 0; i < count; ++i) {
-        result.valid_data[i] = reader.IsRowValid(seg_offsets[i]);
+        result.valid_data[i] = valid[i];
         if (result.valid_data[i]) {
             result.valid_offsets.push_back(seg_offsets[i]);
         }
@@ -4318,9 +4385,10 @@ ChunkedSegmentSealedImpl::get_vector_from_state(
         return fill_with_empty(field_id, count);
     }
 
-    auto vector_pin = PinVectorIndex(snapshot.runtime, op_ctx, field_id);
-    AssertInfo(vector_pin, "vector index is not ready");
-    auto* reader = dynamic_cast<const index::IVectorReader*>(vector_pin.get());
+    auto index_reader = CreateIndexReader(op_ctx, snapshot.runtime, field_id);
+    AssertInfo(index_reader, "vector index is not ready");
+    auto* reader =
+        dynamic_cast<const index::IVectorReader*>(index_reader.get());
     AssertInfo(reader != nullptr,
                "vector value reader capabilities are incomplete");
 
@@ -4396,9 +4464,10 @@ ChunkedSegmentSealedImpl::get_emb_list_from_state(
         return fill_with_empty(field_id, count);
     }
 
-    auto vector_pin = PinVectorIndex(snapshot.runtime, op_ctx, field_id);
-    AssertInfo(vector_pin, "vector index is not ready");
-    auto* reader = dynamic_cast<const index::IVectorReader*>(vector_pin.get());
+    auto index_reader = CreateIndexReader(op_ctx, snapshot.runtime, field_id);
+    AssertInfo(index_reader, "vector index is not ready");
+    auto* reader =
+        dynamic_cast<const index::IVectorReader*>(index_reader.get());
     AssertInfo(reader != nullptr,
                "embedding-list reader capabilities are incomplete");
     auto has_raw_data = reader->HasRawData();
@@ -5320,9 +5389,7 @@ ChunkedSegmentSealedImpl::ChunkedSegmentSealedImpl(
       id_(segment_id),
       primary_key_field_id_(
           schema->get_primary_field_id().value_or(FieldId(-1))),
-      primary_key_type_(primary_key_field_id_ == FieldId(-1)
-                            ? DataType::NONE
-                            : (*schema)[primary_key_field_id_].get_data_type()),
+      primary_key_type_(schema->get_primary_field_type()),
       is_sorted_by_pk_(is_sorted_by_pk),
       // Every branch reports a row's matches in input order; DeletedRecord
       // relies on it.
@@ -5775,9 +5842,10 @@ void
 ChunkedSegmentSealedImpl::ClearData() {
     std::lock_guard<std::mutex> reopen_guard(reopen_mutex_);
     auto runtime_snapshot = CaptureRuntimeResourceState();
-    auto retired_indexings = runtime_snapshot != nullptr
-                                 ? runtime_snapshot->indexes.Slots()
-                                 : std::vector<IndexInventory::RootSlot>{};
+    auto retired_indexings =
+        runtime_snapshot != nullptr
+            ? runtime_snapshot->indexes.SnapshotEntries()
+            : std::vector<std::shared_ptr<IndexInventory::Entry>>{};
     {
         std::unique_lock lck(mutex_);
         stats_.mem_size = 0;
@@ -6046,21 +6114,21 @@ ChunkedSegmentSealedImpl::CreateTextIndexWithSchema(
             AssertInfo(value_key.has_value(),
                        "failed to create text index, neither raw data nor "
                        "index are found");
-            auto root_pin =
-                target_runtime->indexes.PinIndex(op_ctx, *value_key);
+            auto index_reader =
+                target_runtime->indexes.CreateIndexReader(op_ctx, *value_key);
             auto* value_reader = dynamic_cast<
                 const index::IScalarValueReader<std::string_view>*>(
-                root_pin.get());
+                index_reader.get());
             AssertInfo(value_reader != nullptr,
                        "failed to create text index, field index cannot be "
                        "converted to a string value reader");
-            AssertInfo(root_pin->CoordDomain() == index::Domain::Row &&
-                           root_pin->Count() == row_count,
+            AssertInfo(index_reader->CoordDomain() == index::Domain::Row &&
+                           index_reader->Count() == row_count,
                        "text source index for field {} has row domain/count "
                        "mismatch: expected {}, got {}",
                        field_id.get(),
                        row_count,
-                       root_pin->Count());
+                       index_reader->Count());
 
             std::vector<int64_t> offsets(kTextLobIndexBuildBatchSize);
             std::vector<std::string> values(kTextLobIndexBuildBatchSize);
@@ -6148,22 +6216,22 @@ ChunkedSegmentSealedImpl::CreateTextIndexWithSchema(
             cfg.GetScalarIndexEnableMmap() ? cfg.GetMmapPath() : std::string{}};
     auto artifact =
         std::move(index::TextIndexBuilder(std::move(params))).Build(source);
-    auto reader = index::IReaderConvertible::FromArtifact(std::move(artifact));
-    auto caps = reader->Caps();
-    auto value_type = reader->ValueType();
-    AssertInfo(caps.text_match,
-               "local text build did not produce a text-match reader");
-
+    auto storage = std::move(*artifact).IntoStorage();
+    const index::IndexMetadata metadata{index::ReaderCaps{.text_match = true},
+                                        index::Domain::Row,
+                                        storage->value_type_,
+                                        storage->count_};
     auto load_info = CaptureLoadInfoSnapshot();
-    auto translator = std::make_unique<CompletedIndexTranslator>(
-        std::move(reader),
+    auto translator = std::make_unique<CompletedTextStorageTranslator>(
+        std::move(storage),
         fmt::format("seg_{}_local_text_{}", id_, field_id.get()),
         id_,
         cfg.GetScalarIndexEnableMmap(),
         load_info != nullptr ? load_info->GetInsertChannel() : std::string{});
     auto slot = cachinglayer::Manager::GetInstance()
-                    .CreateCacheSlot<index::IIndexReaderBase>(
+                    .CreateCacheSlot<index::TextIndexStorage>(
                         std::move(translator), op_ctx);
+    auto index = std::make_shared<index::TextIndex>(std::move(slot), metadata);
 
     CheckCancellation(op_ctx,
                       id_,
@@ -6171,11 +6239,11 @@ ChunkedSegmentSealedImpl::CreateTextIndexWithSchema(
                       "ChunkedSegmentSealedImpl::CreateTextIndex()");
     IndexCapabilityEntry meta{AllocateLocalIndexKey(*target_runtime, field_id)};
     meta.family = index::families::kText;
-    meta.value_type = value_type;
-    meta.caps = caps;
+    meta.value_type = metadata.value_type;
+    meta.caps = metadata.caps;
     auto replaced = target_runtime->indexes.Register(
         std::make_shared<IndexInventory::Entry>(std::move(meta),
-                                                std::move(slot)));
+                                                std::move(index)));
     AssertInfo(replaced == nullptr,
                "local text index unexpectedly replaced another generation");
     build_guard.Commit();
@@ -6275,7 +6343,7 @@ CreateTextIndexCacheSlot(milvus::OpContext* op_ctx,
     }
 
     // const auto& field_meta = schema_->operator[](field_id);
-    milvus::segcore::storagev1translator::TextMatchIndexLoadInfo load_info{
+    milvus::segcore::TextMatchIndexLoadInfo load_info{
         info_proto.enable_mmap(),
         segment_id,
         info_proto.fieldid(),
@@ -6285,16 +6353,13 @@ CreateTextIndexCacheSlot(milvus::OpContext* op_ctx,
         info_proto.warmup_policy(),
         shard};
 
-    auto translator = std::make_unique<
-        milvus::segcore::storagev1translator::TextMatchIndexTranslator>(
+    auto translator = std::make_unique<milvus::segcore::TextMatchIndexLoader>(
         load_info, file_ctx, config, op_ctx);
     IndexInventory::ResolvedData resolved{translator->Family(),
                                           translator->ValueType(),
                                           translator->Caps(),
                                           nullptr};
-    resolved.slot = milvus::cachinglayer::Manager::GetInstance()
-                        .CreateCacheSlot<index::IIndexReaderBase>(
-                            std::move(translator), op_ctx);
+    resolved.index = translator->CreateIndex(op_ctx);
 
     CheckCancellation(op_ctx,
                       segment_id,
@@ -6334,7 +6399,7 @@ ChunkedSegmentSealedImpl::BuildTextIndexFromFiles(
         meta.value_type = resolved.value_type;
         meta.caps = resolved.caps;
         return std::make_shared<IndexInventory::Entry>(
-            std::move(meta), std::move(resolved.slot));
+            std::move(meta), std::move(resolved.index));
     }
     auto metadata =
         std::make_shared<proto::indexcgo::LoadTextIndexInfo>(*info_proto);
@@ -6944,11 +7009,12 @@ ChunkedSegmentSealedImpl::bulk_subscript_from_state(
                 }
             }
             if (value_key.has_value()) {
-                auto root_pin =
-                    snapshot->runtime->indexes.PinIndex(op_ctx, *value_key);
-                if (root_pin) {
+                auto index_reader =
+                    snapshot->runtime->indexes.CreateIndexReader(op_ctx,
+                                                                 *value_key);
+                if (index_reader) {
                     return ReverseDataFromIndex(
-                        root_pin.get(), seg_offsets, count, field_meta);
+                        index_reader.get(), seg_offsets, count, field_meta);
                 }
             }
         }
@@ -7191,18 +7257,19 @@ ChunkedSegmentSealedImpl::CalcDistByIDs(
     float* distances) const {
     std::shared_lock vector_state_lck(mutex_);
     auto runtime = CaptureRuntimeResourceState();
-    auto vector_pin = PinVectorIndex(runtime, op_ctx, field_id);
-    if (!vector_pin) {
+    auto index_reader = CreateIndexReader(op_ctx, runtime, field_id);
+    if (!index_reader) {
         return false;
     }
-    auto* reader = dynamic_cast<const index::IVectorReader*>(vector_pin.get());
+    auto* reader =
+        dynamic_cast<const index::IVectorReader*>(index_reader.get());
     if (reader == nullptr) {
         return false;
     }
     // Callers pass logical offsets, and knowhere's IdMap compacts them to
     // storage ids inside CalcDistByIDs (#50524).
     auto res = reader->CalcDistByIDs(
-        query_dataset, BitsetView(), seg_offsets, count, is_cosine, op_ctx);
+        query_dataset, BitsetView(), seg_offsets, count, is_cosine);
     if (!res.has_value()) {
         return false;
     }
@@ -7220,11 +7287,12 @@ ChunkedSegmentSealedImpl::IsIndexRefineEnabledLocked(
     milvus::OpContext* op_ctx,
     FieldId field_id,
     const std::shared_ptr<const RuntimeResourceState>& runtime) const {
-    auto vector_pin = PinVectorIndex(runtime, op_ctx, field_id);
-    if (!vector_pin) {
+    auto index_reader = CreateIndexReader(op_ctx, runtime, field_id);
+    if (!index_reader) {
         return false;
     }
-    auto* reader = dynamic_cast<const index::IVectorReader*>(vector_pin.get());
+    auto* reader =
+        dynamic_cast<const index::IVectorReader*>(index_reader.get());
     return reader != nullptr && reader->RefineEnabled();
 }
 
@@ -7653,8 +7721,7 @@ ChunkedSegmentSealedImpl::generate_interim_index(
             const auto index_version =
                 segcore_config_.get_interim_index_version();
             auto translator =
-                std::make_unique<milvus::segcore::storagev1translator::
-                                     InterimSealedIndexTranslator>(
+                std::make_unique<milvus::segcore::InterimSealedIndexTranslator>(
                     vec_data,
                     id_,
                     field_id.get(),
@@ -7665,14 +7732,17 @@ ChunkedSegmentSealedImpl::generate_interim_index(
                     dim,
                     is_sparse,
                     field_meta.get_data_type());
-            auto family = translator->Family();
-            auto value_type = translator->ValueType();
-            auto caps = translator->Caps();
-
-            auto interim_index_cache_slot =
-                milvus::cachinglayer::Manager::GetInstance()
-                    .CreateCacheSlot<index::IIndexReaderBase>(
-                        std::move(translator));
+            index::IndexFamily family{index::families::kVectorMem};
+            const auto value_type = field_meta.get_data_type();
+            const index::ReaderCaps caps{};
+            auto engine_slot = milvus::cachinglayer::Manager::GetInstance()
+                                   .CreateCacheSlot<index::KnowhereEngine>(
+                                       std::move(translator));
+            auto interim_index =
+                std::make_shared<index::VectorIndex>(std::move(engine_slot),
+                                                     value_type,
+                                                     interim_index_type,
+                                                     index_metric);
             bool has_raw_data = false;
             if (is_sparse ||
                 field_meta.get_data_type() == DataType::VECTOR_FLOAT) {
@@ -7690,8 +7760,7 @@ ChunkedSegmentSealedImpl::generate_interim_index(
             if (committer != nullptr) {
                 committer->Commit(
                     [&,
-                     interim_index_cache_slot =
-                         std::move(interim_index_cache_slot),
+                     interim_index = std::move(interim_index),
                      field_binlog_config = std::move(field_binlog_config),
                      family = std::move(family),
                      value_type,
@@ -7706,8 +7775,7 @@ ChunkedSegmentSealedImpl::generate_interim_index(
                         meta.caps = caps;
                         committer->StageInterimVectorIndexMutationLocked(
                             std::make_shared<IndexInventory::Entry>(
-                                std::move(meta),
-                                std::move(interim_index_cache_slot)),
+                                std::move(meta), std::move(interim_index)),
                             std::move(field_binlog_config));
                         clear_bit_if_present(
                             staged_state.published_index_ready_bitset,
@@ -7730,8 +7798,7 @@ ChunkedSegmentSealedImpl::generate_interim_index(
                 meta.caps = caps;
                 if (auto replaced = next_runtime->indexes.Register(
                         std::make_shared<IndexInventory::Entry>(
-                            std::move(meta),
-                            std::move(interim_index_cache_slot)));
+                            std::move(meta), std::move(interim_index)));
                     replaced != nullptr) {
                     retired.push_back(std::move(replaced));
                 }
@@ -8224,6 +8291,11 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
                 milvus_storage::api::Reader::create(
                     column_groups, arrow_schema, needed_columns, *properties)
                     .release());
+            if (storage::PluginLoader::GetInstance().getCipherPlugin()) {
+                reader->set_keyretriever([](const std::string& key_metadata) {
+                    return storage::KeyRetriever().GetKey(key_metadata);
+                });
+            }
             committer.Commit(
                 [reader = std::move(reader)](RuntimeResourceState& runtime,
                                              PublishedSegmentState&) mutable {
@@ -8458,6 +8530,66 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
 }
 
 void
+ChunkedSegmentSealedImpl::DropScalarIndex(
+    const IndexKey& key,
+    const SealedFieldLayoutPtr& schema_snapshot,
+    RuntimeResourceState& runtime,
+    PublishedSegmentState& staged_state,
+    StagedStateCommitter& committer) {
+    const auto field_id = key.field_id;
+    auto retired = runtime.indexes.Drop(key);
+    if (retired == nullptr) {
+        return;
+    }
+    committer.RetireCacheIndexingLocked(std::move(retired));
+
+    if (!field_exists_in_schema(schema_snapshot, field_id)) {
+        // The field is being removed from the schema: every indexID of it lands in
+        // indexes_to_drop and this runs once per index against a layout that no
+        // longer knows the field. Finish the field-level cleanup instead of
+        // indexing into it (which asserts).
+        DropIndexFromState(staged_state, field_id);
+        return;
+    }
+
+    if (schema_snapshot->operator[](field_id).get_data_type() == DataType::JSON) {
+        // A JSON field's readiness bit belongs to an NGRAM entry only, so it -- and
+        // the raw-data flag with it -- has to be re-derived from what the field
+        // still carries.
+        SyncJsonIndexState(staged_state, runtime, field_id);
+        return;
+    }
+
+    size_t scalar_left = 0;
+    std::string remaining_family;
+    for (const auto& entry :
+         runtime.indexes.ResolveCapability(nullptr, field_id).entries()) {
+        if (is_text_entry(entry) || is_vector_entry(entry)) {
+            continue;
+        }
+        ++scalar_left;
+        remaining_family = entry.family;
+    }
+    if (scalar_left == 0) {
+        // The field's last index is gone: run the field-level cleanup.
+        DropIndexFromState(staged_state, field_id);
+        return;
+    }
+    // A sibling remains. Re-derive the flags instead of clearing them blindly:
+    // replacing raw-data index A with raw-data index B in one Reopen lands here
+    // (B was loaded in Prepare, A is dropped now), and clearing would make readers
+    // read a column that was never reloaded. Anything else falls back to the column.
+    const bool has_raw_data =
+        scalar_left == 1 && ScalarFamilyCarriesRawData(remaining_family) &&
+        milvus::index::CanUseIndexRawDataForField(
+            schema_snapshot->operator[](field_id).get_data_type(), true);
+    SetPublishedIndexRawDataInState(staged_state, field_id, has_raw_data);
+    if (!has_raw_data) {
+        ClearIndexRawDataInState(staged_state, field_id);
+    }
+}
+
+void
 ChunkedSegmentSealedImpl::FinalizeLoadDiffForReopen(
     milvus::OpContext* op_ctx,
     SegmentLoadInfo& segment_load_info,
@@ -8465,34 +8597,36 @@ ChunkedSegmentSealedImpl::FinalizeLoadDiffForReopen(
     const SealedFieldLayoutPtr& schema_snapshot,
     StagedStateCommitter& committer) {
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
-    if (!diff.indexes_to_drop.empty()) {
-        for (auto field_id : diff.indexes_to_drop) {
-            if (diff.indexes_to_replace.count(field_id) > 0 ||
-                diff.indexes_to_load.count(field_id) > 0) {
-                continue;
-            }
-            committer.Commit([&](RuntimeResourceState& runtime,
+    // Per indexID: a field may keep its siblings, so neither the field alone nor the
+    // JSON path identifies the one to remove.
+    for (const auto& [field_id, index_ids] : diff.indexes_to_drop) {
+        for (auto index_id : index_ids) {
+            committer.Commit([&, field_id = field_id, index_id = index_id](
+                                 RuntimeResourceState& runtime,
                                  PublishedSegmentState& staged_state) {
-                DropIndex(
-                    field_id, schema_snapshot, &runtime, nullptr, &committer);
-                DropIndexFromState(staged_state, field_id);
+                DropScalarIndex(
+                    IndexKey{field_id, IndexIdentity::PreBuiltIndex(index_id)},
+                    schema_snapshot,
+                    runtime,
+                    staged_state,
+                    committer);
             });
         }
     }
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
-    for (const auto& [field_id, nested_paths] : diff.json_indexes_to_drop) {
-        for (const auto& nested_path : nested_paths) {
-            committer.Commit([&, field_id = field_id, nested_path](
-                                 RuntimeResourceState& runtime,
-                                 PublishedSegmentState& staged_state) {
-                for (auto& retired :
-                     EraseJsonIndexesAtPath(runtime, field_id, nested_path)) {
-                    committer.RetireCacheIndexingLocked(std::move(retired));
-                }
-                SyncJsonIndexState(staged_state, runtime, field_id);
-            });
+    // Field level: only when nothing is left on the field, which is what retires its
+    // vector index and clears the field's bits.
+    for (auto field_id : diff.fields_index_fully_dropped) {
+        if (diff.indexes_to_replace.count(field_id) > 0 ||
+            diff.indexes_to_load.count(field_id) > 0) {
+            continue;
         }
+        committer.Commit([&](RuntimeResourceState& runtime,
+                             PublishedSegmentState& staged_state) {
+            DropIndex(field_id, schema_snapshot, &runtime, nullptr, &committer);
+            DropIndexFromState(staged_state, field_id);
+        });
     }
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
@@ -11339,8 +11473,13 @@ ChunkedSegmentSealedImpl::prefetch_vector(milvus::OpContext* op_ctx,
                                           FieldId field_id) const {
     std::shared_lock vector_state_lck(mutex_);
     auto runtime = CaptureRuntimeResourceState();
-    auto vector_pin = PinVectorIndex(runtime, op_ctx, field_id);
-    if (!vector_pin) {
+    auto index_reader = CreateIndexReader(op_ctx, runtime, field_id);
+    if (index_reader) {
+        const auto* vector =
+            dynamic_cast<const index::IVectorReader*>(index_reader.get());
+        AssertInfo(vector != nullptr, "invalid vector reader");
+        index_reader->Prefetch();
+    } else {
         this->prefetch_chunks_locked(op_ctx, field_id);
     }
 }

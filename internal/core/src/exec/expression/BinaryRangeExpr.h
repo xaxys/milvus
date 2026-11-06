@@ -266,6 +266,12 @@ struct BinaryRangeIndexFunc {
 
 class PhyBinaryRangeFilterExpr : public SegmentExpr {
  public:
+
+    bool
+    IsRangeExpr() const override {
+        return true;
+    }
+
     PhyBinaryRangeFilterExpr(
         std::vector<std::shared_ptr<Expr>> input,
         const std::shared_ptr<const milvus::expr::BinaryRangeFilterExpr>& expr,
@@ -295,6 +301,11 @@ class PhyBinaryRangeFilterExpr : public SegmentExpr {
 
     void
     Eval(EvalCtx& context, VectorPtr& result) override;
+
+    bool
+    SupportsJsonStatsExecPath() const override {
+        return true;
+    }
 
     void
     DetermineExecPath() override;

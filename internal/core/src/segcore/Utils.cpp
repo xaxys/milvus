@@ -57,7 +57,7 @@
 #include "segcore/SegmentInterface.h"
 #include "segcore/SegcoreConfig.h"
 #include "segcore/Types.h"
-#include "segcore/storagev1translator/SealedIndexTranslator.h"
+#include "segcore/indexing/SealedIndexLoader.h"
 #include "storage/ChunkManager.h"
 #include "storage/DataCodec.h"
 #include "storage/FileManager.h"
@@ -1564,7 +1564,7 @@ PrepareLazySealedIndexSlot(LoadIndexInfo& load_index_info) {
     auto metadata = std::make_shared<LoadIndexInfo>(load_index_info);
     // The decision and policy belong to this generation, even after a config refresh.
     metadata->warmup_policy = "disable";
-    load_index_info.cache_index.reset();
+    load_index_info.index = nullptr;
     load_index_info.lazy_index_factory =
         [metadata = std::move(metadata)](milvus::OpContext* op_ctx) {
             CheckCancellation(op_ctx,
@@ -1582,7 +1582,7 @@ PrepareLazySealedIndexSlot(LoadIndexInfo& load_index_info) {
             return IndexInventory::ResolvedData{std::move(attempt.index_family),
                                                 attempt.index_value_type,
                                                 attempt.index_caps,
-                                                std::move(attempt.cache_index)};
+                                                std::move(attempt.index)};
         };
 }
 
@@ -1643,6 +1643,19 @@ MakeSealedIndexCapability(const LoadIndexInfo& info) {
     meta.family = info.index_family;
     meta.value_type = info.index_value_type;
     meta.caps = info.index_caps;
+    // Only the parameters selection actually needs, parsed once at registration.
+    const auto param_of = [&info](const char* key) -> std::string {
+        const auto it = info.index_params.find(key);
+        return it == info.index_params.end() ? std::string{} : it->second;
+    };
+    if (meta.family == "ngram") {
+        if (const auto v = param_of(index::MIN_GRAM); !v.empty()) {
+            meta.params.ngram.min_gram = static_cast<size_t>(std::stoul(v));
+        }
+        if (const auto v = param_of(index::MAX_GRAM); !v.empty()) {
+            meta.params.ngram.max_gram = static_cast<size_t>(std::stoul(v));
+        }
+    }
     return meta;
 }
 
@@ -1677,18 +1690,14 @@ LoadIndexData(milvus::tracer::TraceContext& ctx,
         field_meta, index_meta, remote_chunk_manager, fs);
     file_manager_context.set_for_loading_index(true);
 
-    // use cache layer to load vector/scalar index
-    auto translator = std::make_unique<
-        milvus::segcore::storagev1translator::SealedIndexTranslator>(
+    // Each index owns the cache for its storage.
+    auto loader = std::make_unique<milvus::segcore::SealedIndexLoader>(
         load_index_info, ctx, file_manager_context, config, op_ctx);
-    load_index_info->index_family = translator->Family();
-    load_index_info->index_value_type = translator->ValueType();
-    load_index_info->index_caps = translator->Caps();
+    load_index_info->index_family = loader->Family();
+    load_index_info->index_value_type = loader->ValueType();
+    load_index_info->index_caps = loader->Caps();
 
-    load_index_info->cache_index =
-        milvus::cachinglayer::Manager::GetInstance()
-            .CreateCacheSlot<index::IIndexReaderBase>(std::move(translator),
-                                                      op_ctx);
+    load_index_info->index = loader->CreateIndex(op_ctx);
 }
 
 FieldDataPtr

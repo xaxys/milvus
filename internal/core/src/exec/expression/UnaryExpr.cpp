@@ -247,7 +247,7 @@ PhyUnaryRangeFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                         result = ExecRangeVisitorImplForIndex<bool>();
                         break;
                     case proto::plan::GenericValue::ValCase::kInt64Val:
-                        if (PinnedJsonIndexIsFlat()) {
+                        if (SelectedJsonIndexIsFlat()) {
                             result = ExecRangeVisitorImplForIndex<int64_t>();
                         } else {
                             proto::plan::GenericValue double_val;
@@ -2079,7 +2079,7 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
     if (IsTextIndexOpType(expr_->op_type_)) {
         auto req = MakeIndexRequirement(RequiredReader::TextMatch);
         req.value_type = field_type_;
-        SelectAndPinIndex(req);
+        SelectAndCreateIndexReader(req);
         return;
     }
 
@@ -2089,11 +2089,10 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         return;
     }
 
-    // JsonStats: use JSON statistics to skip segments when possible.
-    if (CanUseJsonStatsAtInit()) {
-        exec_path_ = ExprExecPath::JsonStats;
-        return;
-    }
+    // JsonStats is not chosen here: EnsureExecPathDetermined() upgrades a
+    // RawData outcome to JsonStats when the segment has stats for the field,
+    // so a usable JSON path index selected below always wins over the
+    // shredded-column scan.
 
     // JSON array literals are only executable from raw data. Decide this
     // before the base selector pins a JSON index so a cold or failed index
@@ -2179,6 +2178,13 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         expr_->op_type_ == proto::plan::OpType::RegexMatch;
     auto req = MakeIndexRequirement(is_pattern ? RequiredReader::Ngram
                                                : RequiredReader::Predicate);
+    if (is_pattern) {
+        // The literal decides whether an NGRAM index can serve this query at all, so
+        // selection gets it up front instead of discovering it after a pin.
+        req.has_pattern = true;
+        req.pattern = GetValueFromProto<std::string>(expr_->val_);
+        req.pattern_op = ToIndexPatternOp(expr_->op_type_);
+    }
     req.value_type =
         data_type == DataType::ARRAY
             ? expr_->column_.element_type_
@@ -2188,7 +2194,7 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         expr_->val_.val_case() ==
             proto::plan::GenericValue::ValCase::kInt64Val &&
         !IsInt64SafeForJsonDoubleIndex(expr_->val_.int64_val());
-    if (is_pattern && SelectAndPinIndex(req) &&
+    if (is_pattern && SelectAndCreateIndexReader(req) &&
         ngram_reader_->CanHandle(GetValueFromProto<std::string>(expr_->val_),
                                  ToIndexPatternOp(expr_->op_type_))) {
         return;
@@ -2197,7 +2203,7 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         ClearSelectedIndex();
         req.reader = RequiredReader::PatternMatch;
     }
-    SelectAndPinIndex(req);
+    SelectAndCreateIndexReader(req);
     if (exec_path_ != ExprExecPath::ScalarIndex) {
         return;
     }
@@ -2548,10 +2554,10 @@ PhyUnaryRangeFilterExpr::ExecuteNgramPhase2(TargetBitmap& candidates,
 }
 
 bool
-PhyUnaryRangeFilterExpr::PinnedIndexIsFMIndex() const {
+PhyUnaryRangeFilterExpr::SelectedIndexIsFMIndex() const {
     // Family is recorded on the inventory entry at load time, so this is a
     // metadata check: no cast to a concrete index implementation, and no
-    // dependency on the reader having been pinned successfully.
+    // dependency on the reader having been created successfully.
     return selected_index_entry_.has_value() &&
            selected_index_entry_->family == index::families::kFmIndex;
 }
@@ -2591,7 +2597,7 @@ PhyUnaryRangeFilterExpr::CanUseFMPatternCandidates() {
     // validity in segment row space. The family check keeps this route
     // FM-specific: a different candidates-only reader would fall back to the
     // raw scan (still exact, just unaccelerated) until it is wired up here.
-    return PinnedIndexIsFMIndex() && PatternMatchIsCandidatesOnly() &&
+    return SelectedIndexIsFMIndex() && PatternMatchIsCandidatesOnly() &&
            null_reader_ != nullptr;
 }
 

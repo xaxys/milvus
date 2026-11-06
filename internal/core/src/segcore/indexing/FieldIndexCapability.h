@@ -19,7 +19,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -59,6 +61,17 @@ class IndexIdentity {
     bool
     operator<(const IndexIdentity& other) const;
 
+    // The persisted index id when this identity names a pre-built index. Used by
+    // selection to match a query hint without knowing how identities are encoded.
+    std::optional<int64_t>
+    pre_built_id() const;
+
+    // Renders the identity for logs: the pre-built index id as it was persisted,
+    // or "local:<n>" for a segment-local registration. The two namespaces are
+    // kept apart so a logged id always names the same index.
+    std::string
+    ToString() const;
+
  private:
     explicit IndexIdentity(std::variant<int64_t, uint64_t> value);
 
@@ -87,6 +100,24 @@ struct IndexKeyHash {
 };
 
 // Resolved metadata for one index, used to select and validate its reader.
+// Runtime parameters of one scalar index, grouped by family. Every family fills only
+// its own member; the rest stay default and mean "not carried by this family".
+struct ScalarIndexRuntimeParams {
+    struct Ngram {
+        // 0 means the metadata did not carry the value; selection then defers to the
+        // reader's own check after the pin rather than refusing the index.
+        size_t min_gram{0};
+        size_t max_gram{0};
+    } ngram;
+
+    struct FmIndex {
+        // Recorded for completeness. Selection cannot judge a literal for this family:
+        // the guard compares against the index's own engine statistics, which only
+        // exist once the reader is built (see the design doc, section 6.1).
+        double cost_ratio{0.001};
+    } fmindex;
+};
+
 struct IndexCapabilityEntry {
     IndexKey key;
 
@@ -110,6 +141,12 @@ struct IndexCapabilityEntry {
     // Metadata-derived caps must equal the opened reader's Caps(); the inventory
     // checks that invariant after pinning.
     index::ReaderCaps caps;
+
+    // Parameters selection needs to decide, BEFORE pinning, whether this index can
+    // serve a specific literal. Structured on purpose: the reader of these values is
+    // the selector, and adding a family adds a member here instead of changing the
+    // selector interface (LiteralSupported(req, entry)).
+    ScalarIndexRuntimeParams params;
 };
 
 // Index category available without initializing a lazy entry.

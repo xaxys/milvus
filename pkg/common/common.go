@@ -18,6 +18,7 @@ package common
 
 import (
 	"encoding/binary"
+	"math"
 	"math/bits"
 	"strconv"
 	"strings"
@@ -135,9 +136,20 @@ const (
 	//   An older QueryNode does not recognize FMINDEX and would fail to load
 	//   such a segment, so creation is gated on the whole cluster reporting >= 5
 	//   (see MinScalarIndexVersionForFMINDEX).
+	// Scalar index engine version 6:
+	// - Several scalar indexes on one field (see
+	//   MinScalarIndexVersionForScalarMultiIndex and
+	//   dataCoord.enableMultiScalarIndexPerField).
+	//   Raising the engine version also makes every segment whose scalar indexes
+	//   were built at an older version look outdated: with
+	//   dataCoord.autoUpgradeSegmentIndex enabled, dataCoord schedules the
+	//   bump-schema-version compaction for those segments and DataNode rebuilds
+	//   their scalar indexes. That is the intended upgrade path, but it is a
+	//   cluster-wide job, so it is worth knowing about before this version ships
+	//   (see the design doc for its interaction with several indexes on a field).
 	MinimalScalarIndexEngineVersion = int32(0)
-	CurrentScalarIndexEngineVersion = int32(5)
-	MaximumScalarIndexEngineVersion = int32(5)
+	CurrentScalarIndexEngineVersion = int32(6)
+	MaximumScalarIndexEngineVersion = int32(6)
 
 	// MinScalarIndexVersionForJsonPathMultiType is the minimum scalar index
 	// engine version that supports STL_SORT / BITMAP / HYBRID on JSON fields.
@@ -156,6 +168,14 @@ const (
 	// that recognizes FMINDEX. Creating an FMINDEX while any node still reports a
 	// lower version would break rolling upgrade (old QueryNodes cannot load it).
 	MinScalarIndexVersionForFMINDEX = int32(5)
+
+	// MinScalarIndexVersionForScalarMultiIndex is the minimum scalar index engine
+	// version that can load a segment whose load config carries several scalar
+	// indexes on one field. Below it, ChunkedSegmentSealedImpl::LoadScalarIndex
+	// asserts ("scalar index has been exist at ..."), so creating a second index
+	// on a field has to be refused until every QueryNode reports at least this
+	// version -- see dataCoord.enableMultiScalarIndexPerField.
+	MinScalarIndexVersionForScalarMultiIndex = int32(6)
 )
 
 // ClampScalarIndexVersion clamps the given scalar index version to MaximumScalarIndexEngineVersion.
@@ -396,13 +416,14 @@ const (
 //  Collection properties key
 
 const (
-	CollectionTTLConfigKey      = "collection.ttl.seconds"
-	CollectionAutoCompactionKey = "collection.autocompaction.enabled"
-	CollectionDescription       = "collection.description"
-	CollectionExternalSource    = "collection.external_source"
-	CollectionExternalSpec      = "collection.external_spec"
-	CollectionTTLFieldKey       = "ttl_field"
-	MaxTTLSeconds               = 3155760000 // 100 years
+	CollectionTTLConfigKey          = "collection.ttl.seconds"
+	CollectionAutoReleaseIdleTTLKey = "collection.autorelease.ttl.seconds"
+	CollectionAutoCompactionKey     = "collection.autocompaction.enabled"
+	CollectionDescription           = "collection.description"
+	CollectionExternalSource        = "collection.external_source"
+	CollectionExternalSpec          = "collection.external_spec"
+	CollectionTTLFieldKey           = "ttl_field"
+	MaxTTLSeconds                   = 3155760000 // 100 years
 
 	// Deprecated: will be removed in the 3.0 after implementing ack sync up semantic.
 	CollectionOnTruncatingKey = "collection.on.truncating" // when collection is on truncating, forbid the compaction of current collection.
@@ -1098,6 +1119,23 @@ func GetStringValue(kvs []*commonpb.KeyValuePair, key string) (result string, ex
 		return "", false
 	}
 	return kv.GetValue(), true
+}
+
+// GetCollectionAutoReleaseIdleTTL returns zero when the property is absent,
+// a positive duration for an override, or -time.Second to disable auto release.
+func GetCollectionAutoReleaseIdleTTL(kvs []*commonpb.KeyValuePair) (time.Duration, error) {
+	var ttl time.Duration
+	for _, kv := range kvs {
+		if kv.GetKey() != CollectionAutoReleaseIdleTTLKey {
+			continue
+		}
+		seconds, err := strconv.ParseInt(kv.GetValue(), 10, 64)
+		if err != nil || seconds < -1 || seconds == 0 || seconds > math.MaxInt64/int64(time.Second) {
+			return 0, merr.WrapErrParameterInvalidMsg("%s must be -1 or an integer between 1 and %d seconds, got %q", CollectionAutoReleaseIdleTTLKey, math.MaxInt64/int64(time.Second), kv.GetValue())
+		}
+		ttl = time.Duration(seconds) * time.Second
+	}
+	return ttl, nil
 }
 
 func GetCollectionTTL(kvs []*commonpb.KeyValuePair) (time.Duration, error) {

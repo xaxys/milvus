@@ -906,18 +906,13 @@ func (h *HandlersV2) getCollectionDetails(ctx context.Context, c *gin.Context, a
 	} else {
 		errMessage += err.Error() + ";"
 	}
-	vectorField := ""
-	for _, field := range coll.Schema.Fields {
-		if typeutil.IsVectorType(field.DataType) {
-			vectorField = field.Name
-			break
-		}
-	}
 	indexDesc := []gin.H{}
+	// DescribeCollection returns every index of the collection. Do not narrow the request
+	// to a field: DescribeIndex now honours field_name, and passing the first vector
+	// field's name would hide scalar indexes and other vector fields.
 	descIndexReq := &milvuspb.DescribeIndexRequest{
 		DbName:         dbName,
 		CollectionName: collectionName,
-		FieldName:      vectorField,
 	}
 	indexResp, err := h.wrapperProxy(ctx, c, descIndexReq, h.checkAuth, true, "/milvus.proto.milvus.MilvusService/DescribeIndex", func(reqCtx context.Context, req any) (any, error) {
 		return h.proxy.DescribeIndex(reqCtx, req.(*milvuspb.DescribeIndexRequest))
