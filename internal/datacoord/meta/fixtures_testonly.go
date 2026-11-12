@@ -675,6 +675,11 @@ type MockMixCoord struct {
 	cnt   uberatomic.Int64
 }
 
+// GetIndexLoadStatus implements types.MixCoord; the DataCoord fixtures never read it.
+func (m *MockMixCoord) GetIndexLoadStatus(context.Context, *querypb.GetIndexLoadStatusRequest) (*querypb.GetIndexLoadStatusResponse, error) {
+	return &querypb.GetIndexLoadStatusResponse{}, nil
+}
+
 func (m *MockMixCoord) GetGcStatus(context.Context) (*datapb.GetGcStatusResponse, error) {
 	return &datapb.GetGcStatusResponse{}, nil
 }
