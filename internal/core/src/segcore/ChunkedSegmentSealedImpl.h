@@ -1621,10 +1621,17 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         const std::shared_ptr<const RuntimeResourceState>& runtime,
         FieldId field_id);
 
-    static std::vector<std::shared_ptr<IndexInventory::Entry>>
-    EraseJsonIndexesAtPath(RuntimeResourceState& runtime,
-                           FieldId field_id,
-                           std::string_view nested_path);
+    // Drops exactly one scalar index, identified by its inventory key. A field
+    // may carry several, so the key -- not the field (which would take the
+    // siblings) and not the JSON path (which would take a sibling cast) -- is
+    // what identifies the one to remove. Field-level cleanup, when the field's
+    // last index goes away, is DropIndex() below.
+    void
+    DropScalarIndex(const IndexKey& key,
+                    const SchemaPtr& schema_snapshot,
+                    RuntimeResourceState& runtime,
+                    PublishedSegmentState& staged_state,
+                    StagedStateCommitter& committer);
 
     static void
     SyncJsonIndexState(PublishedSegmentState& state,
@@ -2012,6 +2019,15 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
               RuntimeResourceState* runtime = nullptr,
               milvus::OpContext* op_ctx = nullptr,
               StagedStateCommitter* committer = nullptr);
+
+    // Removes one (field, indexID). Unlike DropIndex, which retires every index of
+    // the field and its vector index, this keeps the field's siblings alive.
+    void
+    DropScalarIndex(const IndexKey& key,
+                    const SealedFieldLayoutPtr& schema_snapshot,
+                    RuntimeResourceState& runtime,
+                    PublishedSegmentState& staged_state,
+                    StagedStateCommitter& committer);
 
     void
     DropFieldData(
