@@ -26,8 +26,6 @@ import (
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
 	"github.com/milvus-io/milvus/internal/util/importutilv2/binlog"
 	"github.com/milvus-io/milvus/pkg/v3/common"
-	"github.com/milvus-io/milvus/pkg/v3/proto/indexcgopb"
-	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -50,6 +48,10 @@ type sourceStream struct {
 	// goroutine, folded into the run counters when the stream drains.
 	readWait time.Duration
 
+	// sharedDeletes carries the task-wide snapshot L0 masks. It is nil for
+	// non-snapshot jobs and for snapshot jobs without a shared L0 inventory.
+	sharedDeletes *binlog.SnapshotL0Deletes
+
 	index        int
 	file         *internalpb.ImportFile
 	reader       importutilv2.Reader
@@ -63,13 +65,15 @@ func newReshardSourceStream(
 	files []*internalpb.ImportFile,
 	writer *fragmentWriter,
 	timings *reshardStageTimings,
+	sharedDeletes *binlog.SnapshotL0Deletes,
 ) *sourceStream {
 	return &sourceStream{
-		spec:    spec,
-		files:   files,
-		runCtx:  runCtx,
-		writer:  writer,
-		timings: timings,
+		spec:          spec,
+		files:         files,
+		runCtx:        runCtx,
+		writer:        writer,
+		timings:       timings,
+		sharedDeletes: sharedDeletes,
 	}
 }
 
@@ -163,13 +167,9 @@ func (s *sourceStream) open(file *internalpb.ImportFile) error {
 	s.cancelSource = cancelSource
 	reader, err := newReshardSourceReader(
 		sourceCtx,
-		s.spec.cm,
-		s.spec.collectionSchema,
+		s.spec,
 		file,
-		s.spec.options,
-		s.spec.bufferSize,
-		s.spec.storageConfig,
-		s.spec.pluginContext,
+		s.sharedDeletes,
 	)
 	if err != nil {
 		cancelSource()
@@ -396,30 +396,34 @@ func startReshardPrepare(
 
 func newReshardSourceReader(
 	ctx context.Context,
-	cm storage.ChunkManager,
-	schema *schemapb.CollectionSchema,
+	spec *sourceSpec,
 	file *internalpb.ImportFile,
-	options importutilv2.Options,
-	bufferSize int64,
-	storageConfig *indexpb.StorageConfig,
-	pluginContext *indexcgopb.StoragePluginContext,
+	sharedDeletes *binlog.SnapshotL0Deletes,
 ) (importutilv2.Reader, error) {
 	if file == nil {
 		return nil, merr.WrapErrDataIntegrityMsg("nil ReshardTask source")
 	}
-	if importutilv2.IsBackup(options) {
-		tsStart, tsEnd, err := importutilv2.ParseTimeRange(options)
-		if err != nil {
-			return nil, err
+	if spec.snapshot {
+		if spec.factory == nil {
+			return nil, merr.WrapErrServiceInternalMsg("snapshot reshard source factory is not initialized")
 		}
-		storageVersion, err := importutilv2.GetStorageVersion(options)
-		if err != nil {
-			return nil, err
-		}
-		return binlog.NewReader(ctx, cm, schema, storageConfig, storageVersion, file.GetPaths(), tsStart, tsEnd, int(bufferSize), "", pluginContext)
+		return spec.factory.NewReader(ctx, spec.collectionSchema, file, int(spec.bufferSize),
+			spec.snapshotDeleteBudget, sharedDeletes)
 	}
-	// V3 never carries a typed snapshot source, so no delete budget is reserved.
-	return importutilv2.NewReader(ctx, cm, schema, file, options, int(bufferSize), storageConfig, 0)
+	if importutilv2.IsBackup(spec.options) {
+		tsStart, tsEnd, err := importutilv2.ParseTimeRange(spec.options)
+		if err != nil {
+			return nil, err
+		}
+		storageVersion, err := importutilv2.GetStorageVersion(spec.options)
+		if err != nil {
+			return nil, err
+		}
+		return binlog.NewReader(ctx, spec.cm, spec.collectionSchema, spec.storageConfig, storageVersion,
+			file.GetPaths(), tsStart, tsEnd, int(spec.bufferSize), "", spec.pluginContext)
+	}
+	return importutilv2.NewReader(ctx, spec.cm, spec.collectionSchema, file, spec.options,
+		int(spec.bufferSize), spec.storageConfig, 0)
 }
 
 // runFieldFunctions executes every schema function (TextEmbedding, BM25,

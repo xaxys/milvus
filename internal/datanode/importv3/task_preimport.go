@@ -117,6 +117,9 @@ func (t *preImportTask) Execute(ctx context.Context) (any, error) {
 // bytes, reading no content. The row count is left 0 and total_memory_size is
 // left unset, because DataCoord only needs the per-file size for reshard BFD.
 func (t *preImportTask) sizeOnlyFile(ctx context.Context, file *internalpb.ImportFile) (*datapb.ImportV3FileStats, error) {
+	if importutilv2.IsSnapshotSource(t.req.GetOptions()) {
+		return t.snapshotFileSize(ctx, file)
+	}
 	maxSize := paramtable.Get().DataNodeCfg.MaxImportFileSizeInGB.GetAsFloat() * 1024 * 1024 * 1024
 
 	start := time.Now()
@@ -140,6 +143,32 @@ func (t *preImportTask) sizeOnlyFile(ctx context.Context, file *internalpb.Impor
 	}
 	mlog.Info(ctx, "size file stat done (backup)",
 		mlog.FieldTaskID(t.taskID), mlog.Strings("files", file.GetPaths()),
+		mlog.Duration("dur", time.Since(start)))
+	return &datapb.ImportV3FileStats{
+		FileId:   file.GetId(),
+		FileSize: size,
+	}, nil
+}
+
+// snapshotFileSize sizes one exact snapshot manifest (and its LOB references)
+// without reading rows. Snapshot jobs are backup jobs, so DataCoord only needs
+// the physical size for reshard BFD; L0 deletes are folded later in Reshard.
+func (t *preImportTask) snapshotFileSize(ctx context.Context, file *internalpb.ImportFile) (*datapb.ImportV3FileStats, error) {
+	maxSize := paramtable.Get().DataNodeCfg.MaxImportFileSizeInGB.GetAsFloat() * 1024 * 1024 * 1024
+
+	start := time.Now()
+	factory := importutilv2.NewReaderFactory(ctx, t.cm, t.req.GetStorageConfig(), t.req.GetOptions())
+	size, err := factory.SnapshotFileSize(ctx, t.req.GetSchema(), file)
+	if err != nil {
+		return nil, err
+	}
+	if size > int64(maxSize) {
+		return nil, merr.WrapErrParameterInvalidMsg(
+			"The import file size has reached the maximum limit allowed for importing, "+
+				"fileSize=%d, maxSize=%d", size, int64(maxSize))
+	}
+	mlog.Info(ctx, "size file stat done (snapshot)",
+		mlog.FieldTaskID(t.taskID), mlog.Int64("fileID", file.GetId()),
 		mlog.Duration("dur", time.Since(start)))
 	return &datapb.ImportV3FileStats{
 		FileId:   file.GetId(),

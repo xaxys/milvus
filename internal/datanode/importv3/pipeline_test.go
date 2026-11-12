@@ -36,6 +36,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/importutilv2"
+	"github.com/milvus-io/milvus/internal/util/importutilv2/binlog"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -764,9 +765,9 @@ func staticReshardReader(reader importutilv2.Reader) reshardReaderBuilder {
 func mockReshardBoundaries(t *testing.T, readers map[int64]reshardReaderBuilder, recorder *reshardCallRecorder) {
 	t.Helper()
 	readerMock := mockey.Mock(newReshardSourceReader).To(
-		func(ctx context.Context, _ storage.ChunkManager, _ *schemapb.CollectionSchema, file *internalpb.ImportFile, _ importutilv2.Options, _ int64, _ *indexpb.StorageConfig, pluginContext *indexcgopb.StoragePluginContext) (importutilv2.Reader, error) {
+		func(ctx context.Context, spec *sourceSpec, file *internalpb.ImportFile, _ *binlog.SnapshotL0Deletes) (importutilv2.Reader, error) {
 			recorder.mu.Lock()
-			recorder.readContexts = append(recorder.readContexts, pluginContext)
+			recorder.readContexts = append(recorder.readContexts, spec.pluginContext)
 			recorder.mu.Unlock()
 			build, ok := readers[file.GetId()]
 			require.True(t, ok, "unexpected reshard source %d", file.GetId())
