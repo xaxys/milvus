@@ -676,6 +676,9 @@ func (t *QueryTask) createPlanArgs(ctx context.Context, visitorArgs *planparserv
 			metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel, metrics.FailLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 			return WrapPlanCreationError(err, "failed to create query plan")
 		}
+		if err := applyIndexHint(ctx, t.node, t.GetCollectionID(), t.plan, t.request.GetQueryParams()); err != nil {
+			return err
+		}
 		collectExprTemplateFeatures(t.request.GetExprTemplateValues(), t.featureSink())
 		collectExecFeatureBits(t.plan, t.collectFeatures)
 		metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel, metrics.SuccessLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
