@@ -7,6 +7,7 @@ import (
 
 	"github.com/milvus-io/milvus/internal/featureusage"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/internal/views/viewquery"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -41,6 +42,9 @@ func (c *legacyQueryCollector) Reduce(ctx context.Context, req *LegacyQueryReque
 				costs = append(costs, input.GetCostAggregation())
 			}
 			result.CostAggregation = mergeLegacyCosts(costs)
+		}
+		if result.Explain == nil {
+			result.Explain = mergeExplain(inputs)
 		}
 		result.FeatureBits |= executionSummaryFeatureBits(plan.ExecutionSummary)
 		result.MvccTimestamp = max(plan.Mvcc.GetGrowingTimetick(), plan.Mvcc.GetTransformingTimetick())
@@ -117,12 +121,30 @@ func reduceLegacyShardSearch(ctx context.Context, req *internalpb.SearchRequest,
 	if err != nil {
 		return nil, err
 	}
+	result.Explain = mergeExplain(inputs)
 	// Preserve accounting even for empty worker results discarded by reducers.
 	result.ScannedRemoteBytes, result.ScannedTotalBytes = scannedRemote, scannedTotal
 	result.IsTopkReduce, result.IsRecallEvaluation = topkReduce, recallEvaluation
 	result.CostAggregation = cost
 	result.Status = merr.Success()
 	return result, nil
+}
+
+// mergeExplain keeps what the runs this reduce merged recorded. The reduce
+// builds a fresh response, which would otherwise drop their explain.
+func mergeExplain[T interface {
+	GetExplain() *internalpb.ExecutionExplain
+}](inputs []T) *internalpb.ExecutionExplain {
+	nodes := make([]*internalpb.ExecutionExplain, 0, len(inputs))
+	for _, input := range inputs {
+		if node := input.GetExplain(); node != nil {
+			nodes = append(nodes, node)
+		}
+	}
+	if len(nodes) == 0 {
+		return nil
+	}
+	return explain.MergeReduced(nodes...)
 }
 
 func mergeLegacyCosts(costs []*internalpb.CostAggregation) *internalpb.CostAggregation {

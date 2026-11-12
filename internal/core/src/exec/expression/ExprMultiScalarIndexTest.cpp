@@ -125,11 +125,12 @@ ExpectSameFilterResult(const ColumnVectorPtr& raw,
 ColumnVectorPtr
 EvaluateFilter(const expr::TypedExprPtr& filter_expr,
                const segcore::SegmentInternalInterface* segment,
-               int64_t row_count) {
+               int64_t row_count,
+               milvus::exec::ExecutionExplainRecorder* explain = nullptr) {
     auto plan = std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID,
                                                        filter_expr);
     return milvus::test::gen_filter_res(
-        plan.get(), segment, row_count, MAX_TIMESTAMP);
+        plan.get(), segment, row_count, MAX_TIMESTAMP, nullptr, explain);
 }
 
 // Installs one already-opened reader under an explicit indexID, so a test can
@@ -941,3 +942,109 @@ TEST(MultiScalarIndexExprTest, StrictHintIsScopedToItsJsonPath) {
               milvus::segcore::IndexIdentity::PreBuiltIndex(6102));
 }
 
+
+// Copies a protobuf string map into a std::map so assertions read it with
+// ordinary lookups.
+std::map<std::string, int64_t>
+CountersOf(const proto::internal::ExecutionExplain& node) {
+    std::map<std::string, int64_t> out;
+    for (const auto& [key, value] : node.counters()) {
+        out[key] = value;
+    }
+    return out;
+}
+
+std::map<std::string, std::string>
+AttributesOf(const proto::internal::ExecutionExplain& node) {
+    std::map<std::string, std::string> out;
+    for (const auto& [key, value] : node.attributes()) {
+        out[key] = value;
+    }
+    return out;
+}
+
+// The explain payload answers "what did this filter do, per leaf": which index
+// served it, or why the raw column did. One field, one filter, two segments --
+// with and without an index -- so the two decision groups can be compared.
+TEST(MultiScalarIndexExprTest, ExplainRecordsIndexAndRawDecisions) {
+    constexpr int64_t kIndexId = 4201;
+
+    auto schema = std::make_shared<Schema>();
+    auto varchar_fid =
+        schema->AddDebugField("varchar_field", DataType::VARCHAR);
+    auto field_data = milvus::test::expr_index::StringField(kVarCharValues);
+
+    proto::plan::GenericValue equal_value;
+    equal_value.set_string_val("prefix_beta");
+    auto equal_expr = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(varchar_fid, DataType::VARCHAR),
+        proto::plan::OpType::Equal,
+        equal_value,
+        std::vector<proto::plan::GenericValue>());
+
+    // No index: the leaf falls back to the raw column and says why.
+    {
+        RawFieldFiles files;
+        auto segment = CreateSealedSegment(schema);
+        segment->LoadFieldData(files.Prepare(varchar_fid, {field_data}));
+
+        milvus::exec::ExecutionExplainRecorder explain(kVarCharValues.size());
+        auto result = EvaluateFilter(
+            equal_expr, segment.get(), kVarCharValues.size(), &explain);
+        ExpectHitRows(result, {2, 6}, "Equal \"prefix_beta\" without index");
+
+        proto::internal::ExecutionExplain node;
+        ASSERT_TRUE(node.ParseFromString(explain.Finish()));
+        EXPECT_EQ(node.kind(), "segment");
+        const auto counters = CountersOf(node);
+        EXPECT_EQ(counters.at("rows_total"),
+                  static_cast<int64_t>(kVarCharValues.size()));
+        EXPECT_EQ(counters.at("rows_matched"), 0)
+            << "nothing was matched by an index";
+        ASSERT_EQ(node.children_size(), 1);
+        const auto& group = node.children(0);
+        EXPECT_EQ(group.kind(), "filter_group");
+        const auto attributes = AttributesOf(group);
+        EXPECT_EQ(attributes.at("field_id"),
+                  std::to_string(varchar_fid.get()));
+        EXPECT_EQ(attributes.at("decline_reason"), "no_index_on_field");
+        const auto group_counters = CountersOf(group);
+        EXPECT_EQ(group_counters.at("leaves"), 1);
+        EXPECT_EQ(group_counters.at("rows_matched"), 0)
+            << "a raw leaf has no index hits to report";
+    }
+
+    // INVERTED serves the leaf: the group names the index and counts its rows.
+    {
+        RawFieldFiles files;
+        auto segment = CreateSealedSegment(schema);
+        segment->LoadFieldData(files.Prepare(varchar_fid, {field_data}));
+        InstallIndexWithId(
+            *segment,
+            varchar_fid,
+            DataType::VARCHAR,
+            kIndexId,
+            BuildIndex(varchar_fid,
+                       DataType::VARCHAR,
+                       milvus::index::INVERTED_INDEX_TYPE,
+                       {field_data}));
+
+        milvus::exec::ExecutionExplainRecorder explain(kVarCharValues.size());
+        auto result = EvaluateFilter(
+            equal_expr, segment.get(), kVarCharValues.size(), &explain);
+        ExpectHitRows(result, {2, 6}, "Equal \"prefix_beta\" over INVERTED");
+
+        proto::internal::ExecutionExplain node;
+        ASSERT_TRUE(node.ParseFromString(explain.Finish()));
+        EXPECT_EQ(CountersOf(node).at("rows_matched"), 2);
+        ASSERT_EQ(node.children_size(), 1);
+        const auto& group = node.children(0);
+        const auto attributes = AttributesOf(group);
+        EXPECT_EQ(attributes.at("index_id"), std::to_string(kIndexId));
+        EXPECT_EQ(attributes.find("decline_reason"), attributes.end())
+            << "an index leaf declined nothing";
+        const auto group_counters = CountersOf(group);
+        EXPECT_EQ(group_counters.at("rows_matched"), 2);
+        EXPECT_EQ(group_counters.at("leaves"), 1);
+    }
+}

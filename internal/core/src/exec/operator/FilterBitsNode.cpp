@@ -27,6 +27,7 @@
 #include "common/Types.h"
 #include "exec/QueryContext.h"
 #include "exec/expression/EvalCtx.h"
+#include "exec/expression/ExecutionExplainRecorder.h"
 #include "exec/expression/ExprCache.h"
 #include "expr/ITypeExpr.h"
 #include "fmt/core.h"
@@ -92,6 +93,9 @@ PhyFilterBitsNode::PhyFilterBitsNode(
     // (ConvertPredicateToFilteredBitset), i.e. it is a null-rejecting
     // consumer: let conjunctions in the predicate tree drop UNKNOWN rows
     // from their active sets early.
+    if (exec_context != nullptr && query_context_ != nullptr) {
+        exec_context->SetExplain(query_context_->explain());
+    }
     exprs_ = std::make_unique<ExprSet>(
         filters, exec_context, /*null_rejecting=*/true);
     need_process_rows_ = query_context_->get_active_count();
@@ -269,6 +273,11 @@ PhyFilterBitsNode::GetOutput() {
                                             col_vec_size);
                 valid_bitset.append(valid_view);
                 num_processed_rows_ += col_vec_size;
+                // Raw leaves evaluated exactly the rows of this batch.
+                if (auto* explain = operator_context_->get_exec_context()
+                                        ->explain()) {
+                    explain->AddScannedRowsForRawLeaves(col_vec_size);
+                }
             } else {
                 ThrowInfo(UnexpectedError,
                           "PhyFilterBitsNode result should be bitmap");

@@ -188,6 +188,19 @@ message SubSearchResults {
   schema.SearchResultData result_data = 8;
 }
 
+// Execution explain: what the query actually did, grouped by decision so the size
+// follows the number of distinct decisions instead of the number of leaves.
+// Counters are totals over the node's children.
+message ExecutionExplain {
+    // "segment" | "filter_group" | "querynode" | "delegator" | "query"
+    string kind = 1;
+    string name = 2;
+    map<string, int64> counters = 3;
+    map<string, string> attributes = 4;
+    repeated ExecutionExplain children = 5;
+    uint32 version = 6;
+}
+
 message SearchResults {
   common.MsgBase base = 1;
   common.Status status = 2;
@@ -213,6 +226,8 @@ message SearchResults {
   bool is_recall_evaluation = 19;
   int64 scanned_remote_bytes = 20;
   int64 scanned_total_bytes = 21;
+  // Execution explain tree, absent when nothing was recorded.
+  ExecutionExplain explain = 25;
   // pre-decoded SearchResultData, avoids re-marshal/unmarshal between delegator and proxy
   schema.SearchResultData result_data = 22;
   // Per-segment filter valid counts for two-stage search (filter-only mode).
@@ -298,6 +313,8 @@ message RetrieveResults {
   // Execution features segcore used for this request; see
   // SearchResults.feature_bits.
   uint64 feature_bits = 21;
+  // Execution explain tree, absent when nothing was recorded.
+  ExecutionExplain explain = 23;
 
   // Query-local typed columns; selected together with ids at every reduce.
   repeated schema.FieldData computed_results = 22;

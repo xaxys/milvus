@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proxy/shardclient"
 	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/exprutil"
 	"github.com/milvus-io/milvus/internal/util/function/embedding"
 	"github.com/milvus-io/milvus/internal/util/function/models"
@@ -1803,6 +1804,22 @@ func (t *SearchTask) PostExecute(ctx context.Context) error {
 			rd.GroupByFieldValue = rd.GroupByFieldValues[0]
 			rd.GroupByFieldValues = nil
 		}
+	}
+
+	// Execution explain: what the shards did, rendered for the client. The
+	// pipeline keeps no explain, so it comes from the results it consumed.
+	explains := make([]*internalpb.ExecutionExplain, 0, len(toReduceResults))
+	for _, result := range toReduceResults {
+		explains = explain.Splice(explains, result.GetExplain())
+	}
+	if rendered := queryExplain(explains); rendered != "" {
+		if t.result.Status == nil {
+			t.result.Status = merr.Success()
+		}
+		if t.result.Status.ExtraInfo == nil {
+			t.result.Status.ExtraInfo = make(map[string]string, 1)
+		}
+		t.result.Status.ExtraInfo[explainKey] = rendered
 	}
 
 	log.Debug(ctx, "Search post execute done",

@@ -18,6 +18,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/function/chain"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/internal/util/segcore"
@@ -64,6 +65,9 @@ type SearchTask struct {
 	others           []*SearchTask
 	notifier         chan error
 	serverID         int64
+	// What the segments of this task recorded, wrapped as the querynode level
+	// of the explain tree. Shared by every sub-task result this task produces.
+	explain *internalpb.ExecutionExplain
 
 	tr           *timerecord.TimeRecorder
 	scheduleSpan trace.Span
@@ -240,6 +244,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 	if err != nil {
 		return err
 	}
+	t.explain = t.buildExplain(results, searchedSegments)
 
 	// In filter-only mode, extract filter statistics and return early.
 	// This supports two-stage search: stage-1 collects per-segment valid
@@ -271,6 +276,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 				SealedSegmentIDsSearched: segmentIDs,
 				FilterValidCounts:        validCounts,
 				FeatureBits:              featureBits,
+				Explain:                  t.explain,
 				CostAggregation: &internalpb.CostAggregation{
 					ServiceTime:          tr.ElapseSpan().Milliseconds(),
 					TotalRelatedDataSize: relatedDataSize,
@@ -303,6 +309,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 			}
 			searchResults.SlicedOffset = 1
 			searchResults.SlicedNumCount = 1
+			searchResults.Explain = t.explain
 			searchResults.CostAggregation = &internalpb.CostAggregation{
 				ServiceTime: tr.ElapseSpan().Milliseconds(),
 			}
@@ -721,6 +728,31 @@ func (t *SearchTask) Done(err error) {
 
 func (t *SearchTask) Wait() error {
 	return <-t.notifier
+}
+
+// buildExplain wraps what the segments recorded into the querynode level of the
+// explain tree. It is nil when no segment recorded anything.
+func (t *SearchTask) buildExplain(results []*segments.SearchResult, searchedSegments []segments.Segment) *internalpb.ExecutionExplain {
+	children := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for i, result := range results {
+		if i >= len(searchedSegments) {
+			break
+		}
+		node, err := result.GetExplain()
+		if err != nil {
+			mlog.Warn(t.ctx, "failed to decode segment execution explain", mlog.Err(err))
+			continue
+		}
+		if node == nil {
+			continue
+		}
+		node.Name = strconv.FormatInt(searchedSegments[i].ID(), 10)
+		children = explain.Splice(children, node)
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	return explain.Wrap(explain.KindQueryNode, strconv.FormatInt(t.GetNodeID(), 10), children)
 }
 
 func (t *SearchTask) SearchResult() *internalpb.SearchResults {

@@ -65,6 +65,9 @@ message RetrieveResults {
   // Materialized computed columns, aligned with ids. QueryScan keeps Arrow
   // details until final row selection and populates this field afterward.
   repeated schema.FieldData computed_results = 10;
+  // Serialized ExecutionExplain of the run that produced this result, absent
+  // when the segment recorded nothing.
+  bytes explain = 11;
 }
 
 message LoadFieldMeta {

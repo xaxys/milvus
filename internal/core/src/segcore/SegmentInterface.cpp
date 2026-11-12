@@ -48,6 +48,7 @@
 #include "plan/PlanNode.h"
 #include "plan/PlanNodeIdGenerator.h"
 #include "prometheus/histogram.h"
+#include "exec/expression/ExecutionExplainRecorder.h"
 #include "query/ExecPlanNodeVisitor.h"
 #include "query/PlanImpl.h"
 #include "query/PlanNode.h"
@@ -223,9 +224,15 @@ SegmentInternalInterface::Search(
     visitor.SetReadSchema(plan->schema_);
     visitor.SetFilterOnly(filter_only);
     visitor.SetEnableExprCache(enable_expr_cache);
+    // Explain is collected only when someone asked for it; the recorder carries
+    // the segment row count for the payload's rows_total.
+    auto explain =
+        std::make_shared<milvus::exec::ExecutionExplainRecorder>(get_real_count());
+    visitor.SetExplainRecorder(explain.get());
     auto results = std::make_unique<SearchResult>();
     *results = visitor.get_moved_result(*plan->plan_node_);
     results->segment_ = (void*)this;
+    results->explain_blob_ = explain->Finish();
     return results;
 }
 
@@ -303,7 +310,11 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
         visitor.SetRetrieveCandidateBudget(limit_size,
                                            plan->max_candidate_rows_);
     }
+    auto explain =
+        std::make_shared<milvus::exec::ExecutionExplainRecorder>(get_real_count());
+    visitor.SetExplainRecorder(explain.get());
     auto retrieve_results = visitor.get_retrieve_result(*plan->plan_node_);
+    results->set_explain(explain->Finish());
 
     retrieve_results.segment_ = (void*)this;
     results->set_has_more_result(retrieve_results.has_more_result);

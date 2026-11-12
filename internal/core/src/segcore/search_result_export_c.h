@@ -121,6 +121,13 @@ PrepareSearchResultsForExport(CTraceContext c_trace,
 //     the segment search itself, by ExportSearchResultAsArrowRecordBatchWithInputPlan
 //     when reading extra fields, and by FillOutputFieldsOrdered during late
 //     materialization. Caller should invoke this after all those phases.
+// Copy the serialized execution explain of this result into out_blob (allocated
+// by the caller through malloc/free). out_size is zero when nothing was recorded.
+void
+GetSearchResultExplain(CSearchResult c_search_result,
+                       void** out_blob,
+                       int* out_size);
+
 void
 GetSearchResultMetadata(CSearchResult c_search_result,
                         bool* has_group_by,

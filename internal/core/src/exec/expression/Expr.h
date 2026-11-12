@@ -38,6 +38,7 @@
 #include "common/OpContext.h"
 #include "common/Types.h"
 #include "exec/expression/EvalCtx.h"
+#include "exec/expression/ExecutionExplainRecorder.h"
 #include "exec/expression/IndexPathSelection.h"
 #include "exec/expression/ValueLookupSource.h"
 #include "exec/expression/ExprCacheHelper.h"
@@ -470,6 +471,12 @@ class Expr : public std::enable_shared_from_this<Expr> {
     // mark and propagate it to their inputs; everywhere else (in particular
     // NOT, where FALSE and UNKNOWN produce different results) the default
     // no-op stops the propagation.
+    // Optional execution-explain sink, set once after construction for the leaves
+    // that can record decisions.
+    virtual void
+    SetExplainRecorder(ExecutionExplainRecorder* /*explain*/) {
+    }
+
     virtual void
     MarkNullRejecting() {
     }
@@ -568,7 +575,8 @@ class SegmentExpr : public Expr {
                 int32_t consistency_level,
                 bool allow_any_json_cast_type = false,
                 bool is_json_contains = false,
-                const query::PlanOptions& plan_options = {})
+                const query::PlanOptions& plan_options = {},
+                ExecutionExplainRecorder* explain = nullptr)
         : Expr(DataType::BOOL, std::move(input), name, op_ctx),
           segment_(const_cast<segcore::SegmentInternalInterface*>(segment)),
           field_id_(field_id),
@@ -576,6 +584,7 @@ class SegmentExpr : public Expr {
           value_type_(value_type),
           allow_any_json_cast_type_(allow_any_json_cast_type),
           active_count_(active_count),
+          explain_(explain),
           batch_size_(batch_size),
           consistency_level_(consistency_level),
           is_json_contains_(is_json_contains),
@@ -3439,7 +3448,27 @@ class SegmentExpr : public Expr {
                                                *cached_index_chunk_valid_res_,
                                                *offsets);
         }
-        return SliceCachedIndexResult(need_element_slicing);
+        auto sliced = SliceCachedIndexResult(need_element_slicing);
+        // Hits this leaf got from the index. A nested index sliced at element
+        // level counts elements; the caller folds them to rows afterwards, so the
+        // two domains are kept apart instead of pretending one is the other.
+        if (explain_ != nullptr && selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                int64_t matched = 0;
+                if (auto col = std::dynamic_pointer_cast<ColumnVector>(sliced);
+                    col != nullptr && col->IsBitmap()) {
+                    matched =
+                        TargetBitmapView(col->GetRawData(), col->size()).count();
+                }
+                if (need_element_slicing) {
+                    explain_->AddElementHits(field_id_, *id, matched);
+                } else {
+                    explain_->AddIndexHits(field_id_, *id, matched);
+                }
+            }
+        }
+        return sliced;
     }
 
     template <typename T>
@@ -4262,8 +4291,48 @@ class SegmentExpr : public Expr {
     // whole-filter cache hit or a conjunction that runs out of rows can skip
     // the evaluation. The report counts feature use, so that only affects
     // how often, never whether.
+    // One line per leaf for the explain payload; independent of the feature-bit
+    // accounting and cheap enough to always run (the sink is null unless the
+    // caller asked for an explain).
+    void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        explain_ = explain;
+    }
+
+    void
+    RecordExplainDecision() {
+        auto* explain = explain_;
+        if (explain == nullptr) {
+            return;
+        }
+        const bool used_index = exec_path_ == ExprExecPath::ScalarIndex ||
+                                exec_path_ == ExprExecPath::TextIndex;
+        int64_t index_id = 0;
+        std::string family;
+        std::string path;
+        bool nested = false;
+        if (selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                index_id = *id;
+            }
+            family = selected_index_entry_->family;
+            path = selected_index_entry_->json_path;
+            nested = selected_index_entry_->caps.nested;
+        }
+        std::string reason;
+        if (!used_index) {
+            reason = milvus::exec::ToString(HasIndexForThisPath()
+                                  ? DeclineReason::kIndexUnusable
+                                  : DeclineReason::kNoIndexOnField);
+        }
+        explain->RecordDecision(
+            field_id_, used_index, index_id, family, nested, path, reason);
+    }
+
     void
     RecordExecPath() {
+        RecordExplainDecision();
         auto* recorder = feature_recorder_;
         if (recorder == nullptr || !ReportsExecPath()) {
             return;
@@ -4604,6 +4673,7 @@ class SegmentExpr : public Expr {
     // QueryContext. Null for growing segments and non-pinned paths.
     const segcore::SegmentReadSnapshot* snapshot_{nullptr};
     const FieldId field_id_;
+    ExecutionExplainRecorder* explain_{nullptr};
     bool is_pk_field_{false};
     // Whether the column carries a validity (null) bitmap. When false, a chunk
     // skipped by SkipIndex needs no per-row validity work, so the multi-chunk

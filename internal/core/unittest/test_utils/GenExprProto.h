@@ -18,6 +18,7 @@
 
 #include "common/Consts.h"
 #include "expr/ITypeExpr.h"
+#include "exec/expression/ExecutionExplainRecorder.h"
 #include "exec/expression/Expr.h"
 #include "exec/expression/Utils.h"
 #include "pb/plan.pb.h"
@@ -171,16 +172,21 @@ gen_filter_res(milvus::plan::PlanNode* plan_node,
                const milvus::segcore::SegmentInternalInterface* segment,
                uint64_t active_count,
                uint64_t timestamp,
-               FixedVector<int32_t>* offsets = nullptr) {
+               FixedVector<int32_t>* offsets = nullptr,
+               milvus::exec::ExecutionExplainRecorder* explain = nullptr) {
     auto filter_node = dynamic_cast<milvus::plan::FilterBitsNode*>(plan_node);
     assert(filter_node != nullptr);
     std::vector<milvus::expr::TypedExprPtr> filters;
     filters.emplace_back(filter_node->filter());
     auto query_context = std::make_shared<milvus::exec::QueryContext>(
         DEAFULT_QUERY_ID, segment, active_count, timestamp);
+    // The production path hands the recorder down from the filter node; this
+    // helper builds the contexts directly, so it wires them itself.
+    query_context->SetExplain(explain);
 
     std::unique_ptr<milvus::exec::ExecContext> exec_context =
         std::make_unique<milvus::exec::ExecContext>(query_context.get());
+    exec_context->SetExplain(explain);
     auto exprs_ =
         std::make_unique<milvus::exec::ExprSet>(filters, exec_context.get());
     std::vector<VectorPtr> results_;

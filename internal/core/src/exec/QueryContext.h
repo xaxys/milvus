@@ -35,6 +35,8 @@
 
 namespace milvus::exec {
 
+class ExecutionExplainRecorder;
+
 enum class ContextScope { GLOBAL = 0, SESSION = 1, QUERY = 2, Executor = 3 };
 
 class BaseConfig {
@@ -183,6 +185,16 @@ class QueryContext : public Context {
     folly::Executor*
     executor() const {
         return executor_;
+    }
+
+    milvus::exec::ExecutionExplainRecorder*
+    explain() const {
+        return explain_;
+    }
+
+    void
+    SetExplain(milvus::exec::ExecutionExplainRecorder* explain) {
+        explain_ = explain;
     }
 
     std::shared_ptr<QueryConfig>
@@ -403,6 +415,7 @@ class QueryContext : public Context {
     // physical time in microseconds (for entity-level TTL filtering)
     // This is already converted from TSO timestamp to physical time in Go layer
     int64_t entity_ttl_physical_time_us_;
+    milvus::exec::ExecutionExplainRecorder* explain_{nullptr};
     milvus::Timestamp collection_ttl_timestamp_;
     // used for vector search
     milvus::SearchInfo search_info_;
@@ -464,8 +477,19 @@ class ExecContext : public Context {
         return query_context_->query_config();
     }
 
+    milvus::exec::ExecutionExplainRecorder*
+    explain() const {
+        return explain_;
+    }
+
+    void
+    SetExplain(milvus::exec::ExecutionExplainRecorder* explain) {
+        explain_ = explain;
+    }
+
  private:
     QueryContext* query_context_;
+    milvus::exec::ExecutionExplainRecorder* explain_{nullptr};
 };
 
 /// @brief Helper function to check cancellation token and throw if cancelled.
