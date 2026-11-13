@@ -126,11 +126,13 @@ ColumnVectorPtr
 EvaluateFilter(const expr::TypedExprPtr& filter_expr,
                const segcore::SegmentInternalInterface* segment,
                int64_t row_count,
-               milvus::exec::ExecutionExplainRecorder* explain = nullptr) {
+               milvus::exec::ExecutionExplainRecorder* explain = nullptr,
+               const milvus::query::PlanOptions& plan_options =
+                   milvus::query::PlanOptions()) {
     auto plan = std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID,
                                                        filter_expr);
     return milvus::test::gen_filter_res(
-        plan.get(), segment, row_count, MAX_TIMESTAMP, nullptr, explain);
+        plan.get(), segment, row_count, MAX_TIMESTAMP, nullptr, explain, plan_options);
 }
 
 // Installs one already-opened reader under an explicit indexID, so a test can
@@ -1012,6 +1014,9 @@ TEST(MultiScalarIndexExprTest, ExplainRecordsIndexAndRawDecisions) {
         EXPECT_EQ(group_counters.at("leaves"), 1);
         EXPECT_EQ(group_counters.at("rows_matched"), 0)
             << "a raw leaf has no index hits to report";
+        EXPECT_EQ(group_counters.at("rows_scanned"),
+                  static_cast<int64_t>(kVarCharValues.size()))
+            << "the raw leaf evaluated every row once";
     }
 
     // INVERTED serves the leaf: the group names the index and counts its rows.
@@ -1046,5 +1051,139 @@ TEST(MultiScalarIndexExprTest, ExplainRecordsIndexAndRawDecisions) {
         const auto group_counters = CountersOf(group);
         EXPECT_EQ(group_counters.at("rows_matched"), 2);
         EXPECT_EQ(group_counters.at("leaves"), 1);
+        EXPECT_EQ(group_counters.at("rows_scanned"), 0)
+            << "an index leaf scans no rows";
     }
+}
+
+// A pattern leaf tries the NGRAM pass first. With two hinted NGRAM indexes on
+// one field, the first one may reject the literal (min_gram too long) while the
+// second can serve it; the hint's order must not be read as "only the first
+// hinted index counts", or the leaf drops a usable index and a strict hint
+// fails the query.
+TEST(MultiScalarIndexExprTest, HintedSecondNgramServesPattern) {
+    constexpr int64_t kLongGramIndexId = 4301;
+    constexpr int64_t kShortGramIndexId = 4302;
+
+    auto schema = std::make_shared<Schema>();
+    auto varchar_fid = schema->AddDebugField("varchar_field", DataType::VARCHAR);
+    const std::vector<std::string> values = {
+        "abc", "abd", "xab", "zzz", "abcd", "abc"};
+    auto field_data = milvus::test::expr_index::StringField(values);
+
+    RawFieldFiles files;
+    auto segment = CreateSealedSegment(schema);
+    segment->LoadFieldData(files.Prepare(varchar_fid, {field_data}));
+    // min_gram 3 cannot answer a two-character literal; min_gram 2 can.
+    InstallIndexWithId(
+        *segment,
+        varchar_fid,
+        DataType::VARCHAR,
+        kLongGramIndexId,
+        BuildIndex(varchar_fid,
+                   DataType::VARCHAR,
+                   milvus::index::NGRAM_INDEX_TYPE,
+                   {field_data},
+                   {{milvus::index::MIN_GRAM, 3}, {milvus::index::MAX_GRAM, 4}}));
+    InstallIndexWithId(
+        *segment,
+        varchar_fid,
+        DataType::VARCHAR,
+        kShortGramIndexId,
+        BuildIndex(varchar_fid,
+                   DataType::VARCHAR,
+                   milvus::index::NGRAM_INDEX_TYPE,
+                   {field_data},
+                   {{milvus::index::MIN_GRAM, 2}, {milvus::index::MAX_GRAM, 3}}));
+
+    proto::plan::GenericValue prefix_value;
+    prefix_value.set_string_val("ab");
+    auto like_expr = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(varchar_fid, DataType::VARCHAR),
+        proto::plan::OpType::PrefixMatch,
+        prefix_value,
+        std::vector<proto::plan::GenericValue>());
+
+    milvus::query::PlanOptions options;
+    options.index_hints = {{varchar_fid.get(), kLongGramIndexId},
+                           {varchar_fid.get(), kShortGramIndexId}};
+    options.index_hint_strict = true;
+
+    milvus::exec::ExecutionExplainRecorder explain(values.size());
+    ColumnVectorPtr result;
+    ASSERT_NO_THROW(result = EvaluateFilter(
+                        like_expr, segment.get(), values.size(), &explain, options))
+        << "the second hinted ngram index can serve the literal";
+
+    ExpectHitRows(result, {0, 1, 4, 5}, "LIKE 'ab%' over two hinted ngram indexes");
+
+    proto::internal::ExecutionExplain node;
+    ASSERT_TRUE(node.ParseFromString(explain.Finish()));
+    ASSERT_EQ(node.children_size(), 1);
+    const auto attributes = AttributesOf(node.children(0));
+    ASSERT_TRUE(attributes.count("index_id") == 1)
+        << "the leaf served the pattern from an index";
+    EXPECT_EQ(attributes.at("index_id"), std::to_string(kShortGramIndexId))
+        << "the index that can handle a two-character literal must serve it";
+}
+
+// A conjunction evaluates its right leaf only on the rows the left leaf left
+// alive. The right leaf's group must report the rows it really processed, not
+// one batch per batch of the whole filter.
+TEST(MultiScalarIndexExprTest, ExplainSkipsShortCircuitedLeaf) {
+    auto schema = std::make_shared<Schema>();
+    auto left_fid = schema->AddDebugField("left_varchar", DataType::VARCHAR);
+    auto right_fid = schema->AddDebugField("right_varchar", DataType::VARCHAR);
+    auto field_data = milvus::test::expr_index::StringField(kVarCharValues);
+
+    RawFieldFiles files;
+    auto segment = CreateSealedSegment(schema);
+    segment->LoadFieldData(files.Prepare(left_fid, {field_data}));
+    segment->LoadFieldData(files.Prepare(right_fid, {field_data}));
+
+    // The left leaf matches nothing, so the right leaf has no row to evaluate.
+    proto::plan::GenericValue never_value;
+    never_value.set_string_val("no-such-prefix");
+    auto left = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(left_fid, DataType::VARCHAR),
+        proto::plan::OpType::PrefixMatch,
+        never_value,
+        std::vector<proto::plan::GenericValue>());
+    proto::plan::GenericValue prefix_value;
+    prefix_value.set_string_val("prefix");
+    auto right = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(right_fid, DataType::VARCHAR),
+        proto::plan::OpType::PrefixMatch,
+        prefix_value,
+        std::vector<proto::plan::GenericValue>());
+    auto both = std::make_shared<expr::LogicalBinaryExpr>(
+        expr::LogicalBinaryExpr::OpType::And, left, right);
+
+    milvus::exec::ExecutionExplainRecorder explain(kVarCharValues.size());
+    auto result =
+        EvaluateFilter(both, segment.get(), kVarCharValues.size(), &explain);
+    ExpectHitRows(result, {}, "AND that matches nothing");
+
+    proto::internal::ExecutionExplain node;
+    ASSERT_TRUE(node.ParseFromString(explain.Finish()));
+    ASSERT_EQ(node.children_size(), 2);
+    bool saw_left = false;
+    bool saw_right = false;
+    for (int i = 0; i < node.children_size(); ++i) {
+        const auto attributes = AttributesOf(node.children(i));
+        const auto counters = CountersOf(node.children(i));
+        if (attributes.at("field_id") == std::to_string(left_fid.get())) {
+            saw_left = true;
+            EXPECT_EQ(counters.at("rows_scanned"),
+                      static_cast<int64_t>(kVarCharValues.size()))
+                << "the left leaf evaluated every row";
+        } else {
+            EXPECT_EQ(attributes.at("field_id"),
+                      std::to_string(right_fid.get()));
+            saw_right = true;
+            EXPECT_EQ(counters.at("rows_scanned"), 0)
+                << "the right leaf was handed no row to evaluate";
+        }
+    }
+    EXPECT_TRUE(saw_left && saw_right);
 }

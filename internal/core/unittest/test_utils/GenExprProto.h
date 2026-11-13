@@ -173,13 +173,21 @@ gen_filter_res(milvus::plan::PlanNode* plan_node,
                uint64_t active_count,
                uint64_t timestamp,
                FixedVector<int32_t>* offsets = nullptr,
-               milvus::exec::ExecutionExplainRecorder* explain = nullptr) {
+               milvus::exec::ExecutionExplainRecorder* explain = nullptr,
+               const milvus::query::PlanOptions& plan_options =
+                   milvus::query::PlanOptions()) {
     auto filter_node = dynamic_cast<milvus::plan::FilterBitsNode*>(plan_node);
     assert(filter_node != nullptr);
     std::vector<milvus::expr::TypedExprPtr> filters;
     filters.emplace_back(filter_node->filter());
     auto query_context = std::make_shared<milvus::exec::QueryContext>(
-        DEAFULT_QUERY_ID, segment, active_count, timestamp);
+        DEAFULT_QUERY_ID,
+        segment,
+        active_count,
+        timestamp,
+        0,
+        0,
+        plan_options);
     // The production path hands the recorder down from the filter node; this
     // helper builds the contexts directly, so it wires them itself.
     query_context->SetExplain(explain);

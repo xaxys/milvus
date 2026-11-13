@@ -273,11 +273,6 @@ PhyFilterBitsNode::GetOutput() {
                                             col_vec_size);
                 valid_bitset.append(valid_view);
                 num_processed_rows_ += col_vec_size;
-                // Raw leaves evaluated exactly the rows of this batch.
-                if (auto* explain = operator_context_->get_exec_context()
-                                        ->explain()) {
-                    explain->AddScannedRowsForRawLeaves(col_vec_size);
-                }
             } else {
                 ThrowInfo(UnexpectedError,
                           "PhyFilterBitsNode result should be bitmap");

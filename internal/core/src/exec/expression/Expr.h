@@ -3173,13 +3173,27 @@ class SegmentExpr : public Expr {
             ProcessDataChunksByScan<T, NeedSegmentOffsets>(
                 func, skip_func, res, valid_res, candidate_mask, values...);
         if (processed_size >= 0) {
+            RecordScannedRows(processed_size);
             return processed_size;
         }
         AssertInfo(!segment_->is_chunked(),
                    "sealed field {} does not provide a data scan cursor",
                    field_id_.get());
-        return ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
-            func, skip_func, res, valid_res, candidate_mask, values...);
+        const auto single_chunk_size =
+            ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
+                func, skip_func, res, valid_res, candidate_mask, values...);
+        RecordScannedRows(single_chunk_size);
+        return single_chunk_size;
+    }
+
+    // Records rows this leaf read from the raw column, after the fact: a leaf
+    // that a conjunction skipped never reaches here, and one that evaluated a
+    // masked batch reports the rows it really processed.
+    void
+    RecordScannedRows(int64_t rows) {
+        if (explain_ != nullptr && explain_group_id_ != 0 && rows > 0) {
+            explain_->AddScannedRows(explain_group_id_, rows);
+        }
     }
 
     // Specialized method for ngram post-filter: processes data in a specific range
@@ -3233,6 +3247,7 @@ class SegmentExpr : public Expr {
             }
         }
 
+        RecordScannedRows(processed_size);
         return processed_size;
     }
 
@@ -4326,7 +4341,7 @@ class SegmentExpr : public Expr {
                                   ? DeclineReason::kIndexUnusable
                                   : DeclineReason::kNoIndexOnField);
         }
-        explain->RecordDecision(
+        explain_group_id_ = explain->RecordDecision(
             field_id_, used_index, index_id, family, nested, path, reason);
     }
 
@@ -4674,6 +4689,8 @@ class SegmentExpr : public Expr {
     const segcore::SegmentReadSnapshot* snapshot_{nullptr};
     const FieldId field_id_;
     ExecutionExplainRecorder* explain_{nullptr};
+    // Handle of this leaf's decision group in explain_, for its scanned rows.
+    int64_t explain_group_id_{0};
     bool is_pk_field_{false};
     // Whether the column carries a validity (null) bitmap. When false, a chunk
     // skipped by SkipIndex needs no per-row validity work, so the multi-chunk

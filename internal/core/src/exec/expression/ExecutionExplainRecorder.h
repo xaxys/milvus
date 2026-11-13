@@ -36,8 +36,9 @@ class ExecutionExplainRecorder {
     explicit ExecutionExplainRecorder(int64_t rows_total) : rows_total_(rows_total) {
     }
 
-    // One call per filter leaf, before it runs.
-    void
+    // One call per filter leaf, before it runs. Returns the group's handle, which
+    // the leaf uses to report the rows it actually evaluated.
+    int64_t
     RecordDecision(FieldId field_id,
                    bool used_index,
                    int64_t index_id,
@@ -53,6 +54,9 @@ class ExecutionExplainRecorder {
                                   nested,
                                   path,
                                   decline_reason)];
+        if (group.id == 0) {
+            group.id = next_group_id_++;
+        }
         ++group.leaves;
         if (group.family.empty()) {
             group.family = std::move(family);
@@ -67,6 +71,7 @@ class ExecutionExplainRecorder {
         group.index_id = index_id;
         group.used_index = used_index;
         group.nested = nested;
+        return group.id;
     }
 
     // Rows an index returned for this leaf group, already row-level (nested hits
@@ -96,16 +101,21 @@ class ExecutionExplainRecorder {
         }
     }
 
-    // Rows the raw leaves of this segment actually evaluated in one batch.
+    // Rows the leaf behind group_id actually evaluated. An index leaf reports
+    // nothing: whatever it reads after the index lookup is not the scan this
+    // counter describes.
     void
-    AddScannedRowsForRawLeaves(int64_t rows) {
-        if (rows <= 0) {
+    AddScannedRows(int64_t group_id, int64_t rows) {
+        if (group_id == 0 || rows <= 0) {
             return;
         }
         std::lock_guard lock(mu_);
         for (auto& [key, group] : groups_) {
-            if (!group.used_index) {
-                group.rows_scanned += rows;
+            if (group.id == group_id) {
+                if (!group.used_index) {
+                    group.rows_scanned += rows;
+                }
+                return;
             }
         }
     }
@@ -159,6 +169,7 @@ class ExecutionExplainRecorder {
 
  private:
     struct Group {
+        int64_t id{0};
         int64_t field_id{0};
         int64_t index_id{0};
         bool used_index{false};
@@ -192,6 +203,7 @@ class ExecutionExplainRecorder {
 
     const int64_t rows_total_;
     mutable std::mutex mu_;
+    mutable int64_t next_group_id_{1};
     mutable std::map<std::string, Group> groups_;
 };
 

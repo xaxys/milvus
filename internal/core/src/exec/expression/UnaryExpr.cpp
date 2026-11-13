@@ -2203,24 +2203,26 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         req.index_hint_strict = false;
     }
     // A hint on this field may name an exact pattern index, which the NGRAM pass
-    // must not shadow. When the selected NGRAM entry is not the hinted one, the
-    // decision belongs to the second pass instead of returning here.
-    const auto hinted_id = [&req]() -> std::optional<int64_t> {
+    // must not shadow. Any index the hint names for this field counts: a hinted
+    // NGRAM index that the first pass rejected for its literal must not stop the
+    // next hinted one from serving the leaf. When the NGRAM selection is none of
+    // the hinted ones, the decision belongs to the second pass instead.
+    const bool field_hinted = [&req]() {
         if (req.index_hints == nullptr) {
-            return std::nullopt;
+            return false;
         }
         for (const auto& [field_id, index_id] : *req.index_hints) {
             if (field_id == req.field_id.get()) {
-                return index_id;
+                return true;
             }
         }
-        return std::nullopt;
+        return false;
     }();
     if (is_pattern && SelectAndCreateIndexReader(req)) {
         const bool satisfied_by_ngram =
-            !hinted_id.has_value() ||
+            !field_hinted ||
             (selected_index_entry_.has_value() &&
-             selected_index_entry_->key.identity.pre_built_id() == hinted_id);
+             index_path_detail::HintRank(req, *selected_index_entry_) >= 0);
         if (satisfied_by_ngram &&
             ngram_reader_->CanHandle(
                 GetValueFromProto<std::string>(expr_->val_),
