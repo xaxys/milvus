@@ -2876,9 +2876,11 @@ class SegmentExpr : public Expr {
                                     TargetBitmapView res,
                                     TargetBitmapView valid_res,
                                     const TargetBitmap* candidate_mask,
+                                    int64_t* evaluated_rows,
                                     const ValTypes&... values) {
         const auto expected_rows = GetNextBatchSize();
         int64_t processed_size = 0;
+        int64_t read_rows = 0;
 
         for (size_t i = current_data_chunk_; i < num_data_chunk_; i++) {
             auto data_pos =
@@ -2893,6 +2895,7 @@ class SegmentExpr : public Expr {
             auto process_chunk = [&](const T* data, ValidityView valid_data) {
                 auto skipped = skip_func && skip_func(skip_view_, i);
                 if (!skipped) {
+                    read_rows += size;
                     if constexpr (NeedSegmentOffsets) {
                         // For GIS functions: construct segment offsets array
                         std::vector<int32_t> segment_offsets_array(size);
@@ -2984,6 +2987,9 @@ class SegmentExpr : public Expr {
                    processed_size,
                    expected_rows);
         CommitLegacyDataProgress(processed_size);
+        if (evaluated_rows != nullptr) {
+            *evaluated_rows = read_rows;
+        }
         return processed_size;
     }
 
@@ -2997,12 +3003,19 @@ class SegmentExpr : public Expr {
                             TargetBitmapView res,
                             TargetBitmapView valid_res,
                             const TargetBitmap* candidate_mask,
+                            int64_t* evaluated_rows,
                             const ValTypes&... values) {
         if constexpr (!milvus::HasTargetType<T>) {
             return -1;
         } else {
             return ProcessDataChunksByScanWithTarget<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                evaluated_rows,
+                values...);
         }
     }
 
@@ -3016,6 +3029,7 @@ class SegmentExpr : public Expr {
                                       TargetBitmapView res,
                                       TargetBitmapView valid_res,
                                       const TargetBitmap* candidate_mask,
+                                      int64_t* evaluated_rows,
                                       const ValTypes&... values) {
         static_assert(milvus::HasTargetType<T>);
         const auto real_batch_size = GetNextBatchSize();
@@ -3065,6 +3079,10 @@ class SegmentExpr : public Expr {
             }
         };
 
+        // Rows this call actually read from the column; skip-index batches are
+        // advanced without data and are not part of it.
+        int64_t read_rows = 0;
+
         const auto advance_without_data = [&](int64_t row, int64_t size) {
             AssertInfo(size > 0,
                        "invalid data-free scan batch at row {} with size {}",
@@ -3111,6 +3129,7 @@ class SegmentExpr : public Expr {
                            "data scan batch [{}, {}) has no values",
                            batch.row_id_start,
                            batch.row_id_start + batch.size);
+                read_rows += batch.size;
                 evaluate_batch(batch.values.data_as<T>(),
                                batch.validity,
                                batch.row_id_start,
@@ -3120,6 +3139,9 @@ class SegmentExpr : public Expr {
         }
 
         AdvanceDataCursor(real_batch_size);
+        if (evaluated_rows != nullptr) {
+            *evaluated_rows = read_rows;
+        }
         return real_batch_size;
     }
 
@@ -3169,11 +3191,18 @@ class SegmentExpr : public Expr {
                           TargetBitmapView valid_res,
                           const TargetBitmap* candidate_mask,
                           const ValTypes&... values) {
+        int64_t read_rows = 0;
         const auto processed_size =
             ProcessDataChunksByScan<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                &read_rows,
+                values...);
         if (processed_size >= 0) {
-            RecordScannedRows(processed_size);
+            RecordScannedRows(read_rows);
             return processed_size;
         }
         AssertInfo(!segment_->is_chunked(),
@@ -3181,14 +3210,20 @@ class SegmentExpr : public Expr {
                    field_id_.get());
         const auto single_chunk_size =
             ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
-        RecordScannedRows(single_chunk_size);
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                &read_rows,
+                values...);
+        RecordScannedRows(read_rows);
         return single_chunk_size;
     }
 
     // Records rows this leaf read from the raw column, after the fact: a leaf
-    // that a conjunction skipped never reaches here, and one that evaluated a
-    // masked batch reports the rows it really processed.
+    // that a conjunction skipped never reaches here, and a chunk whose data was
+    // skipped by the SkipIndex is not counted as read.
     void
     RecordScannedRows(int64_t rows) {
         if (explain_ != nullptr && explain_group_id_ != 0 && rows > 0) {

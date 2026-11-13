@@ -176,3 +176,29 @@ func TestApplyIndexHintCoordinatorFailure(t *testing.T) {
 		Return(nil, merr.ErrServiceNotReady)
 	assert.NoError(t, applyIndexHint(context.Background(), node, 1, plan, fallback))
 }
+
+// A hybrid search carries its hints on each sub-search, not on the outer
+// (ranking) params. The plan builder must read the sub-search's own params, or a
+// strict hint there is silently ignored.
+func TestHybridSubSearchIndexHintUsesSubParams(t *testing.T) {
+	task := newHybridDynamicSearchTask(t, false, []string{"pk"}, nil)
+
+	mix := mocks.NewMockMixCoordClient(t)
+	mix.EXPECT().DescribeIndex(mock.Anything, mock.Anything).Return(&indexpb.DescribeIndexResponse{
+		Status: merr.Success(),
+		IndexInfos: []*indexpb.IndexInfo{
+			{CollectionID: 1, FieldID: 104, IndexID: 2001, IndexName: "vec_idx"},
+		},
+	}, nil).Maybe()
+	task.node = &fakeHintNode{mix: mix}
+
+	// Only the second sub-search hints, in strict mode, at an unknown name. If
+	// plan generation read the outer params this error would never be raised.
+	require.NotEmpty(t, task.request.GetSubReqs())
+	task.request.SubReqs[1].SearchParams = append(task.request.SubReqs[1].SearchParams,
+		kv(IndexHintKey, "missing_idx"), kv(IndexHintModeKey, "strict"))
+
+	err := task.initAdvancedSearchRequest(context.Background())
+	require.ErrorIs(t, err, merr.ErrParameterInvalid)
+	assert.Contains(t, err.Error(), "missing_idx")
+}

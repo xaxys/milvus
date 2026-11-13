@@ -1435,7 +1435,7 @@ func (t *SearchTask) tryGeneratePlan(
 		metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), "search", metrics.FailLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, WrapPlanCreationError(planErr, "failed to create query plan")
 	}
-	if err := applyIndexHint(t.ctx, t.node, t.GetCollectionID(), plan, t.request.GetSearchParams()); err != nil {
+	if err := applyIndexHint(t.ctx, t.node, t.GetCollectionID(), plan, params); err != nil {
 		// A hint the user asked to be strict about must surface, not be swallowed.
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, err
 	}

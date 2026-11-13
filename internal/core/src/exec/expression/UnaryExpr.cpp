@@ -2202,25 +2202,20 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
     if (is_pattern) {
         req.index_hint_strict = false;
     }
-    // A hint on this field may name an exact pattern index, which the NGRAM pass
-    // must not shadow. Any index the hint names for this field counts: a hinted
-    // NGRAM index that the first pass rejected for its literal must not stop the
-    // next hinted one from serving the leaf. When the NGRAM selection is none of
-    // the hinted ones, the decision belongs to the second pass instead.
-    const bool field_hinted = [&req]() {
+    // A hint may name an exact pattern index, which the NGRAM pass must not
+    // shadow. It governs this leaf only when the hinted index can serve this
+    // leaf's path: a hint on j/a must not steer the j/b leaf. HasHintForField
+    // applies the same path check as the selector, so both agree on scope.
+    const bool leaf_hinted = [&]() {
         if (req.index_hints == nullptr) {
             return false;
         }
-        for (const auto& [field_id, index_id] : *req.index_hints) {
-            if (field_id == req.field_id.get()) {
-                return true;
-            }
-        }
-        return false;
+        return index_path_detail::HasHintForField(
+            req, segment_->ResolveIndexCapability(op_ctx_, field_id_));
     }();
     if (is_pattern && SelectAndCreateIndexReader(req)) {
         const bool satisfied_by_ngram =
-            !field_hinted ||
+            !leaf_hinted ||
             (selected_index_entry_.has_value() &&
              index_path_detail::HintRank(req, *selected_index_entry_) >= 0);
         if (satisfied_by_ngram &&

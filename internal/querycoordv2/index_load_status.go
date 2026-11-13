@@ -20,6 +20,8 @@ import (
 	"context"
 
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
+	"github.com/milvus-io/milvus/internal/views/coord/coordview"
+	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -53,8 +55,7 @@ func (s *Server) GetIndexLoadStatus(
 	}
 
 	wanted := typeutil.NewSet[int64](req.GetIndexIDs()...)
-	replicas := s.meta.GetByCollection(ctx, collectionID)
-	segments := s.dist.SegmentDistManager.GetByFilter(meta.WithCollectionID(collectionID))
+	replicas, placements := s.indexLoadEvidence(ctx, collectionID)
 
 	for _, info := range indexInfos {
 		if wanted.Len() > 0 && !wanted.Contain(info.GetIndexID()) {
@@ -66,13 +67,13 @@ func (s *Server) GetIndexLoadStatus(
 			FieldID:          info.GetFieldID(),
 			IndexName:        info.GetIndexName(),
 			ExpectedReplicas: int64(len(replicas)),
-			ExpectedSegments: int64(len(segments)),
+			ExpectedSegments: int64(len(placements)),
 		}
 
 		// A segment counts as ready when the node that loaded it reported the index
 		// as enabled. The same segment may be present once per replica.
-		for _, segment := range segments {
-			if indexReadyOnSegment(segment, info.GetIndexID()) {
+		for _, placement := range placements {
+			if placement.carries(info.GetIndexID()) {
 				status.ReadySegments++
 			}
 		}
@@ -82,11 +83,11 @@ func (s *Server) GetIndexLoadStatus(
 		for _, replica := range replicas {
 			nodes := typeutil.NewSet[int64](replica.GetNodes()...)
 			ready := true
-			for _, segment := range segments {
-				if !nodes.Contain(segment.Node) {
+			for _, placement := range placements {
+				if !nodes.Contain(placement.node) {
 					continue
 				}
-				if !indexReadyOnSegment(segment, info.GetIndexID()) {
+				if !placement.carries(info.GetIndexID()) {
 					ready = false
 					break
 				}
@@ -105,6 +106,83 @@ func (s *Server) GetIndexLoadStatus(
 		resp.Statuses = append(resp.Statuses, status)
 	}
 	return resp, nil
+}
+
+// indexPlacement is one place a segment is served: a node, and how to decide
+// whether the index is there. Legacy distribution reports the loaded index ids
+// per segment; a query view instead names the load requirements its segments were
+// loaded for, so the two are answered differently but counted the same way.
+type indexPlacement struct {
+	node    int64
+	segment *meta.Segment
+	// indexes is the set of index ids the serving load requirement selected for
+	// this placement. Nil means no serving requirement is known, so nothing on
+	// this placement can be certified.
+	indexes map[int64]struct{}
+}
+
+func (p indexPlacement) carries(indexID int64) bool {
+	if p.segment != nil {
+		return indexReadyOnSegment(p.segment, indexID)
+	}
+	_, ok := p.indexes[indexID]
+	return ok
+}
+
+// indexLoadEvidence reads the replicas and the served placements from whichever
+// runtime this coordinator runs. Production init always creates the qviews
+// runtime, which never populates the legacy segment distribution manager; reading
+// that manager there would report every index as not loaded.
+func (s *Server) indexLoadEvidence(ctx context.Context, collectionID int64) ([]*meta.Replica, []indexPlacement) {
+	if s.qviewsRuntime != nil {
+		runtime := s.qviewsRuntime
+		stats := runtime.shardViewRegistry.SnapshotForCollection(collectionID).StatsMap()
+		return s.qviewsReplicaSnapshot(collectionID), qviewsPlacements(stats, func(version uint64) (*querypb.GetQueryViewLoadInfoResponse, error) {
+			return runtime.loadConfigStore.GetLoadInfo(ctx, collectionID, version)
+		})
+	}
+
+	segments := s.dist.SegmentDistManager.GetByFilter(meta.WithCollectionID(collectionID))
+	placements := make([]indexPlacement, 0, len(segments))
+	for _, segment := range segments {
+		placements = append(placements, indexPlacement{node: segment.Node, segment: segment})
+	}
+	return s.meta.GetByCollection(ctx, collectionID), placements
+}
+
+// qviewsPlacements turns the serving query views into placements. A view only
+// certifies an index when its load requirements selected that index; a shard with
+// no serving view (or whose requirements are unavailable) certifies nothing.
+func qviewsPlacements(
+	stats map[qviews.ShardID]*coordview.ShardStats,
+	loadInfo func(version uint64) (*querypb.GetQueryViewLoadInfoResponse, error),
+) []indexPlacement {
+	var placements []indexPlacement
+	for _, stat := range stats {
+		if stat == nil || stat.UpPlacement == nil {
+			continue
+		}
+		var required map[int64]struct{}
+		if stat.UpVersion != nil {
+			if info, err := loadInfo(stat.UpLoadInfoVersion); err == nil {
+				required = indexIDsOf(info)
+			}
+		}
+		for _, node := range stat.UpPlacement.Assignments {
+			placements = append(placements, indexPlacement{node: node, indexes: required})
+		}
+	}
+	return placements
+}
+
+func indexIDsOf(info *querypb.GetQueryViewLoadInfoResponse) map[int64]struct{} {
+	ids := make(map[int64]struct{})
+	for _, field := range info.GetRequiredFields() {
+		for _, id := range field.GetIndexIds() {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
 }
 
 func indexReadyOnSegment(segment *meta.Segment, indexID int64) bool {

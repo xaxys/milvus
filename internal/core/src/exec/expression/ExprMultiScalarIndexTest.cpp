@@ -1187,3 +1187,84 @@ TEST(MultiScalarIndexExprTest, ExplainSkipsShortCircuitedLeaf) {
     }
     EXPECT_TRUE(saw_left && saw_right);
 }
+
+// A hint is scoped to the JSON path it names. With an NGRAM index on j/a and
+// another on j/b, hinting the j/a index (even in strict mode) must not steer the
+// j/b leaf away from its own index: the two-pass NGRAM/PatternMatch logic has to
+// apply the same path check the selector does.
+TEST(MultiScalarIndexExprTest, HintOnOneJsonPathKeepsOtherPathNgram) {
+    constexpr int64_t kPathAIndexId = 4401;
+    constexpr int64_t kPathBIndexId = 4402;
+
+    auto schema = std::make_shared<Schema>();
+    auto json_fid = schema->AddDebugField("json_field", DataType::JSON);
+    std::vector<std::string> rows = {
+        R"({"a": "zzzabc", "b": "abcde"})",
+        R"({"a": "abc", "b": "zzz"})",
+        R"({"a": "q", "b": "xabcx"})",
+        R"({"a": "abcabc", "b": "abc"})",
+    };
+    auto field_data = milvus::test::expr_index::JsonField(rows);
+
+    RawFieldFiles files;
+    auto segment = CreateSealedSegment(schema);
+    segment->LoadFieldData(files.Prepare(json_fid, {field_data}));
+    InstallIndexWithId(
+        *segment,
+        json_fid,
+        DataType::JSON,
+        kPathAIndexId,
+        BuildIndex(json_fid,
+                   DataType::JSON,
+                   milvus::index::NGRAM_INDEX_TYPE,
+                   {field_data},
+                   {{JSON_PATH, "/a"},
+                    {JSON_CAST_TYPE, "VARCHAR"},
+                    {milvus::index::MIN_GRAM, 2},
+                    {milvus::index::MAX_GRAM, 4}}),
+        {{JSON_PATH, "/a"}, {JSON_CAST_TYPE, "VARCHAR"}});
+    InstallIndexWithId(
+        *segment,
+        json_fid,
+        DataType::JSON,
+        kPathBIndexId,
+        BuildIndex(json_fid,
+                   DataType::JSON,
+                   milvus::index::NGRAM_INDEX_TYPE,
+                   {field_data},
+                   {{JSON_PATH, "/b"},
+                    {JSON_CAST_TYPE, "VARCHAR"},
+                    {milvus::index::MIN_GRAM, 2},
+                    {milvus::index::MAX_GRAM, 4}}),
+        {{JSON_PATH, "/b"}, {JSON_CAST_TYPE, "VARCHAR"}});
+
+    proto::plan::GenericValue inner_value;
+    inner_value.set_string_val("abc");
+    auto expr_b = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(json_fid, DataType::JSON, {"b"}),
+        proto::plan::OpType::InnerMatch,
+        inner_value,
+        std::vector<proto::plan::GenericValue>());
+
+    // The hint names the j/a index, in strict mode, and must neither fail the
+    // query nor stop the j/b index from serving its own path.
+    milvus::query::PlanOptions options;
+    options.index_hints = {{json_fid.get(), kPathAIndexId}};
+    options.index_hint_strict = true;
+
+    milvus::exec::ExecutionExplainRecorder explain(rows.size());
+    auto result = EvaluateFilter(expr_b, segment.get(), rows.size(), &explain, options);
+    ExpectHitRows(result, {0, 2, 3}, "JSON j[\"b\"] like \"%abc%\"");
+    EXPECT_TRUE(milvus::test::CanExprExecuteAllAtOnce(
+        expr_b, segment.get(), rows.size()))
+        << "the j/b ngram index must still serve its own path";
+
+    proto::internal::ExecutionExplain node;
+    ASSERT_TRUE(node.ParseFromString(explain.Finish()));
+    ASSERT_EQ(node.children_size(), 1);
+    const auto attributes = AttributesOf(node.children(0));
+    const auto selected = attributes.find("index_id");
+    ASSERT_NE(selected, attributes.end())
+        << "the j/b ngram index must serve its own path";
+    EXPECT_EQ(selected->second, std::to_string(kPathBIndexId));
+}

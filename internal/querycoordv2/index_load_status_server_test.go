@@ -29,9 +29,13 @@ import (
 	metastoremocks "github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
+	"github.com/milvus-io/milvus/internal/views/coord/coordview"
+	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 // indexLoadStatusFixture is the smallest server surface GetIndexLoadStatus reads:
@@ -178,4 +182,46 @@ func TestServerGetIndexLoadStatus(t *testing.T) {
 		assert.Equal(t, int64(0), status.GetReadySegments())
 		assert.Contains(t, status.GetReason(), "no loaded segment")
 	})
+}
+
+// A serving query view certifies exactly the indexes its load requirements
+// selected: an index the view did not select is not loaded on those segments, and
+// a shard with no serving view certifies nothing at all.
+func TestQViewsPlacementsCertifyOnlySelectedIndexes(t *testing.T) {
+	serving := &coordview.ShardStats{
+		UpVersion:         &qviews.QueryViewVersion{},
+		UpLoadInfoVersion: 7,
+		UpPlacement: &coordview.ViewPlacement{Assignments: map[int64]int64{
+			1: 10,
+			2: 11,
+		}},
+	}
+	loading := &coordview.ShardStats{
+		// No Up view yet: the placements exist, but nothing is certified.
+		UpPlacement: &coordview.ViewPlacement{Assignments: map[int64]int64{3: 12}},
+	}
+	placements := qviewsPlacements(map[qviews.ShardID]*coordview.ShardStats{
+		{ReplicaID: 1000, VChannel: "v0"}: serving,
+		{ReplicaID: 1000, VChannel: "v1"}: loading,
+	}, func(version uint64) (*querypb.GetQueryViewLoadInfoResponse, error) {
+		require.Equal(t, uint64(7), version)
+		return &querypb.GetQueryViewLoadInfoResponse{
+			RequiredFields: []*viewpb.LoadFieldConfig{
+				{FieldId: 100, IndexIds: []int64{2001}},
+			},
+		}, nil
+	})
+
+	require.Len(t, placements, 3)
+	ready := 0
+	nodes := typeutil.NewSet[int64]()
+	for _, placement := range placements {
+		nodes.Insert(placement.node)
+		if placement.carries(2001) {
+			ready++
+		}
+		assert.False(t, placement.carries(2002), "an index the view did not select is not loaded")
+	}
+	assert.Equal(t, 2, ready, "only the serving shard certifies the index")
+	assert.ElementsMatch(t, []int64{10, 11, 12}, nodes.Collect())
 }
