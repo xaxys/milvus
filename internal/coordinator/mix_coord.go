@@ -1609,6 +1609,10 @@ func (s *mixCoordImpl) GetQueryViewLoadInfo(ctx context.Context, req *querypb.Ge
 	return s.queryCoordServer.GetQueryViewLoadInfo(ctx, req)
 }
 
+func (s *mixCoordImpl) GetIndexLoadStatus(ctx context.Context, req *querypb.GetIndexLoadStatusRequest) (*querypb.GetIndexLoadStatusResponse, error) {
+	return s.queryCoordServer.GetIndexLoadStatus(ctx, req)
+}
+
 // QueryViewCollectionIndexInfos supplies current index descriptors to the load-info
 // store, which filters them by the retained required field scope on every read.
 func (s *mixCoordImpl) QueryViewCollectionIndexInfos(collectionID int64, indexIDs ...int64) []*indexpb.IndexInfo {

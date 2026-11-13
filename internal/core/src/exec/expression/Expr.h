@@ -38,6 +38,7 @@
 #include "common/OpContext.h"
 #include "common/Types.h"
 #include "exec/expression/EvalCtx.h"
+#include "exec/expression/ExecutionExplainRecorder.h"
 #include "exec/expression/IndexPathSelection.h"
 #include "exec/expression/ValueLookupSource.h"
 #include "exec/expression/ExprCacheHelper.h"
@@ -470,6 +471,12 @@ class Expr : public std::enable_shared_from_this<Expr> {
     // mark and propagate it to their inputs; everywhere else (in particular
     // NOT, where FALSE and UNKNOWN produce different results) the default
     // no-op stops the propagation.
+    // Optional execution-explain sink, set once after construction for the leaves
+    // that can record decisions.
+    virtual void
+    SetExplainRecorder(ExecutionExplainRecorder* /*explain*/) {
+    }
+
     virtual void
     MarkNullRejecting() {
     }
@@ -568,7 +575,8 @@ class SegmentExpr : public Expr {
                 int32_t consistency_level,
                 bool allow_any_json_cast_type = false,
                 bool is_json_contains = false,
-                const query::PlanOptions& plan_options = {})
+                const query::PlanOptions& plan_options = {},
+                ExecutionExplainRecorder* explain = nullptr)
         : Expr(DataType::BOOL, std::move(input), name, op_ctx),
           segment_(const_cast<segcore::SegmentInternalInterface*>(segment)),
           field_id_(field_id),
@@ -576,6 +584,7 @@ class SegmentExpr : public Expr {
           value_type_(value_type),
           allow_any_json_cast_type_(allow_any_json_cast_type),
           active_count_(active_count),
+          explain_(explain),
           batch_size_(batch_size),
           consistency_level_(consistency_level),
           is_json_contains_(is_json_contains),
@@ -2867,9 +2876,11 @@ class SegmentExpr : public Expr {
                                     TargetBitmapView res,
                                     TargetBitmapView valid_res,
                                     const TargetBitmap* candidate_mask,
+                                    int64_t* evaluated_rows,
                                     const ValTypes&... values) {
         const auto expected_rows = GetNextBatchSize();
         int64_t processed_size = 0;
+        int64_t read_rows = 0;
 
         for (size_t i = current_data_chunk_; i < num_data_chunk_; i++) {
             auto data_pos =
@@ -2884,6 +2895,7 @@ class SegmentExpr : public Expr {
             auto process_chunk = [&](const T* data, ValidityView valid_data) {
                 auto skipped = skip_func && skip_func(skip_view_, i);
                 if (!skipped) {
+                    read_rows += size;
                     if constexpr (NeedSegmentOffsets) {
                         // For GIS functions: construct segment offsets array
                         std::vector<int32_t> segment_offsets_array(size);
@@ -2975,6 +2987,9 @@ class SegmentExpr : public Expr {
                    processed_size,
                    expected_rows);
         CommitLegacyDataProgress(processed_size);
+        if (evaluated_rows != nullptr) {
+            *evaluated_rows = read_rows;
+        }
         return processed_size;
     }
 
@@ -2988,12 +3003,19 @@ class SegmentExpr : public Expr {
                             TargetBitmapView res,
                             TargetBitmapView valid_res,
                             const TargetBitmap* candidate_mask,
+                            int64_t* evaluated_rows,
                             const ValTypes&... values) {
         if constexpr (!milvus::HasTargetType<T>) {
             return -1;
         } else {
             return ProcessDataChunksByScanWithTarget<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                evaluated_rows,
+                values...);
         }
     }
 
@@ -3007,6 +3029,7 @@ class SegmentExpr : public Expr {
                                       TargetBitmapView res,
                                       TargetBitmapView valid_res,
                                       const TargetBitmap* candidate_mask,
+                                      int64_t* evaluated_rows,
                                       const ValTypes&... values) {
         static_assert(milvus::HasTargetType<T>);
         const auto real_batch_size = GetNextBatchSize();
@@ -3056,6 +3079,10 @@ class SegmentExpr : public Expr {
             }
         };
 
+        // Rows this call actually read from the column; skip-index batches are
+        // advanced without data and are not part of it.
+        int64_t read_rows = 0;
+
         const auto advance_without_data = [&](int64_t row, int64_t size) {
             AssertInfo(size > 0,
                        "invalid data-free scan batch at row {} with size {}",
@@ -3102,6 +3129,7 @@ class SegmentExpr : public Expr {
                            "data scan batch [{}, {}) has no values",
                            batch.row_id_start,
                            batch.row_id_start + batch.size);
+                read_rows += batch.size;
                 evaluate_batch(batch.values.data_as<T>(),
                                batch.validity,
                                batch.row_id_start,
@@ -3111,6 +3139,9 @@ class SegmentExpr : public Expr {
         }
 
         AdvanceDataCursor(real_batch_size);
+        if (evaluated_rows != nullptr) {
+            *evaluated_rows = read_rows;
+        }
         return real_batch_size;
     }
 
@@ -3160,17 +3191,44 @@ class SegmentExpr : public Expr {
                           TargetBitmapView valid_res,
                           const TargetBitmap* candidate_mask,
                           const ValTypes&... values) {
+        int64_t read_rows = 0;
         const auto processed_size =
             ProcessDataChunksByScan<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                &read_rows,
+                values...);
         if (processed_size >= 0) {
+            RecordScannedRows(read_rows);
             return processed_size;
         }
         AssertInfo(!segment_->is_chunked(),
                    "sealed field {} does not provide a data scan cursor",
                    field_id_.get());
-        return ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
-            func, skip_func, res, valid_res, candidate_mask, values...);
+        const auto single_chunk_size =
+            ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                &read_rows,
+                values...);
+        RecordScannedRows(read_rows);
+        return single_chunk_size;
+    }
+
+    // Records rows this leaf read from the raw column, after the fact: a leaf
+    // that a conjunction skipped never reaches here, and a chunk whose data was
+    // skipped by the SkipIndex is not counted as read.
+    void
+    RecordScannedRows(int64_t rows) {
+        if (explain_ != nullptr && explain_group_id_ != 0 && rows > 0) {
+            explain_->AddScannedRows(explain_group_id_, rows);
+        }
     }
 
     // Specialized method for ngram post-filter: processes data in a specific range
@@ -3224,6 +3282,7 @@ class SegmentExpr : public Expr {
             }
         }
 
+        RecordScannedRows(processed_size);
         return processed_size;
     }
 
@@ -3439,7 +3498,27 @@ class SegmentExpr : public Expr {
                                                *cached_index_chunk_valid_res_,
                                                *offsets);
         }
-        return SliceCachedIndexResult(need_element_slicing);
+        auto sliced = SliceCachedIndexResult(need_element_slicing);
+        // Hits this leaf got from the index. A nested index sliced at element
+        // level counts elements; the caller folds them to rows afterwards, so the
+        // two domains are kept apart instead of pretending one is the other.
+        if (explain_ != nullptr && selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                int64_t matched = 0;
+                if (auto col = std::dynamic_pointer_cast<ColumnVector>(sliced);
+                    col != nullptr && col->IsBitmap()) {
+                    matched =
+                        TargetBitmapView(col->GetRawData(), col->size()).count();
+                }
+                if (need_element_slicing) {
+                    explain_->AddElementHits(field_id_, *id, matched);
+                } else {
+                    explain_->AddIndexHits(field_id_, *id, matched);
+                }
+            }
+        }
+        return sliced;
     }
 
     template <typename T>
@@ -4029,7 +4108,24 @@ class SegmentExpr : public Expr {
                        "selected scalar reader has no null interface");
         }
         num_index_chunk_ = 1;
+        // One line per leaf that commits to an index, naming the entry that was
+        // chosen: with several indexes on one field the choice is the only way
+        // to tell which one served a query.
+        LOG_DEBUG(
+            "scalar index selected, fieldID:{}, indexID:{}, family:{}, "
+            "reader:{}",
+            field_id_.get(),
+            entry->key.identity.ToString(),
+            entry->family,
+            static_cast<int>(req.reader));
         return true;
+    }
+
+    // Ordered comparison leaves (>, >=, <, <=) tell the selector to prefer a
+    // range-friendly family. Purely static: no literal is needed to answer it.
+    virtual bool
+    IsRangeExpr() const {
+        return false;
     }
 
     ExprIndexRequirement
@@ -4045,6 +4141,13 @@ class SegmentExpr : public Expr {
                              : std::string{},
             .json_array_cast = is_json_contains_,
             .accepts_candidates = true,
+            .is_range = IsRangeExpr(),
+            // Hints come from the query, not from the leaf: every expression of this
+            // request sees the same ordered list.
+            .index_hints = plan_options_.index_hints.empty()
+                               ? nullptr
+                               : &plan_options_.index_hints,
+            .index_hint_strict = plan_options_.index_hint_strict,
             .has_offset_input = has_offset_input_,
         };
     }
@@ -4238,8 +4341,48 @@ class SegmentExpr : public Expr {
     // whole-filter cache hit or a conjunction that runs out of rows can skip
     // the evaluation. The report counts feature use, so that only affects
     // how often, never whether.
+    // One line per leaf for the explain payload; independent of the feature-bit
+    // accounting and cheap enough to always run (the sink is null unless the
+    // caller asked for an explain).
+    void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        explain_ = explain;
+    }
+
+    void
+    RecordExplainDecision() {
+        auto* explain = explain_;
+        if (explain == nullptr) {
+            return;
+        }
+        const bool used_index = exec_path_ == ExprExecPath::ScalarIndex ||
+                                exec_path_ == ExprExecPath::TextIndex;
+        int64_t index_id = 0;
+        std::string family;
+        std::string path;
+        bool nested = false;
+        if (selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                index_id = *id;
+            }
+            family = selected_index_entry_->family;
+            path = selected_index_entry_->json_path;
+            nested = selected_index_entry_->caps.nested;
+        }
+        std::string reason;
+        if (!used_index) {
+            reason = milvus::exec::ToString(HasIndexForThisPath()
+                                  ? DeclineReason::kIndexUnusable
+                                  : DeclineReason::kNoIndexOnField);
+        }
+        explain_group_id_ = explain->RecordDecision(
+            field_id_, used_index, index_id, family, nested, path, reason);
+    }
+
     void
     RecordExecPath() {
+        RecordExplainDecision();
         auto* recorder = feature_recorder_;
         if (recorder == nullptr || !ReportsExecPath()) {
             return;
@@ -4580,6 +4723,9 @@ class SegmentExpr : public Expr {
     // QueryContext. Null for growing segments and non-pinned paths.
     const segcore::SegmentReadSnapshot* snapshot_{nullptr};
     const FieldId field_id_;
+    ExecutionExplainRecorder* explain_{nullptr};
+    // Handle of this leaf's decision group in explain_, for its scanned rows.
+    int64_t explain_group_id_{0};
     bool is_pk_field_{false};
     // Whether the column carries a validity (null) bitmap. When false, a chunk
     // skipped by SkipIndex needs no per-row validity work, so the multi-chunk

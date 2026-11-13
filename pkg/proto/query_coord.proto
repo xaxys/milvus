@@ -17,6 +17,10 @@ import "index_coord.proto";
 
 service QueryCoord {
     rpc GetQueryViewLoadInfo(GetQueryViewLoadInfoRequest) returns (GetQueryViewLoadInfoResponse) {}
+    // GetIndexLoadStatus reports, per index, whether the replicas that serve the
+    // collection actually carry it on their loaded segments. It answers "is this index
+    // usable right now, and if not why" without exposing the segment distribution.
+    rpc GetIndexLoadStatus(GetIndexLoadStatusRequest) returns (GetIndexLoadStatusResponse) {}
     rpc ShowLoadCollections(ShowCollectionsRequest)
         returns (ShowCollectionsResponse) {
     }
@@ -332,6 +336,43 @@ message GetSegmentInfoRequest {
     common.MsgBase base = 1;
     repeated int64 segmentIDs = 2;  // deprecated
     int64 collectionID = 3;
+}
+
+// How much of an index is actually available where it is supposed to be.
+enum IndexLoadState {
+    INDEX_LOAD_UNKNOWN = 0;
+    // Every replica has the index on every segment it serves.
+    INDEX_LOAD_LOADED = 1;
+    // Some replica or segment is still missing it; queries on those fall back to
+    // reading the raw column values.
+    INDEX_LOAD_PARTIALLY_LOADED = 2;
+    // No replica carries it.
+    INDEX_LOAD_NOT_LOADED = 3;
+}
+
+message GetIndexLoadStatusRequest {
+    common.MsgBase base = 1;
+    int64 collectionID = 2;
+    // Empty means every index of the collection.
+    repeated int64 indexIDs = 3;
+}
+
+message IndexLoadStatus {
+    int64 indexID = 1;
+    int64 fieldID = 2;
+    string indexName = 3;
+    IndexLoadState state = 4;
+    int64 expectedReplicas = 5;
+    int64 readyReplicas = 6;
+    int64 expectedSegments = 7;
+    int64 readySegments = 8;
+    // Non-empty when state != INDEX_LOAD_LOADED: the most useful single cause.
+    string reason = 9;
+}
+
+message GetIndexLoadStatusResponse {
+    common.Status status = 1;
+    repeated IndexLoadStatus statuses = 2;
 }
 
 message GetSegmentInfoResponse {

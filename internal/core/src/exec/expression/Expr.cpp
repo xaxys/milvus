@@ -498,6 +498,9 @@ CompileExpression(const expr::TypedExprPtr& expr,
     // non-pinned paths) to this expression. Runs for the whole compiled tree
     // because CompileExpression is recursive over inputs.
     result->SetSnapshot(context->get_read_snapshot().get());
+    if (auto* explain = context->explain(); explain != nullptr) {
+        result->SetExplainRecorder(explain);
+    }
     if (plan_options.feature_recorder) {
         result->SetFeatureRecorder(plan_options.feature_recorder.get(),
                                    *context->get_read_schema());

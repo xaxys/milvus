@@ -176,6 +176,12 @@ class NgramIndexReader final : public IIndexReaderBase,
 
     // Per-literal eligibility, including min_gram and extractable regex fragments.
     // Ask after pinning; a load-time capability bit cannot encode this answer.
+    // The rule CanHandle applies, usable before a reader exists: selection calls it
+    // with the parameters from the index metadata so an index that would refuse this
+    // literal is never pinned in the first place.
+    static bool
+    AcceptsLiteral(std::string_view literal, PatternOp op, size_t min_gram);
+
     bool
     CanHandle(std::string_view literal, PatternOp op) const override;
 

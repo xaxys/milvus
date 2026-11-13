@@ -6593,6 +6593,7 @@ type dataCoordConfig struct {
 	BlockingL0EntryNum             ParamItem `refreshable:"true"`
 	BlockingL0SizeInMB             ParamItem `refreshable:"true"`
 	DVForceAllIndexReady           ParamItem `refreshable:"true"`
+	EnableMultiScalarIndexPerField ParamItem `refreshable:"true"`
 
 	ManifestCommitConcurrency ParamItem `refreshable:"false"`
 
@@ -6977,6 +6978,22 @@ exceeds this threshold, the earliest growing segments will be sealed.`,
 Compaction merges small-size segments into a large segment, and clears the entities deleted beyond the rentention duration of Time Travel.`,
 		Export: true,
 	}
+	p.EnableMultiScalarIndexPerField = ParamItem{
+		Key:          "dataCoord.enableMultiScalarIndexPerField",
+		Version:      "3.0.6",
+		Export:       true,
+		PanicIfEmpty: false,
+		Doc: "Whether one scalar field may carry several indexes. Enabled by default. " +
+			"Creation is additionally gated on every QueryNode reporting a scalar index engine " +
+			"version that can load such a segment (common.MinScalarIndexVersionForScalarMultiIndex); " +
+			"until then a second index on a field is refused as not ready and the client can retry. " +
+			"Turn it off to disable the capability outright -- that restores the previous behaviour, " +
+			"where a second index on a field is rejected as an invalid parameter. An older QueryNode " +
+			"asserts while loading a segment whose load config carries two indexes on one field.",
+		DefaultValue: "true",
+	}
+
+	p.EnableMultiScalarIndexPerField.Init(base.mgr)
 	p.EnableCompaction.Init(base.mgr)
 
 	p.EnableAutoCompaction = ParamItem{

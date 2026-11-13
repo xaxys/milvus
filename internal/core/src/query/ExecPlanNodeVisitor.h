@@ -176,6 +176,13 @@ class ExecPlanNodeVisitor : public PlanNodeVisitor {
         return enable_expr_cache_;
     }
 
+    // Optional per-query explain sink, forwarded to every QueryContext this
+    // visitor creates.
+    void
+    SetExplainRecorder(exec::ExecutionExplainRecorder* explain) {
+        explain_ = explain;
+    }
+
     static RowVectorPtr
     ExecuteTask(plan::PlanFragment& plan,
                 std::shared_ptr<milvus::exec::QueryContext> query_context);
@@ -190,6 +197,7 @@ class ExecPlanNodeVisitor : public PlanNodeVisitor {
         std::shared_ptr<milvus::exec::QueryContext> query_context);
 
  private:
+    exec::ExecutionExplainRecorder* explain_{nullptr};
     const segcore::SegmentInterface& segment_;
     Timestamp timestamp_;
     int64_t entity_ttl_physical_time_us_;
