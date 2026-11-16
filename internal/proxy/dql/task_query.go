@@ -113,12 +113,12 @@ type QueryTask struct {
 	// rule as the search task. collectFeatures is decided once at the top of
 	// PreExecute; when it is false featureSink is nil and every hook returns
 	// on its first line.
-	features             featureusage.FeatureSet
-	collectFeatures      bool
+	features        featureusage.FeatureSet
+	collectFeatures bool
 	// explainLeaves describes the predicate leaves of this query's plan, keyed by
 	// the expr_id the plan carries.
-	explainLeaves     map[int64]explain.LeafInfo
-	explainNextExprID int64
+	explainLeaves        map[int64]explain.LeafInfo
+	explainNextExprID    int64
 	allQueryCnt          int64
 	totalRelatedDataSize int64
 	mustUsePartitionKey  bool
@@ -1315,7 +1315,11 @@ func (t *QueryTask) PostExecute(ctx context.Context) error {
 	for _, result := range toReduceResults {
 		explains = explain.Splice(explains, result.GetExplain())
 	}
-	rendered, explainErr := renderExplain(t.request.GetQueryParams(), explains, t.explainLeaves)
+	rendered, explainErr := renderExplain(
+		t.request.GetQueryParams(),
+		explains,
+		t.explainLeaves,
+		explainIndexNamesIfNeeded(ctx, t.node, t.GetCollectionID(), t.request.GetQueryParams()))
 	if explainErr != nil {
 		return explainErr
 	}

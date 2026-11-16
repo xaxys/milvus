@@ -249,6 +249,7 @@ TEST(MultiScalarIndexExprTest,
         proto::plan::OpType::Equal,
         equal_value,
         std::vector<proto::plan::GenericValue>());
+    equal_expr->SetExprId(42001);
 
     auto raw_equal =
         EvaluateFilter(equal_expr, raw_segment.get(), kVarCharValues.size());
@@ -983,6 +984,7 @@ TEST(MultiScalarIndexExprTest, ExplainRecordsIndexAndRawDecisions) {
         proto::plan::OpType::Equal,
         equal_value,
         std::vector<proto::plan::GenericValue>());
+    equal_expr->SetExprId(43001);
 
     // No index: the leaf falls back to the raw column and says why.
     {
@@ -1001,8 +1003,9 @@ TEST(MultiScalarIndexExprTest, ExplainRecordsIndexAndRawDecisions) {
         const auto counters = CountersOf(node);
         EXPECT_EQ(counters.at("rows_total"),
                   static_cast<int64_t>(kVarCharValues.size()));
-        EXPECT_EQ(counters.at("rows_matched"), 0)
-            << "nothing was matched by an index";
+        EXPECT_EQ(counters.at("idx_scan"), 0)
+            << "a raw leaf handles nothing through an index";
+        EXPECT_EQ(counters.at("rows_out"), 2);
         ASSERT_EQ(node.children_size(), 1);
         const auto& group = node.children(0);
         EXPECT_EQ(group.kind(), "filter_group");
@@ -1011,12 +1014,13 @@ TEST(MultiScalarIndexExprTest, ExplainRecordsIndexAndRawDecisions) {
                   std::to_string(varchar_fid.get()));
         EXPECT_EQ(attributes.at("decline_reason"), "no_index_on_field");
         const auto group_counters = CountersOf(group);
-        EXPECT_EQ(group_counters.at("leaves"), 1);
-        EXPECT_EQ(group_counters.at("rows_matched"), 0)
-            << "a raw leaf has no index hits to report";
-        EXPECT_EQ(group_counters.at("rows_scanned"),
+        EXPECT_EQ(group_counters.at("rows_in"),
+                  static_cast<int64_t>(kVarCharValues.size()));
+        EXPECT_EQ(group_counters.at("raw_scan"),
                   static_cast<int64_t>(kVarCharValues.size()))
-            << "the raw leaf evaluated every row once";
+            << "the raw leaf read every row once";
+        EXPECT_EQ(group_counters.at("idx_scan"), 0);
+        EXPECT_EQ(group_counters.at("rows_out"), 2);
     }
 
     // INVERTED serves the leaf: the group names the index and counts its rows.
@@ -1041,7 +1045,9 @@ TEST(MultiScalarIndexExprTest, ExplainRecordsIndexAndRawDecisions) {
 
         proto::internal::ExecutionExplain node;
         ASSERT_TRUE(node.ParseFromString(explain.Finish()));
-        EXPECT_EQ(CountersOf(node).at("rows_matched"), 2);
+        EXPECT_EQ(CountersOf(node).at("rows_out"), 2);
+        EXPECT_EQ(CountersOf(node).at("idx_scan"),
+                  static_cast<int64_t>(kVarCharValues.size()));
         ASSERT_EQ(node.children_size(), 1);
         const auto& group = node.children(0);
         const auto attributes = AttributesOf(group);
@@ -1049,10 +1055,14 @@ TEST(MultiScalarIndexExprTest, ExplainRecordsIndexAndRawDecisions) {
         EXPECT_EQ(attributes.find("decline_reason"), attributes.end())
             << "an index leaf declined nothing";
         const auto group_counters = CountersOf(group);
-        EXPECT_EQ(group_counters.at("rows_matched"), 2);
-        EXPECT_EQ(group_counters.at("leaves"), 1);
-        EXPECT_EQ(group_counters.at("rows_scanned"), 0)
-            << "an index leaf scans no rows";
+        EXPECT_EQ(group_counters.at("rows_in"),
+                  static_cast<int64_t>(kVarCharValues.size()));
+        EXPECT_EQ(group_counters.at("idx_scan"),
+                  static_cast<int64_t>(kVarCharValues.size()))
+            << "the index handled every input row";
+        EXPECT_EQ(group_counters.at("raw_scan"), 0)
+            << "an exact index leaf reads no raw rows";
+        EXPECT_EQ(group_counters.at("rows_out"), 2);
     }
 }
 
@@ -1149,6 +1159,7 @@ TEST(MultiScalarIndexExprTest, ExplainSkipsShortCircuitedLeaf) {
         proto::plan::OpType::PrefixMatch,
         never_value,
         std::vector<proto::plan::GenericValue>());
+    left->SetExprId(45001);
     proto::plan::GenericValue prefix_value;
     prefix_value.set_string_val("prefix");
     auto right = std::make_shared<expr::UnaryRangeFilterExpr>(
@@ -1156,6 +1167,7 @@ TEST(MultiScalarIndexExprTest, ExplainSkipsShortCircuitedLeaf) {
         proto::plan::OpType::PrefixMatch,
         prefix_value,
         std::vector<proto::plan::GenericValue>());
+    right->SetExprId(45002);
     auto both = std::make_shared<expr::LogicalBinaryExpr>(
         expr::LogicalBinaryExpr::OpType::And, left, right);
 
@@ -1174,15 +1186,20 @@ TEST(MultiScalarIndexExprTest, ExplainSkipsShortCircuitedLeaf) {
         const auto counters = CountersOf(node.children(i));
         if (attributes.at("field_id") == std::to_string(left_fid.get())) {
             saw_left = true;
-            EXPECT_EQ(counters.at("rows_scanned"),
+            EXPECT_EQ(counters.at("rows_in"),
                       static_cast<int64_t>(kVarCharValues.size()))
                 << "the left leaf evaluated every row";
+            EXPECT_EQ(counters.at("raw_scan"),
+                      static_cast<int64_t>(kVarCharValues.size()));
+            EXPECT_EQ(counters.at("rows_out"), 0);
         } else {
             EXPECT_EQ(attributes.at("field_id"),
                       std::to_string(right_fid.get()));
             saw_right = true;
-            EXPECT_EQ(counters.at("rows_scanned"), 0)
+            EXPECT_EQ(counters.at("rows_in"), 0)
                 << "the right leaf was handed no row to evaluate";
+            EXPECT_EQ(counters.at("raw_scan"), 0);
+            EXPECT_EQ(counters.at("rows_out"), 0);
         }
     }
     EXPECT_TRUE(saw_left && saw_right);

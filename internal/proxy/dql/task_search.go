@@ -1818,7 +1818,11 @@ func (t *SearchTask) PostExecute(ctx context.Context) error {
 	for _, result := range toReduceResults {
 		explains = explain.Splice(explains, result.GetExplain())
 	}
-	rendered, explainErr := renderExplain(t.request.GetSearchParams(), explains, t.explainLeaves)
+	rendered, explainErr := renderExplain(
+		t.request.GetSearchParams(),
+		explains,
+		t.explainLeaves,
+		explainIndexNamesIfNeeded(ctx, t.node, t.GetCollectionID(), t.request.GetSearchParams()))
 	if explainErr != nil {
 		return explainErr
 	}

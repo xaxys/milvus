@@ -60,24 +60,30 @@ type Summary struct {
 	Level string `json:"level"`
 	// Segments is the number of distinct segments the query ran on.
 	Segments int `json:"segments"`
-	// RowsTotal sums rows_total over those segments, each segment counted once.
-	RowsTotal int64 `json:"rows_total"`
+	// RowsIn sums the input rows of all conditions: the rows the leaves of the
+	// plan received, which is not a distinct row count of the collection.
+	RowsIn int64 `json:"rows_in"`
+	// RowsOut sums the rows all conditions matched. Not distinct either.
+	RowsOut int64 `json:"rows_out"`
 	// Conditions holds one entry per filter expr of the plan, ordered by expr_id
 	// with the exprs that carry no id last.
 	Conditions []Condition `json:"conditions"`
 }
 
 // Condition is one expr of the plan together with every decision its leaves
-// made. RowsMatched is the rows an index returned: a raw leaf hits no index, so
-// it stays 0 and this counter is not the final match count of the condition.
+// made. The four counters are independent axes, not shares of one total:
+// IdxScan is the input the index path covered, RawScan the rows read back from
+// the columns, RowsIn what the leaves received and RowsOut what they matched.
 type Condition struct {
 	ExprID          int64         `json:"expr_id"`
 	Condition       string        `json:"condition"`
 	Type            string        `json:"type"`
 	FieldID         int64         `json:"field_id"`
 	Segments        int           `json:"segments"`
-	RowsMatched     int64         `json:"rows_matched"`
-	RowsScanned     int64         `json:"rows_scanned"`
+	IdxScan         int64         `json:"idx_scan"`
+	RawScan         int64         `json:"raw_scan"`
+	RowsIn          int64         `json:"rows_in"`
+	RowsOut         int64         `json:"rows_out"`
 	ElementHits     int64         `json:"element_hits,omitempty"`
 	Used            []IndexUse    `json:"used"`
 	RawScanSegments int           `json:"raw_scan_segments"`
@@ -85,15 +91,34 @@ type Condition struct {
 }
 
 // IndexUse is how many segments answered one condition with one index family on
-// one path.
+// one path. Its counters are the condition's axes restricted to the segments
+// that used this index.
 type IndexUse struct {
 	Kind        string `json:"kind"`
 	IndexID     int64  `json:"index_id"`
+	IndexName   string `json:"index_name,omitempty"`
 	Family      string `json:"family"`
 	Segments    int    `json:"segments"`
-	RowsMatched int64  `json:"rows_matched"`
-	RowsScanned int64  `json:"rows_scanned"`
+	IdxScan     int64  `json:"idx_scan"`
+	RawScan     int64  `json:"raw_scan"`
+	RowsIn      int64  `json:"rows_in"`
+	RowsOut     int64  `json:"rows_out"`
 	ElementHits int64  `json:"element_hits,omitempty"`
+}
+
+// NameIndexUses fills in the human-readable index names the proxy resolved from
+// the coordinator. A name that cannot be resolved leaves the id in place.
+func NameIndexUses(summary *Summary, names map[int64]string) {
+	if summary == nil || len(names) == 0 {
+		return
+	}
+	for i := range summary.Conditions {
+		for j := range summary.Conditions[i].Used {
+			if name := names[summary.Conditions[i].Used[j].IndexID]; name != "" {
+				summary.Conditions[i].Used[j].IndexName = name
+			}
+		}
+	}
 }
 
 // ReasonCount is how many segments fell back to a raw scan for one reason.
@@ -138,40 +163,78 @@ type usedKey struct {
 	path    string
 }
 
+// axisCounters is one filter_group counted on the four axes of the leaf view.
+// They do not add up into a single workload: an index leaf covers its input
+// (idxScan) without reading a column, a raw leaf reads what it received
+// (rawScan), and either way rowsOut is what the predicate matched.
+type axisCounters struct {
+	idxScan     int64
+	rawScan     int64
+	rowsIn      int64
+	rowsOut     int64
+	elementHits int64
+}
+
+// countersOf reads one filter_group's counters. A query node that predates the
+// four axes reports rows_matched / rows_scanned only; those map onto the new
+// axes before aggregation, so a rolling upgrade never shows empty counters. An
+// index leaf of the old contract did not know its input rows, so rows_matched
+// stands in for both the input and the rows the index covered.
+func countersOf(filterGroup *internalpb.ExecutionExplain, used bool) axisCounters {
+	raw := filterGroup.GetCounters()
+	if _, ok := raw["rows_in"]; ok {
+		return axisCounters{
+			idxScan:     raw["idx_scan"],
+			rawScan:     raw["raw_scan"],
+			rowsIn:      raw["rows_in"],
+			rowsOut:     raw["rows_out"],
+			elementHits: raw["element_hits"],
+		}
+	}
+	legacy := axisCounters{
+		rawScan:     raw["rows_scanned"],
+		rowsOut:     raw["rows_matched"],
+		elementHits: raw["element_hits"],
+	}
+	if used {
+		legacy.rowsIn = legacy.rowsOut
+		legacy.idxScan = legacy.rowsOut
+	} else {
+		legacy.rowsIn = legacy.rawScan
+	}
+	return legacy
+}
+
 // groupAgg is the cross-segment aggregate of one decision.
 type groupAgg struct {
-	key         groupKey
-	fieldID     int64
-	segments    map[string]struct{}
-	rowsMatched int64
-	rowsScanned int64
-	elementHits int64
+	key      groupKey
+	fieldID  int64
+	segments map[string]struct{}
+	axisCounters
 }
 
 // usedAgg is the cross-segment aggregate of one index use.
 type usedAgg struct {
-	key         usedKey
-	segments    map[string]struct{}
-	rowsMatched int64
-	rowsScanned int64
-	elementHits int64
+	key      usedKey
+	segments map[string]struct{}
+	axisCounters
 }
 
 // conditionAgg is one condition while it is being assembled.
 type conditionAgg struct {
-	key         conditionKey
-	segments    map[string]struct{}
-	rowsMatched int64
-	rowsScanned int64
-	elementHits int64
-	used        map[usedKey]*usedAgg
-	reasons     map[string]map[string]struct{}
+	key      conditionKey
+	segments map[string]struct{}
+	axisCounters
+	used    map[usedKey]*usedAgg
+	reasons map[string]map[string]struct{}
 }
 
 // Summarize folds the segment-level explain tree into the leaf view: per filter
-// condition, how many segments used which index and how many fell back to a raw
-// scan. segments are the KindSegment nodes of the tree, already flattened by the
-// caller; leaves is the plan's expr_id -> predicate table.
+// condition, how many rows its leaves received, how many of them an index
+// covered, how many were read from the columns, how many matched, and how many
+// segments fell back to a raw scan. segments are the KindSegment nodes of the
+// tree, already flattened by the caller; leaves is the plan's expr_id ->
+// predicate table.
 //
 // A segment may be reported more than once, so every count is taken over
 // distinct segment IDs and the counters of a (segment, decision) pair are summed
@@ -182,8 +245,8 @@ func Summarize(segments []*internalpb.ExecutionExplain, leaves map[int64]LeafInf
 		Conditions: []Condition{},
 	}
 
-	// Rows per distinct segment: the root counter sums each segment once.
-	rowsTotal := make(map[string]int64, len(segments))
+	// Distinct segments: the root counts each of them once.
+	seen := make(map[string]struct{}, len(segments))
 	// One entry per decision seen anywhere, in the order the tree reports them.
 	groups := make([]*groupAgg, 0, len(segments))
 	groupIndex := make(map[groupKey]int, len(segments))
@@ -195,9 +258,7 @@ func Summarize(segments []*internalpb.ExecutionExplain, leaves map[int64]LeafInf
 			continue
 		}
 		segmentID := segment.GetName()
-		if _, ok := rowsTotal[segmentID]; !ok {
-			rowsTotal[segmentID] = segment.GetCounters()["rows_total"]
-		}
+		seen[segmentID] = struct{}{}
 		for _, filterGroup := range segment.GetChildren() {
 			if filterGroup == nil || filterGroup.GetKind() != KindFilterGroup {
 				continue
@@ -220,31 +281,29 @@ func Summarize(segments []*internalpb.ExecutionExplain, leaves map[int64]LeafInf
 				continue
 			}
 			counted[decision] = struct{}{}
-			counters := filterGroup.GetCounters()
-			agg.rowsMatched += counters["rows_matched"]
-			agg.rowsScanned += counters["rows_scanned"]
-			agg.elementHits += counters["element_hits"]
+			addCounters(&agg.axisCounters, countersOf(filterGroup, key.used))
 		}
 	}
 
-	summary.Segments = len(rowsTotal)
-	for _, rows := range rowsTotal {
-		summary.RowsTotal += rows
-	}
+	summary.Segments = len(seen)
 	summary.Conditions = buildConditions(groups, leaves)
+	for _, condition := range summary.Conditions {
+		summary.RowsIn += condition.RowsIn
+		summary.RowsOut += condition.RowsOut
+	}
 	return summary
 }
 
 // RenderSummaryText formats a summary as indented text, two spaces per level:
 //
-//	query [rows_total=..., segments=...]
-//	  expr <condition> [rows_matched=..., rows_scanned=..., segments=...] {expr_id=..., field_id=..., type=...}
-//	    index <index_id> <family> [rows_matched=..., rows_scanned=..., segments=...]
-//	    raw [rows_matched=..., rows_scanned=..., segments=...] {decline_reason=...}
+//	query [rows_in=..., rows_out=..., segments=...]
+//	  expr <condition> [idx_scan=..., raw_scan=..., rows_in=..., rows_out=..., segments=...] {expr_id=..., field_id=..., type=...}
+//	    index <index_id> <family> [idx_scan=..., raw_scan=..., rows_in=..., rows_out=..., segments=...]
+//	    raw [idx_scan=..., raw_scan=..., rows_in=..., rows_out=..., segments=...] {decline_reason=...}
 //
 // Every index a condition used comes before its raw fallbacks. Counters and
 // attributes are sorted by key, so the same summary always renders the same
-// text. The raw line carries what the raw leaves of the condition scanned: the
+// text. The raw lines carry what the raw leaves of the condition processed: the
 // reasons only split the segment count, so they all share that remainder.
 func RenderSummaryText(s *Summary) string {
 	if s == nil {
@@ -254,8 +313,9 @@ func RenderSummaryText(s *Summary) string {
 	var b strings.Builder
 	writeNodeHeader(&b, 0, KindQuery)
 	writePairs(&b, " [", "]", map[string]int64{
-		"rows_total": s.RowsTotal,
-		"segments":   int64(s.Segments),
+		"rows_in":  s.RowsIn,
+		"rows_out": s.RowsOut,
+		"segments": int64(s.Segments),
 	})
 	b.WriteByte('\n')
 
@@ -277,15 +337,7 @@ func RenderSummaryJSON(s *Summary) (string, error) {
 
 func writeCondition(b *strings.Builder, condition Condition) {
 	writeNodeHeader(b, 1, "expr", condition.Condition)
-	counters := map[string]int64{
-		"rows_matched": condition.RowsMatched,
-		"rows_scanned": condition.RowsScanned,
-		"segments":     int64(condition.Segments),
-	}
-	if condition.ElementHits > 0 {
-		counters["element_hits"] = condition.ElementHits
-	}
-	writePairs(b, " [", "]", counters)
+	writePairs(b, " [", "]", counterPairs(condition.axisCounters(), condition.Segments))
 	writePairs(b, " {", "}", map[string]string{
 		"expr_id":  strconv.FormatInt(condition.ExprID, 10),
 		"field_id": strconv.FormatInt(condition.FieldID, 10),
@@ -294,30 +346,44 @@ func writeCondition(b *strings.Builder, condition Condition) {
 	b.WriteByte('\n')
 
 	for _, used := range sortedUsed(condition.Used) {
-		writeNodeHeader(b, 2, "index", strconv.FormatInt(used.IndexID, 10), used.Family)
-		counters := map[string]int64{
-			"rows_matched": used.RowsMatched,
-			"rows_scanned": used.RowsScanned,
-			"segments":     int64(used.Segments),
+		name := used.IndexName
+		if name == "" {
+			name = strconv.FormatInt(used.IndexID, 10)
 		}
-		if used.ElementHits > 0 {
-			counters["element_hits"] = used.ElementHits
-		}
-		writePairs(b, " [", "]", counters)
+		writeNodeHeader(b, 2, "index", name, used.Family)
+		writePairs(b, " [", "]", counterPairs(axisCounters{
+			idxScan:     used.IdxScan,
+			rawScan:     used.RawScan,
+			rowsIn:      used.RowsIn,
+			rowsOut:     used.RowsOut,
+			elementHits: used.ElementHits,
+		}, used.Segments))
 		b.WriteByte('\n')
 	}
 
-	rawMatched, rawScanned := rawRemainder(condition)
+	raw := rawRemainder(condition)
 	for _, reason := range sortedReasons(condition.Reasons) {
 		writeNodeHeader(b, 2, "raw")
-		writePairs(b, " [", "]", map[string]int64{
-			"rows_matched": rawMatched,
-			"rows_scanned": rawScanned,
-			"segments":     int64(reason.Segments),
-		})
+		writePairs(b, " [", "]", counterPairs(raw, reason.Segments))
 		writePairs(b, " {", "}", map[string]string{"decline_reason": reason.Reason})
 		b.WriteByte('\n')
 	}
+}
+
+// counterPairs renders the four axes of one node under the keys the text format
+// uses, plus element_hits when the node hit elements.
+func counterPairs(c axisCounters, segments int) map[string]int64 {
+	pairs := map[string]int64{
+		"idx_scan": c.idxScan,
+		"raw_scan": c.rawScan,
+		"rows_in":  c.rowsIn,
+		"rows_out": c.rowsOut,
+		"segments": int64(segments),
+	}
+	if c.elementHits > 0 {
+		pairs["element_hits"] = c.elementHits
+	}
+	return pairs
 }
 
 // writeNodeHeader writes "<indent><kind> <names...>", skipping empty names.
@@ -334,20 +400,29 @@ func writeNodeHeader(b *strings.Builder, depth int, kind string, names ...string
 }
 
 // rawRemainder is what the raw leaves of a condition processed: the condition
-// totals minus what its indexes reported.
-func rawRemainder(condition Condition) (matched, scanned int64) {
-	matched, scanned = condition.RowsMatched, condition.RowsScanned
+// totals minus what its indexes reported. An index that read candidate rows
+// back from the columns may leave raw_scan at zero here even though it scanned.
+func rawRemainder(condition Condition) axisCounters {
+	rest := condition.axisCounters()
 	for _, used := range condition.Used {
-		matched -= used.RowsMatched
-		scanned -= used.RowsScanned
+		rest.idxScan -= used.IdxScan
+		rest.rawScan -= used.RawScan
+		rest.rowsIn -= used.RowsIn
+		rest.rowsOut -= used.RowsOut
 	}
-	if matched < 0 {
-		matched = 0
+	rest.idxScan = nonNegative(rest.idxScan)
+	rest.rawScan = nonNegative(rest.rawScan)
+	rest.rowsIn = nonNegative(rest.rowsIn)
+	rest.rowsOut = nonNegative(rest.rowsOut)
+	rest.elementHits = 0
+	return rest
+}
+
+func nonNegative(value int64) int64 {
+	if value < 0 {
+		return 0
 	}
-	if scanned < 0 {
-		scanned = 0
-	}
-	return matched, scanned
+	return value
 }
 
 func buildConditions(groups []*groupAgg, leaves map[int64]LeafInfo) []Condition {
@@ -368,9 +443,7 @@ func buildConditions(groups []*groupAgg, leaves map[int64]LeafInfo) []Condition 
 		}
 		aggregate := aggregates[at]
 		mergeSegments(aggregate.segments, group.segments)
-		aggregate.rowsMatched += group.rowsMatched
-		aggregate.rowsScanned += group.rowsScanned
-		aggregate.elementHits += group.elementHits
+		addCounters(&aggregate.axisCounters, group.axisCounters)
 
 		if !group.key.used {
 			reason := group.key.declineReason
@@ -393,9 +466,7 @@ func buildConditions(groups []*groupAgg, leaves map[int64]LeafInfo) []Condition 
 			aggregate.used[useKey] = used
 		}
 		mergeSegments(used.segments, group.segments)
-		used.rowsMatched += group.rowsMatched
-		used.rowsScanned += group.rowsScanned
-		used.elementHits += group.elementHits
+		addCounters(&used.axisCounters, group.axisCounters)
 	}
 
 	conditions := make([]Condition, 0, len(aggregates))
@@ -411,8 +482,10 @@ func (agg *conditionAgg) condition(leaves map[int64]LeafInfo) Condition {
 	condition := Condition{
 		ExprID:      agg.key.exprID,
 		Segments:    len(agg.segments),
-		RowsMatched: agg.rowsMatched,
-		RowsScanned: agg.rowsScanned,
+		IdxScan:     agg.idxScan,
+		RawScan:     agg.rawScan,
+		RowsIn:      agg.rowsIn,
+		RowsOut:     agg.rowsOut,
 		ElementHits: agg.elementHits,
 		Used:        make([]IndexUse, 0, len(agg.used)),
 		Reasons:     make([]ReasonCount, 0, len(agg.reasons)),
@@ -430,8 +503,10 @@ func (agg *conditionAgg) condition(leaves map[int64]LeafInfo) Condition {
 			IndexID:     entry.key.indexID,
 			Family:      entry.key.family,
 			Segments:    len(entry.segments),
-			RowsMatched: entry.rowsMatched,
-			RowsScanned: entry.rowsScanned,
+			IdxScan:     entry.idxScan,
+			RawScan:     entry.rawScan,
+			RowsIn:      entry.rowsIn,
+			RowsOut:     entry.rowsOut,
 			ElementHits: entry.elementHits,
 		})
 	}
@@ -451,6 +526,25 @@ func (agg *conditionAgg) condition(leaves map[int64]LeafInfo) Condition {
 		return condition.Reasons[i].Reason < condition.Reasons[j].Reason
 	})
 	return condition
+}
+
+// axisCounters is the counter part of a rendered condition or index use.
+func (condition Condition) axisCounters() axisCounters {
+	return axisCounters{
+		idxScan:     condition.IdxScan,
+		rawScan:     condition.RawScan,
+		rowsIn:      condition.RowsIn,
+		rowsOut:     condition.RowsOut,
+		elementHits: condition.ElementHits,
+	}
+}
+
+func addCounters(dst *axisCounters, src axisCounters) {
+	dst.idxScan += src.idxScan
+	dst.rawScan += src.rawScan
+	dst.rowsIn += src.rowsIn
+	dst.rowsOut += src.rowsOut
+	dst.elementHits += src.elementHits
 }
 
 // groupKeyOf reads one filter_group: its decision key and the field it reads.

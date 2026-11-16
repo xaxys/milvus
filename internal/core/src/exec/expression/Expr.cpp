@@ -92,9 +92,26 @@ ExprSet::Eval(int32_t begin,
     auto* exec_ctx = context.get_exec_context();
     auto* query_ctx =
         exec_ctx != nullptr ? exec_ctx->get_query_context() : nullptr;
+    auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
     for (size_t i = begin; i < end; ++i) {
         milvus::exec::checkCancellation(query_ctx);
         exprs_[i]->Eval(context, results[i]);
+        // The set is where a top-level leaf is evaluated, so report the rows it
+        // was handed and matched here. A logical top-level expression carries no
+        // expr_id; the conjunction that owns the nested leaves reports them.
+        if (explain != nullptr && exprs_[i]->expr_id() != 0 &&
+            results[i] != nullptr) {
+            if (auto col =
+                    std::dynamic_pointer_cast<ColumnVector>(results[i]);
+                col != nullptr && col->IsBitmap()) {
+                const auto size = col->size();
+                explain->AddRows(
+                    exprs_[i]->expr_id(),
+                    static_cast<int64_t>(size),
+                    static_cast<int64_t>(
+                        TargetBitmapView(col->GetRawData(), size).count()));
+            }
+        }
     }
 }
 

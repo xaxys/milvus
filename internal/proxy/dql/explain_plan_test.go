@@ -188,7 +188,7 @@ func explainSegment() *internalpb.ExecutionExplain {
 				"expr_id": "3", "field_id": "101", "family": "ngram",
 				"index_id": "459123456789100001", "nested": "false",
 			},
-			Counters: map[string]int64{"leaves": 1, "rows_matched": 31, "rows_scanned": 0},
+			Counters: map[string]int64{"rows_in": 50000, "idx_scan": 50000, "raw_scan": 0, "rows_out": 31},
 		}},
 	}
 }
@@ -196,25 +196,43 @@ func explainSegment() *internalpb.ExecutionExplain {
 func TestRenderExplainLevelsAndFormats(t *testing.T) {
 	leaves := map[int64]explain.LeafInfo{3: {Condition: `title contains "%降噪%"`, Type: "contains", FieldID: 101}}
 
-	rendered, err := renderExplain(nil, []*internalpb.ExecutionExplain{explainSegment()}, leaves)
+	rendered, err := renderExplain(nil, []*internalpb.ExecutionExplain{explainSegment()}, leaves, nil)
 	require.NoError(t, err)
 	assert.Contains(t, rendered, `expr title contains "%降噪%"`)
 	assert.Contains(t, rendered, "index 459123456789100001 ngram")
+	assert.Contains(t, rendered, "rows_out=31")
 
-	rendered, err = renderExplain([]*commonpb.KeyValuePair{{Key: explainFormatKey, Value: "json"}}, []*internalpb.ExecutionExplain{explainSegment()}, leaves)
+	rendered, err = renderExplain([]*commonpb.KeyValuePair{{Key: explainFormatKey, Value: "json"}}, []*internalpb.ExecutionExplain{explainSegment()}, leaves, nil)
 	require.NoError(t, err)
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal([]byte(rendered), &decoded))
 	assert.Equal(t, "summary", decoded["level"])
 
-	rendered, err = renderExplain([]*commonpb.KeyValuePair{{Key: explainFormatKey, Value: "none"}}, []*internalpb.ExecutionExplain{explainSegment()}, leaves)
+	rendered, err = renderExplain([]*commonpb.KeyValuePair{{Key: explainFormatKey, Value: "none"}}, []*internalpb.ExecutionExplain{explainSegment()}, leaves, nil)
 	require.NoError(t, err)
 	assert.Empty(t, rendered)
 
-	_, err = renderExplain([]*commonpb.KeyValuePair{{Key: explainLevelKey, Value: "detail"}}, []*internalpb.ExecutionExplain{explainSegment()}, leaves)
+	_, err = renderExplain([]*commonpb.KeyValuePair{{Key: explainLevelKey, Value: "detail"}}, []*internalpb.ExecutionExplain{explainSegment()}, leaves, nil)
 	assert.Error(t, err)
 
-	rendered, err = renderExplain(nil, nil, leaves)
+	rendered, err = renderExplain(nil, nil, leaves, nil)
 	require.NoError(t, err)
 	assert.Empty(t, rendered)
+}
+
+func TestRenderExplainUsesIndexNames(t *testing.T) {
+	leaves := map[int64]explain.LeafInfo{3: {Condition: `title contains "%降噪%"`, Type: "contains", FieldID: 101}}
+	names := map[int64]string{459123456789100001: "title_ngram"}
+	segments := []*internalpb.ExecutionExplain{explainSegment()}
+
+	rendered, err := renderExplain(nil, segments, leaves, names)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "index title_ngram ngram")
+
+	rendered, err = renderExplain(
+		[]*commonpb.KeyValuePair{{Key: explainFormatKey, Value: "json"}},
+		segments, leaves, names)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, `"index_name":"title_ngram"`)
+	assert.Contains(t, rendered, `"index_id":459123456789100001`)
 }

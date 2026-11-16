@@ -3215,7 +3215,7 @@ class SegmentExpr : public Expr {
                 &read_rows,
                 values...);
         if (processed_size >= 0) {
-            RecordScannedRows(read_rows);
+            RecordRawScan(read_rows);
             return processed_size;
         }
         AssertInfo(!segment_->is_chunked(),
@@ -3230,7 +3230,7 @@ class SegmentExpr : public Expr {
                 candidate_mask,
                 &read_rows,
                 values...);
-        RecordScannedRows(read_rows);
+        RecordRawScan(read_rows);
         return single_chunk_size;
     }
 
@@ -3238,9 +3238,9 @@ class SegmentExpr : public Expr {
     // that a conjunction skipped never reaches here, and a chunk whose data was
     // skipped by the SkipIndex is not counted as read.
     void
-    RecordScannedRows(int64_t rows) {
-        if (explain_ != nullptr && explain_group_id_ != 0 && rows > 0) {
-            explain_->AddScannedRows(explain_group_id_, rows);
+    RecordRawScan(int64_t rows) {
+        if (explain_ != nullptr && expr_id_ != 0 && rows > 0) {
+            explain_->AddRawScan(expr_id_, rows);
         }
     }
 
@@ -3295,7 +3295,7 @@ class SegmentExpr : public Expr {
             }
         }
 
-        RecordScannedRows(processed_size);
+        RecordRawScan(processed_size);
         return processed_size;
     }
 
@@ -3512,10 +3512,12 @@ class SegmentExpr : public Expr {
                                                *offsets);
         }
         auto sliced = SliceCachedIndexResult(need_element_slicing);
-        // Hits this leaf got from the index. A nested index sliced at element
-        // level counts elements; the caller folds them to rows afterwards, so the
-        // two domains are kept apart instead of pretending one is the other.
-        if (explain_ != nullptr && selected_index_entry_.has_value()) {
+        // Row-level hits are counted where the leaf's output is consumed (the
+        // filter or conjunction that owns it). A nested index sliced at element
+        // level is the exception: those hits live in the element domain and the
+        // caller folds them to rows afterwards, so they stay a separate counter.
+        if (explain_ != nullptr && need_element_slicing &&
+            selected_index_entry_.has_value()) {
             if (auto id = selected_index_entry_->key.identity.pre_built_id();
                 id.has_value()) {
                 int64_t matched = 0;
@@ -3524,11 +3526,7 @@ class SegmentExpr : public Expr {
                     matched =
                         TargetBitmapView(col->GetRawData(), col->size()).count();
                 }
-                if (need_element_slicing) {
-                    explain_->AddElementHits(field_id_, *id, matched);
-                } else {
-                    explain_->AddIndexHits(field_id_, *id, matched);
-                }
+                explain_->AddElementHits(field_id_, *id, matched);
             }
         }
         return sliced;
@@ -4389,14 +4387,14 @@ class SegmentExpr : public Expr {
                                   ? DeclineReason::kIndexUnusable
                                   : DeclineReason::kNoIndexOnField);
         }
-        explain_group_id_ = explain->RecordDecision(field_id_,
-                                                    expr_id_,
-                                                    used_index,
-                                                    index_id,
-                                                    family,
-                                                    nested,
-                                                    path,
-                                                    reason);
+        explain->RecordDecision(field_id_,
+                                expr_id_,
+                                used_index,
+                                index_id,
+                                family,
+                                nested,
+                                path,
+                                reason);
     }
 
     void
@@ -4743,8 +4741,6 @@ class SegmentExpr : public Expr {
     const segcore::SegmentReadSnapshot* snapshot_{nullptr};
     const FieldId field_id_;
     ExecutionExplainRecorder* explain_{nullptr};
-    // Handle of this leaf's decision group in explain_, for its scanned rows.
-    int64_t explain_group_id_{0};
     bool is_pk_field_{false};
     // Whether the column carries a validity (null) bitmap. When false, a chunk
     // skipped by SkipIndex needs no per-row validity work, so the multi-chunk

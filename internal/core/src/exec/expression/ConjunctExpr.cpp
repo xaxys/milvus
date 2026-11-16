@@ -95,8 +95,14 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         "PhyConjunctFilterExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("is_and", is_and_);
 
+    auto* explain = context.get_exec_context() == nullptr
+                        ? nullptr
+                        : context.get_exec_context()->explain();
     TargetBitmap inherited_bitmap;
     bool has_result = false;
+    // Rows handed to the next child: the parent's mask for the first one, then
+    // the active set the previous child left behind.
+    int64_t next_rows_in = -1;
     auto restore_bitmap =
         folly::makeGuard([&context, &inherited_bitmap, &has_result] {
             if (has_result) {
@@ -124,7 +130,11 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         // instance's offset mode is fixed for its lifetime, so no later
         // call could have used the batch path anyway.)
         std::vector<std::shared_ptr<PhyUnaryRangeFilterExpr>> ngram_exprs;
-        if (!has_input_offset) {
+        // The fused batch path evaluates several LIKE leaves without exposing
+        // each one's result, so execution explain cannot attribute rows to them.
+        // Plain evaluation is slower but observable; explain is a diagnostic
+        // mode, so prefer it here and keep the fast path otherwise.
+        if (!has_input_offset && explain == nullptr) {
             for (size_t idx : like_indices_) {
                 auto input = inputs_[idx];
                 if (auto cached =
@@ -186,19 +196,23 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
             continue;
         }
 
+        const bool first_input = !has_result;
         VectorPtr input_result;
         inputs_[idx]->Eval(context, input_result);
 
+        ColumnVectorPtr child_bitmap;
         ColumnVectorPtr all_flat_result;
-        if (!has_result) {
+        if (first_input) {
             // The first input needs the parent's mask in context. Take it only
             // after that input succeeds, then restore its storage on every exit.
             inherited_bitmap = context.take_bitmap_input();
             has_result = true;
             result = input_result;
             all_flat_result = GetColumnVector(result);
+            child_bitmap = all_flat_result;
         } else {
             auto input_flat_result = GetColumnVector(input_result);
+            child_bitmap = input_flat_result;
             all_flat_result = GetColumnVector(result);
             if (is_and_) {
                 common::ThreeValuedLogicOp::And(all_flat_result,
@@ -207,6 +221,28 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                 common::ThreeValuedLogicOp::Or(all_flat_result,
                                                input_flat_result);
             }
+        }
+
+        // Attribute this child's input and hits before the accumulated bitmap is
+        // mutated further. A child that is itself logical carries no expr_id and
+        // counts its own children.
+        if (explain != nullptr && child_bitmap != nullptr &&
+            inputs_[idx] != nullptr && inputs_[idx]->expr_id() != 0) {
+            int64_t rows_in;
+            if (first_input) {
+                rows_in = inherited_bitmap.empty()
+                              ? static_cast<int64_t>(child_bitmap->size())
+                              : static_cast<int64_t>(inherited_bitmap.count());
+            } else {
+                rows_in = next_rows_in >= 0
+                              ? next_rows_in
+                              : static_cast<int64_t>(child_bitmap->size());
+            }
+            const int64_t rows_out = static_cast<int64_t>(
+                TargetBitmapView(child_bitmap->GetRawData(),
+                                 child_bitmap->size())
+                    .count());
+            explain->AddRows(inputs_[idx]->expr_id(), rows_in, rows_out);
         }
 
         // The last evaluated expression needs neither a skip decision nor a
@@ -228,6 +264,7 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
             SkipFollowingExprs(i + 1);
             return;
         }
+        next_rows_in = static_cast<int64_t>(active_rows.count());
         context.set_bitmap_input(std::move(active_rows));
     }
 }

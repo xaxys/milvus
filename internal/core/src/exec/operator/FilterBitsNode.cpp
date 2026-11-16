@@ -153,6 +153,25 @@ PhyFilterBitsNode::GetOutput() {
         return nullptr;
     }
 
+    // Execution explain: the filter owns one top-level expression. When that
+    // expression is a leaf it is the leaf's consumer, so the rows it hands over
+    // and the rows the predicate matches are recorded here. A logical top-level
+    // expression carries no expr_id and counts its own children instead.
+    auto* explain = operator_context_->get_exec_context() == nullptr
+                        ? nullptr
+                        : operator_context_->get_exec_context()->explain();
+    std::shared_ptr<Expr> top_expr;
+    if (exprs_->size() > 0) {
+        top_expr = exprs_->expr(0);
+    }
+    const bool explain_leaf =
+        explain != nullptr && top_expr != nullptr && top_expr->expr_id() != 0;
+    auto record_explain_rows = [&](int64_t rows_in, int64_t rows_out) {
+        if (explain_leaf) {
+            explain->AddRows(top_expr->expr_id(), rows_in, rows_out);
+        }
+    };
+
     // Cache read: Stage 2 of two-stage search reuses the bitset cached by Stage 1.
     // Cache lives in the process-level ExprResCacheManager keyed by
     // (segment_id, FilterBitsNode signature + dynamic filter context), so
@@ -182,6 +201,12 @@ PhyFilterBitsNode::GetOutput() {
                                     : TargetBitmap(need_process_rows_, true)));
             cached_output = std::make_shared<RowVector>(std::move(col_res));
             num_processed_rows_ = need_process_rows_;
+            // Nothing ran: the cached bitset is the filtered form (1 means
+            // excluded), so the predicate matched the other rows.
+            record_explain_rows(
+                need_process_rows_,
+                need_process_rows_ -
+                    static_cast<int64_t>(cached.result->count()));
         });
         if (cached_output != nullptr) {
             MarkFeature(

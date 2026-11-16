@@ -23,13 +23,17 @@ package dql
 // decisions back into one condition.
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/milvus-io/milvus/internal/util/explain"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
@@ -83,6 +87,7 @@ func renderExplain(
 	params []*commonpb.KeyValuePair,
 	explains []*internalpb.ExecutionExplain,
 	leaves map[int64]explain.LeafInfo,
+	indexNames map[int64]string,
 ) (string, error) {
 	format, level, err := explainParams(params)
 	if err != nil || format == explainFormatNone {
@@ -101,10 +106,55 @@ func renderExplain(
 	if len(summary.Conditions) == 0 {
 		return "", nil
 	}
+	explain.NameIndexUses(summary, indexNames)
 	if format == explainFormatJSON {
 		return explain.RenderSummaryJSON(summary)
 	}
 	return explain.RenderSummaryText(summary), nil
+}
+
+// explainIndexNames resolves the indexes this collection carries, so the
+// summary can name the one each segment used instead of only its id. A failure
+// is not worth failing the query over: the rendered view keeps the ids.
+func explainIndexNames(
+	ctx context.Context,
+	node taskmodel.TaskNode,
+	collectionID int64,
+) map[int64]string {
+	if node == nil || node.MixCoord() == nil {
+		return nil
+	}
+	resp, err := node.MixCoord().DescribeIndex(ctx, &indexpb.DescribeIndexRequest{
+		CollectionID: collectionID,
+	})
+	if err == nil {
+		err = merr.Error(resp.GetStatus())
+	}
+	if err != nil {
+		mlog.Warn(ctx, "index names unavailable for execution explain",
+			mlog.Int64("collectionID", collectionID), mlog.Err(err))
+		return nil
+	}
+	names := make(map[int64]string, len(resp.GetIndexInfos()))
+	for _, info := range resp.GetIndexInfos() {
+		names[info.GetIndexID()] = info.GetIndexName()
+	}
+	return names
+}
+
+// explainIndexNamesIfNeeded skips the coordinator lookup when the request asked
+// for no explain payload, so a normal search pays nothing for this view.
+func explainIndexNamesIfNeeded(
+	ctx context.Context,
+	node taskmodel.TaskNode,
+	collectionID int64,
+	params []*commonpb.KeyValuePair,
+) map[int64]string {
+	format, _, err := explainParams(params)
+	if err != nil || format == explainFormatNone {
+		return nil
+	}
+	return explainIndexNames(ctx, node, collectionID)
 }
 
 // assignExplainIDs tags every predicate leaf of the plan and records how to
