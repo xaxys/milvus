@@ -498,6 +498,9 @@ CompileExpression(const expr::TypedExprPtr& expr,
     // non-pinned paths) to this expression. Runs for the whole compiled tree
     // because CompileExpression is recursive over inputs.
     result->SetSnapshot(context->get_read_snapshot().get());
+    // The plan node id travels with the logical expression; the explain records
+    // it so the proxy can group decisions by leaf across segments.
+    result->SetExprId(expr->expr_id());
     if (auto* explain = context->explain(); explain != nullptr) {
         result->SetExplainRecorder(explain);
     }

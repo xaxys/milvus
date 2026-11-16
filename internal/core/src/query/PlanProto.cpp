@@ -1833,6 +1833,12 @@ ProtoParser::ParseExprs(const proto::plan::Expr& expr_pb,
         }
     }
     if (type_check(result->type())) {
+        // Carry the proxy-assigned node id into the typed tree. ParseExprs runs
+        // for every node, children included, so each leaf keeps its own id.
+        if (expr_pb.expr_id() != 0) {
+            std::const_pointer_cast<expr::ITypeExpr>(result)->SetExprId(
+                expr_pb.expr_id());
+        }
         return result;
     }
     ThrowInfo(UnexpectedError,

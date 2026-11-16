@@ -17,21 +17,5 @@
 
 package dql
 
-import (
-	"github.com/milvus-io/milvus/internal/util/explain"
-	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
-)
-
-// explainKey is the client status entry that carries the rendered tree.
+// explainKey is the client status entry that carries the rendered explain.
 const explainKey = "explain"
-
-// queryExplain renders what the shards reported as the top level of the
-// explain tree: query -> delegator -> querynode -> segment -> filter_group.
-// It returns "" when no shard recorded anything.
-func queryExplain(explains []*internalpb.ExecutionExplain) string {
-	children := explain.Splice(nil, explains...)
-	if len(children) == 0 {
-		return ""
-	}
-	return explain.Render(explain.Wrap(explain.KindQuery, "", children))
-}

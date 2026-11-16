@@ -99,6 +99,11 @@ type SearchTask struct {
 	// on its first line, so a request that will not be counted pays for no
 	// parameter scan, no expression walk and no JSON decode.
 	collectFeatures bool
+	// explainLeaves describes the predicate leaves this request's plans tagged
+	// with expr_id; explainNextExprID keeps the ids unique across hybrid
+	// sub-plans.
+	explainLeaves     map[int64]explain.LeafInfo
+	explainNextExprID int64
 	// countFeatures is set only on the first task built for a user request, so
 	// the repeat runs above add nothing.
 	countFeatures          bool
@@ -1435,6 +1440,7 @@ func (t *SearchTask) tryGeneratePlan(
 		metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), "search", metrics.FailLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, WrapPlanCreationError(planErr, "failed to create query plan")
 	}
+	assignExplainIDs(plan, t.schema.CollectionSchema, &t.explainNextExprID, &t.explainLeaves)
 	if err := applyIndexHint(t.ctx, t.node, t.GetCollectionID(), plan, params); err != nil {
 		// A hint the user asked to be strict about must surface, not be swallowed.
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, err
@@ -1812,7 +1818,11 @@ func (t *SearchTask) PostExecute(ctx context.Context) error {
 	for _, result := range toReduceResults {
 		explains = explain.Splice(explains, result.GetExplain())
 	}
-	if rendered := queryExplain(explains); rendered != "" {
+	rendered, explainErr := renderExplain(t.request.GetSearchParams(), explains, t.explainLeaves)
+	if explainErr != nil {
+		return explainErr
+	}
+	if rendered != "" {
 		if t.result.Status == nil {
 			t.result.Status = merr.Success()
 		}

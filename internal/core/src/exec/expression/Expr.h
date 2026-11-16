@@ -412,6 +412,18 @@ class Expr : public std::enable_shared_from_this<Expr> {
         return type_;
     }
 
+    // Request-unique id of the logical expression node this was compiled from;
+    // zero for nodes the proxy did not tag. Read by the explain recorder.
+    int64_t
+    expr_id() const {
+        return expr_id_;
+    }
+
+    void
+    SetExprId(int64_t expr_id) {
+        expr_id_ = expr_id;
+    }
+
     std::string
     name() {
         return name_;
@@ -550,6 +562,7 @@ class Expr : public std::enable_shared_from_this<Expr> {
     std::vector<std::shared_ptr<Expr>> inputs_;
     std::string name_;
     milvus::OpContext* op_ctx_;
+    int64_t expr_id_{0};
 
     // whether we have offset input and do expr filtering on these data
     // default is false which means we will do expr filtering on the total segment data
@@ -4376,8 +4389,14 @@ class SegmentExpr : public Expr {
                                   ? DeclineReason::kIndexUnusable
                                   : DeclineReason::kNoIndexOnField);
         }
-        explain_group_id_ = explain->RecordDecision(
-            field_id_, used_index, index_id, family, nested, path, reason);
+        explain_group_id_ = explain->RecordDecision(field_id_,
+                                                    expr_id_,
+                                                    used_index,
+                                                    index_id,
+                                                    family,
+                                                    nested,
+                                                    path,
+                                                    reason);
     }
 
     void

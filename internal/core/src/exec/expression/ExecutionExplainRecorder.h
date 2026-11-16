@@ -40,6 +40,7 @@ class ExecutionExplainRecorder {
     // the leaf uses to report the rows it actually evaluated.
     int64_t
     RecordDecision(FieldId field_id,
+                   int64_t expr_id,
                    bool used_index,
                    int64_t index_id,
                    std::string family,
@@ -48,6 +49,7 @@ class ExecutionExplainRecorder {
                    std::string decline_reason) {
         std::lock_guard lock(mu_);
         auto& group = groups_[Key(field_id,
+                                  expr_id,
                                   used_index,
                                   index_id,
                                   family,
@@ -68,6 +70,7 @@ class ExecutionExplainRecorder {
             group.decline_reason = std::move(decline_reason);
         }
         group.field_id = field_id.get();
+        group.expr_id = expr_id;
         group.index_id = index_id;
         group.used_index = used_index;
         group.nested = nested;
@@ -137,6 +140,9 @@ class ExecutionExplainRecorder {
             child->set_version(1);
             auto& attrs = *child->mutable_attributes();
             attrs["field_id"] = std::to_string(group.field_id);
+            if (group.expr_id != 0) {
+                attrs["expr_id"] = std::to_string(group.expr_id);
+            }
             if (group.used_index) {
                 attrs["index_id"] = std::to_string(group.index_id);
             }
@@ -171,6 +177,7 @@ class ExecutionExplainRecorder {
     struct Group {
         int64_t id{0};
         int64_t field_id{0};
+        int64_t expr_id{0};
         int64_t index_id{0};
         bool used_index{false};
         bool nested{false};
@@ -185,14 +192,16 @@ class ExecutionExplainRecorder {
 
     static std::string
     Key(FieldId field_id,
+        int64_t expr_id,
         bool used_index,
         int64_t index_id,
         const std::string& family,
         bool nested,
         const std::string& path,
         const std::string& decline_reason) {
-        return fmt::format("{}|{}|{}|{}|{}|{}|{}",
+        return fmt::format("{}|{}|{}|{}|{}|{}|{}|{}",
                            field_id.get(),
+                           expr_id,
                            used_index,
                            index_id,
                            family,

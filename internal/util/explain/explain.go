@@ -43,6 +43,30 @@ const (
 	KindReduced = "reduced"
 )
 
+// Segments returns the segment nodes of the given trees. Reduced nodes are
+// flattened on the way, and the levels Go owns (query / delegator / querynode)
+// are skipped: their counters are sums of the segments underneath them.
+func Segments(nodes ...*internalpb.ExecutionExplain) []*internalpb.ExecutionExplain {
+	var segments []*internalpb.ExecutionExplain
+	var walk func(node *internalpb.ExecutionExplain)
+	walk = func(node *internalpb.ExecutionExplain) {
+		if node == nil {
+			return
+		}
+		if node.GetKind() == KindSegment {
+			segments = append(segments, node)
+			return
+		}
+		for _, child := range node.GetChildren() {
+			walk(child)
+		}
+	}
+	for _, node := range Splice(nil, nodes...) {
+		walk(node)
+	}
+	return segments
+}
+
 // Wrap builds a node that owns children and sums their counters.
 func Wrap(kind, name string, children []*internalpb.ExecutionExplain) *internalpb.ExecutionExplain {
 	node := &internalpb.ExecutionExplain{

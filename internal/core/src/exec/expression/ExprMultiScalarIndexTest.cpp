@@ -1268,3 +1268,61 @@ TEST(MultiScalarIndexExprTest, HintOnOneJsonPathKeepsOtherPathNgram) {
         << "the j/b ngram index must serve its own path";
     EXPECT_EQ(selected->second, std::to_string(kPathBIndexId));
 }
+
+// Two leaves on the same field can make the same decision. The plan assigns
+// them different expr_ids, and the explain must keep them apart: the proxy folds
+// decisions by expr_id to rebuild each condition, so merging them here would
+// lose which leaf scanned what.
+TEST(MultiScalarIndexExprTest, ExplainKeepsLeavesWithSameDecisionApart) {
+    auto schema = std::make_shared<Schema>();
+    auto int_fid = schema->AddDebugField("int64_field", DataType::INT64);
+
+    std::vector<int64_t> values = {10, 20, 30, 40, 40, 50, 60, 70, 80, 90};
+    auto int_field =
+        std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+    int_field->FillFieldData(values.data(), values.size());
+
+    RawFieldFiles files;
+    auto segment = CreateSealedSegment(schema);
+    segment->LoadFieldData(files.Prepare(int_fid, {int_field}));
+    InstallIndexWithId(
+        *segment,
+        int_fid,
+        DataType::INT64,
+        7101,
+        BuildIndex(int_fid,
+                   DataType::INT64,
+                   milvus::index::ASCENDING_SORT,
+                   {int_field}));
+
+    auto lower = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(int_fid, DataType::INT64),
+        proto::plan::OpType::GreaterThan,
+        Int64Literal(20),
+        std::vector<proto::plan::GenericValue>());
+    lower->SetExprId(71001);
+    auto upper = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(int_fid, DataType::INT64),
+        proto::plan::OpType::LessThan,
+        Int64Literal(60),
+        std::vector<proto::plan::GenericValue>());
+    upper->SetExprId(71002);
+    auto both = std::make_shared<expr::LogicalBinaryExpr>(
+        expr::LogicalBinaryExpr::OpType::And, lower, upper);
+
+    milvus::exec::ExecutionExplainRecorder explain(values.size());
+    auto result = EvaluateFilter(both, segment.get(), values.size(), &explain);
+    ExpectHitRows(result, {2, 3, 4, 5}, "int64 in (20, 60)");
+
+    proto::internal::ExecutionExplain node;
+    ASSERT_TRUE(node.ParseFromString(explain.Finish()));
+    ASSERT_EQ(node.children_size(), 2)
+        << "each expr_id keeps its own filter group";
+    EXPECT_EQ(AttributesOf(node.children(0)).at("expr_id"), "71001");
+    EXPECT_EQ(AttributesOf(node.children(1)).at("expr_id"), "71002");
+    for (int i = 0; i < node.children_size(); ++i) {
+        const auto attributes = AttributesOf(node.children(i));
+        EXPECT_EQ(attributes.at("field_id"), std::to_string(int_fid.get()));
+        EXPECT_EQ(attributes.at("family"), "sort");
+    }
+}

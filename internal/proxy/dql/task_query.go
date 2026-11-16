@@ -115,6 +115,10 @@ type QueryTask struct {
 	// on its first line.
 	features             featureusage.FeatureSet
 	collectFeatures      bool
+	// explainLeaves describes the predicate leaves of this query's plan, keyed by
+	// the expr_id the plan carries.
+	explainLeaves     map[int64]explain.LeafInfo
+	explainNextExprID int64
 	allQueryCnt          int64
 	totalRelatedDataSize int64
 	mustUsePartitionKey  bool
@@ -677,6 +681,7 @@ func (t *QueryTask) createPlanArgs(ctx context.Context, visitorArgs *planparserv
 			metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel, metrics.FailLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 			return WrapPlanCreationError(err, "failed to create query plan")
 		}
+		assignExplainIDs(t.plan, schema.CollectionSchema, &t.explainNextExprID, &t.explainLeaves)
 		if err := applyIndexHint(ctx, t.node, t.GetCollectionID(), t.plan, t.request.GetQueryParams()); err != nil {
 			return err
 		}
@@ -1310,7 +1315,11 @@ func (t *QueryTask) PostExecute(ctx context.Context) error {
 	for _, result := range toReduceResults {
 		explains = explain.Splice(explains, result.GetExplain())
 	}
-	if rendered := queryExplain(explains); rendered != "" {
+	rendered, explainErr := renderExplain(t.request.GetQueryParams(), explains, t.explainLeaves)
+	if explainErr != nil {
+		return explainErr
+	}
+	if rendered != "" {
 		if t.result.Status == nil {
 			t.result.Status = merr.Success()
 		}

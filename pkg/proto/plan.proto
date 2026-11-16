@@ -344,6 +344,11 @@ message Expr {
     RoaringFilterExpr roaring_filter_expr = 23;
   };
   bool is_template = 20;
+  // Request-unique id of this expression node, assigned by the proxy before the
+  // plan is serialized. Segcore reports it in the execution explain so the proxy
+  // can aggregate the per-segment decisions back to one condition. Zero means the
+  // sender did not assign one (older proxy or a generated node).
+  int64 expr_id = 24;
 }
 
 message VectorANNS {
