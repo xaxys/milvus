@@ -2453,6 +2453,16 @@ PhyUnaryRangeFilterExpr::CanUseNgramIndex() const {
     return ngram_reader_->CanHandle(literal, ToIndexPatternOp(expr_->op_type_));
 }
 
+bool
+PhyUnaryRangeFilterExpr::NgramCandidatesAreExact() const {
+    if (ngram_reader_ == nullptr || has_offset_input_) {
+        return false;
+    }
+    auto literal = GetValueFromProto<std::string>(expr_->val_);
+    return ngram_reader_->CandidatesAreExact(
+        literal, ToIndexPatternOp(expr_->op_type_));
+}
+
 void
 PhyUnaryRangeFilterExpr::ExecuteNgramPhase1(TargetBitmap& candidates) {
     if (!arg_inited_) {

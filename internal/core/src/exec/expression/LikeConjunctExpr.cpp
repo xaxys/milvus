@@ -61,10 +61,24 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
     // Phase 1: Execute once for entire segment (no bitmap_input needed)
     if (cached_phase1_res_ == nullptr) {
         TargetBitmap candidates(active_count_, true);
+        auto* explain = context.get_exec_context() == nullptr
+                            ? nullptr
+                            : context.get_exec_context()->explain();
 
-        // Execute all ngram index queries, AND merge results
+        // Execute all ngram index queries, AND merge results. With explain on,
+        // each leaf's phase1 result is kept long enough to report its exact hit
+        // count (the fusion gate admits only leaves whose candidates are exact).
         for (auto& expr : ngram_exprs_) {
-            expr->ExecuteNgramPhase1(candidates);
+            if (explain != nullptr && expr->expr_id() != 0) {
+                TargetBitmap expr_candidates(active_count_, true);
+                expr->ExecuteNgramPhase1(expr_candidates);
+                explain->AddRows(expr->expr_id(),
+                                 active_count_,
+                                 static_cast<int64_t>(expr_candidates.count()));
+                candidates &= expr_candidates;
+            } else {
+                expr->ExecuteNgramPhase1(candidates);
+            }
             if (candidates.none()) {
                 break;
             }

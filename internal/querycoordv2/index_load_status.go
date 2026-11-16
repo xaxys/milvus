@@ -55,7 +55,7 @@ func (s *Server) GetIndexLoadStatus(
 	}
 
 	wanted := typeutil.NewSet[int64](req.GetIndexIDs()...)
-	replicas, placements := s.indexLoadEvidence(ctx, collectionID)
+	replicas, placements, servingShards := s.indexLoadEvidence(ctx, collectionID)
 
 	for _, info := range indexInfos {
 		if wanted.Len() > 0 && !wanted.Contain(info.GetIndexID()) {
@@ -78,19 +78,34 @@ func (s *Server) GetIndexLoadStatus(
 			}
 		}
 
-		// A replica counts as ready only when every segment it serves has the index:
-		// a replica that is missing it on one shard still cannot answer from the index.
+		// A replica counts as ready only when every segment it serves has the index,
+		// and it actually serves something: a replica that is still being placed has
+		// no node on any shard view, and counting it as ready would hide that the
+		// collection cannot yet answer from a full replica set. A query view replica
+		// must also cover every shard that is currently served.
 		for _, replica := range replicas {
 			nodes := typeutil.NewSet[int64](replica.GetNodes()...)
 			ready := true
+			served := 0
+			covered := typeutil.NewSet[qviews.ShardID]()
 			for _, placement := range placements {
 				if !nodes.Contain(placement.node) {
 					continue
+				}
+				served++
+				if placement.viewShard != nil {
+					covered.Insert(*placement.viewShard)
 				}
 				if !placement.carries(info.GetIndexID()) {
 					ready = false
 					break
 				}
+			}
+			if served == 0 {
+				ready = false
+			}
+			if ready && covered.Len() < servingShards {
+				ready = false
 			}
 			if ready {
 				status.ReadyReplicas++
@@ -115,6 +130,9 @@ func (s *Server) GetIndexLoadStatus(
 type indexPlacement struct {
 	node    int64
 	segment *meta.Segment
+	// viewShard is the shard this placement came from when it was read out of a
+	// query view; nil on the legacy distribution path.
+	viewShard *qviews.ShardID
 	// indexes is the set of index ids the serving load requirement selected for
 	// this placement. Nil means no serving requirement is known, so nothing on
 	// this placement can be certified.
@@ -133,13 +151,20 @@ func (p indexPlacement) carries(indexID int64) bool {
 // runtime this coordinator runs. Production init always creates the qviews
 // runtime, which never populates the legacy segment distribution manager; reading
 // that manager there would report every index as not loaded.
-func (s *Server) indexLoadEvidence(ctx context.Context, collectionID int64) ([]*meta.Replica, []indexPlacement) {
+func (s *Server) indexLoadEvidence(ctx context.Context, collectionID int64) ([]*meta.Replica, []indexPlacement, int) {
 	if s.qviewsRuntime != nil {
 		runtime := s.qviewsRuntime
 		stats := runtime.shardViewRegistry.SnapshotForCollection(collectionID).StatsMap()
-		return s.qviewsReplicaSnapshot(collectionID), qviewsPlacements(stats, func(version uint64) (*querypb.GetQueryViewLoadInfoResponse, error) {
+		placements := qviewsPlacements(stats, func(version uint64) (*querypb.GetQueryViewLoadInfoResponse, error) {
 			return runtime.loadConfigStore.GetLoadInfo(ctx, collectionID, version)
 		})
+		servingShards := 0
+		for _, stat := range stats {
+			if stat != nil && stat.UpPlacement != nil {
+				servingShards++
+			}
+		}
+		return s.qviewsReplicaSnapshot(collectionID), placements, servingShards
 	}
 
 	segments := s.dist.SegmentDistManager.GetByFilter(meta.WithCollectionID(collectionID))
@@ -147,7 +172,7 @@ func (s *Server) indexLoadEvidence(ctx context.Context, collectionID int64) ([]*
 	for _, segment := range segments {
 		placements = append(placements, indexPlacement{node: segment.Node, segment: segment})
 	}
-	return s.meta.GetByCollection(ctx, collectionID), placements
+	return s.meta.GetByCollection(ctx, collectionID), placements, 0
 }
 
 // qviewsPlacements turns the serving query views into placements. A view only
@@ -158,7 +183,7 @@ func qviewsPlacements(
 	loadInfo func(version uint64) (*querypb.GetQueryViewLoadInfoResponse, error),
 ) []indexPlacement {
 	var placements []indexPlacement
-	for _, stat := range stats {
+	for shard, stat := range stats {
 		if stat == nil || stat.UpPlacement == nil {
 			continue
 		}
@@ -168,8 +193,14 @@ func qviewsPlacements(
 				required = indexIDsOf(info)
 			}
 		}
+		shardID := shard
+		// Assignments maps segmentID -> nodeID: one placement per served segment.
 		for _, node := range stat.UpPlacement.Assignments {
-			placements = append(placements, indexPlacement{node: node, indexes: required})
+			placements = append(placements, indexPlacement{
+				node:      node,
+				viewShard: &shardID,
+				indexes:   required,
+			})
 		}
 	}
 	return placements

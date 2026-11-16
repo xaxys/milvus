@@ -381,7 +381,8 @@ CompileExpression(const expr::TypedExprPtr& expr,
             context->get_segment(),
             context->get_active_count(),
             context->query_config()->get_expr_batch_size(),
-            context->get_consistency_level());
+            context->get_consistency_level(),
+            plan_options);
     } else if (auto casted_expr = std::dynamic_pointer_cast<
                    const milvus::expr::TimestamptzArithCompareExpr>(expr)) {
         result = std::make_shared<PhyTimestamptzArithCompareExpr>(
@@ -463,7 +464,8 @@ CompileExpression(const expr::TypedExprPtr& expr,
             context->get_segment(),
             context->get_active_count(),
             context->query_config()->get_expr_batch_size(),
-            context->get_consistency_level());
+            context->get_consistency_level(),
+            plan_options);
     } else if (auto casted_expr = std::dynamic_pointer_cast<
                    const milvus::expr::GISFunctionFilterExpr>(expr)) {
         result = std::make_shared<PhyGISFunctionFilterExpr>(

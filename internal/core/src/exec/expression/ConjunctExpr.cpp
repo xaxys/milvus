@@ -130,11 +130,13 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         // instance's offset mode is fixed for its lifetime, so no later
         // call could have used the batch path anyway.)
         std::vector<std::shared_ptr<PhyUnaryRangeFilterExpr>> ngram_exprs;
-        // The fused batch path evaluates several LIKE leaves without exposing
-        // each one's result, so execution explain cannot attribute rows to them.
-        // Plain evaluation is slower but observable; explain is a diagnostic
-        // mode, so prefer it here and keep the fast path otherwise.
-        if (!has_input_offset && explain == nullptr) {
+        // The fused batch path evaluates several LIKE leaves through one shared
+        // candidate bitmap. When execution explain is on, it can still attribute
+        // rows as long as every fused leaf's phase1 candidates are exact (then
+        // its candidate count is its match count). A leaf that needs phase2
+        // refinement cannot be attributed inside the fused pipeline, so it keeps
+        // the plain path.
+        if (!has_input_offset) {
             for (size_t idx : like_indices_) {
                 auto input = inputs_[idx];
                 if (auto cached =
@@ -146,7 +148,9 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                 if (unary_expr) {
                     unary_expr->EnsureExecPathDetermined();
                 }
-                if (unary_expr && unary_expr->CanUseNgramIndex()) {
+                if (unary_expr && unary_expr->CanUseNgramIndex() &&
+                    (explain == nullptr ||
+                     unary_expr->NgramCandidatesAreExact())) {
                     ngram_exprs.push_back(unary_expr);
                     batch_ngram_indices_.insert(idx);
                 }

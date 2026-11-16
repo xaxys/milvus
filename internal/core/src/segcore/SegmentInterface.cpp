@@ -224,10 +224,12 @@ SegmentInternalInterface::Search(
     visitor.SetReadSchema(plan->schema_);
     visitor.SetFilterOnly(filter_only);
     visitor.SetEnableExprCache(enable_expr_cache);
-    // Explain is collected only when someone asked for it; the recorder carries
-    // the segment row count for the payload's rows_total.
-    auto explain =
-        std::make_shared<milvus::exec::ExecutionExplainRecorder>(get_real_count());
+    // Explain carries the segment row count for the payload's rows_total.
+    // get_active_count only reads the timestamps of this segment; get_real_count
+    // can run a count(*) Retrieve, which would re-enter this function and
+    // recurse on growing segments that have deletes.
+    auto explain = std::make_shared<milvus::exec::ExecutionExplainRecorder>(
+        get_active_count(timestamp));
     visitor.SetExplainRecorder(explain.get());
     auto results = std::make_unique<SearchResult>();
     *results = visitor.get_moved_result(*plan->plan_node_);
@@ -310,8 +312,8 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
         visitor.SetRetrieveCandidateBudget(limit_size,
                                            plan->max_candidate_rows_);
     }
-    auto explain =
-        std::make_shared<milvus::exec::ExecutionExplainRecorder>(get_real_count());
+    auto explain = std::make_shared<milvus::exec::ExecutionExplainRecorder>(
+        get_active_count(timestamp));
     visitor.SetExplainRecorder(explain.get());
     auto retrieve_results = visitor.get_retrieve_result(*plan->plan_node_);
     results->set_explain(explain->Finish());
