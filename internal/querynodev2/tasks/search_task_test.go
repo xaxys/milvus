@@ -404,16 +404,22 @@ func TestSearchTaskMergeFunctionChains(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		chains    []*schemapb.FunctionChain
+		options   *planpb.PlanOption
 		malformed bool
 		wantMerge bool
 	}{
 		{name: "no chain", wantMerge: true},
+		{name: "explain disabled", options: &planpb.PlanOption{EnableExplain: false}, wantMerge: true},
+		{name: "explain enabled", options: &planpb.PlanOption{EnableExplain: true}, wantMerge: false},
 		{name: "L0", chains: []*schemapb.FunctionChain{{Stage: schemapb.FunctionChainStage_FunctionChainStageL0Rerank}}},
 		{name: "L1", chains: []*schemapb.FunctionChain{{Stage: schemapb.FunctionChainStage_FunctionChainStageL1Rerank}}},
 		{name: "malformed plan", malformed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			serializedPlan, err := proto.Marshal(&planpb.PlanNode{QuerynodeFunctionChains: tc.chains})
+			serializedPlan, err := proto.Marshal(&planpb.PlanNode{
+				QuerynodeFunctionChains: tc.chains,
+				PlanOptions:             tc.options,
+			})
 			require.NoError(t, err)
 			if tc.malformed {
 				serializedPlan = []byte{0xff}

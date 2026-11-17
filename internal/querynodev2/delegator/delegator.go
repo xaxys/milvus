@@ -42,6 +42,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator/deletebuffer"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/function"
 	"github.com/milvus-io/milvus/internal/util/grpcclient"
 	"github.com/milvus-io/milvus/internal/util/reduce"
@@ -716,12 +717,27 @@ func (sd *shardDelegator) Search(ctx context.Context, req *querypb.SearchRequest
 				if err != nil {
 					return nil, err
 				}
-				return segments.ReduceSearchOnQueryNode(ctx,
+				reduced, err := segments.ReduceSearchOnQueryNode(ctx,
 					results,
 					reduce.NewReduceSearchResultInfo(searchReq.GetReq().GetNq(),
 						searchReq.GetReq().GetTopk()).WithMetricType(searchReq.GetReq().GetMetricType()).
 						WithGroupSize(searchReq.GetReq().GetGroupSize()).
 						WithGroupByFieldIdsFromProto(searchReq.GetReq().GetGroupByFieldId(), searchReq.GetReq().GetGroupByFieldIds()))
+				if err != nil {
+					return nil, err
+				}
+				// Reduce drops the per-worker explains; keep them under a node the
+				// channel-level reduce splices into the delegator level.
+				explains := make([]*internalpb.ExecutionExplain, 0, len(results))
+				for _, result := range results {
+					if node := result.GetExplain(); node != nil {
+						explains = append(explains, node)
+					}
+				}
+				if len(explains) > 0 {
+					reduced.Explain = explain.MergeReduced(explains...)
+				}
+				return reduced, nil
 			})
 			futures[index] = future
 		}

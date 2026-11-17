@@ -3,6 +3,7 @@ package viewquery
 import (
 	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -143,6 +144,18 @@ func assembleAdvancedSearchResults(results []*internalpb.SearchResults) *interna
 			SlicedOffset:   result.GetSlicedOffset(),
 			ReqIndex:       int64(index),
 		})
+	}
+
+	// The hybrid reducer merges the wrapper, not its sub-results, so keep what
+	// the node-local runs recorded or the whole explain payload is lost.
+	explains := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for _, result := range results {
+		if node := result.GetExplain(); node != nil {
+			explains = append(explains, node)
+		}
+	}
+	if len(explains) > 0 {
+		searchResults.Explain = explain.MergeReduced(explains...)
 	}
 
 	searchResults.ChannelsMvcc = channelsMVCC

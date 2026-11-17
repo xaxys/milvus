@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proxy/shardclient"
 	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/exprutil"
 	"github.com/milvus-io/milvus/internal/util/function/embedding"
 	"github.com/milvus-io/milvus/internal/util/function/models"
@@ -98,6 +99,11 @@ type SearchTask struct {
 	// on its first line, so a request that will not be counted pays for no
 	// parameter scan, no expression walk and no JSON decode.
 	collectFeatures bool
+	// explainLeaves describes the predicate leaves this request's plans tagged
+	// with expr_id; explainNextExprID keeps the ids unique across hybrid
+	// sub-plans.
+	explainLeaves     map[int64]explain.LeafInfo
+	explainNextExprID int64
 	// countFeatures is set only on the first task built for a user request, so
 	// the repeat runs above add nothing.
 	countFeatures          bool
@@ -1434,7 +1440,10 @@ func (t *SearchTask) tryGeneratePlan(
 		metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), "search", metrics.FailLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, WrapPlanCreationError(planErr, "failed to create query plan")
 	}
-	if err := applyIndexHint(t.ctx, t.node, t.GetCollectionID(), plan, t.request.GetSearchParams()); err != nil {
+	if err := configureExplainPlan(plan, t.request.GetSearchParams(), false, t.schema.CollectionSchema, &t.explainNextExprID, &t.explainLeaves); err != nil {
+		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, err
+	}
+	if err := applyIndexHint(t.ctx, t.node, t.GetCollectionID(), plan, effectiveIndexHintParams(t.request.GetSearchParams(), params)); err != nil {
 		// A hint the user asked to be strict about must surface, not be swallowed.
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, err
 	}
@@ -1804,6 +1813,22 @@ func (t *SearchTask) PostExecute(ctx context.Context) error {
 			rd.GroupByFieldValues = nil
 		}
 	}
+
+	// Execution explain: what the shards did, rendered for the client. The
+	// pipeline keeps no explain, so it comes from the results it consumed.
+	explains := make([]*internalpb.ExecutionExplain, 0, len(toReduceResults))
+	for _, result := range toReduceResults {
+		explains = explain.Splice(explains, result.GetExplain())
+	}
+	rendered, explainErr := renderExplain(
+		t.request.GetSearchParams(),
+		explains,
+		t.explainLeaves,
+		func(ids []int64) map[int64]string { return explainIndexNames(ctx, t.node, t.GetCollectionID(), ids) })
+	if explainErr != nil {
+		return explainErr
+	}
+	attachExplain(&t.result.Status, rendered)
 
 	log.Debug(ctx, "Search post execute done",
 		mlog.Int64("collection", t.GetCollectionID()),

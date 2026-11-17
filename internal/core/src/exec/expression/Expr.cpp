@@ -36,6 +36,7 @@
 #include "exec/expression/GISConjunctExpr.h"
 #include "exec/expression/GISFunctionFilterExpr.h"
 #include "exec/expression/JsonContainsExpr.h"
+#include "exec/expression/LikeConjunctExpr.h"
 #include "exec/expression/LogicalBinaryExpr.h"
 #include "exec/expression/LogicalUnaryExpr.h"
 #include "exec/expression/MatchExpr.h"
@@ -92,9 +93,31 @@ ExprSet::Eval(int32_t begin,
     auto* exec_ctx = context.get_exec_context();
     auto* query_ctx =
         exec_ctx != nullptr ? exec_ctx->get_query_context() : nullptr;
+    auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
+    if (explain != nullptr && !explain_eval_marked_) {
+        explain_eval_marked_ = true;
+        for (size_t i = begin; i < end; ++i) {
+            MarkExplainEvalEntered({exprs_[i]}, explain);
+        }
+    }
     for (size_t i = begin; i < end; ++i) {
         milvus::exec::checkCancellation(query_ctx);
         exprs_[i]->Eval(context, results[i]);
+        // The set is where a top-level leaf is evaluated, so report the rows it
+        // was handed and matched here. A logical top-level expression carries no
+        // expr_id; the conjunction that owns the nested leaves reports them.
+        if (explain != nullptr && exprs_[i]->expr_id() != 0 &&
+            results[i] != nullptr) {
+            if (auto col = std::dynamic_pointer_cast<ColumnVector>(results[i]);
+                col != nullptr && col->IsBitmap()) {
+                const auto size = col->size();
+                explain->AddRows(
+                    exprs_[i]->expr_id(),
+                    static_cast<int64_t>(size),
+                    static_cast<int64_t>(
+                        TargetBitmapView(col->GetRawData(), size).count()));
+            }
+        }
     }
 }
 
@@ -150,18 +173,43 @@ CompileExpressions(const std::vector<expr::TypedExprPtr>& sources,
     auto ttl_expr =
         CreateTTLFieldFilterExpression(context->get_query_context());
 
+    auto clear_explain = [](auto& self, const ExprPtr& node) -> void {
+        if (!node) {
+            return;
+        }
+        node->SetExplainRecorder(nullptr);
+        for (const auto& child : node->GetInputsRef()) {
+            self(self, child);
+        }
+    };
+
     // Merge TTL expression with the first source expression if TTL exists
     for (size_t i = 0; i < sources.size(); ++i) {
-        expr::TypedExprPtr expr_to_compile = sources[i];
+        auto compiled = CompileExpression(sources[i],
+                                          context->get_query_context(),
+                                          flatten_candidate,
+                                          enable_constant_folding);
         if (i == 0 && ttl_expr != nullptr) {
-            // Merge TTL expression with the first expression using AND
-            expr_to_compile = std::make_shared<expr::LogicalBinaryExpr>(
-                expr::LogicalBinaryExpr::OpType::And, sources[i], ttl_expr);
+            // Compile the internal TTL filter without an explain recorder so
+            // injected TTL leaves do not emit phantom unknown conditions.
+            auto compiled_ttl = CompileExpression(ttl_expr,
+                                                  context->get_query_context(),
+                                                  flatten_candidate,
+                                                  false);
+            clear_explain(clear_explain, compiled_ttl);
+            if (auto conjunct =
+                    std::dynamic_pointer_cast<PhyConjunctFilterExpr>(compiled);
+                conjunct != nullptr && conjunct->IsAnd()) {
+                conjunct->GetInputsRef().push_back(std::move(compiled_ttl));
+            } else {
+                compiled = std::make_shared<PhyConjunctFilterExpr>(
+                    std::vector<ExprPtr>{std::move(compiled),
+                                         std::move(compiled_ttl)},
+                    /*is_and=*/true,
+                    context->get_query_context()->get_op_context());
+            }
         }
-        exprs.emplace_back(CompileExpression(expr_to_compile,
-                                             context->get_query_context(),
-                                             flatten_candidate,
-                                             enable_constant_folding));
+        exprs.emplace_back(std::move(compiled));
     }
 
     if (OPTIMIZE_EXPR_ENABLED.load()) {
@@ -173,6 +221,13 @@ CompileExpressions(const std::vector<expr::TypedExprPtr>& sources,
         DecorateRawExprCache(exprs,
                              query_context->get_op_context(),
                              query_context->get_enable_sub_expr_cache_write());
+    }
+
+    if (auto* explain = context != nullptr ? context->explain() : nullptr;
+        explain != nullptr) {
+        int32_t next_order = explain->CurrentEvalOrder();
+        AssignExplainEvalOrders(exprs, explain, next_order);
+        explain->AdvanceNextEvalOrder(next_order);
     }
 
     return exprs;
@@ -364,7 +419,8 @@ CompileExpression(const expr::TypedExprPtr& expr,
             context->get_segment(),
             context->get_active_count(),
             context->query_config()->get_expr_batch_size(),
-            context->get_consistency_level());
+            context->get_consistency_level(),
+            plan_options);
     } else if (auto casted_expr = std::dynamic_pointer_cast<
                    const milvus::expr::TimestamptzArithCompareExpr>(expr)) {
         result = std::make_shared<PhyTimestamptzArithCompareExpr>(
@@ -446,7 +502,8 @@ CompileExpression(const expr::TypedExprPtr& expr,
             context->get_segment(),
             context->get_active_count(),
             context->query_config()->get_expr_batch_size(),
-            context->get_consistency_level());
+            context->get_consistency_level(),
+            plan_options);
     } else if (auto casted_expr = std::dynamic_pointer_cast<
                    const milvus::expr::GISFunctionFilterExpr>(expr)) {
         result = std::make_shared<PhyGISFunctionFilterExpr>(
@@ -457,7 +514,8 @@ CompileExpression(const expr::TypedExprPtr& expr,
             context->get_segment(),
             context->get_active_count(),
             context->query_config()->get_expr_batch_size(),
-            context->get_consistency_level());
+            context->get_consistency_level(),
+            plan_options);
     } else if (auto match_expr =
                    std::dynamic_pointer_cast<const milvus::expr::MatchExpr>(
                        expr)) {
@@ -498,6 +556,12 @@ CompileExpression(const expr::TypedExprPtr& expr,
     // non-pinned paths) to this expression. Runs for the whole compiled tree
     // because CompileExpression is recursive over inputs.
     result->SetSnapshot(context->get_read_snapshot().get());
+    // The plan node id travels with the logical expression; the explain records
+    // it so the proxy can group decisions by leaf across segments.
+    result->SetExprId(expr->expr_id());
+    if (auto* explain = context->explain(); explain != nullptr) {
+        result->SetExplainRecorder(explain);
+    }
     if (plan_options.feature_recorder) {
         result->SetFeatureRecorder(plan_options.feature_recorder.get(),
                                    *context->get_read_schema());
@@ -618,6 +682,7 @@ SplitFuseGISConjunct(std::shared_ptr<milvus::exec::PhyConjunctFilterExpr>& expr,
                 p.op = le->op_;
                 p.query_wkt = le->geometry_wkt_;
                 p.has_index = segment->HasIndex(FieldId(field));
+                p.expr_id = g->expr_id();
                 state->preds.push_back(std::move(p));
             }
             auto coarse = std::make_shared<PhyGISCoarseConjunctExpr>(
@@ -627,24 +692,32 @@ SplitFuseGISConjunct(std::shared_ptr<milvus::exec::PhyConjunctFilterExpr>& expr,
                 segment,
                 active,
                 bs,
-                cl);
+                cl,
+                qc->get_plan_options());
+            coarse->SetSnapshot(qc->get_read_snapshot().get());
             // The coarse pass is where the R-Tree serves the group. The refine
             // pass always re-checks its candidates on raw data by design, so
-            // it records nothing.
+            // it records no exec path feature bits.
             if (qc->get_plan_options().feature_recorder) {
                 coarse->SetFeatureRecorder(
                     qc->get_plan_options().feature_recorder.get(),
                     *qc->get_read_schema());
             }
-            out.push_back(std::move(coarse));
-            out.push_back(std::make_shared<PhyGISRefineConjunctExpr>(
+            auto refine = std::make_shared<PhyGISRefineConjunctExpr>(
                 state,
                 "PhyGISRefineConjunctExpr",
                 op_ctx,
                 segment,
                 active,
                 bs,
-                cl));
+                cl);
+            refine->SetSnapshot(qc->get_read_snapshot().get());
+            if (auto* explain = context->explain(); explain != nullptr) {
+                coarse->SetExplainRecorder(explain);
+                refine->SetExplainRecorder(explain);
+            }
+            out.push_back(std::move(coarse));
+            out.push_back(std::move(refine));
         };
 
     const auto& inputs = expr->GetInputsRef();
@@ -977,6 +1050,169 @@ OptimizeCompiledExprs(ExecContext* context, const std::vector<ExprPtr>& exprs) {
     double cost =
         std::chrono::duration<double, std::micro>(end - start).count();
     milvus::monitor::internal_core_optimize_expr_latency.Observe(cost / 1000);
+}
+
+static void
+AssignEvalOrderForExpr(const ExprPtr& expr,
+                       ExecutionExplainRecorder* explain,
+                       int32_t& next_order) {
+    if (!expr || explain == nullptr) {
+        return;
+    }
+    if (auto cached = std::dynamic_pointer_cast<RawExprCacheAdapter>(expr)) {
+        AssignEvalOrderForExpr(cached->wrapped_expr(), explain, next_order);
+        return;
+    }
+    if (auto conjunct =
+            std::dynamic_pointer_cast<PhyConjunctFilterExpr>(expr)) {
+        conjunct->SetEvalOrderBase(next_order);
+        const auto& inputs = conjunct->GetInputsRef();
+        const auto order = conjunct->GetReorder();
+        if (!order.empty()) {
+            for (size_t idx : order) {
+                if (idx >= inputs.size() || conjunct->IsBatchNgramIndex(idx)) {
+                    continue;
+                }
+                AssignEvalOrderForExpr(inputs[idx], explain, next_order);
+            }
+        } else {
+            for (const auto& child : inputs) {
+                AssignEvalOrderForExpr(child, explain, next_order);
+            }
+        }
+        return;
+    }
+    if (auto like_conjunct =
+            std::dynamic_pointer_cast<PhyLikeConjunctExpr>(expr)) {
+        for (const auto& leaf : like_conjunct->ngram_exprs()) {
+            if (leaf && leaf->expr_id() != 0) {
+                FieldId fid(0);
+                if (auto col = leaf->GetColumnInfo(); col.has_value()) {
+                    fid = col->field_id_;
+                }
+                explain->SetEvalOrder(leaf->expr_id(), next_order++, fid);
+            }
+        }
+        return;
+    }
+    if (auto gis_coarse =
+            std::dynamic_pointer_cast<PhyGISCoarseConjunctExpr>(expr)) {
+        const auto& st = gis_coarse->group_state();
+        const bool has_index = !st.preds.empty() && st.preds.front().has_index;
+        if (has_index) {
+            for (const auto& p : st.preds) {
+                if (p.expr_id != 0) {
+                    explain->SetEvalOrder(p.expr_id, next_order++, st.field_id);
+                }
+            }
+        }
+        return;
+    }
+    if (auto gis_refine =
+            std::dynamic_pointer_cast<PhyGISRefineConjunctExpr>(expr)) {
+        const auto& st = gis_refine->group_state();
+        const bool has_index = !st.preds.empty() && st.preds.front().has_index;
+        if (!has_index) {
+            for (const auto& p : st.preds) {
+                if (p.expr_id != 0) {
+                    explain->SetEvalOrder(p.expr_id, next_order++, st.field_id);
+                }
+            }
+        }
+        return;
+    }
+    for (const auto& child : expr->GetInputsRef()) {
+        AssignEvalOrderForExpr(child, explain, next_order);
+    }
+    if (expr->expr_id() != 0) {
+        FieldId fid(0);
+        if (auto col = expr->GetColumnInfo(); col.has_value()) {
+            fid = col->field_id_;
+        }
+        explain->SetEvalOrder(expr->expr_id(), next_order++, fid);
+    }
+}
+
+void
+AssignExplainEvalOrders(const std::vector<ExprPtr>& exprs,
+                        ExecutionExplainRecorder* explain,
+                        int32_t& next_order) {
+    if (explain == nullptr) {
+        return;
+    }
+    for (const auto& expr : exprs) {
+        AssignEvalOrderForExpr(expr, explain, next_order);
+    }
+}
+
+namespace {
+
+template <typename Fn>
+void
+ForEachCompiledExplainExprId(const ExprPtr& expr, Fn&& fn) {
+    if (!expr) {
+        return;
+    }
+    if (auto cached = std::dynamic_pointer_cast<RawExprCacheAdapter>(expr)) {
+        ForEachCompiledExplainExprId(cached->wrapped_expr(), fn);
+        return;
+    }
+    if (auto like_conjunct =
+            std::dynamic_pointer_cast<PhyLikeConjunctExpr>(expr)) {
+        for (const auto& leaf : like_conjunct->ngram_exprs()) {
+            if (leaf && leaf->expr_id() != 0) {
+                fn(leaf->expr_id());
+            }
+        }
+        return;
+    }
+    if (auto gis_coarse =
+            std::dynamic_pointer_cast<PhyGISCoarseConjunctExpr>(expr)) {
+        for (const auto& p : gis_coarse->group_state().preds) {
+            if (p.expr_id != 0) {
+                fn(p.expr_id);
+            }
+        }
+        return;
+    }
+    if (auto gis_refine =
+            std::dynamic_pointer_cast<PhyGISRefineConjunctExpr>(expr)) {
+        for (const auto& p : gis_refine->group_state().preds) {
+            if (p.expr_id != 0) {
+                fn(p.expr_id);
+            }
+        }
+        return;
+    }
+    for (const auto& child : expr->GetInputsRef()) {
+        ForEachCompiledExplainExprId(child, fn);
+    }
+    if (expr->expr_id() != 0) {
+        fn(expr->expr_id());
+    }
+}
+
+}  // namespace
+
+void
+MarkExplainEvalEntered(const std::vector<ExprPtr>& exprs,
+                       ExecutionExplainRecorder* explain) {
+    if (explain == nullptr) {
+        return;
+    }
+    for (const auto& expr : exprs) {
+        ForEachCompiledExplainExprId(
+            expr, [&](int64_t expr_id) { explain->MarkEvalEntered(expr_id); });
+    }
+}
+
+void
+MarkExplainDomainEmpty(const ExprPtr& expr, ExecutionExplainRecorder* explain) {
+    if (explain == nullptr || !expr) {
+        return;
+    }
+    ForEachCompiledExplainExprId(
+        expr, [&](int64_t expr_id) { explain->MarkDomainEmpty(expr_id); });
 }
 
 TargetBitmap

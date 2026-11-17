@@ -266,7 +266,6 @@ struct BinaryRangeIndexFunc {
 
 class PhyBinaryRangeFilterExpr : public SegmentExpr {
  public:
-
     bool
     IsRangeExpr() const override {
         return true;
@@ -309,6 +308,9 @@ class PhyBinaryRangeFilterExpr : public SegmentExpr {
 
     void
     DetermineExecPath() override;
+
+    void
+    RecordExplainDecision() override;
 
     bool
     SupportsRawExprCache() const override {

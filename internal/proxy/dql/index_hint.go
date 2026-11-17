@@ -63,6 +63,29 @@ func indexHintNames(params []*commonpb.KeyValuePair) ([]string, bool, error) {
 	return names, mode == indexHintModeStrict, nil
 }
 
+// effectiveIndexHintParams resolves outer vs sub-request index hint parameters.
+// When outer specifies a non-empty index_hint, outer overrides sub completely;
+// otherwise sub applies, inheriting outer's index_hint_mode when sub omits it.
+func effectiveIndexHintParams(outer, sub []*commonpb.KeyValuePair) []*commonpb.KeyValuePair {
+	if outerHint, err := funcutil.GetAttrByKeyFromRepeatedKV(IndexHintKey, outer); err == nil && strings.TrimSpace(outerHint) != "" {
+		return outer
+	}
+	if len(sub) == 0 {
+		return outer
+	}
+	if _, err := funcutil.GetAttrByKeyFromRepeatedKV(IndexHintModeKey, sub); err == nil {
+		return sub
+	}
+	outerMode, err := funcutil.GetAttrByKeyFromRepeatedKV(IndexHintModeKey, outer)
+	if err != nil || strings.TrimSpace(outerMode) == "" {
+		return sub
+	}
+	merged := make([]*commonpb.KeyValuePair, 0, len(sub)+1)
+	merged = append(merged, sub...)
+	merged = append(merged, &commonpb.KeyValuePair{Key: IndexHintModeKey, Value: outerMode})
+	return merged
+}
+
 // applyIndexHint resolves the hinted index names to (field, index) pairs and attaches
 // them to the plan, preserving the user's priority order. Resolution happens here
 // because only the coordinator knows the metadata; the selection itself happens in

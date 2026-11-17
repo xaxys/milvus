@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/querynodev2/tasks"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/internal/util/segmentutil"
 	"github.com/milvus-io/milvus/internal/util/streamrpc"
@@ -263,6 +264,7 @@ func (node *QueryNode) queryChannel(ctx context.Context, req *querypb.QueryReque
 	if err != nil {
 		return nil, err
 	}
+	resp.Explain = delegatorRetrieveExplain(channel, results)
 	// The delegator fixed this snapshot before querying any segments. Reading
 	// tSafe again here could report a newer snapshot than the returned data.
 	resp.MvccTimestamp = req.GetReq().GetMvccTimestamp()
@@ -278,6 +280,19 @@ func (node *QueryNode) queryChannel(ctx context.Context, req *querypb.QueryReque
 	))
 	resp.Status = merr.Success()
 	return resp, nil
+}
+
+// delegatorRetrieveExplain is delegatorExplain for the query path; the two
+// result types differ only in name.
+func delegatorRetrieveExplain(channel string, results []*internalpb.RetrieveResults) *internalpb.ExecutionExplain {
+	children := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for _, result := range results {
+		children = explain.Splice(children, result.GetExplain())
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	return explain.Wrap(explain.KindDelegator, channel, children)
 }
 
 func (node *QueryNode) queryChannelStream(ctx context.Context, req *querypb.QueryRequest, channel string, srv streamrpc.QueryStreamServer) error {
@@ -439,6 +454,7 @@ func (node *QueryNode) searchChannel(ctx context.Context, req *querypb.SearchReq
 	if err != nil {
 		return nil, err
 	}
+	resp.Explain = delegatorExplain(channel, results)
 
 	tr.CtxElapse(ctx, "search with channel done, ch="+channel)
 
@@ -449,6 +465,20 @@ func (node *QueryNode) searchChannel(ctx context.Context, req *querypb.SearchReq
 	metrics.QueryNodeSearchNQ.WithLabelValues(nodeIDStr).Observe(float64(req.Req.GetNq()))
 	metrics.QueryNodeSearchTopK.WithLabelValues(nodeIDStr).Observe(float64(req.Req.GetTopk()))
 	return resp, nil
+}
+
+// delegatorExplain wraps what each worker's querynode recorded into the
+// delegator level of the explain tree. A reduce pass inside the delegator
+// leaves a KindReduced node, whose children Splice lifts to this level.
+func delegatorExplain(channel string, results []*internalpb.SearchResults) *internalpb.ExecutionExplain {
+	children := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for _, result := range results {
+		children = explain.Splice(children, result.GetExplain())
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	return explain.Wrap(explain.KindDelegator, channel, children)
 }
 
 func (node *QueryNode) getChannelStatistics(ctx context.Context, req *querypb.GetStatisticsRequest, channel string) (*internalpb.GetStatisticsResponse, error) {

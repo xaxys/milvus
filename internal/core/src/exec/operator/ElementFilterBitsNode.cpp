@@ -199,6 +199,12 @@ PhyElementFilterBitsNode::EvaluateElementExpression(
         // (expressions return nullptr on empty input) and mark all elements
         // as filtered out.
         if (element_offsets.empty()) {
+            if (count == 0 && total_elements > 0) {
+                if (auto* explain = query_context_->explain();
+                    explain != nullptr) {
+                    MarkExplainEvalEntered(element_exprs_->exprs(), explain);
+                }
+            }
             TargetBitmap bitset(total_elements, true);
             TargetBitmap valid_bitset(total_elements, true);
             return std::make_pair(std::move(bitset), std::move(valid_bitset));

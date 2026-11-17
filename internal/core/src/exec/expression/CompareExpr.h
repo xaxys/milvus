@@ -221,6 +221,11 @@ class PhyCompareFilterExpr : public Expr {
     Eval(EvalCtx& context, VectorPtr& result) override;
 
     void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        explain_ = explain;
+    }
+
+    void
     SetSnapshot(const segcore::SegmentReadSnapshot* snapshot) override {
         segment_chunk_reader_.SetSnapshot(snapshot);
     }
@@ -936,6 +941,30 @@ class PhyCompareFilterExpr : public Expr {
     VectorPtr
     ExecCompareRightType(EvalCtx& context);
 
+    struct OperandExplainDecision {
+        FieldId field_id{0};
+        bool used_index{false};
+        int64_t index_id{0};
+        std::string family;
+        bool nested{false};
+        std::string path;
+        std::string decline_reason;
+
+        bool
+        SameGroup(const OperandExplainDecision& other) const {
+            return field_id == other.field_id &&
+                   used_index == other.used_index &&
+                   index_id == other.index_id && family == other.family &&
+                   nested == other.nested && path == other.path &&
+                   decline_reason == other.decline_reason;
+        }
+    };
+
+    void
+    RecordCompareExplain(bool left_used_index,
+                         bool right_used_index,
+                         int64_t batch_rows);
+
  private:
     const FieldId left_field_;
     const FieldId right_field_;
@@ -958,6 +987,10 @@ class PhyCompareFilterExpr : public Expr {
 
     const segcore::SegmentChunkReader segment_chunk_reader_;
     int64_t batch_size_;
+    ExecutionExplainRecorder* explain_{nullptr};
+    bool explain_recorded_{false};
+    OperandExplainDecision left_explain_;
+    OperandExplainDecision right_explain_;
     std::shared_ptr<const milvus::expr::CompareExpr> expr_;
     ValueLookupSource left_value_lookup_;
     ValueLookupSource right_value_lookup_;

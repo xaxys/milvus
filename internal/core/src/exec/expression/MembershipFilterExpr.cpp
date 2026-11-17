@@ -39,6 +39,7 @@ PhyMembershipFilterExpr<LogicalExpr, ProbePolicy>::Eval(EvalCtx& context,
     // Mirrors TermExpr.
     auto* input = context.get_offset_input();
     SetHasOffsetInput(input != nullptr);
+    EnsureExplainDecisionRecorded();
     auto data_type = expr_->column_.data_type_;
     switch (data_type) {
         case DataType::INT8: {

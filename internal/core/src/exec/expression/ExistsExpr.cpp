@@ -42,6 +42,29 @@ namespace milvus {
 namespace exec {
 
 void
+PhyExistsFilterExpr::RecordExplainDecision() {
+    if (has_offset_input_ &&
+        !(exec_path_ == ExprExecPath::ScalarIndex && num_data_chunk_ == 0 &&
+          !expr_->column_.element_level_)) {
+        if (explain_ != nullptr) {
+            explain_->RecordDecision(
+                field_id_,
+                expr_id_,
+                /*used_index=*/false,
+                /*index_id=*/0,
+                /*family=*/"",
+                /*nested=*/false,
+                /*path=*/"",
+                milvus::exec::ToString((is_pk_field_ || HasIndexForThisPath())
+                                           ? DeclineReason::kIndexUnusable
+                                           : DeclineReason::kNoIndexOnField));
+        }
+        return;
+    }
+    SegmentExpr::RecordExplainDecision();
+}
+
+void
 PhyExistsFilterExpr::DetermineExecPath() {
     // JsonStats is the fallback applied by EnsureExecPathDetermined() when no
     // index serves this path; see SegmentExpr::FallbackToJsonStatsIfEligible().
@@ -62,13 +85,17 @@ PhyExistsFilterExpr::DetermineExecPath() {
 
 void
 PhyExistsFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
+    auto input = context.get_offset_input();
+    if (input != nullptr && !prefetch_future_.has_value()) {
+        SetHasOffsetInput(true);
+    }
     WaitPrefetch();
     tracer::AutoSpan span(
         "PhyExistsFilterExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("data_type", static_cast<int>(expr_->column_.data_type_));
 
-    auto input = context.get_offset_input();
     SetHasOffsetInput((input != nullptr));
+    EnsureExplainDecisionRecorded();
     auto data_type = expr_->column_.data_type_;
     if (expr_->column_.element_level_) {
         data_type = expr_->column_.element_type_;
@@ -230,6 +257,8 @@ PhyExistsFilterExpr::EvalJsonExistsForDataSegmentByStats() {
 
                 TargetBitmap res(active_count_);
                 TargetBitmapView res_view(res);
+                int64_t shredded_scanned = 0;
+                int64_t shared_scanned = 0;
 
                 // process shredding data
                 {
@@ -242,8 +271,9 @@ PhyExistsFilterExpr::EvalJsonExistsForDataSegmentByStats() {
                     for (const auto& field : shredding_fields) {
                         TargetBitmap temp_valid(active_count_, true);
                         TargetBitmapView temp_valid_view(temp_valid);
-                        index->ExecutorForGettingValid(
+                        const auto scanned = index->ExecutorForGettingValid(
                             op_ctx_, field, temp_valid_view);
+                        shredded_scanned = std::max(shredded_scanned, scanned);
                         res_view |= temp_valid_view;
                     }
                 }
@@ -259,10 +289,13 @@ PhyExistsFilterExpr::EvalJsonExistsForDataSegmentByStats() {
                         bson_index_,
                         pointer,
                         [&](BsonView bson, uint32_t row_id, uint32_t offset) {
+                            ++shared_scanned;
                             res_view[row_id] = !bson.IsBsonValueEmpty(offset);
                         });
                 }
 
+                RecordRawScan(std::min<int64_t>(
+                    active_count_, shredded_scanned + shared_scanned));
                 TargetBitmap valid(active_count_, true);
                 return {std::move(res), std::move(valid)};
             },

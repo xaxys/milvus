@@ -90,10 +90,44 @@ PhyColumnExpr::GetNextBatchSize() {
                : batch_size_;
 }
 
+PhyColumnExpr::ExplainInfo
+PhyColumnExpr::ResolveExplainInfo() const {
+    ExplainInfo info;
+    info.field_id = expr_->GetColumn().field_id_;
+    const auto capabilities =
+        segment_chunk_reader_.segment_->ResolveIndexCapability(op_ctx_,
+                                                               info.field_id);
+    if (HasValueReader()) {
+        const auto decision =
+            DetermineExecPath({.field_id = info.field_id,
+                               .reader = RequiredReader::ValueLookup,
+                               .value_type = expr_->GetColumn().data_type_},
+                              capabilities);
+        const auto* entry = decision.key.has_value()
+                                ? capabilities.Find(*decision.key)
+                                : nullptr;
+        info.used_index = true;
+        if (entry != nullptr) {
+            if (auto id = entry->key.identity.pre_built_id(); id.has_value()) {
+                info.index_id = *id;
+            }
+            info.family = entry->family;
+            info.nested = entry->caps.nested;
+            info.path = entry->json_path;
+        }
+        return info;
+    }
+    info.decline_reason = milvus::exec::ToString(
+        capabilities.entries().empty() ? DeclineReason::kNoIndexOnField
+                                       : DeclineReason::kIndexUnusable);
+    return info;
+}
+
 void
 PhyColumnExpr::Eval(EvalCtx& context, VectorPtr& result) {
     tracer::AutoSpan span("PhyColumnExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("data_type", static_cast<int>(expr_->type()));
+    last_raw_read_rows_ = 0;
 
     auto input = context.get_offset_input();
     SetHasOffsetInput(input != nullptr);
@@ -148,6 +182,7 @@ PhyColumnExpr::DoEval(OffsetVector* input) {
         if (real_batch_size == 0) {
             return nullptr;
         }
+        last_raw_read_rows_ = static_cast<int64_t>(real_batch_size);
 
         auto res_vec = std::make_shared<ColumnVector>(
             expr_->GetColumn().data_type_, real_batch_size);
@@ -224,6 +259,7 @@ PhyColumnExpr::DoEval(OffsetVector* input) {
         if (real_batch_size == 0) {
             return nullptr;
         }
+        last_raw_read_rows_ = real_batch_size;
 
         auto res_vec = std::make_shared<ColumnVector>(
             expr_->GetColumn().data_type_, real_batch_size);
@@ -251,6 +287,7 @@ PhyColumnExpr::DoEval(OffsetVector* input) {
         if (real_batch_size == 0) {
             return nullptr;
         }
+        last_raw_read_rows_ = real_batch_size;
 
         auto res_vec = std::make_shared<ColumnVector>(
             expr_->GetColumn().data_type_, real_batch_size);
@@ -323,6 +360,7 @@ PhyColumnExpr::DoEvalFromValueReader(OffsetVector* input) {
     valid.set();
     if (!GatherFromValueReader(
             offsets.data(), real_batch_size, values, valid)) {
+        last_raw_read_rows_ = real_batch_size;
         const auto raw_chunk_count =
             segment_chunk_reader_.NumChunkData(expr_->GetColumn().field_id_);
         int64_t cached_chunk_id = -1;

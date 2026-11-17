@@ -301,6 +301,12 @@ PhyMatchFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                    "Match child returned empty result for non-empty element "
                    "batch, elem_count={}",
                    elem_count);
+        if (auto* exec_ctx = context.get_exec_context(); exec_ctx != nullptr) {
+            if (auto* explain = exec_ctx->explain();
+                explain != nullptr && !inputs_.empty()) {
+                MarkExplainDomainEmpty(inputs_[0], explain);
+            }
+        }
         if (MatchEmptyElements(match_type, threshold)) {
             bitset_view.set();
         }
@@ -325,6 +331,18 @@ PhyMatchFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         match_result_col_vec->GetRawData(), match_result_col_vec->size());
     TargetBitmapView match_result_valid_view(
         match_result_col_vec->GetValidRawData(), match_result_col_vec->size());
+
+    // MatchExpr carries no expr_id; when its predicate is a single leaf
+    // (conjunctions and NOT nodes already attribute their own children),
+    // credit the evaluated element batch and element matches here.
+    auto* exec_ctx = context.get_exec_context();
+    auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
+    if (explain != nullptr && inputs_[0]->expr_id() != 0) {
+        explain->AddRows(
+            inputs_[0]->expr_id(),
+            elem_count,
+            static_cast<int64_t>(match_result_bitset_view.count()));
+    }
 
     bool all_valid = match_result_valid_view.all();
 
