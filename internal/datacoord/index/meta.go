@@ -459,7 +459,7 @@ func (m *IndexMeta) UpdateIndexTasksMetrics() {
 	}
 }
 
-func checkIdenticalJSON(index *model.Index, req *indexpb.CreateIndexRequest) bool {
+func CheckIdenticalJSON(index *model.Index, req *indexpb.CreateIndexRequest) bool {
 	// Skip error handling since json path existence is guaranteed in CreateIndex
 	jsonPath1, _ := GetIndexParam(index.IndexParams, common.JSONPathKey)
 	jsonPath2, _ := GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
@@ -472,7 +472,7 @@ func checkIdenticalJSON(index *model.Index, req *indexpb.CreateIndexRequest) boo
 	return castType1 == castType2
 }
 
-func checkParams(fieldIndex *model.Index, req *indexpb.CreateIndexRequest) bool {
+func CheckParams(fieldIndex *model.Index, req *indexpb.CreateIndexRequest) bool {
 	metaTypeParams := DeleteParams(fieldIndex.TypeParams, []string{common.MmapEnabledKey, common.WarmupKey})
 	reqTypeParams := DeleteParams(req.TypeParams, []string{common.MmapEnabledKey, common.WarmupKey})
 	if len(metaTypeParams) != len(reqTypeParams) {
@@ -582,36 +582,16 @@ func (m *IndexMeta) canCreateIndex(req *indexpb.CreateIndexRequest, isJSON bool)
 			continue
 		}
 		if req.IndexName == index.IndexName {
-			if req.FieldID == index.FieldID && checkParams(index, req) &&
-				/*only check json params when it is json index*/ (!isJSON || checkIdenticalJSON(index, req)) {
+			if req.FieldID == index.FieldID && CheckParams(index, req) &&
+				/*only check json params when it is json index*/ (!isJSON || CheckIdenticalJSON(index, req)) {
 				return index.IndexID, ErrIndexOperationIgnored
 			}
-			errMsg := "at most one distinct index is allowed per field"
+			errMsg := "index name is already used by another index in this collection"
 			mlog.Warn(context.TODO(), errMsg,
 				mlog.String("source index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
 					index.IndexName, index.FieldID, index.IndexParams, index.UserIndexParams, index.TypeParams)),
 				mlog.String("current index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
 					req.GetIndexName(), req.GetFieldID(), req.GetIndexParams(), req.GetUserIndexParams(), req.GetTypeParams())))
-			return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
-		}
-		if req.FieldID == index.FieldID {
-			if isJSON {
-				// Skip error handling since json path existence is guaranteed in CreateIndex
-				jsonPath1, _ := GetIndexParam(index.IndexParams, common.JSONPathKey)
-				jsonPath2, _ := GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
-
-				if jsonPath1 != jsonPath2 {
-					// if json path is not same, create index is allowed
-					continue
-				}
-			}
-			// creating multiple indexes on same field is not supported
-			errMsg := "CreateIndex failed: creating multiple indexes on same field is not supported"
-			mlog.Warn(context.TODO(), errMsg)
-			// Client-caused conflict, same family as the "one distinct index per
-			// field" case above: return an input-class error rather than
-			// ServiceInternal (code 5, "never return out of Milvus") so the
-			// caller is not blamed with a system error / counted as a system-caused failure.
 			return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
 		}
 	}
@@ -630,7 +610,7 @@ func (m *IndexMeta) HasSameReq(req *indexpb.CreateIndexRequest) (bool, UniqueID)
 		if fieldIndex.FieldID != req.FieldID || fieldIndex.IndexName != req.IndexName {
 			continue
 		}
-		if !checkParams(fieldIndex, req) {
+		if !CheckParams(fieldIndex, req) {
 			continue
 		}
 		mlog.Debug(context.TODO(), "has same index", mlog.Int64("collectionID", req.CollectionID),

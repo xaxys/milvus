@@ -19,6 +19,8 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	indexpkg "github.com/milvus-io/milvus/internal/datacoord/index"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"path"
 	"strconv"
 	"strings"
@@ -49,7 +51,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/meta"
 	"github.com/milvus-io/milvus/internal/distributed/streaming"
 	"github.com/milvus-io/milvus/internal/metacache"
-	catalogmocks "github.com/milvus-io/milvus/internal/metastore/mocks"
+	"github.com/milvus-io/milvus/internal/metastore/mocks"
 	snapshotstorage "github.com/milvus-io/milvus/internal/snapshotio/storage"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster"
@@ -1891,7 +1893,7 @@ func TestCreateRestoreJob_PreRegistersTargetSegmentsAsImporting(t *testing.T) {
 		}},
 	}
 
-	catalog := catalogmocks.NewDataCoordCatalog(t)
+	catalog := mocks.NewDataCoordCatalog(t)
 	catalog.EXPECT().AddSegment(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, seg *datapb.SegmentInfo) error {
 		assert.Equal(t, int64(2001), seg.GetID())
 		assert.Equal(t, int64(200), seg.GetCollectionID())
@@ -2278,6 +2280,84 @@ func TestSnapshotManager_RestoreIndexes_FMINDEXNilVersionManager(t *testing.T) {
 
 	assert.ErrorIs(t, err, merr.ErrServiceNotReady)
 	assert.False(t, broadcasterCalled)
+}
+
+func TestSnapshotManager_RestoreIndexes_MultiIndexPerFieldGate(t *testing.T) {
+	ctx := context.Background()
+	const collectionID = int64(100)
+
+	newSM := func(t *testing.T, version int32, withManager bool) *Manager {
+		// The broker no longer answers collection lookups: the manager reads them
+		// from its meta. Keep a mock so the constructor signature stays covered.
+		mockBroker := broker.NewMockBroker(t)
+		mockAllocator := allocator.NewMockAllocator(t)
+		mockAllocator.EXPECT().AllocID(mock.Anything).Return(int64(1001), nil).Maybe()
+		var vm indexpkg.IndexEngineVersionManager
+		if withManager {
+			mockVM := indexpkg.NewMockVersionManager(t)
+			mockVM.EXPECT().ResolveScalarIndexVersion().Return(version).Maybe()
+			vm = mockVM
+		}
+		// RestoreIndexes reads the collection from meta; a MetaStore-backed meta with
+		// the collection pre-loaded is what production provides.
+		catalog := mocks.NewDataCoordCatalog(t)
+		metaStore := metacache.NewMetaStore(catalog)
+		metaStore.PutCollection(&metacache.CollectionInfo{ID: collectionID, DatabaseName: "default"})
+		return NewSnapshotManager(&meta.Meta{MetaStore: metaStore}, nil, nil, mockAllocator, nil, mockBroker, nil, vm)
+	}
+
+	// a snapshot that carries two indexes on one field: the same gate CreateIndex
+	// applies has to hold here, or a restore would hand a segment with two indexes on
+	// one field to a QueryNode that cannot load it
+	twoIndexes := &snapshotstorage.SnapshotData{
+		Indexes: []*indexpb.IndexInfo{
+			{IndexName: "scalar_inverted", FieldID: 101, IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}},
+			{IndexName: "scalar_bitmap", FieldID: 101, IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "BITMAP"}}},
+		},
+	}
+	// Records whether the restore got past the gate. When it does, the fixture stops it
+	// right there with a non-gate error, so the assertions below can tell the two apart.
+	broadcasterCalled := false
+	startBroadcaster := func(context.Context, int64, string) (broadcaster.BroadcastAPI, error) {
+		broadcasterCalled = true
+		return nil, merr.WrapErrServiceInternal("fixture stops the restore here")
+	}
+
+	t.Run("stale engine version refuses the restore", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		broadcasterCalled = false
+		sm := newSM(t, common.MinScalarIndexVersionForScalarMultiIndex-1, true)
+		err := sm.RestoreIndexes(ctx, twoIndexes, collectionID, startBroadcaster, "snapshot")
+		assert.ErrorIs(t, err, merr.ErrServiceNotReady)
+		assert.False(t, broadcasterCalled, "must be refused before broadcasting")
+	})
+
+	t.Run("switch off refuses the restore the way it always did", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "false")
+		broadcasterCalled = false
+		sm := newSM(t, common.CurrentScalarIndexEngineVersion, true)
+		err := sm.RestoreIndexes(ctx, twoIndexes, collectionID, startBroadcaster, "snapshot")
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "creating multiple indexes on same field is not supported")
+		assert.False(t, broadcasterCalled, "must be refused before broadcasting")
+	})
+
+	t.Run("a single index per field is never gated", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "false")
+		sm := newSM(t, 0, false)
+		// the gate must not fire; the restore proceeds to the broadcaster, which this
+		// fixture lets fail by returning a nil API -- reaching it is what matters here.
+		broadcasterCalled = false
+		err := sm.RestoreIndexes(ctx, &snapshotstorage.SnapshotData{
+			Indexes: []*indexpb.IndexInfo{
+				{IndexName: "scalar_inverted", FieldID: 101, IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}},
+			},
+		}, collectionID, startBroadcaster, "snapshot")
+		// it got past the gate: the only error is the fixture's own stop
+		assert.True(t, broadcasterCalled)
+		assert.NotErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.NotErrorIs(t, err, merr.ErrServiceNotReady)
+	})
 }
 
 // --- Test ReadSnapshotData ---
@@ -6413,4 +6493,13 @@ func TestSnapshotManager_ListSnapshots_DeterministicComparisons(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"a", "b", "old"}, snapshotSummaryNames(infos))
 	}
+}
+
+// setMultiScalarIndexPerField flips the operator switch for the duration of a test.
+func setMultiScalarIndexPerField(t *testing.T, value string) {
+	t.Helper()
+	orig := paramtable.Get().DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue(value)
+	t.Cleanup(func() {
+		paramtable.Get().DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue(orig)
+	})
 }
