@@ -286,17 +286,6 @@ SegmentLoadInfo::ComputeDiffIndexes(LoadDiff& diff, SegmentLoadInfo& new_info) {
             new_index_ids.insert(index_id);
         }
     }
-    std::unordered_map<FieldId, std::unordered_set<std::string>>
-        new_json_index_paths;
-    for (const auto& [field_id, index_paths] :
-         new_info.json_index_path_cache_) {
-        if (!new_info.HasFieldInSchema(field_id)) {
-            continue;
-        }
-        for (const auto& index_path : index_paths) {
-            new_json_index_paths[field_id].insert(index_path.second);
-        }
-    }
     // Find indexes to load/replace: indexes in new_info but not in current
     // Only consider fields that exist in the current schema (skip dropped fields)
     for (const auto& [field_id, load_index_infos] :
@@ -307,12 +296,44 @@ SegmentLoadInfo::ComputeDiffIndexes(LoadDiff& diff, SegmentLoadInfo& new_info) {
         if (!new_info.HasFieldInSchema(field_id)) {
             continue;
         }
+        size_t incoming_new = 0;
         for (const auto& load_index_info : load_index_infos) {
             if (current_index_ids.find(load_index_info.index_id) ==
                 current_index_ids.end()) {
-                // New index_id: check if field already has an index loaded
+                ++incoming_new;
+            }
+        }
+        for (const auto& load_index_info : load_index_infos) {
+            if (current_index_ids.find(load_index_info.index_id) ==
+                current_index_ids.end()) {
+                // New index_id. A scalar index is identified by its indexID, so a
+                // new one alongside the current ones is an addition: the indexes
+                // that leave are listed in indexes_to_drop by indexID. It replaces
+                // the field's index only when the field's current indexes do not
+                // all survive this load (the single-index upgrade path, where the
+                // old index goes away), or when it is a vector index.
+                bool current_survives = true;
                 if (current_indexed_fields.find(field_id) !=
                     current_indexed_fields.end()) {
+                    for (const auto current_id :
+                         field_index_id_cache_.at(field_id)) {
+                        current_survives =
+                            current_survives &&
+                            new_index_ids.find(current_id) != new_index_ids.end();
+                    }
+                }
+                // One load replacing one index may erase the field's other scalar
+                // entries; when several indexes arrive together that shortcut
+                // would erase each other's fresh entries, so they are all plain
+                // loads and the outgoing IDs are retired by indexes_to_drop.
+                const bool single_incoming = incoming_new == 1;
+                const bool replaces_field_index =
+                    single_incoming &&
+                    (!current_survives ||
+                     (IsVectorDataType(load_index_info.field_type) &&
+                      current_indexed_fields.find(field_id) !=
+                          current_indexed_fields.end()));
+                if (replaces_field_index) {
                     diff.indexes_to_replace[field_id].push_back(
                         load_index_info);
                 } else {
@@ -322,25 +343,30 @@ SegmentLoadInfo::ComputeDiffIndexes(LoadDiff& diff, SegmentLoadInfo& new_info) {
         }
     }
 
-    // Find indexes to drop: fields that have indexes in current but not in new_info
+    // Find indexes to drop, by indexID. A field may keep some of its indexes, so
+    // neither the field alone (which would take the siblings) nor the JSON path
+    // (which would take a sibling cast type) identifies the one to remove.
     for (const auto& [field_id, index_ids] : field_index_id_cache_) {
         for (auto index_id : index_ids) {
-            if (!new_info.HasFieldInSchema(field_id) ||
-                new_index_ids.find(index_id) == new_index_ids.end()) {
-                auto field_paths = json_index_path_cache_.find(field_id);
-                if (field_paths != json_index_path_cache_.end()) {
-                    auto path = field_paths->second.find(index_id);
-                    if (path != field_paths->second.end()) {
-                        if (new_json_index_paths[field_id].find(path->second) ==
-                            new_json_index_paths[field_id].end()) {
-                            diff.json_indexes_to_drop[field_id].insert(
-                                path->second);
-                        }
-                        continue;
-                    }
-                }
-                diff.indexes_to_drop.insert(field_id);
+            if (new_info.HasFieldInSchema(field_id) &&
+                new_index_ids.find(index_id) != new_index_ids.end()) {
+                continue;
             }
+            diff.indexes_to_drop[field_id].insert(index_id);
+        }
+    }
+    // Separately: a field that had indexes and has none left in the new config is
+    // dropped at field level too -- that path is what retires its vector index and
+    // clears the field's bits.
+    for (const auto& field_id : current_indexed_fields) {
+        bool any_left = new_info.HasFieldInSchema(field_id);
+        if (any_left) {
+            auto it = new_info.field_index_id_cache_.find(field_id);
+            any_left = it != new_info.field_index_id_cache_.end() &&
+                       !it->second.empty();
+        }
+        if (!any_left) {
+            diff.fields_index_fully_dropped.insert(field_id);
         }
     }
 }
