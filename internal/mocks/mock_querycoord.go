@@ -677,6 +677,65 @@ func (_c *MockQueryCoord_EnsureCollectionReady_Call) RunAndReturn(run func(conte
 	return _c
 }
 
+// GetIndexLoadStatus provides a mock function with given fields: _a0, _a1
+func (_m *MockQueryCoord) GetIndexLoadStatus(_a0 context.Context, _a1 *querypb.GetIndexLoadStatusRequest) (*querypb.GetIndexLoadStatusResponse, error) {
+	ret := _m.Called(_a0, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetIndexLoadStatus")
+	}
+
+	var r0 *querypb.GetIndexLoadStatusResponse
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetIndexLoadStatusRequest) (*querypb.GetIndexLoadStatusResponse, error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetIndexLoadStatusRequest) *querypb.GetIndexLoadStatusResponse); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*querypb.GetIndexLoadStatusResponse)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *querypb.GetIndexLoadStatusRequest) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockQueryCoord_GetIndexLoadStatus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetIndexLoadStatus'
+type MockQueryCoord_GetIndexLoadStatus_Call struct {
+	*mock.Call
+}
+
+// GetIndexLoadStatus is a helper method to define mock.On call
+//   - _a0 context.Context
+//   - _a1 *querypb.GetIndexLoadStatusRequest
+func (_e *MockQueryCoord_Expecter) GetIndexLoadStatus(_a0 interface{}, _a1 interface{}) *MockQueryCoord_GetIndexLoadStatus_Call {
+	return &MockQueryCoord_GetIndexLoadStatus_Call{Call: _e.mock.On("GetIndexLoadStatus", _a0, _a1)}
+}
+
+func (_c *MockQueryCoord_GetIndexLoadStatus_Call) Run(run func(_a0 context.Context, _a1 *querypb.GetIndexLoadStatusRequest)) *MockQueryCoord_GetIndexLoadStatus_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*querypb.GetIndexLoadStatusRequest))
+	})
+	return _c
+}
+
+func (_c *MockQueryCoord_GetIndexLoadStatus_Call) Return(_a0 *querypb.GetIndexLoadStatusResponse, _a1 error) *MockQueryCoord_GetIndexLoadStatus_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockQueryCoord_GetIndexLoadStatus_Call) RunAndReturn(run func(context.Context, *querypb.GetIndexLoadStatusRequest) (*querypb.GetIndexLoadStatusResponse, error)) *MockQueryCoord_GetIndexLoadStatus_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetLoadSegmentInfo provides a mock function with given fields: _a0, _a1
 func (_m *MockQueryCoord) GetLoadSegmentInfo(_a0 context.Context, _a1 *querypb.GetSegmentInfoRequest) (*querypb.GetSegmentInfoResponse, error) {
 	ret := _m.Called(_a0, _a1)
@@ -968,6 +1027,65 @@ func (_c *MockQueryCoord_GetQueryViewLoadInfo_Call) Return(_a0 *querypb.GetQuery
 }
 
 func (_c *MockQueryCoord_GetQueryViewLoadInfo_Call) RunAndReturn(run func(context.Context, *querypb.GetQueryViewLoadInfoRequest) (*querypb.GetQueryViewLoadInfoResponse, error)) *MockQueryCoord_GetQueryViewLoadInfo_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetQueryViewSegmentLoadInfo provides a mock function with given fields: _a0, _a1
+func (_m *MockQueryCoord) GetQueryViewSegmentLoadInfo(_a0 context.Context, _a1 *querypb.GetQueryViewSegmentLoadInfoRequest) (*querypb.GetQueryViewSegmentLoadInfoResponse, error) {
+	ret := _m.Called(_a0, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetQueryViewSegmentLoadInfo")
+	}
+
+	var r0 *querypb.GetQueryViewSegmentLoadInfoResponse
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetQueryViewSegmentLoadInfoRequest) (*querypb.GetQueryViewSegmentLoadInfoResponse, error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *querypb.GetQueryViewSegmentLoadInfoRequest) *querypb.GetQueryViewSegmentLoadInfoResponse); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*querypb.GetQueryViewSegmentLoadInfoResponse)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *querypb.GetQueryViewSegmentLoadInfoRequest) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockQueryCoord_GetQueryViewSegmentLoadInfo_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetQueryViewSegmentLoadInfo'
+type MockQueryCoord_GetQueryViewSegmentLoadInfo_Call struct {
+	*mock.Call
+}
+
+// GetQueryViewSegmentLoadInfo is a helper method to define mock.On call
+//   - _a0 context.Context
+//   - _a1 *querypb.GetQueryViewSegmentLoadInfoRequest
+func (_e *MockQueryCoord_Expecter) GetQueryViewSegmentLoadInfo(_a0 interface{}, _a1 interface{}) *MockQueryCoord_GetQueryViewSegmentLoadInfo_Call {
+	return &MockQueryCoord_GetQueryViewSegmentLoadInfo_Call{Call: _e.mock.On("GetQueryViewSegmentLoadInfo", _a0, _a1)}
+}
+
+func (_c *MockQueryCoord_GetQueryViewSegmentLoadInfo_Call) Run(run func(_a0 context.Context, _a1 *querypb.GetQueryViewSegmentLoadInfoRequest)) *MockQueryCoord_GetQueryViewSegmentLoadInfo_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*querypb.GetQueryViewSegmentLoadInfoRequest))
+	})
+	return _c
+}
+
+func (_c *MockQueryCoord_GetQueryViewSegmentLoadInfo_Call) Return(_a0 *querypb.GetQueryViewSegmentLoadInfoResponse, _a1 error) *MockQueryCoord_GetQueryViewSegmentLoadInfo_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockQueryCoord_GetQueryViewSegmentLoadInfo_Call) RunAndReturn(run func(context.Context, *querypb.GetQueryViewSegmentLoadInfoRequest) (*querypb.GetQueryViewSegmentLoadInfoResponse, error)) *MockQueryCoord_GetQueryViewSegmentLoadInfo_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -2941,11 +3059,6 @@ func (_c *MockQueryCoord_ValidateAnalyzer_Call) Return(_a0 *querypb.ValidateAnal
 func (_c *MockQueryCoord_ValidateAnalyzer_Call) RunAndReturn(run func(context.Context, *querypb.ValidateAnalyzerRequest) (*querypb.ValidateAnalyzerResponse, error)) *MockQueryCoord_ValidateAnalyzer_Call {
 	_c.Call.Return(run)
 	return _c
-}
-
-// GetQueryViewSegmentLoadInfo is patched with mockey by QueryView tests.
-func (_m *MockQueryCoord) GetQueryViewSegmentLoadInfo(ctx context.Context, req *querypb.GetQueryViewSegmentLoadInfoRequest) (*querypb.GetQueryViewSegmentLoadInfoResponse, error) {
-	panic("patch GetQueryViewSegmentLoadInfo with mockey")
 }
 
 // NewMockQueryCoord creates a new instance of MockQueryCoord. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.

@@ -663,6 +663,58 @@ func (r *segmentResource) closeIfUnusedLocked() bool {
 }
 
 // CollectionIDs returns the collections this node holds QueryViews for.
+// LoadedIndexes reports the indexes the physical segment behind segmentID
+// loaded. A segment that this manager does not hold (released, or owned by
+// another load path) returns nil, which the reporting side reads as "no
+// evidence" rather than "loaded nothing".
+func (m *SegmentResourceManager) LoadedIndexes(segmentID int64) []int64 {
+	m.mu.Lock()
+	resource := m.resources[segmentID]
+	if resource == nil || resource.closing {
+		m.mu.Unlock()
+		return nil
+	}
+	bases := make([]*segmentBase, 0, len(resource.bases))
+	for _, base := range resource.bases {
+		if base.segment == nil {
+			continue
+		}
+		resource.operations.Add(1)
+		base.operationRefs++
+		bases = append(bases, base)
+	}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, base := range bases {
+			base.operationRefs--
+			resource.wakeLocked()
+			resource.operations.Done()
+		}
+	}()
+
+	var ids []int64
+	for _, base := range bases {
+		readable, ok := UnwrapTransformSegment(base.segment).(interface {
+			QuerySegment() segments.Segment
+		})
+		if !ok {
+			continue
+		}
+		physical := readable.QuerySegment()
+		if physical == nil {
+			continue
+		}
+		for _, index := range physical.Indexes() {
+			if index.IndexInfo != nil {
+				ids = append(ids, index.IndexInfo.IndexID)
+			}
+		}
+	}
+	return ids
+}
+
 func (m *SegmentResourceManager) CollectionIDs() []int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()

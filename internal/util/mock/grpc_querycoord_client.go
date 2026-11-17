@@ -214,6 +214,10 @@ func (m *GrpcQueryCoordClient) ValidateAnalyzer(ctx context.Context, req *queryp
 	return &querypb.ValidateAnalyzerResponse{}, m.Err
 }
 
+func (m *GrpcQueryCoordClient) GetIndexLoadStatus(context.Context, *querypb.GetIndexLoadStatusRequest, ...grpc.CallOption) (*querypb.GetIndexLoadStatusResponse, error) {
+	return &querypb.GetIndexLoadStatusResponse{}, m.Err
+}
+
 func (m *GrpcQueryCoordClient) GetQueryViewLoadInfo(context.Context, *querypb.GetQueryViewLoadInfoRequest, ...grpc.CallOption) (*querypb.GetQueryViewLoadInfoResponse, error) {
 	return &querypb.GetQueryViewLoadInfoResponse{}, m.Err
 }

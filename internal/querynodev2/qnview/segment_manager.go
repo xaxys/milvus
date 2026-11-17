@@ -89,4 +89,9 @@ type SegmentManager interface {
 	// WaitTransformVisible waits until the view-scoped TransformLogBuffer can
 	// serve the QueryPlan transforming timetick boundary.
 	WaitTransformVisible(ctx context.Context, key qviews.QueryViewKey, timetick uint64) error
+
+	// LoadedIndexes returns the index ids the segment currently loaded, or nil
+	// when the segment is not held by this manager. The coordinator uses it to
+	// certify that a serving query view really carries an index.
+	LoadedIndexes(segmentID int64) []int64
 }
