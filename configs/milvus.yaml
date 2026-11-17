@@ -914,6 +914,7 @@ dataCoord:
       # The size threshold in MB, if the total entry number of l0 logs of each shard
       # exceeds this threshold, the earliest growing segments will be sealed.
       blockingL0SizeInMB: 64
+  enableMultiScalarIndexPerField: auto # Whether one scalar field may carry several indexes. auto: enable once all registered online components reach 3.1.0 and the stability window elapses (until then, creating a second index on a field is refused as not ready and the client can retry); false: disable outright and restore the previous behavior, rejecting a second index on a field as an invalid parameter; true: force enable and bypass the software-version gate.
   manifestCommitConcurrency: 16 # Maximum concurrent DataCoord manifest commits across L0 compaction, index and stats publication, schema materialization, and GC. Values are clamped to [1, 256]. Workers start on demand. Read once during metadata initialization; changes require restart.
   # Switch value to control if to enable segment compaction.
   # Compaction merges small-size segments into a large segment, and clears the entities deleted beyond the rentention duration of Time Travel.

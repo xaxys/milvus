@@ -3519,6 +3519,485 @@ func Test_loadCollectionTask_Execute(t *testing.T) {
 	})
 }
 
+// Test_loadCollectionTask_Execute_SmallestIndexIDPerField pins the load-config
+// rule: a field may now carry several indexes but the load config still carries a
+// single indexID per field, so it must always be the SMALLEST one (the earliest
+// created) and must stay put across repeated Load calls: DescribeIndex returns the
+// indexes in map order, and a flapping fieldIndexID would re-broadcast the load
+// config and reset an already-loaded collection back to Loading.
+func Test_loadCollectionTask_Execute_SmallestIndexIDPerField(t *testing.T) {
+	const (
+		dbName         = "db"
+		collectionName = "multi_index_collection"
+		collectionID   = UniqueID(100)
+		fieldID        = UniqueID(10)
+		vecFieldID     = UniqueID(11)
+		vecIndexID     = UniqueID(1000)
+		firstIndexID   = UniqueID(1100)
+		secondIndexID  = UniqueID(1200)
+	)
+
+	cache := NewMockCache(t)
+	cache.EXPECT().GetCollectionID(mock.Anything, dbName, collectionName).Return(collectionID, nil)
+	cache.EXPECT().GetCollectionSchema(mock.Anything, dbName, collectionName).Return(
+		mustNewSchemaInfo(&schemapb.CollectionSchema{
+			Name: collectionName,
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: fieldID, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+				{FieldID: vecFieldID, Name: "vec", DataType: schemapb.DataType_FloatVector},
+			},
+		}), nil)
+
+	indexInfo := func(fieldID, indexID UniqueID) *indexpb.IndexInfo {
+		return &indexpb.IndexInfo{
+			CollectionID: collectionID,
+			FieldID:      fieldID,
+			IndexID:      indexID,
+			IndexName:    funcutil.GenRandomStr(),
+			State:        commonpb.IndexState_Finished,
+		}
+	}
+
+	// The first field carries two indexes (the second one was created later). The
+	// response is ascending by indexID -- DescribeIndex sorts the infos it returns,
+	// and the load config relies on that order to pick "the field's index" -- so the
+	// same index has to be chosen on every Load call. A choice that changed between
+	// calls would re-broadcast a different load config and reset the collection to
+	// Loading.
+	mixCoord := mocks.NewMockMixCoordClient(t)
+	mixCoord.EXPECT().DescribeIndex(mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ *indexpb.DescribeIndexRequest, _ ...grpc.CallOption) (*indexpb.DescribeIndexResponse, error) {
+			return &indexpb.DescribeIndexResponse{Status: merr.Success(), IndexInfos: []*indexpb.IndexInfo{
+				indexInfo(vecFieldID, vecIndexID),
+				indexInfo(fieldID, firstIndexID),
+				indexInfo(fieldID, secondIndexID),
+			}}, nil
+		}).Times(2)
+
+	loaded := make([]map[int64]int64, 0, 2)
+	mixCoord.EXPECT().LoadCollection(mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, req *querypb.LoadCollectionRequest, _ ...grpc.CallOption) (*commonpb.Status, error) {
+			loaded = append(loaded, req.GetFieldIndexID())
+			return merr.Success(), nil
+		}).Times(2)
+
+	ctx := context.Background()
+	task := &LoadCollectionTask{
+		baseTask: baseTask{MetaCache: cache},
+		LoadCollectionRequest: &milvuspb.LoadCollectionRequest{
+			Base:           commonpbutil.NewMsgBase(),
+			DbName:         dbName,
+			CollectionName: collectionName,
+		},
+		ctx:      ctx,
+		mixCoord: mixCoord,
+	}
+
+	for i := 0; i < 2; i++ {
+		require.NoError(t, task.Execute(ctx))
+	}
+
+	require.Len(t, loaded, 2)
+	assert.Equal(t, vecIndexID, loaded[0][vecFieldID])
+	for i, fieldIndexIDs := range loaded {
+		assert.Equal(t, firstIndexID, fieldIndexIDs[fieldID],
+			"call %d must take the smallest indexID of the field", i)
+	}
+	assert.Equal(t, loaded[0], loaded[1])
+}
+
+func Test_describeIndexTask_Execute_DynamicFieldFiltering(t *testing.T) {
+	const (
+		dbName         = "db"
+		collectionName = "dyn_collection"
+		collectionID   = UniqueID(200)
+		pkFieldID      = UniqueID(100)
+		vecFieldID     = UniqueID(101)
+		dynFieldID     = UniqueID(102)
+	)
+
+	cache := NewMockCache(t)
+	cache.EXPECT().GetCollectionID(mock.Anything, dbName, collectionName).Return(collectionID, nil).Maybe()
+	cache.EXPECT().GetCollectionSchema(mock.Anything, dbName, collectionName).Return(
+		mustNewSchemaInfo(&schemapb.CollectionSchema{
+			Name:               collectionName,
+			EnableDynamicField: true,
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: pkFieldID, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+				{FieldID: vecFieldID, Name: "vec", DataType: schemapb.DataType_FloatVector},
+				{FieldID: dynFieldID, Name: "$meta", DataType: schemapb.DataType_JSON, IsDynamic: true},
+			},
+		}), nil).Maybe()
+
+	allIndexes := []*indexpb.IndexInfo{
+		{
+			CollectionID: collectionID,
+			FieldID:      dynFieldID,
+			IndexID:      2001,
+			IndexName:    "idx_dyn_a",
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: "INVERTED"},
+				{Key: common.JSONPathKey, Value: "/dyn_a"},
+				{Key: common.JSONCastTypeKey, Value: "VARCHAR"},
+			},
+			State: commonpb.IndexState_Finished,
+		},
+		{
+			CollectionID: collectionID,
+			FieldID:      dynFieldID,
+			IndexID:      2002,
+			IndexName:    "idx_dyn_b",
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: "INVERTED"},
+				{Key: common.JSONPathKey, Value: "/dyn_b/nested"},
+				{Key: common.JSONCastTypeKey, Value: "VARCHAR"},
+			},
+			State: commonpb.IndexState_Finished,
+		},
+	}
+
+	runDescribe := func(fieldName string) (*milvuspb.DescribeIndexResponse, error) {
+		mixCoord := mocks.NewMockMixCoordClient(t)
+		mixCoord.EXPECT().DescribeIndex(mock.Anything, mock.Anything).Return(&indexpb.DescribeIndexResponse{
+			Status:     merr.Success(),
+			IndexInfos: append([]*indexpb.IndexInfo(nil), allIndexes...),
+		}, nil).Once()
+		ctx := context.Background()
+		task := &DescribeIndexTask{
+			baseTask: baseTask{MetaCache: cache},
+			DescribeIndexRequest: &milvuspb.DescribeIndexRequest{
+				Base:           commonpbutil.NewMsgBase(),
+				DbName:         dbName,
+				CollectionName: collectionName,
+				FieldName:      fieldName,
+			},
+			ctx:      ctx,
+			mixCoord: mixCoord,
+		}
+		err := task.Execute(ctx)
+		return task.result, err
+	}
+
+	t.Run("dynamic key filters out sibling dynamic keys", func(t *testing.T) {
+		res, err := runDescribe("dyn_a")
+		require.NoError(t, err)
+		require.NoError(t, merr.Error(res.GetStatus()))
+		require.Len(t, res.GetIndexDescriptions(), 1)
+		assert.Equal(t, "idx_dyn_a", res.GetIndexDescriptions()[0].GetIndexName())
+		assert.Equal(t, "dyn_a", res.GetIndexDescriptions()[0].GetFieldName())
+	})
+
+	t.Run("nested dynamic path matches top-level dynamic key", func(t *testing.T) {
+		res, err := runDescribe("dyn_b")
+		require.NoError(t, err)
+		require.NoError(t, merr.Error(res.GetStatus()))
+		require.Len(t, res.GetIndexDescriptions(), 1)
+		assert.Equal(t, "idx_dyn_b", res.GetIndexDescriptions()[0].GetIndexName())
+		assert.Equal(t, "dyn_b", res.GetIndexDescriptions()[0].GetFieldName())
+	})
+
+	t.Run("nested dynamic bracket path matches exact nested index", func(t *testing.T) {
+		res, err := runDescribe("dyn_b['nested']")
+		require.NoError(t, err)
+		require.NoError(t, merr.Error(res.GetStatus()))
+		require.Len(t, res.GetIndexDescriptions(), 1)
+		assert.Equal(t, "idx_dyn_b", res.GetIndexDescriptions()[0].GetIndexName())
+	})
+
+	t.Run("non-existent dynamic key returns ErrIndexNotFound", func(t *testing.T) {
+		res, err := runDescribe("non_existent")
+		assert.ErrorIs(t, err, merr.ErrIndexNotFound)
+		assert.ErrorIs(t, merr.Error(res.GetStatus()), merr.ErrIndexNotFound)
+		assert.NotContains(t, err.Error(), "indexName=non_existent")
+		assert.Empty(t, res.GetIndexDescriptions())
+	})
+
+	t.Run("non-existent field on non-dynamic collection fails before DescribeIndex RPC", func(t *testing.T) {
+		nonDynCache := NewMockCache(t)
+		nonDynCache.EXPECT().GetCollectionSchema(mock.Anything, dbName, "static_coll").Return(
+			mustNewSchemaInfo(&schemapb.CollectionSchema{
+				Name: "static_coll",
+				Fields: []*schemapb.FieldSchema{
+					{FieldID: pkFieldID, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+					{FieldID: vecFieldID, Name: "vec", DataType: schemapb.DataType_FloatVector},
+				},
+			}), nil).Once()
+		mixCoord := mocks.NewMockMixCoordClient(t)
+		ctx := context.Background()
+		task := &DescribeIndexTask{
+			baseTask: baseTask{MetaCache: nonDynCache},
+			DescribeIndexRequest: &milvuspb.DescribeIndexRequest{
+				Base:           commonpbutil.NewMsgBase(),
+				DbName:         dbName,
+				CollectionName: "static_coll",
+				FieldName:      "no_such_field",
+			},
+			ctx:      ctx,
+			mixCoord: mixCoord,
+		}
+		err := task.Execute(ctx)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.ErrorIs(t, merr.Error(task.result.GetStatus()), merr.ErrParameterInvalid)
+	})
+}
+
+func Test_AlterIndexTask_VisibleOnLoadedCollectionAndUnambiguousEmptyIndexName(t *testing.T) {
+	const (
+		dbName         = "db"
+		collectionName = "products"
+		collectionID   = UniqueID(300)
+	)
+	cache := NewMockCache(t)
+	cache.EXPECT().GetCollectionID(mock.Anything, dbName, collectionName).Return(collectionID, nil).Maybe()
+	cache.EXPECT().GetCollectionSchema(mock.Anything, dbName, collectionName).Return(
+		mustNewSchemaInfo(&schemapb.CollectionSchema{
+			Name:               collectionName,
+			EnableDynamicField: true,
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: 100, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+				{FieldID: 101, Name: "vec", DataType: schemapb.DataType_FloatVector},
+				{FieldID: 102, Name: "age", DataType: schemapb.DataType_Int64},
+				{FieldID: 103, Name: "$meta", DataType: schemapb.DataType_JSON, IsDynamic: true},
+			},
+		}), nil).Maybe()
+
+	t.Run("alter visible=false allowed on loaded collection with or without explicit index_name", func(t *testing.T) {
+		mixCoord := mocks.NewMockMixCoordClient(t)
+		for _, idxName := range []string{"title_ngram", ""} {
+			task := &AlterIndexTask{
+				baseTask: baseTask{MetaCache: cache},
+				req: &milvuspb.AlterIndexRequest{
+					DbName:         dbName,
+					CollectionName: collectionName,
+					IndexName:      idxName,
+					ExtraParams:    []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+				},
+				ctx:      context.Background(),
+				mixCoord: mixCoord,
+			}
+			require.NoError(t, task.PreExecute(context.Background()))
+		}
+	})
+
+	t.Run("alter mmap.enabled still rejected on loaded collection", func(t *testing.T) {
+		mixCoord := mocks.NewMockMixCoordClient(t)
+		mixCoord.EXPECT().ShowLoadCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{
+			Status:              merr.Success(),
+			CollectionIDs:       []int64{collectionID},
+			InMemoryPercentages: []int64{100},
+		}, nil).Once()
+		task := &AlterIndexTask{
+			baseTask: baseTask{MetaCache: cache},
+			req: &milvuspb.AlterIndexRequest{
+				DbName:         dbName,
+				CollectionName: collectionName,
+				IndexName:      "title_ngram",
+				ExtraParams:    []*commonpb.KeyValuePair{{Key: common.MmapEnabledKey, Value: "true"}},
+			},
+			ctx:      context.Background(),
+			mixCoord: mixCoord,
+		}
+		err := task.PreExecute(context.Background())
+		assert.ErrorIs(t, err, merr.ErrCollectionLoaded)
+	})
+
+	t.Run("alter visible with invalid boolean rejected", func(t *testing.T) {
+		mixCoord := mocks.NewMockMixCoordClient(t)
+		task := &AlterIndexTask{
+			baseTask: baseTask{MetaCache: cache},
+			req: &milvuspb.AlterIndexRequest{
+				DbName:         dbName,
+				CollectionName: collectionName,
+				IndexName:      "title_ngram",
+				ExtraParams:    []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "not_a_bool"}},
+			},
+			ctx:      context.Background(),
+			mixCoord: mixCoord,
+		}
+		err := task.PreExecute(context.Background())
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+
+	t.Run("fieldIndexIDByField skips visible=false indexes and picks smallest indexID", func(t *testing.T) {
+		got := fieldIndexIDByField([]*indexpb.IndexInfo{
+			{
+				FieldID:     10,
+				IndexID:     1001,
+				IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+			},
+			{
+				FieldID: 10,
+				IndexID: 1005,
+			},
+			{
+				FieldID: 10,
+				IndexID: 1002,
+			},
+			{
+				FieldID:     11,
+				IndexID:     2001,
+				IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+			},
+		})
+		assert.Equal(t, map[int64]int64{10: 1002}, got)
+	})
+
+	t.Run("DropIndexTask with field_name and empty index_name resolves unambiguous index or reports ambiguity", func(t *testing.T) {
+		allIndexes := []*indexpb.IndexInfo{
+			{CollectionID: collectionID, FieldID: 101, IndexID: 1, IndexName: "vec_idx"},
+			{CollectionID: collectionID, FieldID: 102, IndexID: 2, IndexName: "age_stl"},
+			{
+				CollectionID: collectionID,
+				FieldID:      103,
+				IndexID:      3,
+				IndexName:    "dyn_a_idx",
+				IndexParams:  []*commonpb.KeyValuePair{{Key: common.JSONPathKey, Value: "/dyn_a"}},
+			},
+		}
+
+		// 1. Field "age" has 1 index (even though collection has 3 indexes total) -> drops "age_stl".
+		mixCoord := mocks.NewMockMixCoordClient(t)
+		mixCoord.EXPECT().DescribeIndex(mock.Anything, &indexpb.DescribeIndexRequest{CollectionID: collectionID}).Return(&indexpb.DescribeIndexResponse{
+			Status:     merr.Success(),
+			IndexInfos: allIndexes,
+		}, nil).Once()
+		mixCoord.EXPECT().DropIndex(mock.Anything, &indexpb.DropIndexRequest{
+			CollectionID: collectionID,
+			IndexName:    "age_stl",
+		}).Return(merr.Success(), nil).Once()
+		dropAge := &DropIndexTask{
+			baseTask:     baseTask{MetaCache: cache},
+			ctx:          context.Background(),
+			collectionID: collectionID,
+			mixCoord:     mixCoord,
+			DropIndexRequest: &milvuspb.DropIndexRequest{
+				DbName:         dbName,
+				CollectionName: collectionName,
+				FieldName:      "age",
+			},
+		}
+		require.NoError(t, dropAge.Execute(context.Background()))
+
+		// 2. Dynamic key "dyn_a" has 1 index -> drops "dyn_a_idx".
+		mixCoordDyn := mocks.NewMockMixCoordClient(t)
+		mixCoordDyn.EXPECT().DescribeIndex(mock.Anything, &indexpb.DescribeIndexRequest{CollectionID: collectionID}).Return(&indexpb.DescribeIndexResponse{
+			Status:     merr.Success(),
+			IndexInfos: allIndexes,
+		}, nil).Once()
+		mixCoordDyn.EXPECT().DropIndex(mock.Anything, &indexpb.DropIndexRequest{
+			CollectionID: collectionID,
+			IndexName:    "dyn_a_idx",
+		}).Return(merr.Success(), nil).Once()
+		dropDyn := &DropIndexTask{
+			baseTask:     baseTask{MetaCache: cache},
+			ctx:          context.Background(),
+			collectionID: collectionID,
+			mixCoord:     mixCoordDyn,
+			DropIndexRequest: &milvuspb.DropIndexRequest{
+				DbName:         dbName,
+				CollectionName: collectionName,
+				FieldName:      "dyn_a",
+			},
+		}
+		require.NoError(t, dropDyn.Execute(context.Background()))
+
+		// 3. Field "pk" has 0 indexes -> idempotent no-op without calling mixCoord.DropIndex.
+		mixCoordNoop := mocks.NewMockMixCoordClient(t)
+		mixCoordNoop.EXPECT().DescribeIndex(mock.Anything, &indexpb.DescribeIndexRequest{CollectionID: collectionID}).Return(&indexpb.DescribeIndexResponse{
+			Status:     merr.Success(),
+			IndexInfos: allIndexes,
+		}, nil).Once()
+		dropNoop := &DropIndexTask{
+			baseTask:     baseTask{MetaCache: cache},
+			ctx:          context.Background(),
+			collectionID: collectionID,
+			mixCoord:     mixCoordNoop,
+			DropIndexRequest: &milvuspb.DropIndexRequest{
+				DbName:         dbName,
+				CollectionName: collectionName,
+				FieldName:      "pk",
+			},
+		}
+		require.NoError(t, dropNoop.Execute(context.Background()))
+		assert.NoError(t, merr.Error(dropNoop.result))
+
+		// 4. Field "age" with 2 indexes -> ErrIndexDuplicate.
+		mixCoordDup := mocks.NewMockMixCoordClient(t)
+		mixCoordDup.EXPECT().DescribeIndex(mock.Anything, &indexpb.DescribeIndexRequest{CollectionID: collectionID}).Return(&indexpb.DescribeIndexResponse{
+			Status: merr.Success(),
+			IndexInfos: append(append([]*indexpb.IndexInfo(nil), allIndexes...),
+				&indexpb.IndexInfo{CollectionID: collectionID, FieldID: 102, IndexID: 4, IndexName: "age_bitmap"}),
+		}, nil).Once()
+		dropDup := &DropIndexTask{
+			baseTask:     baseTask{MetaCache: cache},
+			ctx:          context.Background(),
+			collectionID: collectionID,
+			mixCoord:     mixCoordDup,
+			DropIndexRequest: &milvuspb.DropIndexRequest{
+				DbName:         dbName,
+				CollectionName: collectionName,
+				FieldName:      "age",
+			},
+		}
+		err := dropDup.Execute(context.Background())
+		assert.ErrorIs(t, err, merr.ErrIndexDuplicate)
+		assert.ErrorIs(t, merr.Error(dropDup.result), merr.ErrIndexDuplicate)
+	})
+
+	t.Run("GetIndexStateTask and GetIndexBuildProgressTask resolve unambiguous field_name", func(t *testing.T) {
+		allIndexes := []*indexpb.IndexInfo{
+			{CollectionID: collectionID, FieldID: 101, IndexID: 1, IndexName: "vec_idx"},
+			{CollectionID: collectionID, FieldID: 102, IndexID: 2, IndexName: "age_stl"},
+		}
+		mixCoord := mocks.NewMockMixCoordClient(t)
+		mixCoord.EXPECT().DescribeIndex(mock.Anything, &indexpb.DescribeIndexRequest{CollectionID: collectionID}).Return(&indexpb.DescribeIndexResponse{
+			Status:     merr.Success(),
+			IndexInfos: allIndexes,
+		}, nil).Twice()
+		mixCoord.EXPECT().GetIndexState(mock.Anything, &indexpb.GetIndexStateRequest{
+			CollectionID: collectionID,
+			IndexName:    "age_stl",
+		}).Return(&indexpb.GetIndexStateResponse{
+			Status: merr.Success(),
+			State:  commonpb.IndexState_Finished,
+		}, nil).Once()
+		mixCoord.EXPECT().GetIndexBuildProgress(mock.Anything, &indexpb.GetIndexBuildProgressRequest{
+			CollectionID: collectionID,
+			IndexName:    "age_stl",
+		}).Return(&indexpb.GetIndexBuildProgressResponse{
+			Status:      merr.Success(),
+			TotalRows:   100,
+			IndexedRows: 100,
+		}, nil).Once()
+
+		stateTask := &GetIndexStateTask{
+			baseTask: baseTask{MetaCache: cache},
+			ctx:      context.Background(),
+			mixCoord: mixCoord,
+			GetIndexStateRequest: &milvuspb.GetIndexStateRequest{
+				DbName:         dbName,
+				CollectionName: collectionName,
+				FieldName:      "age",
+			},
+		}
+		require.NoError(t, stateTask.Execute(context.Background()))
+		assert.Equal(t, commonpb.IndexState_Finished, stateTask.result.GetState())
+
+		progTask := &GetIndexBuildProgressTask{
+			baseTask: baseTask{MetaCache: cache},
+			ctx:      context.Background(),
+			mixCoord: mixCoord,
+			GetIndexBuildProgressRequest: &milvuspb.GetIndexBuildProgressRequest{
+				DbName:         dbName,
+				CollectionName: collectionName,
+				FieldName:      "age",
+			},
+		}
+		require.NoError(t, progTask.Execute(context.Background()))
+		assert.EqualValues(t, 100, progTask.result.GetIndexedRows())
+	})
+}
+
 func TestLoadCollectionTaskExecuteTextRequiresStorageV3(t *testing.T) {
 	paramtable.Get().Save(paramtable.Get().CommonCfg.UseLoonFFI.Key, "false")
 	t.Cleanup(func() {

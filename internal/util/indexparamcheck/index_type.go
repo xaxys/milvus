@@ -27,23 +27,42 @@ const (
 	IndexVector IndexType = "VECINDEX"
 
 	// scalar index
-	IndexSTLSORT  IndexType = "STL_SORT"
-	IndexTRIE     IndexType = "TRIE"
-	IndexTrie     IndexType = "Trie"
-	IndexBitmap   IndexType = "BITMAP"
-	IndexHybrid   IndexType = "HYBRID" // BITMAP + INVERTED
-	IndexINVERTED IndexType = "INVERTED"
-	IndexNGRAM    IndexType = "NGRAM"
-	IndexFMINDEX  IndexType = "FMINDEX"
-	IndexRTREE    IndexType = "RTREE"
+	IndexSTLSORT    IndexType = "STL_SORT"
+	IndexAsceneding IndexType = "Asceneding"
+	IndexTRIE       IndexType = "TRIE"
+	IndexTrie       IndexType = "Trie"
+	IndexMarisaTrie IndexType = "marisa-trie"
+	IndexBitmap     IndexType = "BITMAP"
+	IndexHybrid     IndexType = "HYBRID" // BITMAP + INVERTED
+	IndexINVERTED   IndexType = "INVERTED"
+	IndexNGRAM      IndexType = "NGRAM"
+	IndexFMINDEX    IndexType = "FMINDEX"
+	IndexRTREE      IndexType = "RTREE"
 
 	AutoIndex IndexType = "AUTOINDEX"
 )
 
+// CanonicalScalarIndexType normalizes legacy scalar index_type aliases to their
+// canonical upper-case names so duplicate-definition and idempotency checks
+// treat equivalent spellings identically.
+func CanonicalScalarIndexType(indexType IndexType) IndexType {
+	switch indexType {
+	case IndexTrie, IndexMarisaTrie:
+		return IndexTRIE
+	case IndexAsceneding:
+		return IndexSTLSORT
+	default:
+		return indexType
+	}
+}
+
 func IsScalarIndexType(indexType IndexType) bool {
-	return indexType == IndexSTLSORT || indexType == IndexTRIE || indexType == IndexTrie ||
-		indexType == IndexBitmap || indexType == IndexHybrid || indexType == IndexINVERTED ||
-		indexType == IndexNGRAM || indexType == IndexFMINDEX
+	switch CanonicalScalarIndexType(indexType) {
+	case IndexSTLSORT, IndexTRIE, IndexBitmap, IndexHybrid, IndexINVERTED, IndexNGRAM, IndexFMINDEX, IndexRTREE:
+		return true
+	default:
+		return false
+	}
 }
 
 func IsGpuIndex(indexType IndexType) bool {
@@ -64,14 +83,12 @@ func IsDiskIndex(indexType IndexType) bool {
 }
 
 func IsScalarMmapIndex(indexType IndexType) bool {
-	return indexType == IndexSTLSORT ||
-		indexType == IndexINVERTED ||
-		indexType == IndexBitmap ||
-		indexType == IndexHybrid ||
-		indexType == IndexTrie ||
-		indexType == IndexTRIE ||
-		indexType == IndexNGRAM ||
-		indexType == IndexFMINDEX
+	switch CanonicalScalarIndexType(indexType) {
+	case IndexSTLSORT, IndexINVERTED, IndexBitmap, IndexHybrid, IndexTRIE, IndexNGRAM, IndexFMINDEX:
+		return true
+	default:
+		return false
+	}
 }
 
 func ValidateMmapIndexParams(indexType IndexType, indexParams map[string]string) error {
@@ -112,6 +129,21 @@ func ValidateWarmupIndexParams(indexParams map[string]string) error {
 	}
 	if err := common.ValidateWarmupPolicy(warmupPolicy); err != nil {
 		return err
+	}
+	return nil
+}
+
+func ValidateVisibleIndexParams(isVectorField bool, indexParams map[string]string) error {
+	raw, ok := indexParams[common.IndexVisibleKey]
+	if !ok {
+		return nil
+	}
+	visible, err := strconv.ParseBool(raw)
+	if err != nil {
+		return merr.WrapErrParameterInvalidMsg("invalid %s value: %s, expected: true, false", common.IndexVisibleKey, raw)
+	}
+	if isVectorField && !visible {
+		return merr.WrapErrParameterInvalidMsg("hiding vector index via %s=false is not supported", common.IndexVisibleKey)
 	}
 	return nil
 }

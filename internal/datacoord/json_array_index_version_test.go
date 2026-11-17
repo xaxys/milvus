@@ -89,6 +89,7 @@ func TestCreateIndexJSONArraySoftwareGate(t *testing.T) {
 								ID: 1, DatabaseName: "default",
 								Schema: &schemapb.CollectionSchema{Name: "collection", Fields: []*schemapb.FieldSchema{field}},
 							}),
+							domainMetas:               domainMetas{indexMeta: newIndexMetaForMultiIndexTest(t)},
 							allocator:                 alloc,
 							indexEngineVersionManager: index.JSONArrayVersionManager(t, tc.version),
 						}

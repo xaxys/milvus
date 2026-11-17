@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/coordinator/snmanager"
@@ -42,6 +43,7 @@ import (
 	mockkv "github.com/milvus-io/milvus/internal/kv/mocks"
 	"github.com/milvus-io/milvus/internal/metacache"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
+	catalogkv "github.com/milvus-io/milvus/internal/metastore/kv/queryview"
 	catalogmocks "github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/mocks"
@@ -57,7 +59,6 @@ import (
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster/registry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
-	"github.com/milvus-io/milvus/internal/views/coord/loadmgr/loadmgrtest"
 	qvresource "github.com/milvus-io/milvus/internal/views/coord/resource"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
@@ -77,7 +78,17 @@ import (
 func initStreamingSystem(t *testing.T) {
 	// DDL-only fixtures have no loaded collections. Index callbacks still use
 	// the real load owner to decide whether a new requirements version is needed.
-	configs, err := loadmgr.RecoverLoadConfigStore(t.Context(), loadmgrtest.Dependencies(t))
+	// In-memory load-config catalog: the etcd-backed dependency would block for the
+	// full dial timeout in a unit-test environment without etcd.
+	mockMetaKv := mockkv.NewMetaKv(t)
+	mockMetaKv.EXPECT().WalkWithPrefix(mock.Anything, "coord/load_info/", mock.Anything, mock.Anything).
+		Return(nil).Maybe()
+	configs, err := loadmgr.RecoverLoadConfigStore(t.Context(), loadmgr.LoadConfigStoreDependencies{
+		Catalog: catalogkv.NewCollectionLoadInfoCatalog(mockMetaKv),
+		AllocateVersion: func(context.Context) (uint64, error) {
+			return 1, nil
+		},
+	})
 	require.NoError(t, err)
 	previous := qvresource.Resource()
 	qvresource.Init(&qvresource.Resources{
@@ -176,6 +187,9 @@ func TestServer_CreateIndex(t *testing.T) {
 
 	catalog := catalogmocks.NewDataCoordCatalog(t)
 	catalog.EXPECT().CreateIndex(mock.Anything, mock.Anything).Return(nil).Maybe()
+	catalog.EXPECT().ListIndexes(mock.Anything).Return([]*model.Index{}, nil).Maybe()
+	catalog.EXPECT().ListChannelCheckpoint(mock.Anything).Return(map[string]*msgpb.MsgPosition{}, nil).Maybe()
+	catalog.EXPECT().ListSegmentChangeGroups(mock.Anything).Return(nil, nil).Maybe()
 
 	mock0Allocator := meta.NewMockAllocator(t)
 
@@ -887,6 +901,18 @@ func TestServer_AlterIndex(t *testing.T) {
 		assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrParameterInvalid)
 
 		indexParams[0].Value = "IVF_FLAT"
+	})
+
+	t.Run("vector_visible_false_rejected", func(t *testing.T) {
+		mockGetCollectionInfo()
+		hideVecReq := &indexpb.AlterIndexRequest{
+			CollectionID: collID,
+			IndexName:    indexName,
+			Params:       []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+		}
+		resp, err := s.AlterIndex(ctx, hideVecReq)
+		assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrParameterInvalid)
+		assert.Contains(t, resp.GetReason(), "hiding vector index")
 	})
 
 	t.Run("param_value_invalied", func(t *testing.T) {
@@ -3006,4 +3032,800 @@ func TestJsonIndex(t *testing.T) {
 	}
 	resp, err = s.CreateIndex(context.Background(), req)
 	assert.Error(t, merr.CheckRPCCall(resp, err))
+}
+
+// Test_checkFMIndexEngineVersion covers the shared FMINDEX rolling-upgrade gate
+// used by BOTH Server.CreateIndex and snapshotManager.RestoreIndexes (so a
+// snapshot restore cannot bypass it). MinScalarIndexVersionForFMINDEX is 5:
+// resolved version 4 must be rejected, 5 accepted; non-FMINDEX always passes.
+func newIndexMetaForMultiIndexTest(t *testing.T, indexes ...*model.Index) *index.IndexMeta {
+	t.Helper()
+	catalog := catalogmocks.NewDataCoordCatalog(t)
+	catalog.EXPECT().CreateIndex(mock.Anything, mock.Anything).Return(nil).Maybe()
+	// NewIndexMeta loads the meta cache, which asks the catalog for its snapshot.
+	catalog.EXPECT().ListIndexes(mock.Anything).Return([]*model.Index{}, nil).Maybe()
+	catalog.EXPECT().ListChannelCheckpoint(mock.Anything).Return(map[string]*msgpb.MsgPosition{}, nil).Maybe()
+	catalog.EXPECT().ListSegmentChangeGroups(mock.Anything).Return(nil, nil).Maybe()
+	catalog.EXPECT().ListSegmentIndexes(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
+	m, err := index.NewIndexMeta(context.Background(), catalog, nil)
+	require.NoError(t, err)
+	for _, idx := range indexes {
+		require.NoError(t, m.CreateIndex(context.Background(), idx))
+	}
+	return m
+}
+
+// storedIndex builds an index as it would be persisted by CreateIndex.
+func storedIndex(collID, fieldID, indexID int64, name string, params ...*commonpb.KeyValuePair) *model.Index {
+	return &model.Index{
+		CollectionID:    collID,
+		FieldID:         fieldID,
+		IndexID:         indexID,
+		IndexName:       name,
+		IndexParams:     params,
+		UserIndexParams: params,
+	}
+}
+
+// setMultiScalarIndexPerField sets the three-valued capability switch that allows
+// a second scalar index on one field (dataCoord.enableMultiScalarIndexPerField):
+// "auto" defers to the cluster software-upgrade gate, "false" refuses it outright,
+// and "true" enables it immediately.
+func setMultiScalarIndexPerField(t *testing.T, value string) {
+	orig := Params.DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue(value)
+	t.Cleanup(func() {
+		Params.DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue(orig)
+	})
+}
+
+// TestServer_checkIndexCreationPolicy pins the field-level creation rules:
+//
+//   - a second index on the same SCALAR field requires dataCoord.enableMultiScalarIndexPerField
+//     to resolve to true (either flipped by VersionGateSwitcher once every component reaches
+//     3.1.0, or explicitly set to "true");
+//   - while still on "auto" before the gate flips, the second scalar index is rejected with
+//     retriable merr.ErrServiceNotReady so callers can retry after the rolling upgrade;
+//   - with explicit "false", the second scalar index is rejected with non-retriable
+//     merr.ErrParameterInvalid, restoring the pre-feature behavior;
+//   - a second index under a different name with the same resolved definition is
+//     rejected as a duplicate parameter error;
+//   - a second index on a VECTOR field is rejected unconditionally as an
+//     input-class error, without consulting the gate;
+//   - a second JSON index on the SAME path is gated, a JSON index on a DIFFERENT
+//     path is not (the pre-existing multi-path capability).
+func TestServer_checkIndexCreationPolicy(t *testing.T) {
+	const collID = UniqueID(1)
+
+	invertedParams := []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}
+	stlSortParams := []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "STL_SORT"}}
+	jsonPathA := []*commonpb.KeyValuePair{
+		{Key: common.IndexTypeKey, Value: "INVERTED"},
+		{Key: common.JSONPathKey, Value: `json["a"]`},
+		{Key: common.JSONCastTypeKey, Value: "varchar"},
+	}
+	jsonPathASort := []*commonpb.KeyValuePair{
+		{Key: common.IndexTypeKey, Value: "STL_SORT"},
+		{Key: common.JSONPathKey, Value: `json["a"]`},
+		{Key: common.JSONCastTypeKey, Value: "varchar"},
+	}
+
+	m := newIndexMetaForMultiIndexTest(t,
+		storedIndex(collID, 100, 1000, "scalar_first", invertedParams...),
+		storedIndex(collID, 101, 1001, "vector_first", invertedParams...),
+		storedIndex(collID, 102, 1002, "json_first", jsonPathA...),
+	)
+
+	req := func(fieldID int64, params ...*commonpb.KeyValuePair) *indexpb.CreateIndexRequest {
+		return &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       "second",
+			IndexParams:     params,
+			UserIndexParams: params,
+		}
+	}
+
+	planPolicy := func(r *indexpb.CreateIndexRequest, isJSON bool, fieldType schemapb.DataType) error {
+		_, _, err := m.PlanCreateIndex(r, fmt.Sprintf("f%d", r.GetFieldID()), typeutil.IsVectorType(fieldType), isJSON)
+		if errors.Is(err, index.ErrIndexOperationIgnored) {
+			return nil
+		}
+		return err
+	}
+
+	t.Run("switch off restores the pre-feature refusal", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "false")
+		err := planPolicy(req(100, stlSortParams...), false, schemapb.DataType_Int64)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "creating multiple indexes on same field is not supported")
+		assert.False(t, merr.Status(err).GetRetriable())
+	})
+
+	t.Run("software upgrade gate pending (auto) is refused as not ready", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
+		err := planPolicy(req(100, stlSortParams...), false, schemapb.DataType_Int64)
+		assert.ErrorIs(t, err, merr.ErrServiceNotReady)
+		assert.Contains(t, err.Error(), "cluster software upgrade gate")
+		assert.True(t, merr.Status(err).GetRetriable())
+	})
+
+	t.Run("switch on allows the second index", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		err := planPolicy(req(100, stlSortParams...), false, schemapb.DataType_Int64)
+		assert.NoError(t, err)
+	})
+
+	t.Run("duplicate definition under a different index_name is rejected", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		err := planPolicy(req(100, invertedParams...), false, schemapb.DataType_Int64)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "same definition")
+	})
+
+	t.Run("autoindex unnamed replay matches explicit AUTOINDEX user params", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
+		autoMeta := newIndexMetaForMultiIndexTest(t, &model.Index{
+			CollectionID:    collID,
+			FieldID:         104,
+			IndexID:         1004,
+			IndexName:       "f104",
+			IsAutoIndex:     true,
+			IndexParams:     []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "HYBRID"}},
+			UserIndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "AUTOINDEX"}},
+		})
+		unnamed := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         104,
+			IsAutoIndex:     true,
+			IndexParams:     []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "HYBRID"}},
+			UserIndexParams: nil,
+		}
+		_, name, err := autoMeta.PlanCreateIndex(unnamed, "f104", false, false)
+		assert.ErrorIs(t, err, index.ErrIndexOperationIgnored)
+		assert.Equal(t, "f104", name)
+	})
+
+	t.Run("same json path with different json_cast_function is allowed", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		withCastFn := []*commonpb.KeyValuePair{
+			{Key: common.IndexTypeKey, Value: "INVERTED"},
+			{Key: common.JSONPathKey, Value: `json["a"]`},
+			{Key: common.JSONCastTypeKey, Value: "varchar"},
+			{Key: common.JSONCastFunctionKey, Value: "STRING_TO_DOUBLE"},
+		}
+		err := planPolicy(req(102, withCastFn...), true, schemapb.DataType_JSON)
+		assert.NoError(t, err)
+	})
+
+	t.Run("second vector index rejected regardless of gate", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		err := planPolicy(req(101, invertedParams...), false, schemapb.DataType_FloatVector)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Equal(t, merr.Code(merr.ErrParameterInvalid), merr.Code(err))
+		assert.Contains(t, err.Error(), "creating multiple indexes on a vector field is not supported")
+	})
+
+	t.Run("json index on a different path is never gated", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
+		otherPath := []*commonpb.KeyValuePair{
+			{Key: common.IndexTypeKey, Value: "INVERTED"},
+			{Key: common.JSONPathKey, Value: `json["b"]`},
+			{Key: common.JSONCastTypeKey, Value: "varchar"},
+		}
+		err := planPolicy(req(102, otherPath...), true, schemapb.DataType_JSON)
+		assert.NoError(t, err)
+	})
+
+	t.Run("json index on the same path is gated the same way", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		err := planPolicy(req(102, jsonPathASort...), true, schemapb.DataType_JSON)
+		assert.NoError(t, err)
+
+		setMultiScalarIndexPerField(t, "auto")
+		err = planPolicy(req(102, jsonPathASort...), true, schemapb.DataType_JSON)
+		assert.ErrorIs(t, err, merr.ErrServiceNotReady)
+
+		setMultiScalarIndexPerField(t, "false")
+		err = planPolicy(req(102, jsonPathASort...), true, schemapb.DataType_JSON)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "creating multiple indexes on same field is not supported")
+	})
+
+	t.Run("field without any index is never gated", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "false")
+		assert.NoError(t, planPolicy(req(103, invertedParams...), false, schemapb.DataType_Int64))
+		assert.NoError(t, planPolicy(req(103, invertedParams...), false, schemapb.DataType_FloatVector))
+	})
+}
+
+// TestServer_resolveIndexName pins the name-resolution rules. The
+// name is the only identity a user has for an index, so resolution must stay
+// idempotent for a replay and mint a unique name for a genuinely new index on a
+// field that already carries one.
+func TestServer_resolveIndexName(t *testing.T) {
+	setMultiScalarIndexPerField(t, "true")
+
+	const (
+		collID       = UniqueID(1)
+		fieldID      = UniqueID(100)
+		otherFieldID = UniqueID(101)
+		jsonFieldID  = UniqueID(102)
+		jsonPathA    = `json["a"]`
+	)
+
+	schema := &schemapb.CollectionSchema{
+		Name: "multi_index",
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: fieldID, Name: "f100", DataType: schemapb.DataType_Int64},
+			{FieldID: otherFieldID, Name: "f101", DataType: schemapb.DataType_Int64},
+			{FieldID: jsonFieldID, Name: "json", DataType: schemapb.DataType_JSON},
+		},
+	}
+
+	indexType := func(t string) []*commonpb.KeyValuePair {
+		return []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: t}}
+	}
+	jsonParams := func(path, castType string) []*commonpb.KeyValuePair {
+		return []*commonpb.KeyValuePair{
+			{Key: common.IndexTypeKey, Value: "INVERTED"},
+			{Key: common.JSONPathKey, Value: path},
+			{Key: common.JSONCastTypeKey, Value: castType},
+		}
+	}
+	req := func(fieldID int64, params []*commonpb.KeyValuePair) *indexpb.CreateIndexRequest {
+		return &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexParams:     params,
+			UserIndexParams: params,
+		}
+	}
+	resolve := func(m *index.IndexMeta, r *indexpb.CreateIndexRequest, isJSON bool) (string, error) {
+		field := typeutil.GetField(schema, r.GetFieldID())
+		baseName := field.GetName()
+		if isJSON {
+			jp, _ := index.GetIndexParam(r.GetIndexParams(), common.JSONPathKey)
+			baseName += jp
+		}
+		_, name, err := m.PlanCreateIndex(r, baseName, typeutil.IsVectorType(field.GetDataType()), isJSON)
+		if errors.Is(err, index.ErrIndexOperationIgnored) {
+			return name, nil
+		}
+		return name, err
+	}
+
+	t.Run("identical index on the same field reuses its name", func(t *testing.T) {
+		m := newIndexMetaForMultiIndexTest(t, storedIndex(collID, fieldID, 1000, "user_named", indexType("INVERTED")...))
+		name, err := resolve(m, req(fieldID, indexType("INVERTED")), false)
+		assert.NoError(t, err)
+		assert.Equal(t, "user_named", name)
+
+		// Replaying the very same request must resolve to the very same name,
+		// otherwise a retry would create a second index on the field.
+		replay, err := resolve(m, req(fieldID, indexType("INVERTED")), false)
+		assert.NoError(t, err)
+		assert.Equal(t, name, replay)
+	})
+
+	t.Run("derived name is the field name", func(t *testing.T) {
+		m := newIndexMetaForMultiIndexTest(t, storedIndex(collID, otherFieldID, 1000, "unrelated", indexType("STL_SORT")...))
+		name, err := resolve(m, req(fieldID, indexType("INVERTED")), false)
+		assert.NoError(t, err)
+		assert.Equal(t, "f100", name)
+	})
+
+	t.Run("derived name for a JSON path is field name plus path", func(t *testing.T) {
+		m := newIndexMetaForMultiIndexTest(t)
+		name, err := resolve(m, req(jsonFieldID, jsonParams(jsonPathA, "varchar")), true)
+		assert.NoError(t, err)
+		assert.Equal(t, "json"+jsonPathA, name)
+	})
+
+	t.Run("derived name taken by a different definition is an error, not a suffix", func(t *testing.T) {
+		// The first index already owns the derived name; a second index with a
+		// different definition must say so instead of silently becoming "f100_2",
+		// which would make the same request resolve differently per cluster.
+		m := newIndexMetaForMultiIndexTest(t, storedIndex(collID, fieldID, 1000, "f100", indexType("INVERTED")...))
+		_, err := resolve(m, req(fieldID, indexType("STL_SORT")), false)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "specify index_name explicitly")
+	})
+
+	t.Run("JSON: same path different cast gets its own derived name", func(t *testing.T) {
+		// Two casts on one path are two indexes; the derived name would collide, so
+		// the caller has to name the second one explicitly.
+		m := newIndexMetaForMultiIndexTest(t, storedIndex(collID, jsonFieldID, 1000, "json"+jsonPathA, jsonParams(jsonPathA, "varchar")...))
+		_, err := resolve(m, req(jsonFieldID, jsonParams(jsonPathA, "double")), true)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+	})
+}
+
+// Fixture ids shared by the multi-index creation tests.
+const (
+	multiIndexCollID    = UniqueID(1)
+	multiIndexPKFID     = UniqueID(1)
+	multiIndexScalarFID = UniqueID(100)
+	multiIndexVectorFID = UniqueID(101)
+	multiIndexJSONFID   = UniqueID(102)
+)
+
+// multiIndexSchema is the collection schema the fixture requests are written
+// against: one scalar, one vector and one JSON field, matching the fixture ids.
+func multiIndexSchema() *schemapb.CollectionSchema {
+	return &schemapb.CollectionSchema{
+		Name: "multi_index",
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: multiIndexPKFID, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+			{FieldID: multiIndexScalarFID, Name: "scalar", DataType: schemapb.DataType_Int64},
+			{
+				FieldID: multiIndexVectorFID, Name: "vec", DataType: schemapb.DataType_FloatVector,
+				TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "4"}},
+			},
+			{FieldID: multiIndexJSONFID, Name: "json", DataType: schemapb.DataType_JSON},
+		},
+	}
+}
+
+func newMultiIndexPolicyTestServer(t *testing.T) (*Server, func(int32)) {
+	initStreamingSystem(t)
+	setMultiScalarIndexPerField(t, "true")
+
+	catalog := catalogmocks.NewDataCoordCatalog(t)
+	catalog.EXPECT().CreateIndex(mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	// The collection registry lives in the shared MetaStore; building it from the
+	// same catalog keeps this fixture's one mock in charge of collection lookups.
+	metaStore := metacache.NewMetaStore(catalog)
+	// CreateIndex resolves the field type from the collection schema, so the fixture
+	// collection carries the same schema the requests are written against.
+	metaStore.PutCollection(&metacache.CollectionInfo{ID: multiIndexCollID, Schema: multiIndexSchema()})
+
+	resolvedVersion := common.CurrentScalarIndexEngineVersion
+	mockVM := index.NewMockVersionManager(t)
+	mockVM.EXPECT().ResolveScalarIndexVersion().RunAndReturn(func() int32 { return resolvedVersion }).Maybe()
+
+	// meta.NewMeta loads the meta cache, which asks the catalog for its snapshot.
+	catalog.EXPECT().ListChannelCheckpoint(mock.Anything).Return(map[string]*msgpb.MsgPosition{}, nil).Maybe()
+	catalog.EXPECT().ListIndexes(mock.Anything).Return([]*model.Index{}, nil).Maybe()
+	catalog.EXPECT().ListSegments(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
+	catalog.EXPECT().ListSegmentChangeGroups(mock.Anything).Return(nil, nil).Maybe()
+	catalog.EXPECT().ListSegmentIndexes(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
+	brk := broker.NewMockBroker(t)
+	mt, err := meta.NewMeta(context.Background(), catalog, nil, metaStore, brk,
+		index.LoadIndexTestMetas(catalog, &index.IndexTestMetas{}))
+	require.NoError(t, err)
+
+	s := &Server{
+		meta:        mt,
+		domainMetas: domainMetas{indexMeta: newIndexMetaForMultiIndexTest(t)},
+		broker:      multiIndexBroker(t),
+		allocator: func() allocator.Allocator {
+			a := allocator.NewMockAllocator(t)
+			a.EXPECT().AllocID(mock.Anything).Return(int64(2001), nil).Maybe()
+			return a
+		}(),
+		notifyIndexChan:           make(chan UniqueID, 1),
+		indexEngineVersionManager: mockVM,
+	}
+	RegisterDDLCallbacks(s)
+	s.stateCode.Store(commonpb.StateCode_Healthy)
+
+	b := mocks.NewMixCoord(t)
+	b.EXPECT().DescribeCollectionInternal(mock.Anything, mock.Anything).Maybe().Return(&milvuspb.DescribeCollectionResponse{
+		Status: merr.Success(),
+		Schema: &schemapb.CollectionSchema{
+			Name: "multi_index",
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: multiIndexScalarFID, Name: "scalar", DataType: schemapb.DataType_Int64},
+				{
+					FieldID: multiIndexVectorFID, Name: "vec", DataType: schemapb.DataType_FloatVector,
+					TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "128"}},
+				},
+				{FieldID: multiIndexJSONFID, Name: "json", DataType: schemapb.DataType_JSON},
+			},
+		},
+		CollectionID: multiIndexCollID,
+	}, nil)
+	s.broker = broker.NewCoordinatorBroker(b)
+
+	return s, func(version int32) { resolvedVersion = version }
+}
+
+func multiIndexIndexType(indexType string) []*commonpb.KeyValuePair {
+	return []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: indexType}}
+}
+
+func multiIndexDimParams() []*commonpb.KeyValuePair {
+	return []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "128"}}
+}
+
+func multiIndexJSONParams(path string) []*commonpb.KeyValuePair {
+	return []*commonpb.KeyValuePair{
+		{Key: common.JSONPathKey, Value: path},
+		{Key: common.JSONCastTypeKey, Value: "varchar"},
+	}
+}
+
+func multiIndexCreateReq(fieldID int64, name string, params, typeParams []*commonpb.KeyValuePair) *indexpb.CreateIndexRequest {
+	return &indexpb.CreateIndexRequest{
+		CollectionID:    multiIndexCollID,
+		FieldID:         fieldID,
+		IndexName:       name,
+		TypeParams:      typeParams,
+		IndexParams:     params,
+		UserIndexParams: params,
+		Timestamp:       100,
+	}
+}
+
+// TestServer_CreateIndex_MultiIndexPolicy covers G1 and G2 end to end through
+// Server.CreateIndex: the policy runs before any metadata is written, so the
+// rejection is visible to the client and no index is persisted.
+func TestServer_CreateIndex_MultiIndexPolicy(t *testing.T) {
+	// CreateIndex only broadcasts: the index is persisted by the DDL callback that
+	// consumes the WAL message. These cases therefore assert the RPC contract of the
+	// policy (accepted / refused with which error), not the persisted row count --
+	// persistence is covered by the DDL callback tests.
+	s, _ := newMultiIndexPolicyTestServer(t)
+	ctx := context.Background()
+
+	t.Run("first index on the scalar field accepted", func(t *testing.T) {
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "scalar_inverted", multiIndexIndexType("INVERTED"), nil))
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+	})
+
+	t.Run("second index on the scalar field accepted once the gate has opened", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		defer setMultiScalarIndexPerField(t, "true")
+
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "scalar_stl_sort", multiIndexIndexType("STL_SORT"), nil))
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+	})
+
+	t.Run("second index on the scalar field rejected while the switch is off", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "false")
+
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "scalar_bitmap_off", multiIndexIndexType("BITMAP"), nil))
+		assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrParameterInvalid)
+		assert.Contains(t, resp.GetReason(), "creating multiple indexes on same field is not supported")
+		assert.False(t, resp.GetRetriable())
+	})
+
+	t.Run("pending software upgrade gate (auto) keeps the second index out as retriable", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
+
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "scalar_bitmap", multiIndexIndexType("BITMAP"), nil))
+		assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrServiceNotReady)
+		assert.Contains(t, resp.GetReason(), "cluster software upgrade gate")
+		assert.True(t, resp.GetRetriable())
+	})
+
+	t.Run("json indexes on different paths are not gated", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
+
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexJSONFID, "json_a", multiIndexJSONParams(`json["a"]`), nil))
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+		// a second path on the same json field is the pre-existing capability
+		resp, err = s.CreateIndex(ctx, multiIndexCreateReq(multiIndexJSONFID, "json_b", multiIndexJSONParams(`json["b"]`), nil))
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+	})
+
+	t.Run("second index on the vector field rejected", func(t *testing.T) {
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexVectorFID, "vec_ivf", multiIndexIndexType("IVF_FLAT"), multiIndexDimParams()))
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+
+		resp, err = s.CreateIndex(ctx, multiIndexCreateReq(multiIndexVectorFID, "vec_hnsw", multiIndexIndexType("HNSW"), multiIndexDimParams()))
+		assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrParameterInvalid)
+		assert.Contains(t, resp.GetReason(), "creating multiple indexes on a vector field is not supported")
+	})
+}
+
+// TestServer_CreateIndex_IdenticalReplayIsNotASecondIndex pins the pre-existing
+// invariant that replaying a CreateIndex stays idempotent -- same name, same
+// field, same params -> a no-op (TestServer_CreateIndex/success_with_index_exist
+// has covered the vector case long before this feature). A client retry, an SDK
+// retry, a DDL replay and a snapshot restore all rely on it.
+//
+// It goes through Server.CreateIndex, so it pins the wiring as well:
+// PlanCreateIndex recognizes the replay before the readiness gate, reuses the
+// existing name, and reports ErrIndexOperationIgnored.
+func TestServer_CreateIndex_IdenticalReplayIsNotASecondIndex(t *testing.T) {
+	s, _ := newMultiIndexPolicyTestServer(t)
+	ctx := context.Background()
+
+	t.Run("identical replay on a vector field stays idempotent", func(t *testing.T) {
+		req := multiIndexCreateReq(multiIndexVectorFID, "vec_replay", multiIndexIndexType("IVF_FLAT"), multiIndexDimParams())
+		resp, err := s.CreateIndex(ctx, req)
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+
+		// the very same request again: no new index, the call is a no-op
+		replay := multiIndexCreateReq(multiIndexVectorFID, "vec_replay", multiIndexIndexType("IVF_FLAT"), multiIndexDimParams())
+		resp, err = s.CreateIndex(ctx, replay)
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+	})
+
+	t.Run("identical replay on a scalar field is not gated by auto or false", func(t *testing.T) {
+		req := multiIndexCreateReq(multiIndexScalarFID, "scalar_replay", multiIndexIndexType("INVERTED"), nil)
+		resp, err := s.CreateIndex(ctx, req)
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+
+		// a replay creates a second index only if it is NOT recognized as a
+		// replay, so the rolling-upgrade gate must not apply to it
+		setMultiScalarIndexPerField(t, "auto")
+		replay := multiIndexCreateReq(multiIndexScalarFID, "scalar_replay", multiIndexIndexType("INVERTED"), nil)
+		resp, err = s.CreateIndex(ctx, replay)
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+
+		setMultiScalarIndexPerField(t, "false")
+		resp, err = s.CreateIndex(ctx, replay)
+		assert.NoError(t, merr.CheckRPCCall(resp, err))
+	})
+}
+
+// TestServer_DescribeIndexReturnsAscendingIndexID pins a deterministic response
+// order. The store behind DescribeIndex is a map, so before this it changed
+// between calls -- and anything deriving "the field's index" from the list (the
+// proxy building a load config) would flap. Ordering is a convenience for every
+// client; selecting a specific index still has to be done by indexID.
+func TestServer_DescribeIndexReturnsAscendingIndexID(t *testing.T) {
+	s, setResolvedVersion := newMultiIndexPolicyTestServer(t)
+	setResolvedVersion(common.CurrentScalarIndexEngineVersion)
+	setMultiScalarIndexPerField(t, "true")
+	ctx := context.Background()
+
+	// CreateIndex only broadcasts; the rows come from the DDL callback. DescribeIndex
+	// is about the order of the rows that exist, so the fixture writes them directly.
+	seed := func(fieldID, indexID int64, name string, params ...*commonpb.KeyValuePair) {
+		t.Helper()
+		require.NoError(t, s.indexMeta.CreateIndex(ctx, storedIndex(multiIndexCollID, fieldID, indexID, name, params...)))
+	}
+
+	// three indexes on one scalar field
+	seed(multiIndexScalarFID, 3001, "ord_inverted", multiIndexIndexType("INVERTED")...)
+	seed(multiIndexScalarFID, 3002, "ord_bitmap", multiIndexIndexType("BITMAP")...)
+	seed(multiIndexScalarFID, 3003, "ord_stl_sort", multiIndexIndexType("STL_SORT")...)
+
+	// one more index on a later field: the result is field-major, so an index on a
+	// later field never precedes one on an earlier field
+	jsonParams := append(multiIndexIndexType("INVERTED"),
+		&commonpb.KeyValuePair{Key: common.JSONCastTypeKey, Value: "varchar"},
+		&commonpb.KeyValuePair{Key: common.JSONPathKey, Value: `json["a"]`})
+	seed(multiIndexJSONFID, 3004, "ord_json", jsonParams...)
+
+	// the same call twice: sorted each time, and identical between calls even
+	// though the underlying iteration order is not deterministic
+	var first []int64
+	for round := 0; round < 2; round++ {
+		resp, err := s.DescribeIndex(ctx, &indexpb.DescribeIndexRequest{
+			CollectionID: multiIndexCollID,
+		})
+		if !assert.NoError(t, merr.CheckRPCCall(resp, err)) {
+			return
+		}
+		ids := make([]int64, 0, len(resp.GetIndexInfos()))
+		for _, info := range resp.GetIndexInfos() {
+			ids = append(ids, (info.GetFieldID()<<32)|(info.GetIndexID()&0xffffffff))
+		}
+		if !assert.Len(t, ids, 4) {
+			return
+		}
+		for i := 1; i < len(ids); i++ {
+			assert.Less(t, ids[i-1], ids[i],
+				"index infos must come back sorted by (fieldID, indexID), got %v", ids)
+		}
+		if round == 0 {
+			first = ids
+		} else {
+			assert.Equal(t, first, ids, "the order must not change between calls")
+		}
+	}
+}
+
+func TestServer_CreateIndex_MultiIndexNamingAndCap(t *testing.T) {
+	s, setResolvedVersion := newMultiIndexPolicyTestServer(t)
+	setResolvedVersion(common.CurrentScalarIndexEngineVersion)
+	ctx := context.Background()
+
+	ngram := func(n int) []*commonpb.KeyValuePair {
+		return append(multiIndexIndexType("NGRAM"),
+			&commonpb.KeyValuePair{Key: "min_gram", Value: "2"},
+			&commonpb.KeyValuePair{Key: "max_gram", Value: "3"},
+			&commonpb.KeyValuePair{Key: "n", Value: fmt.Sprint(n)})
+	}
+
+	// The first unnamed index takes the fixed name derived from the field.
+	resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "", multiIndexIndexType("INVERTED"), nil))
+	require.NoError(t, merr.CheckRPCCall(resp, err))
+	infos := s.indexMeta.GetIndexesForCollection(multiIndexCollID, "")
+	require.Len(t, infos, 1)
+
+	// A second unnamed index derives the same name and is refused, not renamed with
+	// an ordinal suffix.
+	resp, err = s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "", ngram(1), nil))
+	assert.Error(t, merr.CheckRPCCall(resp, err))
+
+	// The same unnamed request again is a replay: same name, same definition.
+	resp, err = s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "", multiIndexIndexType("INVERTED"), nil))
+	assert.NoError(t, merr.CheckRPCCall(resp, err))
+
+	// Ten indexes per field at most, whatever their names. The cap is counted on the
+	// persisted index metadata, and CreateIndex only broadcasts (persistence happens in
+	// the DDL callback), so seed the remaining slots directly and then check the RPC.
+	require.Eventually(t, func() bool {
+		return len(s.indexMeta.GetFieldIndexes(multiIndexCollID, multiIndexScalarFID, "")) >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+	for i := len(s.indexMeta.GetFieldIndexes(multiIndexCollID, multiIndexScalarFID, "")); i < index.MaxScalarIndexesPerField; i++ {
+		require.NoError(t, s.indexMeta.CreateIndex(ctx, &model.Index{
+			CollectionID: multiIndexCollID,
+			FieldID:      multiIndexScalarFID,
+			IndexName:    fmt.Sprintf("cap_index_%d", i),
+			IndexID:      int64(9000 + i),
+			IndexParams:  ngram(i),
+			TypeParams:   nil,
+			IsDeleted:    false,
+		}))
+	}
+	require.Len(t, s.indexMeta.GetFieldIndexes(multiIndexCollID, multiIndexScalarFID, ""), index.MaxScalarIndexesPerField)
+	resp, err = s.CreateIndex(ctx, multiIndexCreateReq(multiIndexScalarFID, "cap_index_11", ngram(11), nil))
+	assert.Error(t, merr.CheckRPCCall(resp, err), "the eleventh index on one field must be refused")
+}
+
+// multiIndexBroker returns a broker for the DDL broadcast path. The broker interface
+// only exposes the collection/partition operations snapshot restore needs, so the
+// mock is returned without collection-lookup expectations.
+func multiIndexBroker(t *testing.T) broker.Broker {
+	t.Helper()
+	return broker.NewMockBroker(t)
+}
+
+// TestServer_CreateIndex_MultiIndexCapAndNaming pins the two limits that come from
+// the creation rules: one field carries at most index.MaxScalarIndexesPerField indexes, and
+// an unnamed request never gets a numeric suffix -- a derived-name clash is an error.
+func TestServer_CreateIndex_MultiIndexCapAndNaming(t *testing.T) {
+	s, setResolvedVersion := newMultiIndexPolicyTestServer(t)
+	setResolvedVersion(common.CurrentScalarIndexEngineVersion)
+	setMultiScalarIndexPerField(t, "true")
+	ctx := context.Background()
+
+	// Fill the field with its cap of indexes, written directly because CreateIndex
+	// only broadcasts (persistence is the DDL callback's job).
+	for i := 0; i < index.MaxScalarIndexesPerField; i++ {
+		require.NoError(t, s.indexMeta.CreateIndex(ctx, storedIndex(
+			multiIndexCollID, multiIndexScalarFID, int64(4000+i),
+			fmt.Sprintf("cap_%d", i), multiIndexIndexType("INVERTED")...)))
+	}
+
+	t.Run("one more than the cap is refused", func(t *testing.T) {
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(
+			multiIndexScalarFID, "cap_overflow", multiIndexIndexType("BITMAP"), nil))
+		assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrParameterInvalid)
+		assert.Contains(t, resp.GetReason(), "the limit is")
+	})
+
+	t.Run("unnamed request on a free field derives the field name", func(t *testing.T) {
+		// The vector field carries no index yet, so the derived name is free.
+		req := multiIndexCreateReq(multiIndexVectorFID, "", multiIndexIndexType("HNSW"), nil)
+		assert.Equal(t, "", req.GetIndexName(), "the request must not name the index")
+	})
+
+	t.Run("unnamed request whose derived name is taken is an error, not a suffix", func(t *testing.T) {
+		// The field already holds "f100"; a second unnamed request with a different
+		// definition must not silently become "f100_2".
+		resp, err := s.CreateIndex(ctx, multiIndexCreateReq(
+			multiIndexScalarFID, "", multiIndexIndexType("STL_SORT"), nil))
+		// The cap is hit first on this field, so the refusal is the cap one -- both are
+		// parameter errors, which is what matters for the client contract.
+		assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrParameterInvalid)
+	})
+}
+
+// TestServer_CreateIndex_JSONCapPerPath pins the cap scope: the per-key limit
+// applies to one JSON path, so a field that already indexes ten distinct paths
+// still accepts an eleventh path (that freedom predates multi-index), while an
+// eleventh index on a single path is refused.
+func TestServer_CreateIndex_JSONCapPerPath(t *testing.T) {
+	s, setResolvedVersion := newMultiIndexPolicyTestServer(t)
+	setResolvedVersion(common.CurrentScalarIndexEngineVersion)
+	setMultiScalarIndexPerField(t, "true")
+	ctx := context.Background()
+
+	seed := func(path string, i int) {
+		require.NoError(t, s.indexMeta.CreateIndex(ctx, &model.Index{
+			CollectionID: multiIndexCollID,
+			FieldID:      multiIndexJSONFID,
+			IndexName:    fmt.Sprintf("json_%s_%d", path, i),
+			IndexID:      int64(7000 + len(path)*10 + i),
+			IndexParams: append(multiIndexIndexType("INVERTED"),
+				&commonpb.KeyValuePair{Key: common.JSONPathKey, Value: path},
+				&commonpb.KeyValuePair{Key: common.JSONCastTypeKey, Value: "DOUBLE"}),
+			IsDeleted: false,
+		}))
+	}
+
+	// Ten indexes spread over ten paths.
+	for i := 0; i < index.MaxScalarIndexesPerField; i++ {
+		seed(fmt.Sprintf("/p%d", i), i)
+	}
+
+	// A new path is still accepted.
+	resp, err := s.CreateIndex(ctx, multiIndexCreateReq(multiIndexJSONFID, "json_new_path",
+		append(multiIndexIndexType("INVERTED"),
+			&commonpb.KeyValuePair{Key: common.JSONPathKey, Value: `json["fresh"]`},
+			&commonpb.KeyValuePair{Key: common.JSONCastTypeKey, Value: "DOUBLE"}), nil))
+	assert.NoError(t, merr.CheckRPCCall(resp, err))
+
+	// A tenth+ first index on one path is refused: fill /p0 up to the cap.
+	for i := 1; i < index.MaxScalarIndexesPerField; i++ {
+		seed("/p0", 100+i)
+	}
+	// A different cast so this is a new definition, not a replay of a seeded one.
+	resp, err = s.CreateIndex(ctx, multiIndexCreateReq(multiIndexJSONFID, "json_p0_overflow",
+		append(multiIndexIndexType("INVERTED"),
+			&commonpb.KeyValuePair{Key: common.JSONPathKey, Value: `json["p0"]`},
+			&commonpb.KeyValuePair{Key: common.JSONCastTypeKey, Value: "varchar"}), nil))
+	assert.Error(t, merr.CheckRPCCall(resp, err), "an eleventh index on one path must be refused")
+}
+
+func TestServer_AlterIndex_ScalarVisiblePropertyAndEmptyIndexName(t *testing.T) {
+	s, _ := newMultiIndexPolicyTestServer(t)
+	s.indexMeta.Catalog.(*catalogmocks.DataCoordCatalog).EXPECT().AlterIndexes(mock.Anything, mock.Anything).Return(nil).Maybe()
+	mockHandler := meta.NewNMockHandler(t)
+	mockHandler.EXPECT().GetCollection(mock.Anything, multiIndexCollID).Return(&meta.CollectionInfo{
+		ID:     multiIndexCollID,
+		Schema: multiIndexSchema(),
+	}, nil).Maybe()
+	s.handler = mockHandler
+	ctx := context.Background()
+
+	// Empty index_name when collection has 0 indexes returns ErrIndexNotFound.
+	resp, err := s.AlterIndex(ctx, &indexpb.AlterIndexRequest{
+		CollectionID: multiIndexCollID,
+		IndexName:    "",
+		Params:       []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+	})
+	assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrIndexNotFound)
+
+	require.NoError(t, s.indexMeta.CreateIndex(ctx, storedIndex(
+		multiIndexCollID, multiIndexScalarFID, 8001, "title_ngram", multiIndexIndexType("INVERTED")...)))
+
+	// Empty index_name when collection has a single index resolves unambiguously.
+	resp, err = s.AlterIndex(ctx, &indexpb.AlterIndexRequest{
+		CollectionID: multiIndexCollID,
+		IndexName:    "",
+		Params:       []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+	})
+	require.NoError(t, merr.CheckRPCCall(resp, err))
+	idx := s.indexMeta.GetIndexesForCollection(multiIndexCollID, "title_ngram")[0]
+	visible, ok := common.IsIndexVisible(idx.IndexParams...)
+	assert.True(t, ok)
+	assert.False(t, visible)
+
+	resp, err = s.AlterIndex(ctx, &indexpb.AlterIndexRequest{
+		CollectionID: multiIndexCollID,
+		IndexName:    "title_ngram",
+		DeleteKeys:   []string{common.IndexVisibleKey},
+	})
+	require.NoError(t, merr.CheckRPCCall(resp, err))
+	idx = s.indexMeta.GetIndexesForCollection(multiIndexCollID, "title_ngram")[0]
+	visible, ok = common.IsIndexVisible(idx.IndexParams...)
+	assert.False(t, ok)
+	assert.True(t, visible)
+
+	// Once a second index exists in the collection, empty index_name is ambiguous.
+	require.NoError(t, s.indexMeta.CreateIndex(ctx, storedIndex(
+		multiIndexCollID, multiIndexVectorFID, 8002, "vec_hnsw", multiIndexIndexType("HNSW")...)))
+	resp, err = s.AlterIndex(ctx, &indexpb.AlterIndexRequest{
+		CollectionID: multiIndexCollID,
+		IndexName:    "",
+		Params:       []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+	})
+	assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrIndexDuplicate)
+
+	// DropIndex with empty index_name and DropAll=false also reports ErrIndexDuplicate before checking collection load state.
+	resp, err = s.DropIndex(ctx, &indexpb.DropIndexRequest{
+		CollectionID: multiIndexCollID,
+		IndexName:    "",
+		DropAll:      false,
+	})
+	assert.ErrorIs(t, merr.CheckRPCCall(resp, err), merr.ErrIndexDuplicate)
 }

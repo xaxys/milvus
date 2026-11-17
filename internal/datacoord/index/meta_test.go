@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/datacoord/meta"
 	"github.com/milvus-io/milvus/internal/json"
@@ -38,12 +39,15 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	catalogmocks "github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/model"
+	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/workerpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -159,6 +163,12 @@ func TestMeta_ScalarAutoIndex(t *testing.T) {
 		UserIndexParams: userIndexParams,
 	}
 
+	paramtable.Init()
+	origGate := paramtable.Get().DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue("true")
+	t.Cleanup(func() {
+		paramtable.Get().DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue(origGate)
+	})
+
 	t.Run("user index params consistent", func(t *testing.T) {
 		m.Indexes[collID] = map[UniqueID]*model.Index{
 			indexID: {
@@ -175,9 +185,10 @@ func TestMeta_ScalarAutoIndex(t *testing.T) {
 				UserIndexParams: userIndexParams,
 			},
 		}
-		tmpIndexID, err := m.CanCreateIndex(req, false)
+		gotID, gotName, err := m.PlanCreateIndex(req, "f100", false, false)
 		assert.ErrorIs(t, err, ErrIndexOperationIgnored)
-		assert.Zero(t, tmpIndexID)
+		assert.Equal(t, indexID, gotID)
+		assert.Equal(t, indexName, gotName)
 	})
 
 	t.Run("user index params not consistent", func(t *testing.T) {
@@ -197,12 +208,12 @@ func TestMeta_ScalarAutoIndex(t *testing.T) {
 			},
 		}
 		req.UserIndexParams = append(req.UserIndexParams, &commonpb.KeyValuePair{Key: "bitmap_cardinality_limit", Value: "1000"})
-		tmpIndexID, err := m.CanCreateIndex(req, false)
+		tmpIndexID, _, err := m.PlanCreateIndex(req, "f100", false, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.UserIndexParams = append(req.UserIndexParams, &commonpb.KeyValuePair{Key: "bitmap_cardinality_limit", Value: "500"})
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, _, err = m.PlanCreateIndex(req, "f100", false, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
@@ -244,16 +255,13 @@ func TestMeta_ScalarAutoIndex(t *testing.T) {
 				UserIndexParams: userIndexParams,
 			},
 		}
-		tmpIndexID, err := m.CanCreateIndex(req, false)
+		gotID, gotName, err := m.PlanCreateIndex(req, "f100", false, false)
 		assert.ErrorIs(t, err, ErrIndexOperationIgnored)
-		assert.Zero(t, tmpIndexID)
-		newIndexParams := req.GetIndexParams()
-		assert.Equal(t, len(newIndexParams), 1)
-		assert.Equal(t, newIndexParams[0].Key, common.IndexTypeKey)
-		assert.Equal(t, newIndexParams[0].Value, "INVERTED")
+		assert.Equal(t, indexID, gotID)
+		assert.Equal(t, indexName, gotName)
 	})
 
-	t.Run("ngram index param rewrite", func(t *testing.T) {
+	t.Run("ngram autoindex idempotency without mutating req", func(t *testing.T) {
 		m.Indexes[collID] = map[UniqueID]*model.Index{
 			indexID: {
 				CollectionID: collID,
@@ -278,20 +286,99 @@ func TestMeta_ScalarAutoIndex(t *testing.T) {
 			UserIndexParams: userIndexParams,
 		}
 
-		indexID, err := m.CanCreateIndex(ngramReq, false)
+		gotID, gotName, err := m.PlanCreateIndex(ngramReq, "f100", false, false)
 		assert.ErrorIs(t, err, ErrIndexOperationIgnored)
-		assert.Zero(t, indexID)
+		assert.Equal(t, indexID, gotID)
+		assert.Equal(t, indexName, gotName)
 		require.Len(t, ngramReq.GetIndexParams(), 1)
-		assert.Equal(t, "NGRAM", ngramReq.GetIndexParams()[0].GetValue())
+		assert.Equal(t, "HYBRID", ngramReq.GetIndexParams()[0].GetValue())
+	})
+
+	t.Run("vector index retry with enable=true in UserIndexParams stays idempotent", func(t *testing.T) {
+		vecIdx := &model.Index{
+			CollectionID: collID,
+			FieldID:      fieldID,
+			IndexID:      indexID,
+			IndexName:    "vec_idx",
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: "HNSW"},
+				{Key: common.MetricTypeKey, Value: "L2"},
+			},
+			UserIndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: "HNSW"},
+				{Key: common.MetricTypeKey, Value: "L2"},
+			},
+		}
+		m.Indexes[collID] = map[UniqueID]*model.Index{indexID: vecIdx}
+
+		retryReq := &indexpb.CreateIndexRequest{
+			CollectionID: collID,
+			FieldID:      fieldID,
+			IndexName:    "vec_idx",
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: "HNSW"},
+				{Key: common.MetricTypeKey, Value: "L2"},
+				{Key: common.IndexVisibleKey, Value: "true"},
+			},
+			UserIndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: "HNSW"},
+				{Key: common.MetricTypeKey, Value: "L2"},
+				{Key: common.IndexVisibleKey, Value: "true"},
+			},
+		}
+		assert.True(t, CheckParams(vecIdx, retryReq))
+		_, gotName, err := m.PlanCreateIndex(retryReq, "vec", true, false)
+		assert.ErrorIs(t, err, ErrIndexOperationIgnored)
+		assert.Equal(t, "vec_idx", gotName)
+	})
+
+	t.Run("dynamic json distinct paths do not overwrite json_path on autoindex", func(t *testing.T) {
+		idxA := &model.Index{
+			CollectionID: collID,
+			FieldID:      fieldID,
+			IndexID:      indexID,
+			IndexName:    "$meta/a",
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: "INVERTED"},
+				{Key: common.JSONPathKey, Value: "/a"},
+				{Key: common.JSONCastTypeKey, Value: "VARCHAR"},
+			},
+			IsAutoIndex:     true,
+			UserIndexParams: userIndexParams,
+		}
+		m.Indexes[collID] = map[UniqueID]*model.Index{indexID: idxA}
+
+		reqB := &indexpb.CreateIndexRequest{
+			CollectionID: collID,
+			FieldID:      fieldID,
+			IndexName:    "$meta/b",
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: "HYBRID"},
+				{Key: common.JSONPathKey, Value: "/b"},
+				{Key: common.JSONCastTypeKey, Value: "VARCHAR"},
+			},
+			IsAutoIndex:     true,
+			UserIndexParams: userIndexParams,
+		}
+
+		assert.False(t, CheckParams(idxA, reqB))
+		gotPath, err := GetIndexParam(reqB.GetIndexParams(), common.JSONPathKey)
+		require.NoError(t, err)
+		assert.Equal(t, "/b", gotPath)
+
+		gotID, gotName, err := m.PlanCreateIndex(reqB, "$meta/b", false, true)
+		require.NoError(t, err)
+		assert.Zero(t, gotID)
+		assert.Equal(t, "$meta/b", gotName)
 	})
 }
 
-// TestMeta_CanCreateIndex_BoundAutoIndexEquivalence: the add-function-field DDL
+// TestMeta_PlanCreateIndex_BoundAutoIndexEquivalence: the add-function-field DDL
 // persists an AutoIndex-resolved bound index in the create_index convention
 // (UserIndexParams = AUTOINDEX + final metric); a later create_index(AUTOINDEX)
 // on the same field must dedupe as idempotent instead of hitting the
 // one-distinct-index-per-field conflict.
-func TestMeta_CanCreateIndex_BoundAutoIndexEquivalence(t *testing.T) {
+func TestMeta_PlanCreateIndex_BoundAutoIndexEquivalence(t *testing.T) {
 	catalog := catalogmocks.NewDataCoordCatalog(t)
 	catalog.On("CreateIndex", mock.Anything, mock.Anything).Return(nil)
 	m := NewSegmentIndexMeta(catalog)
@@ -330,9 +417,10 @@ func TestMeta_CanCreateIndex_BoundAutoIndexEquivalence(t *testing.T) {
 		IsAutoIndex:                      false,
 		UserAutoindexMetricTypeSpecified: true,
 	}
-	tmpIndexID, err := m.CanCreateIndex(req, false)
+	gotID, gotName, err := m.PlanCreateIndex(req, "sparse", true, false)
 	assert.ErrorIs(t, err, ErrIndexOperationIgnored)
-	assert.Zero(t, tmpIndexID)
+	assert.Equal(t, UniqueID(10), gotID)
+	assert.Equal(t, "sparse", gotName)
 
 	// A different explicit index on the same field remains a conflict.
 	conflictReq := &indexpb.CreateIndexRequest{
@@ -348,13 +436,13 @@ func TestMeta_CanCreateIndex_BoundAutoIndexEquivalence(t *testing.T) {
 			{Key: common.MetricTypeKey, Value: "IP"},
 		},
 	}
-	tmpIndexID, err = m.CanCreateIndex(conflictReq, false)
+	tmpIndexID, _, err := m.PlanCreateIndex(conflictReq, "sparse", true, false)
 	assert.Error(t, err)
 	assert.NotErrorIs(t, err, ErrIndexOperationIgnored)
 	assert.Zero(t, tmpIndexID)
 }
 
-func TestMeta_CanCreateIndex(t *testing.T) {
+func TestMeta_PlanCreateIndex(t *testing.T) {
 	var (
 		collID = UniqueID(1)
 		// partID     = UniqueID(2)
@@ -421,44 +509,46 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 	}
 
 	t.Run("can create index", func(t *testing.T) {
-		tmpIndexID, err := m.CanCreateIndex(req, false)
+		tmpIndexID, gotName, err := m.PlanCreateIndex(req, "vec", true, false)
 		assert.NoError(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
+		assert.Equal(t, indexName, gotName)
 
 		err = m.CreateIndex(context.TODO(), indexModel)
 		assert.NoError(t, err)
 
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, gotName, err = m.PlanCreateIndex(req, "vec", true, false)
 		assert.ErrorIs(t, err, ErrIndexOperationIgnored)
-		assert.Zero(t, tmpIndexID)
+		assert.Equal(t, indexID, tmpIndexID)
+		assert.Equal(t, indexName, gotName)
 	})
 
 	t.Run("params not consistent", func(t *testing.T) {
 		req.TypeParams = append(req.TypeParams, &commonpb.KeyValuePair{Key: "primary_key", Value: "false"})
-		tmpIndexID, err := m.CanCreateIndex(req, false)
+		tmpIndexID, _, err := m.PlanCreateIndex(req, "vec", true, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.TypeParams = []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "64"}}
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, _, err = m.PlanCreateIndex(req, "vec", true, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.TypeParams = typeParams
 		req.UserIndexParams = append(indexParams, &commonpb.KeyValuePair{Key: "metrics_type", Value: "L2"})
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, _, err = m.PlanCreateIndex(req, "vec", true, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.IndexParams = []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "HNSW"}}
 		req.UserIndexParams = req.IndexParams
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, _, err = m.PlanCreateIndex(req, "vec", true, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.IndexParams = []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "FLAT"}, {Key: common.MetricTypeKey, Value: "COSINE"}}
 		req.UserIndexParams = req.IndexParams
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, _, err = m.PlanCreateIndex(req, "vec", true, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
@@ -467,118 +557,137 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 		req.IndexParams = []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "FLAT"}, {Key: common.MetricTypeKey, Value: "COSINE"}}
 		req.UserIndexParams = []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "AUTOINDEX"}, {Key: common.MetricTypeKey, Value: "COSINE"}}
 		req.UserAutoindexMetricTypeSpecified = false
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, _, err = m.PlanCreateIndex(req, "vec", true, false)
 		assert.ErrorIs(t, err, ErrIndexOperationIgnored)
-		assert.Zero(t, tmpIndexID)
-		// req should follow the meta
-		assert.Equal(t, "L2", req.GetUserIndexParams()[1].Value)
-		assert.Equal(t, "L2", req.GetIndexParams()[1].Value)
+		assert.Equal(t, indexID, tmpIndexID)
+		// CheckParams does not mutate req in place.
+		assert.Equal(t, "COSINE", req.GetUserIndexParams()[1].Value)
+		assert.Equal(t, "COSINE", req.GetIndexParams()[1].Value)
 
 		// if autoindex specify metric type, so the index param change is from user, return error
 		req.IndexParams = []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "FLAT"}, {Key: common.MetricTypeKey, Value: "COSINE"}}
 		req.UserIndexParams = []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "AUTOINDEX"}, {Key: common.MetricTypeKey, Value: "COSINE"}}
 		req.UserAutoindexMetricTypeSpecified = true
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, _, err = m.PlanCreateIndex(req, "vec", true, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.IndexParams = indexParams
 		req.UserIndexParams = indexParams
 		req.FieldID++
-		tmpIndexID, err = m.CanCreateIndex(req, false)
+		tmpIndexID, _, err = m.PlanCreateIndex(req, "vec", true, false)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
 
-	t.Run("multiple indexes", func(t *testing.T) {
+	t.Run("multiple vector indexes on one field rejected", func(t *testing.T) {
 		req.IndexName = "_default_idx_2"
 		req.FieldID = fieldID
-		tmpIndexID, err := m.CanCreateIndex(req, false)
-		assert.Error(t, err)
+		tmpIndexID, _, err := m.PlanCreateIndex(req, "vec", true, false)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
 
 	t.Run("index has been deleted", func(t *testing.T) {
 		m.Indexes[collID][indexID].IsDeleted = true
-		tmpIndexID, err := m.CanCreateIndex(req, false)
+		tmpIndexID, gotName, err := m.PlanCreateIndex(req, "vec", true, false)
 		assert.NoError(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
+		assert.Equal(t, req.GetIndexName(), gotName)
 	})
 }
 
-func TestMeta_HasSameReq(t *testing.T) {
+func TestMeta_PlanCreateIndex_NameUniqueness(t *testing.T) {
+	paramtable.Init()
+	origGate := paramtable.Get().DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue("true")
+	t.Cleanup(func() {
+		paramtable.Get().DataCoordCfg.EnableMultiScalarIndexPerField.SwapTempValue(origGate)
+	})
+
 	var (
-		collID = UniqueID(1)
-		// partID     = UniqueID(2)
-		indexID    = UniqueID(10)
-		fieldID    = UniqueID(100)
-		indexName  = "_default_idx"
-		typeParams = []*commonpb.KeyValuePair{
-			{
-				Key:   common.DimKey,
-				Value: "128",
-			},
-			{
-				Key:   common.MmapEnabledKey,
-				Value: "true",
-			},
-		}
-		indexParams = []*commonpb.KeyValuePair{
-			{
-				Key:   common.IndexTypeKey,
-				Value: "FLAT",
-			},
-		}
+		collID  = UniqueID(1)
+		fieldID = UniqueID(100)
+		indexID = UniqueID(10)
 	)
 
-	m := NewSegmentIndexMeta(catalogmocks.NewDataCoordCatalog(t))
+	catalog := catalogmocks.NewDataCoordCatalog(t)
+	catalog.EXPECT().CreateIndex(mock.Anything, mock.Anything).Return(nil).Maybe()
+	// NewIndexMeta loads the meta cache, which asks the catalog for its snapshot.
+	catalog.EXPECT().ListIndexes(mock.Anything).Return([]*model.Index{}, nil).Maybe()
+	catalog.EXPECT().ListChannelCheckpoint(mock.Anything).Return(map[string]*msgpb.MsgPosition{}, nil).Maybe()
+	catalog.EXPECT().ListSegmentChangeGroups(mock.Anything).Return(nil, nil).Maybe()
 
-	req := &indexpb.CreateIndexRequest{
+	m, err := NewIndexMeta(context.Background(), catalog, nil)
+	require.NoError(t, err)
+	indexParams := []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}
+	stored := &model.Index{
 		CollectionID:    collID,
 		FieldID:         fieldID,
-		IndexName:       indexName,
-		TypeParams:      typeParams,
+		IndexID:         indexID,
+		IndexName:       "scalar_idx",
 		IndexParams:     indexParams,
-		Timestamp:       0,
-		IsAutoIndex:     false,
 		UserIndexParams: indexParams,
 	}
+	require.NoError(t, m.CreateIndex(context.Background(), stored))
 
-	t.Run("no indexes", func(t *testing.T) {
-		has, _ := m.HasSameReq(req)
-		assert.False(t, has)
-	})
-
-	t.Run("has same req", func(t *testing.T) {
-		m.Indexes[collID] = map[UniqueID]*model.Index{
-			indexID: {
-				TenantID:        "",
-				CollectionID:    collID,
-				FieldID:         fieldID,
-				IndexID:         indexID,
-				IndexName:       indexName,
-				IsDeleted:       false,
-				CreateTime:      10,
-				TypeParams:      typeParams,
-				IndexParams:     indexParams,
-				IsAutoIndex:     false,
-				UserIndexParams: indexParams,
-			},
+	t.Run("another name with distinct definition on the same field is a new index", func(t *testing.T) {
+		distinctParams := []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "BITMAP"}}
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       "_default_idx_2",
+			IndexParams:     distinctParams,
+			UserIndexParams: distinctParams,
 		}
-		has, _ := m.HasSameReq(req)
-		assert.True(t, has)
+		tmpIndexID, gotName, err := m.PlanCreateIndex(req, "f100", false, false)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), tmpIndexID)
+		assert.Equal(t, "_default_idx_2", gotName)
 	})
 
-	t.Run("params not consistent", func(t *testing.T) {
-		req.TypeParams = []*commonpb.KeyValuePair{{}}
-		has, _ := m.HasSameReq(req)
-		assert.False(t, has)
+	t.Run("same name on the same field with different params conflicts", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       stored.IndexName,
+			IndexParams:     []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "STL_SORT"}},
+			UserIndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "STL_SORT"}},
+		}
+		tmpIndexID, _, err := m.PlanCreateIndex(req, "f100", false, false)
+		assert.Error(t, err)
+		assert.NotErrorIs(t, err, ErrIndexOperationIgnored)
+		assert.Equal(t, merr.Code(merr.ErrParameterInvalid), merr.Code(err))
+		assert.Contains(t, err.Error(), "index name is already used by another index in this collection")
+		assert.Equal(t, int64(0), tmpIndexID)
 	})
 
-	t.Run("index has been deleted", func(t *testing.T) {
-		m.Indexes[collID][indexID].IsDeleted = true
-		has, _ := m.HasSameReq(req)
-		assert.False(t, has)
+	t.Run("same name on another field conflicts", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID + 1,
+			IndexName:       stored.IndexName,
+			IndexParams:     indexParams,
+			UserIndexParams: indexParams,
+		}
+		tmpIndexID, _, err := m.PlanCreateIndex(req, "f101", false, false)
+		assert.Error(t, err)
+		assert.NotErrorIs(t, err, ErrIndexOperationIgnored)
+		assert.Contains(t, err.Error(), "index name is already used by another index in this collection")
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+
+	t.Run("same name, same field, same params is an idempotent replay", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       stored.IndexName,
+			IndexParams:     indexParams,
+			UserIndexParams: indexParams,
+		}
+		tmpIndexID, gotName, err := m.PlanCreateIndex(req, "f100", false, false)
+		assert.ErrorIs(t, err, ErrIndexOperationIgnored)
+		assert.Equal(t, indexID, tmpIndexID)
+		assert.Equal(t, stored.IndexName, gotName)
 	})
 }
 
@@ -2037,9 +2146,9 @@ func TestRemoveSegmentIndexConcurrentCreateDifferentIndex(t *testing.T) {
 
 	// Dropping a definition allows a new index on the same field before GC
 	// removes the old segment record. The new index has different IDs.
-	indexID, err := m.CanCreateIndex(&indexpb.CreateIndexRequest{
+	indexID, _, err := m.PlanCreateIndex(&indexpb.CreateIndexRequest{
 		CollectionID: 1, FieldID: 100, IndexName: "idx",
-	}, false)
+	}, "f100", false, false)
 	require.NoError(t, err)
 	require.Zero(t, indexID)
 	definition = model.CloneIndex(definition)
@@ -2464,7 +2573,7 @@ func TestCheckParams(t *testing.T) {
 				{Key: common.IndexTypeKey, Value: "HNSW"},
 			},
 		}
-		assert.True(t, checkParams(fieldIndex, req))
+		assert.True(t, CheckParams(fieldIndex, req))
 	})
 
 	t.Run("same params with warmup in request only", func(t *testing.T) {
@@ -2493,7 +2602,7 @@ func TestCheckParams(t *testing.T) {
 		}
 		// Before fix: this would return false because len(metaTypeParams) != len(reqTypeParams)
 		// After fix: this should return true because WarmupKey is filtered from both
-		assert.True(t, checkParams(fieldIndex, req))
+		assert.True(t, CheckParams(fieldIndex, req))
 	})
 
 	t.Run("same params with warmup in different order", func(t *testing.T) {
@@ -2516,7 +2625,7 @@ func TestCheckParams(t *testing.T) {
 				{Key: common.MetricTypeKey, Value: "L2"},
 			},
 		}
-		assert.True(t, checkParams(fieldIndex, req))
+		assert.True(t, CheckParams(fieldIndex, req))
 	})
 
 	t.Run("different params", func(t *testing.T) {
@@ -2538,7 +2647,7 @@ func TestCheckParams(t *testing.T) {
 				{Key: common.IndexTypeKey, Value: "HNSW"},
 			},
 		}
-		assert.False(t, checkParams(fieldIndex, req))
+		assert.False(t, CheckParams(fieldIndex, req))
 	})
 
 	t.Run("mmap enabled should be ignored", func(t *testing.T) {
@@ -2561,7 +2670,7 @@ func TestCheckParams(t *testing.T) {
 				{Key: common.IndexTypeKey, Value: "HNSW"},
 			},
 		}
-		assert.True(t, checkParams(fieldIndex, req))
+		assert.True(t, CheckParams(fieldIndex, req))
 	})
 }
 
@@ -2949,4 +3058,189 @@ func TestIndexMeta_AllDenseWithDiskIndex(t *testing.T) {
 			assert.Equal(t, tt.want, m.AllDenseWithDiskIndex(collectionID, tt.schema))
 		})
 	}
+}
+
+func TestIndexMeta_NestedParamsAndVisibleConflictAndRestoredPolicy(t *testing.T) {
+	t.Run("DeleteParams strips keys inside nested params JSON", func(t *testing.T) {
+		userParams := []*commonpb.KeyValuePair{
+			{Key: common.ParamsKey, Value: `{"index_type":"INVERTED","visible":"false"}`},
+		}
+		cleaned := DeleteParams(userParams, []string{common.IndexVisibleKey})
+		val, err := GetIndexParam(cleaned, common.ParamsKey)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"index_type":"INVERTED"}`, val)
+	})
+
+	t.Run("PlanCreateIndex rejects opposite visible on existing index and keeps SameScalarIndexDefinition dedup", func(t *testing.T) {
+		paramtable.Init()
+		pt := paramtable.Get()
+		pt.Save(pt.DataCoordCfg.EnableMultiScalarIndexPerField.Key, "true")
+		defer pt.Reset(pt.DataCoordCfg.EnableMultiScalarIndexPerField.Key)
+
+		m := &IndexMeta{
+			Indexes: map[UniqueID]map[UniqueID]*model.Index{
+				10: {
+					100: {
+						CollectionID: 10,
+						FieldID:      101,
+						IndexID:      100,
+						IndexName:    "str_inv",
+						TypeParams: []*commonpb.KeyValuePair{
+							{Key: common.MaxLengthKey, Value: "64"},
+						},
+						IndexParams: []*commonpb.KeyValuePair{
+							{Key: common.IndexTypeKey, Value: indexparamcheck.IndexINVERTED},
+							{Key: common.IndexVisibleKey, Value: "false"},
+						},
+						UserIndexParams: []*commonpb.KeyValuePair{
+							{Key: common.ParamsKey, Value: `{"index_type":"INVERTED","visible":"false"}`},
+						},
+					},
+				},
+			},
+		}
+
+		// Unnamed retry with default visible=true must fail rather than silently succeed with visible=false.
+		conflictReq := &indexpb.CreateIndexRequest{
+			CollectionID: 10,
+			FieldID:      101,
+			TypeParams: []*commonpb.KeyValuePair{
+				{Key: common.MaxLengthKey, Value: "128"},
+			},
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: indexparamcheck.IndexINVERTED},
+			},
+		}
+		assert.False(t, CheckParams(m.Indexes[10][100], conflictReq))
+		_, _, err := m.PlanCreateIndex(conflictReq, "str", false, false)
+		require.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "use AlterIndex to change visible")
+
+		// Same-visible retry after AlterCollectionField changed max_length stays idempotent.
+		sameVisibleReq := &indexpb.CreateIndexRequest{
+			CollectionID: 10,
+			FieldID:      101,
+			IndexName:    "str_inv",
+			TypeParams: []*commonpb.KeyValuePair{
+				{Key: common.MaxLengthKey, Value: "128"},
+				{Key: common.WarmupScalarIndexKey, Value: "sync"},
+			},
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: indexparamcheck.IndexINVERTED},
+				{Key: common.IndexVisibleKey, Value: "false"},
+			},
+		}
+		assert.True(t, CheckParams(m.Indexes[10][100], sameVisibleReq))
+		_, gotName, err := m.PlanCreateIndex(sameVisibleReq, "str", false, false)
+		require.ErrorIs(t, err, ErrIndexOperationIgnored)
+		assert.Equal(t, "str_inv", gotName)
+
+		// Distinct name with same scalar definition is still blocked even if visible differs.
+		dupNameReq := &indexpb.CreateIndexRequest{
+			CollectionID: 10,
+			FieldID:      101,
+			IndexName:    "str_inv_2",
+			TypeParams: []*commonpb.KeyValuePair{
+				{Key: common.MaxLengthKey, Value: "128"},
+			},
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: indexparamcheck.IndexINVERTED},
+				{Key: common.IndexVisibleKey, Value: "true"},
+			},
+		}
+		_, _, err = m.PlanCreateIndex(dupNameReq, "str", false, false)
+		require.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "same definition")
+	})
+
+	t.Run("FMINDEX default fill and NGRAM integer normalization in SameScalarIndexDefinition", func(t *testing.T) {
+		fmDefault := &model.Index{
+			FieldID: 101,
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: indexparamcheck.IndexFMINDEX},
+			},
+		}
+		fmExplicit := &indexpb.CreateIndexRequest{
+			FieldID: 101,
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: indexparamcheck.IndexFMINDEX},
+				{Key: indexparamcheck.FmSaSampleRateKey, Value: "08"},
+				{Key: indexparamcheck.FmBlockBytesKey, Value: "64"},
+			},
+		}
+		assert.True(t, SameScalarIndexDefinition(fmDefault, fmExplicit, false))
+
+		ngramIdx := &model.Index{
+			FieldID: 101,
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: indexparamcheck.IndexNGRAM},
+				{Key: indexparamcheck.MinGramKey, Value: "2"},
+				{Key: indexparamcheck.MaxGramKey, Value: "3"},
+			},
+		}
+		ngramPadded := &indexpb.CreateIndexRequest{
+			FieldID: 101,
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: indexparamcheck.IndexNGRAM},
+				{Key: indexparamcheck.MinGramKey, Value: "02"},
+				{Key: indexparamcheck.MaxGramKey, Value: "03"},
+			},
+		}
+		assert.True(t, SameScalarIndexDefinition(ngramIdx, ngramPadded, false))
+
+		trieUpper := &model.Index{
+			FieldID:     101,
+			IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: indexparamcheck.IndexTRIE}},
+		}
+		for _, alias := range []string{indexparamcheck.IndexTrie, indexparamcheck.IndexMarisaTrie} {
+			trieAlias := &indexpb.CreateIndexRequest{
+				FieldID:     101,
+				IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: alias}},
+			}
+			assert.True(t, SameScalarIndexDefinition(trieUpper, trieAlias, false), "alias=%s", alias)
+		}
+
+		sortCanonical := &model.Index{
+			FieldID:     101,
+			IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: indexparamcheck.IndexSTLSORT}},
+		}
+		sortAlias := &indexpb.CreateIndexRequest{
+			FieldID:     101,
+			IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: indexparamcheck.IndexAsceneding}},
+		}
+		assert.True(t, SameScalarIndexDefinition(sortCanonical, sortAlias, false))
+	})
+
+	t.Run("ValidateRestoredIndexesPolicy nil schema is internal error and rejects duplicate definitions", func(t *testing.T) {
+		paramtable.Init()
+		pt := paramtable.Get()
+		pt.Save(pt.DataCoordCfg.EnableMultiScalarIndexPerField.Key, "true")
+		defer pt.Reset(pt.DataCoordCfg.EnableMultiScalarIndexPerField.Key)
+
+		err := ValidateRestoredIndexesPolicy(nil, []*indexpb.IndexInfo{{FieldID: 101}})
+		require.ErrorIs(t, err, merr.ErrServiceInternal)
+
+		schema := &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: 101, Name: "title", DataType: schemapb.DataType_VarChar},
+			},
+		}
+		dupDefs := []*indexpb.IndexInfo{
+			{
+				FieldID:     101,
+				IndexID:     1,
+				IndexName:   "idx_1",
+				IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: indexparamcheck.IndexINVERTED}},
+			},
+			{
+				FieldID:     101,
+				IndexID:     2,
+				IndexName:   "idx_2",
+				IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: indexparamcheck.IndexINVERTED}},
+			},
+		}
+		err = ValidateRestoredIndexesPolicy(schema, dupDefs)
+		require.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "duplicate scalar index definition")
+	})
 }

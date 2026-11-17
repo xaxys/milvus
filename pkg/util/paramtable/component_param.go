@@ -230,6 +230,7 @@ func (p *ComponentParam) versionGateItems() []*ParamItem {
 		&p.FunctionCfg.EnableWriteBeforeMaterialization,
 		&p.DataCoordCfg.ImportEnableIDRangeMsg,
 		&p.DataCoordCfg.EnableArraySortIndex,
+		&p.DataCoordCfg.EnableMultiScalarIndexPerField,
 	}
 }
 
@@ -6775,6 +6776,7 @@ type dataCoordConfig struct {
 	BlockingL0EntryNum             ParamItem `refreshable:"true"`
 	BlockingL0SizeInMB             ParamItem `refreshable:"true"`
 	DVForceAllIndexReady           ParamItem `refreshable:"true"`
+	EnableMultiScalarIndexPerField ParamItem `refreshable:"true"`
 
 	ManifestCommitConcurrency ParamItem `refreshable:"false"`
 
@@ -7175,6 +7177,27 @@ exceeds this threshold, the earliest growing segments will be sealed.`,
 Compaction merges small-size segments into a large segment, and clears the entities deleted beyond the rentention duration of Time Travel.`,
 		Export: true,
 	}
+	p.EnableMultiScalarIndexPerField = ParamItem{
+		Key:          "dataCoord.enableMultiScalarIndexPerField",
+		Version:      "3.1.0",
+		DefaultValue: "auto",
+		Export:       true,
+		PanicIfEmpty: false,
+		Doc: "Whether one scalar field may carry several indexes. " +
+			"auto: enable once all registered online components reach 3.1.0 and the stability window elapses " +
+			"(until then, creating a second index on a field is refused as not ready and the client can retry); " +
+			"false: disable outright and restore the previous behavior, rejecting a second index on a field as an invalid parameter; " +
+			"true: force enable and bypass the software-version gate (an older QueryNode asserts while loading a segment whose load config carries two indexes on one field).",
+		VersionGateSwitcher: &VersionGateSwitcher{
+			EnableAutoSwitchValue: "auto",
+			PreSwitchValue:        "false",
+			GateVersion:           "3.1.0",
+			TargetValue:           "true",
+			SwitchDelay:           time.Minute,
+		},
+	}
+
+	p.EnableMultiScalarIndexPerField.Init(base.mgr)
 	p.EnableCompaction.Init(base.mgr)
 
 	p.EnableAutoCompaction = ParamItem{

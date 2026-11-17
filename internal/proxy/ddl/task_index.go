@@ -26,6 +26,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/parser/planparserv2"
 	"github.com/milvus-io/milvus/internal/proxy/fieldvalidator"
 	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/milvus-io/milvus/internal/types"
@@ -34,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/indexparams"
@@ -204,6 +206,10 @@ func (cit *CreateIndexTask) parseIndexParams(ctx context.Context) error {
 	if err := indexparamcheck.ValidateWarmupIndexParams(indexParamsMap); err != nil {
 		mlog.Warn(ctx, "Invalid warmup params", mlog.Err(err))
 		return merr.WrapErrParameterInvalidMsg("invalid warmup params: %s", err.Error())
+	}
+	if err := indexparamcheck.ValidateVisibleIndexParams(isVecIndex, indexParamsMap); err != nil {
+		mlog.Warn(ctx, "Invalid visible params", mlog.Err(err))
+		return err
 	}
 
 	if !isVecIndex {
@@ -737,6 +743,9 @@ func (t *AlterIndexTask) PreExecute(ctx context.Context) error {
 		if err := indexparamcheck.ValidateWarmupIndexParams(indexParamsMap); err != nil {
 			return merr.WrapErrParameterInvalidMsg("invalid warmup params: %s", err.Error())
 		}
+		if err := indexparamcheck.ValidateVisibleIndexParams(false, indexParamsMap); err != nil {
+			return err
+		}
 	} else if len(t.req.GetDeleteKeys()) > 0 {
 		for _, param := range t.req.GetDeleteKeys() {
 			if !indexparams.IsConfigableIndexParam(param) {
@@ -753,25 +762,40 @@ func (t *AlterIndexTask) PreExecute(ctx context.Context) error {
 	}
 	t.collectionID = collection
 
-	if len(t.req.GetIndexName()) == 0 {
-		return merr.WrapErrParameterInvalidMsg("index name is empty")
-	}
-
 	// TODO fubang should implement it when the alter index is reconstructed
 	// typeParams := funcutil.KeyValuePair2Map(t.req.GetExtraParams())
 	// if err = ValidateAutoIndexMmapConfig(typeParams); err != nil {
 	// 	return err
 	// }
 
-	loaded, err := isCollectionLoaded(ctx, t.mixCoord, collection)
-	if err != nil {
-		return err
-	}
-	if loaded {
-		return merr.WrapErrCollectionLoaded(collName, "can't alter index on loaded collection, please release the collection first")
+	if !alterOnlyTouchesVisible(t.req.GetExtraParams(), t.req.GetDeleteKeys()) {
+		loaded, err := isCollectionLoaded(ctx, t.mixCoord, collection)
+		if err != nil {
+			return err
+		}
+		if loaded {
+			return merr.WrapErrCollectionLoaded(collName, "can't alter index on loaded collection, please release the collection first")
+		}
 	}
 
 	return nil
+}
+
+func alterOnlyTouchesVisible(extraParams []*commonpb.KeyValuePair, deleteKeys []string) bool {
+	if len(extraParams) == 0 && len(deleteKeys) == 0 {
+		return false
+	}
+	for _, kv := range extraParams {
+		if kv.GetKey() != common.IndexVisibleKey {
+			return false
+		}
+	}
+	for _, key := range deleteKeys {
+		if key != common.IndexVisibleKey {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *AlterIndexTask) Execute(ctx context.Context) error {
@@ -872,13 +896,33 @@ func (dit *DescribeIndexTask) Execute(ctx context.Context) error {
 		return merr.Wrap(err, "failed to get collection schema")
 	}
 
-	resp, err := dit.mixCoord.DescribeIndex(ctx, &indexpb.DescribeIndexRequest{CollectionID: dit.collectionID, IndexName: dit.IndexName, Timestamp: dit.Timestamp})
+	fieldName := dit.GetFieldName()
+	var targetField *schemapb.FieldSchema
+	var targetNestedPath string
+	if fieldName != "" {
+		targetField, targetNestedPath, err = resolveDescribeTargetField(schema.SchemaHelper, fieldName)
+		if err != nil {
+			err = merr.WrapErrParameterInvalidMsg(
+				"field %s not found in collection %s", fieldName, dit.GetCollectionName())
+			dit.result = &milvuspb.DescribeIndexResponse{Status: merr.Status(err)}
+			return err
+		}
+	}
+
+	// FieldName is not part of the internal request: it is a public-API filter that
+	// this task applies to the response (one field may now carry several indexes).
+	resp, err := dit.mixCoord.DescribeIndex(ctx, &indexpb.DescribeIndexRequest{
+		CollectionID: dit.collectionID,
+		IndexName:    dit.IndexName,
+		Timestamp:    dit.Timestamp,
+	})
 	if err != nil {
 		return err
 	}
 
 	dit.result = &milvuspb.DescribeIndexResponse{}
 	dit.result.Status = resp.GetStatus()
+
 	err = merr.Error(resp.GetStatus())
 	if err != nil {
 		if errors.Is(err, merr.ErrIndexNotFound) && len(dit.GetIndexName()) == 0 {
@@ -887,6 +931,29 @@ func (dit *DescribeIndexTask) Execute(ctx context.Context) error {
 		}
 		return err
 	}
+
+	// A field name narrows the result to that field's indexes: it used to be dropped
+	// on the way in, so every caller got the whole collection back. One scalar field
+	// can now carry several indexes, so "the indexes of this field" has to mean it.
+	// Filtering here rather than in DataCoord also covers the RESTful handlers, which
+	// go through this task.
+	if targetField != nil {
+		filtered := filterIndexInfosByTargetField(resp.GetIndexInfos(), targetField.FieldID, targetNestedPath)
+		if len(filtered) == 0 {
+			// the field exists (or is a dynamic/JSON key) but carries no matching index
+			if len(dit.GetIndexName()) > 0 {
+				err = merr.WrapErrIndexNotFound(dit.GetIndexName())
+			} else {
+				err = merr.WrapErrIndexNotFoundForCollection(dit.GetCollectionName())
+			}
+			dit.result.Status = merr.Status(err)
+			return err
+		}
+		// narrow the list the enrichment below walks, so the per-index field/params
+		// decoration only runs over this field's indexes
+		resp.IndexInfos = filtered
+	}
+
 	for _, indexInfo := range resp.IndexInfos {
 		field, err := schema.SchemaHelper.GetFieldFromID(indexInfo.FieldID)
 		if err != nil {
@@ -902,21 +969,10 @@ func (dit *DescribeIndexTask) Execute(ctx context.Context) error {
 		}
 		fieldName := field.Name
 		if field.IsDynamic {
-			jsonPath, err := funcutil.GetAttrByKeyFromRepeatedKV(common.JSONPathKey, indexInfo.GetIndexParams())
-			if err != nil {
+			if _, err := funcutil.GetAttrByKeyFromRepeatedKV(common.JSONPathKey, indexInfo.GetIndexParams()); err != nil {
 				mlog.Warn(ctx, "failed to get json path for dynamic field", mlog.Err(err))
-			} else if jsonPath != "" {
-				// Skip leading "/" and find next "/" to get first path segment
-				trimmedPath := strings.TrimPrefix(jsonPath, "/")
-				slashIndex := strings.Index(trimmedPath, "/")
-				if slashIndex == -1 {
-					fieldName = trimmedPath // Use full remaining path if no more "/"
-				} else {
-					fieldName = trimmedPath[:slashIndex]
-				}
-				// Unescape JSON Pointer path: ~1 -> / and ~0 -> ~
-				fieldName = strings.ReplaceAll(fieldName, "~1", "/")
-				fieldName = strings.ReplaceAll(fieldName, "~0", "~")
+			} else {
+				fieldName = dynamicIndexFieldName(field.Name, indexInfo.GetIndexParams())
 			}
 		}
 		desc := &milvuspb.IndexDescription{
@@ -939,6 +995,58 @@ func (dit *DescribeIndexTask) Execute(ctx context.Context) error {
 
 func (dit *DescribeIndexTask) PostExecute(ctx context.Context) error {
 	return nil
+}
+
+func resolveDescribeTargetField(helper *typeutil.SchemaHelper, fieldName string) (*schemapb.FieldSchema, string, error) {
+	if field, err := helper.GetUserFieldFromName(fieldName); err == nil {
+		return field, "", nil
+	}
+	var identifierExpr *planpb.Expr
+	if err := planparserv2.ParseIdentifier(helper, fieldName, func(expr *planpb.Expr) error {
+		identifierExpr = expr
+		return nil
+	}); err == nil && identifierExpr != nil && identifierExpr.GetColumnExpr() != nil {
+		colInfo := identifierExpr.GetColumnExpr().GetInfo()
+		if colInfo != nil && !common.IsSystemField(colInfo.GetFieldId()) {
+			if field, err := helper.GetFieldFromID(colInfo.GetFieldId()); err == nil {
+				rawSegs := colInfo.GetNestedPath()
+				if len(rawSegs) == 0 {
+					return field, "", nil
+				}
+				var ptr strings.Builder
+				for _, seg := range rawSegs {
+					ptr.WriteByte('/')
+					s := strings.ReplaceAll(seg, "~", "~0")
+					ptr.WriteString(strings.ReplaceAll(s, "/", "~1"))
+				}
+				return field, ptr.String(), nil
+			}
+		}
+	}
+	field, err := helper.GetUserFieldFromNameDefaultJSON(fieldName)
+	if err != nil {
+		return nil, "", err
+	}
+	if field.GetIsDynamic() && fieldName != field.GetName() {
+		escaped := strings.ReplaceAll(fieldName, "~", "~0")
+		escaped = strings.ReplaceAll(escaped, "/", "~1")
+		return field, "/" + escaped, nil
+	}
+	return field, "", nil
+}
+
+func dynamicIndexFieldName(defaultName string, indexParams []*commonpb.KeyValuePair) string {
+	jsonPath, err := funcutil.GetAttrByKeyFromRepeatedKV(common.JSONPathKey, indexParams)
+	if err != nil || jsonPath == "" {
+		return defaultName
+	}
+	trimmedPath := strings.TrimPrefix(jsonPath, "/")
+	if slashIndex := strings.Index(trimmedPath, "/"); slashIndex != -1 {
+		trimmedPath = trimmedPath[:slashIndex]
+	}
+	trimmedPath = strings.ReplaceAll(trimmedPath, "~1", "/")
+	trimmedPath = strings.ReplaceAll(trimmedPath, "~0", "~")
+	return trimmedPath
 }
 
 type GetIndexStatisticsTask struct {
@@ -1114,6 +1222,78 @@ func (dit *DropIndexTask) PreExecute(ctx context.Context) error {
 	return nil
 }
 
+func filterIndexInfosByTargetField(
+	infos []*indexpb.IndexInfo,
+	fieldID int64,
+	targetNestedPath string,
+) []*indexpb.IndexInfo {
+	filtered := make([]*indexpb.IndexInfo, 0, len(infos))
+	for _, info := range infos {
+		if info.GetFieldID() != fieldID {
+			continue
+		}
+		if targetNestedPath != "" {
+			idxPath, _ := funcutil.GetAttrByKeyFromRepeatedKV(common.JSONPathKey, info.GetIndexParams())
+			if idxPath != targetNestedPath && !strings.HasPrefix(idxPath, targetNestedPath+"/") {
+				continue
+			}
+		}
+		filtered = append(filtered, info)
+	}
+	return filtered
+}
+
+func resolveUnambiguousIndexNameByField(
+	ctx context.Context,
+	cache Cache,
+	mixCoord types.MixCoordClient,
+	dbName string,
+	collectionName string,
+	collectionID UniqueID,
+	fieldName string,
+	emptyIsNoop bool,
+) (string, bool, error) {
+	schema, err := cache.GetCollectionSchema(ctx, dbName, collectionName)
+	if err != nil {
+		mlog.Error(ctx, "failed to get collection schema", mlog.Err(err))
+		return "", false, merr.Wrap(err, "failed to get collection schema")
+	}
+	targetField, targetNestedPath, err := resolveDescribeTargetField(schema.SchemaHelper, fieldName)
+	if err != nil {
+		return "", false, merr.WrapErrParameterInvalidMsg(
+			"field %s not found in collection %s", fieldName, collectionName)
+	}
+
+	resp, err := mixCoord.DescribeIndex(ctx, &indexpb.DescribeIndexRequest{
+		CollectionID: collectionID,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if err = merr.Error(resp.GetStatus()); err != nil {
+		if errors.Is(err, merr.ErrIndexNotFound) {
+			if emptyIsNoop {
+				return "", true, nil
+			}
+			return "", false, merr.WrapErrIndexNotFoundForCollection(collectionName)
+		}
+		return "", false, err
+	}
+
+	matched := filterIndexInfosByTargetField(resp.GetIndexInfos(), targetField.FieldID, targetNestedPath)
+	switch len(matched) {
+	case 0:
+		if emptyIsNoop {
+			return "", true, nil
+		}
+		return "", false, merr.WrapErrIndexNotFoundForCollection(collectionName)
+	case 1:
+		return matched[0].GetIndexName(), false, nil
+	default:
+		return "", false, merr.WrapErrIndexDuplicate(fieldName)
+	}
+}
+
 func (dit *DropIndexTask) Execute(ctx context.Context) error {
 	ctxLog := mlog.With()
 	ctxLog.Info(ctx, "proxy drop index", mlog.Int64("collID", dit.collectionID),
@@ -1122,11 +1302,29 @@ func (dit *DropIndexTask) Execute(ctx context.Context) error {
 		mlog.String("db_name", dit.DbName),
 	)
 
+	indexName := dit.GetIndexName()
+	if indexName == "" && dit.GetFieldName() != "" {
+		resolvedName, noop, err := resolveUnambiguousIndexNameByField(
+			ctx, dit.GetMetaCache(), dit.mixCoord,
+			dit.GetDbName(), dit.GetCollectionName(), dit.collectionID,
+			dit.GetFieldName(), true,
+		)
+		if err != nil {
+			dit.result = merr.Status(err)
+			return err
+		}
+		if noop {
+			dit.result = merr.Success()
+			return nil
+		}
+		indexName = resolvedName
+	}
+
 	var err error
 	dit.result, err = dit.mixCoord.DropIndex(ctx, &indexpb.DropIndexRequest{
 		CollectionID: dit.collectionID,
 		PartitionIDs: nil,
-		IndexName:    dit.IndexName,
+		IndexName:    indexName,
 		DropAll:      false,
 	})
 	if err = merr.CheckRPCCall(dit.result, err); err != nil {
@@ -1207,9 +1405,23 @@ func (gibpt *GetIndexBuildProgressTask) Execute(ctx context.Context) error {
 	}
 	gibpt.collectionID = collectionID
 
+	indexName := gibpt.GetIndexName()
+	if indexName == "" && gibpt.GetFieldName() != "" {
+		resolvedName, _, err := resolveUnambiguousIndexNameByField(
+			ctx, gibpt.GetMetaCache(), gibpt.mixCoord,
+			gibpt.GetDbName(), collectionName, collectionID,
+			gibpt.GetFieldName(), false,
+		)
+		if err != nil {
+			gibpt.result = &milvuspb.GetIndexBuildProgressResponse{Status: merr.Status(err)}
+			return err
+		}
+		indexName = resolvedName
+	}
+
 	resp, err := gibpt.mixCoord.GetIndexBuildProgress(ctx, &indexpb.GetIndexBuildProgressRequest{
 		CollectionID: collectionID,
-		IndexName:    gibpt.IndexName,
+		IndexName:    indexName,
 	})
 	if err = merr.CheckRPCCall(resp, err); err != nil {
 		return err
@@ -1293,9 +1505,23 @@ func (gist *GetIndexStateTask) Execute(ctx context.Context) error {
 		return err
 	}
 
+	indexName := gist.GetIndexName()
+	if indexName == "" && gist.GetFieldName() != "" {
+		resolvedName, _, err := resolveUnambiguousIndexNameByField(
+			ctx, gist.GetMetaCache(), gist.mixCoord,
+			gist.GetDbName(), gist.CollectionName, collectionID,
+			gist.GetFieldName(), false,
+		)
+		if err != nil {
+			gist.result = &milvuspb.GetIndexStateResponse{Status: merr.Status(err)}
+			return err
+		}
+		indexName = resolvedName
+	}
+
 	state, err := gist.mixCoord.GetIndexState(ctx, &indexpb.GetIndexStateRequest{
 		CollectionID: collectionID,
-		IndexName:    gist.IndexName,
+		IndexName:    indexName,
 	})
 	if err = merr.CheckRPCCall(state, err); err != nil {
 		return err

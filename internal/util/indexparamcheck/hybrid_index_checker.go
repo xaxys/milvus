@@ -1,6 +1,8 @@
 package indexparamcheck
 
 import (
+	"strconv"
+
 	"github.com/samber/lo"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
@@ -36,12 +38,18 @@ func (c *HYBRIDChecker) CheckTrain(dataType schemapb.DataType, elementType schem
 				return merr.WrapErrParameterInvalidMsg("failed to check bitmap cardinality limit, should be larger than 0 and smaller than %d",
 					MaxBitmapCardinalityLimit)
 			}
+			if limit, err := strconv.Atoi(params[common.BitmapCardinalityLimitKey]); err == nil {
+				params[common.BitmapCardinalityLimitKey] = strconv.Itoa(limit)
+			}
 		}
 		return nil
 	}
 	if !CheckIntByRange(params, common.BitmapCardinalityLimitKey, 1, MaxBitmapCardinalityLimit) {
 		return merr.WrapErrParameterInvalidMsg("failed to check bitmap cardinality limit, should be larger than 0 and smaller than %d",
 			MaxBitmapCardinalityLimit)
+	}
+	if limit, err := strconv.Atoi(params[common.BitmapCardinalityLimitKey]); err == nil {
+		params[common.BitmapCardinalityLimitKey] = strconv.Itoa(limit)
 	}
 	return c.scalarIndexChecker.CheckTrain(dataType, elementType, params)
 }

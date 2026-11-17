@@ -38,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 // RestoreCollectionManager is wired directly to RootCoord inside Coordinator.
@@ -68,6 +69,9 @@ func (sm *Manager) broadcastRestoreCollection(ctx context.Context, snapshot *sna
 	}
 	schema := proto.Clone(snapshot.Collection.GetSchema()).(*schemapb.CollectionSchema)
 	schema.Name, schema.DbName = target, db
+	if err := sm.validateRestoredIndexesPolicy(schema, snapshot.Indexes); err != nil {
+		return 0, err
+	}
 	encoded, err := proto.Marshal(schema)
 	if err != nil {
 		return 0, err
@@ -101,7 +105,8 @@ func (sm *Manager) broadcastRestoreCollection(ctx context.Context, snapshot *sna
 			CreateTime: uint64(time.Now().UnixNano()), IndexName: source.GetIndexName(), TypeParams: dcindex.DeleteParams(source.GetTypeParams(), []string{common.MmapEnabledKey}),
 			IndexParams: source.GetIndexParams(), UserIndexParams: source.GetUserIndexParams(), IsAutoIndex: source.GetIsAutoIndex(),
 		}
-		if err := indexparamcheck.ValidateIndexParams(index); err != nil {
+		restoredField := typeutil.GetField(schema, index.FieldID)
+		if err := indexparamcheck.ValidateIndexParams(index, restoredField != nil && typeutil.IsVectorType(restoredField.GetDataType())); err != nil {
 			return 0, err
 		}
 		if err := sm.CheckJSONPathIndexVersion(index); err != nil {

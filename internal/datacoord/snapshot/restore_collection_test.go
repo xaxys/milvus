@@ -18,22 +18,27 @@ package snapshot
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/bytedance/mockey"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/datacoord/copysegment"
+	dcindex "github.com/milvus-io/milvus/internal/datacoord/index"
 	"github.com/milvus-io/milvus/internal/datacoord/meta"
 	"github.com/milvus-io/milvus/internal/metacache"
 	kvdatacoord "github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	"github.com/milvus-io/milvus/internal/rootcoord"
 	snapshotstorage "github.com/milvus-io/milvus/internal/snapshotio/storage"
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster/broadcast"
+	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/types"
@@ -110,5 +115,84 @@ func TestRestoreCallbackPersistsJobBeforeSegments(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 77, id)
 		require.Equal(t, 1, allocated.Times())
+	})
+}
+
+func TestRestoreCollectionEnforcesMultiIndexGateAndCap(t *testing.T) {
+	schema := &schemapb.CollectionSchema{
+		Name: "source",
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: 101, Name: "scalar", DataType: schemapb.DataType_Int64},
+			{FieldID: 102, Name: "vec", DataType: schemapb.DataType_FloatVector},
+		},
+	}
+	twoScalar := []*indexpb.IndexInfo{
+		{IndexName: "idx_inv", FieldID: 101, IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}},
+		{IndexName: "idx_sort", FieldID: 101, IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "STL_SORT"}}},
+	}
+
+	t.Run("production broadcastRestoreCollection refuses when switch is off", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "false")
+		mockey.PatchConvey("switch off", t, func() {
+			capture := &meta.CaptureBroadcastAPI{}
+			mockey.Mock(broadcast.StartBroadcastWithResourceKeys).Return(capture, nil).Build()
+			mockey.Mock((*rootcoord.Core).CheckRestoreTargetAbsent).Return(merr.WrapErrCollectionNotFound("target")).Build()
+			prepare := mockey.Mock((*rootcoord.Core).PrepareRestoreCollection).Return(nil, func() {}, nil).Build()
+
+			sm := &Manager{CollectionRestorer: &rootcoord.Core{}}
+			_, err := sm.finishRestoreSnapshot(t.Context(), nil, &snapshotstorage.SnapshotData{
+				Collection: &datapb.CollectionDescription{Schema: schema},
+				Indexes:    twoScalar,
+			}, "snapshot", 10, "target", "default", 5, false, "", "", nil, nil, nil, nil)
+			require.ErrorIs(t, err, merr.ErrParameterInvalid)
+			require.Contains(t, err.Error(), "creating multiple indexes on same field is not supported")
+			require.Zero(t, prepare.Times())
+		})
+	})
+
+	t.Run("production broadcastRestoreCollection refuses when software upgrade gate is pending (auto)", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "auto")
+		mockey.PatchConvey("auto gate pending", t, func() {
+			capture := &meta.CaptureBroadcastAPI{}
+			mockey.Mock(broadcast.StartBroadcastWithResourceKeys).Return(capture, nil).Build()
+			mockey.Mock((*rootcoord.Core).CheckRestoreTargetAbsent).Return(merr.WrapErrCollectionNotFound("target")).Build()
+			prepare := mockey.Mock((*rootcoord.Core).PrepareRestoreCollection).Return(nil, func() {}, nil).Build()
+
+			sm := &Manager{CollectionRestorer: &rootcoord.Core{}}
+			_, err := sm.finishRestoreSnapshot(t.Context(), nil, &snapshotstorage.SnapshotData{
+				Collection: &datapb.CollectionDescription{Schema: schema},
+				Indexes:    twoScalar,
+			}, "snapshot", 10, "target", "default", 5, false, "", "", nil, nil, nil, nil)
+			require.ErrorIs(t, err, merr.ErrServiceNotReady)
+			require.Contains(t, err.Error(), "cluster software upgrade gate")
+			require.Zero(t, prepare.Times())
+		})
+	})
+
+	t.Run("production broadcastRestoreCollection refuses exceeding per-field scalar index cap", func(t *testing.T) {
+		setMultiScalarIndexPerField(t, "true")
+		tooMany := make([]*indexpb.IndexInfo, 0, dcindex.MaxScalarIndexesPerField+1)
+		for i := 0; i <= dcindex.MaxScalarIndexesPerField; i++ {
+			tooMany = append(tooMany, &indexpb.IndexInfo{
+				IndexName:   fmt.Sprintf("idx_%d", i),
+				FieldID:     101,
+				IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}},
+			})
+		}
+		mockey.PatchConvey("cap exceeded", t, func() {
+			capture := &meta.CaptureBroadcastAPI{}
+			mockey.Mock(broadcast.StartBroadcastWithResourceKeys).Return(capture, nil).Build()
+			mockey.Mock((*rootcoord.Core).CheckRestoreTargetAbsent).Return(merr.WrapErrCollectionNotFound("target")).Build()
+			prepare := mockey.Mock((*rootcoord.Core).PrepareRestoreCollection).Return(nil, func() {}, nil).Build()
+
+			sm := &Manager{CollectionRestorer: &rootcoord.Core{}}
+			_, err := sm.finishRestoreSnapshot(t.Context(), nil, &snapshotstorage.SnapshotData{
+				Collection: &datapb.CollectionDescription{Schema: schema},
+				Indexes:    tooMany,
+			}, "snapshot", 10, "target", "default", 5, false, "", "", nil, nil, nil, nil)
+			require.ErrorIs(t, err, merr.ErrParameterInvalid)
+			require.Contains(t, err.Error(), "the limit is")
+			require.Zero(t, prepare.Times())
+		})
 	})
 }

@@ -17,6 +17,51 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
+func TestIsIndexVisible(t *testing.T) {
+	visible, ok := IsIndexVisible()
+	assert.True(t, visible)
+	assert.False(t, ok)
+
+	visible, ok = IsIndexVisible(&commonpb.KeyValuePair{Key: IndexVisibleKey, Value: "true"})
+	assert.True(t, visible)
+	assert.True(t, ok)
+
+	visible, ok = IsIndexVisible(&commonpb.KeyValuePair{Key: IndexVisibleKey, Value: "false"})
+	assert.False(t, visible)
+	assert.True(t, ok)
+
+	visible, ok = IsIndexVisible(&commonpb.KeyValuePair{Key: IndexVisibleKey, Value: "invalid"})
+	assert.True(t, visible)
+	assert.False(t, ok)
+}
+
+func TestIsIndexInfoVisible(t *testing.T) {
+	assert.True(t, IsIndexInfoVisible(nil, nil))
+	assert.False(t, IsIndexInfoVisible(nil, []*commonpb.KeyValuePair{
+		{Key: IndexVisibleKey, Value: "false"},
+	}))
+	assert.True(t, IsIndexInfoVisible(
+		[]*commonpb.KeyValuePair{{Key: IndexVisibleKey, Value: "false"}},
+		[]*commonpb.KeyValuePair{{Key: IndexVisibleKey, Value: "true"}},
+	))
+	assert.False(t, IsIndexInfoVisible(
+		[]*commonpb.KeyValuePair{{Key: IndexVisibleKey, Value: "false"}},
+		nil,
+	))
+	assert.False(t, IsIndexInfoVisible(
+		nil,
+		[]*commonpb.KeyValuePair{{Key: ParamsKey, Value: `{"index_type":"INVERTED","visible":"false"}`}},
+	))
+	assert.False(t, IsIndexInfoVisible(
+		nil,
+		[]*commonpb.KeyValuePair{{Key: ParamsKey, Value: `{"index_type":"INVERTED","visible":false}`}},
+	))
+	assert.True(t, IsIndexInfoVisible(
+		[]*commonpb.KeyValuePair{{Key: IndexVisibleKey, Value: "true"}},
+		[]*commonpb.KeyValuePair{{Key: ParamsKey, Value: `{"index_type":"INVERTED","visible":"false"}`}},
+	))
+}
+
 func TestParseTalonEnabledStages(t *testing.T) {
 	for _, tc := range []struct {
 		value string

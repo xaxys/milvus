@@ -18,6 +18,7 @@ package common
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"math"
 	"math/bits"
 	"strconv"
@@ -501,6 +502,7 @@ const (
 // common properties
 const (
 	MmapEnabledKey             = "mmap.enabled"
+	IndexVisibleKey            = "visible"
 	LocalFormatKey             = "local_format"
 	LoadPriorityKey            = "load_priority"
 	PartitionKeyIsolationKey   = "partitionkey.isolation"
@@ -580,6 +582,56 @@ func IsMmapIndexEnabled(kvs ...*commonpb.KeyValuePair) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+// IsIndexVisible returns whether the "visible" property is true and whether it
+// was explicitly present with a valid boolean value. An index without an
+// explicit "visible" key is visible by default.
+func IsIndexVisible(kvs ...*commonpb.KeyValuePair) (bool, bool) {
+	for _, kv := range kvs {
+		if kv.GetKey() == IndexVisibleKey {
+			visible, err := strconv.ParseBool(kv.GetValue())
+			if err != nil {
+				return true, false
+			}
+			return visible, true
+		}
+	}
+	return true, false
+}
+
+// IsIndexInfoVisible resolves the effective "visible" state of an index across
+// UserIndexParams (top-level), IndexParams (top-level), and legacy nested JSON
+// under UserIndexParams["params"]. Defaults to true when unspecified.
+func IsIndexInfoVisible(indexParams, userIndexParams []*commonpb.KeyValuePair) bool {
+	if visible, ok := IsIndexVisible(userIndexParams...); ok {
+		return visible
+	}
+	if visible, ok := IsIndexVisible(indexParams...); ok {
+		return visible
+	}
+	for _, kv := range userIndexParams {
+		if kv.GetKey() != ParamsKey {
+			continue
+		}
+		var nested map[string]any
+		if err := json.Unmarshal([]byte(kv.GetValue()), &nested); err != nil {
+			continue
+		}
+		raw, exists := nested[IndexVisibleKey]
+		if !exists {
+			continue
+		}
+		switch v := raw.(type) {
+		case bool:
+			return v
+		case string:
+			if parsed, err := strconv.ParseBool(v); err == nil {
+				return parsed
+			}
+		}
+	}
+	return true
 }
 
 // GetWarmupPolicy returns the warmup policy value and whether it exists from key-value pairs

@@ -306,7 +306,7 @@ func (c *Core) prepareBoundFieldIndex(ctx context.Context, coll *model.Collectio
 		IsAutoIndex:     false,
 		UserIndexParams: userIndexParams,
 	}
-	if err := indexparamcheck.ValidateIndexParams(index); err != nil {
+	if err := indexparamcheck.ValidateIndexParams(index, typeutil.IsVectorType(plan.Field.GetDataType())); err != nil {
 		return nil, err
 	}
 	return model.MarshalIndexModel(index), nil

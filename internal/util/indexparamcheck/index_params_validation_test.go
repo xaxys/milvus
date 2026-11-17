@@ -45,8 +45,19 @@ func TestValidateIndexParams(t *testing.T) {
 				},
 			},
 		}
-		err := ValidateIndexParams(index)
+		err := ValidateIndexParams(index, true)
 		assert.NoError(t, err)
+	})
+
+	t.Run("vector autoindex rejects visible=false", func(t *testing.T) {
+		index := &model.Index{
+			IndexParams: []*commonpb.KeyValuePair{
+				{Key: common.IndexTypeKey, Value: AutoIndex},
+				{Key: common.IndexVisibleKey, Value: "false"},
+			},
+		}
+		err := ValidateIndexParams(index, true)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
 	})
 
 	t.Run("invalid index param", func(t *testing.T) {
@@ -62,7 +73,7 @@ func TestValidateIndexParams(t *testing.T) {
 				},
 			},
 		}
-		err := ValidateIndexParams(index)
+		err := ValidateIndexParams(index, true)
 		assert.Error(t, err)
 	})
 
@@ -81,7 +92,7 @@ func TestValidateIndexParams(t *testing.T) {
 				},
 			},
 		}
-		err := ValidateIndexParams(index)
+		err := ValidateIndexParams(index, true)
 		assert.Error(t, err)
 	})
 
@@ -98,7 +109,7 @@ func TestValidateIndexParams(t *testing.T) {
 				},
 			},
 		}
-		err := ValidateIndexParams(index)
+		err := ValidateIndexParams(index, true)
 		assert.Error(t, err)
 	})
 
@@ -115,7 +126,7 @@ func TestValidateIndexParams(t *testing.T) {
 				},
 			},
 		}
-		err := ValidateIndexParams(index)
+		err := ValidateIndexParams(index, true)
 		assert.Error(t, err)
 	})
 
@@ -132,7 +143,7 @@ func TestValidateIndexParams(t *testing.T) {
 				},
 			},
 		}
-		err := ValidateIndexParams(index)
+		err := ValidateIndexParams(index, true)
 		assert.Error(t, err)
 	})
 }

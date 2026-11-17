@@ -191,3 +191,30 @@ func TestArraySortVersionGate(t *testing.T) {
 	}
 	assert.False(t, item.GetAsBool())
 }
+
+func TestMultiScalarIndexPerFieldVersionGate(t *testing.T) {
+	params := &ComponentParam{}
+	params.Init(NewBaseTable(SkipRemote(true)))
+	item := &params.DataCoordCfg.EnableMultiScalarIndexPerField
+	assert.Contains(t, params.versionGateItems(), item)
+	assert.Equal(t, "auto", item.DefaultValue)
+	assert.Equal(t, "3.1.0", item.VersionGateSwitcher.GateVersion)
+	assert.Equal(t, time.Minute, item.VersionGateSwitcher.SwitchDelay)
+	assert.False(t, item.GetAsBool())
+	assert.False(t, item.IsSetByUser())
+
+	assert.NoError(t, params.Save(item.Key, item.VersionGateSwitcher.TargetValue))
+	assert.True(t, item.GetAsBool())
+	assert.True(t, item.IsSetByUser())
+	assert.NoError(t, params.Save(item.Key, "auto"))
+	assert.False(t, item.GetAsBool())
+	assert.False(t, item.IsSetByUser())
+
+	for _, val := range []string{"true", "false", "auto"} {
+		old := item.SwapTempValue(val)
+		assert.Equal(t, val == "true", item.GetAsBool())
+		assert.Equal(t, val != "auto", item.IsSetByUser())
+		item.SwapTempValue(old)
+	}
+	assert.False(t, item.GetAsBool())
+}
