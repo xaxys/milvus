@@ -4063,6 +4063,12 @@ class SegmentExpr : public Expr {
             .json_array_cast = is_json_contains_,
             .accepts_candidates = true,
             .is_range = IsRangeExpr(),
+            // Hints come from the query, not from the leaf: every expression of this
+            // request sees the same ordered list.
+            .index_hints = plan_options_.index_hints.empty()
+                               ? nullptr
+                               : &plan_options_.index_hints,
+            .index_hint_strict = plan_options_.index_hint_strict,
             .has_offset_input = has_offset_input_,
         };
     }
