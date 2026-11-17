@@ -74,6 +74,10 @@ type describeCollectionFuncType func(ctx context.Context, request *milvuspb.Desc
 
 type showPartitionsFuncType func(ctx context.Context, request *milvuspb.ShowPartitionsRequest) (*milvuspb.ShowPartitionsResponse, error)
 
+func (coord *MixCoordMock) GetIndexLoadStatus(ctx context.Context, req *querypb.GetIndexLoadStatusRequest, opts ...grpc.CallOption) (*querypb.GetIndexLoadStatusResponse, error) {
+	return &querypb.GetIndexLoadStatusResponse{Status: merr.Success()}, nil
+}
+
 type MixCoordMock struct {
 	nodeID  typeutil.UniqueID
 	address string

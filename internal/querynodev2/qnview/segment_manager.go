@@ -20,10 +20,11 @@ type AcquireSegments struct {
 	View *viewpb.QueryViewOfQueryNode
 
 	// OnReady is called when segments become available.
-	// readySegments maps partitionID → newly loaded segment IDs.
+	// readySegments maps partitionID → newly loaded segment IDs; optional
+	// loadedIndexes maps segmentID → prepared index IDs (empty slice = 0 indexes).
 	// May be called multiple times for incremental progress.
 	// Must NOT be called synchronously during Acquire.
-	OnReady func(readySegments map[int64][]int64)
+	OnReady func(readySegments map[int64][]int64, loadedIndexes ...map[int64][]int64)
 
 	// OnUnrecoverable is called when a fatal error prevents segment loading.
 	// Must NOT be called synchronously during Acquire.

@@ -789,3 +789,21 @@ func TestPendingOverwrite_SegmentsThenUnrecoverable(t *testing.T) {
 	assertReportState(t, sm, qviews.QueryViewStateUnrecoverable)
 	assertNoReport(t, sm)
 }
+
+func TestReportCarriesLoadedIndexesPerSegment(t *testing.T) {
+	sm := NewQNQueryViewStateMachine(buildTestMeta(), buildTestQNView())
+	sm.OnSegmentsReady(
+		map[int64][]int64{10: {1000, 1001, 1002}},
+		map[int64][]int64{
+			1000: {3, 2, 3}, // duplicates and unsorted: normalized on push
+			1001: nil,       // prepared segment that loaded zero indexes
+		},
+	)
+	got := sm.loadedIndexesOf([]int64{1000, 1001, 1002})
+
+	require.Len(t, got, 2, "ready 0-index segment must emit an empty entry while untracked segment is omitted")
+	assert.Equal(t, int64(1000), got[0].GetSegmentId())
+	assert.Equal(t, []int64{2, 3}, got[0].GetIndexIds())
+	assert.Equal(t, int64(1001), got[1].GetSegmentId())
+	assert.Empty(t, got[1].GetIndexIds())
+}

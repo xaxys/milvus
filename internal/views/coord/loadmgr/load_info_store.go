@@ -70,6 +70,27 @@ func (s *LoadConfigStore) GetLoadInfo(ctx context.Context, collectionID int64, v
 	}, nil
 }
 
+// RequiredIndexIDs returns the set of index IDs selected by the retained
+// LoadConfig at version directly from memory without consulting IndexMeta.
+func (s *LoadConfigStore) RequiredIndexIDs(collectionID int64, version uint64) (map[int64]struct{}, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if version == 0 {
+		return nil, false
+	}
+	cfg := s.history[collectionID][version]
+	if cfg == nil {
+		return nil, false
+	}
+	ids := make(map[int64]struct{})
+	for _, field := range cfg.RequiredFields {
+		for _, id := range field.GetIndexIds() {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids, true
+}
+
 // AcquireLoadInfo pins requirements through final durable View removal. It is
 // serialized with deletion, including creation before the View is persisted.
 func (s *LoadConfigStore) AcquireLoadInfo(ctx context.Context, collectionID int64, version uint64) (func(), error) {

@@ -24,6 +24,13 @@ type LoadInfoRefProvider interface {
 	AcquireLoadInfo(context.Context, int64, uint64) (func(), error)
 }
 
+// RequiredIndexProvider optionally resolves the exact index IDs selected by a
+// retained LoadInfoVersion so steady-state segments matching it need not be
+// duplicated in Coordinator memory or ETCD.
+type RequiredIndexProvider interface {
+	RequiredIndexIDs(collectionID int64, version uint64) (map[int64]struct{}, bool)
+}
+
 // ShardViewManager manages multiple QueryViews for a single shard (vchannel)
 // within a single replica on the Coord side.
 //
@@ -114,6 +121,7 @@ func newShardViewManager(
 	}
 	for _, view := range recoveredViews {
 		sm := RecoverCoordQueryViewStateMachineWithRef(view, nil)
+		m.bindExpectedIndexes(sm)
 		recovered = append(recovered, sm)
 		m.views[sm.Version()] = sm
 	}
@@ -178,6 +186,7 @@ func RecoverShardViewManager(
 				m.abortRecovery()
 				return nil, err
 			}
+			m.bindExpectedIndexes(sm)
 		}
 		if ref != nil {
 			allMissing = false
@@ -305,7 +314,19 @@ func (m *ShardViewManager) statsLocked() *ShardStats {
 }
 
 func viewPlacement(sm *CoordQueryViewStateMachine) *ViewPlacement {
-	p := &ViewPlacement{Assignments: make(map[int64]int64), PartitionSizes: make(map[int64]map[int64]int64)}
+	reported := sm.QNSegmentIndexes()
+	p := &ViewPlacement{
+		Assignments:    make(map[int64]int64),
+		SegmentIndexes: make(map[int64]map[int64]struct{}, len(reported)),
+		PartitionSizes: make(map[int64]map[int64]int64),
+	}
+	for segID, ids := range reported {
+		copied := make(map[int64]struct{}, len(ids))
+		for id := range ids {
+			copied[id] = struct{}{}
+		}
+		p.SegmentIndexes[segID] = copied
+	}
 	for _, node := range sm.View().GetQueryNode() {
 		for _, part := range node.GetPartitions() {
 			rows := p.PartitionSizes[part.GetPartitionId()]
@@ -334,6 +355,17 @@ func viewNodeIDs(view *viewpb.QueryViewOfShard) []int64 {
 		nodes = append(nodes, node.GetNodeId())
 	}
 	return nodes
+}
+
+func (m *ShardViewManager) bindExpectedIndexes(sm *CoordQueryViewStateMachine) {
+	provider, ok := m.loadInfoRefs.(RequiredIndexProvider)
+	if !ok {
+		return
+	}
+	meta := sm.View().GetMeta()
+	if required, ok := provider.RequiredIndexIDs(meta.GetCollectionId(), meta.GetLoadInfoVersion()); ok {
+		sm.SetExpectedIndexes(required)
+	}
 }
 
 // fillShardStats attaches the complete published footprint of each placed segment, read
@@ -510,6 +542,7 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 	}
 	sm := NewCoordQueryViewStateMachineWithRef(view, ref)
 	sm.releaseLoadInfo = releaseLoadInfo
+	m.bindExpectedIndexes(sm)
 	sm.preparation = preparation
 	if preparation != nil {
 		preparation.Version = sm.Version()

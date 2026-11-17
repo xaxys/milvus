@@ -101,7 +101,7 @@ func (f *resourceTestFixture) request(version int64, schema int32, load uint64) 
 	meta := buildHandlerTestMeta(version)
 	meta.SchemaVersion, meta.LoadInfoVersion = schema, load
 	view := &viewpb.QueryViewOfQueryNode{NodeId: 1, Partitions: []*viewpb.QueryViewOfPartition{{PartitionId: 10, SegmentIds: []int64{1000}, SegmentManifestVersions: []int64{1}}}}
-	req := AcquireSegments{Meta: meta, View: view, Key: qviews.NewQueryViewAtQueryNode(meta, view).QueryViewKey(), OnReady: func(map[int64][]int64) { f.ready <- schema }}
+	req := AcquireSegments{Meta: meta, View: view, Key: qviews.NewQueryViewAtQueryNode(meta, view).QueryViewKey(), OnReady: func(map[int64][]int64, ...map[int64][]int64) { f.ready <- schema }}
 	return req
 }
 
@@ -330,7 +330,7 @@ func TestSegmentResourceEmptyAssignmentPreparesDependencies(t *testing.T) {
 		meta := buildHandlerTestMeta(1)
 		view := &viewpb.QueryViewOfQueryNode{NodeId: 1}
 		ready := make(chan map[int64][]int64, 1)
-		req := AcquireSegments{Meta: meta, View: view, Key: qviews.NewQueryViewAtQueryNode(meta, view).QueryViewKey(), OnReady: func(ids map[int64][]int64) { ready <- ids }}
+		req := AcquireSegments{Meta: meta, View: view, Key: qviews.NewQueryViewAtQueryNode(meta, view).QueryViewKey(), OnReady: func(ids map[int64][]int64, _ ...map[int64][]int64) { ready <- ids }}
 		f.manager.Acquire(req)
 		select {
 		case ids := <-ready:
@@ -560,6 +560,78 @@ func TestSegmentResourceRefreshesSnapshotWhenLoadInfoVersionAdvances(t *testing.
 		f.await(t, 1)
 		require.EqualValues(t, 3, f.gets.Load())
 		require.EqualValues(t, 1, preparedWith301.Load(), "v3 must refresh snapshot and open newly built index 301")
+
+		f.drop(t, v1)
+		f.drop(t, v2)
+		f.drop(t, v3)
+	})
+}
+
+func TestSegmentResourceManagerPushesLoadedIndexesPerView(t *testing.T) {
+	mockey.PatchConvey("Acquire pushes per-view prepared index IDs including 0-index segments", t, func() {
+		f := setupResourceTest(t, nil)
+		f.getMock.UnPatch()
+		mockey.Mock((*resourceTestMetadata).GetQueryViewSegmentLoadInfo).To(func(_ *resourceTestMetadata, _ context.Context, collectionID, segmentID int64) (SegmentLoadInfoSnapshot, error) {
+			snap := resourceSnapshot(collectionID, segmentID, 1)
+			snap.LoadInfo.IndexInfos = []*querypb.FieldIndexInfo{
+				{FieldID: 101, IndexID: 10},
+				{FieldID: 101, IndexID: 20},
+			}
+			return snap, nil
+		}).Build()
+		f.dependencyMock.UnPatch()
+		mockey.Mock((*fakeQueryViewCollectionRuntimeManager).Acquire).To(func(_ *fakeQueryViewCollectionRuntimeManager, _ context.Context, view *qviews.QueryViewAtQueryNode) (CollectionRuntimeGuard, bool, error) {
+			loadVer := view.IntoProto().Meta.GetLoadInfoVersion()
+			var idxs []*indexpb.IndexInfo
+			switch loadVer {
+			case 1:
+				idxs = []*indexpb.IndexInfo{{FieldID: 101, IndexID: 10}}
+			case 2:
+				idxs = []*indexpb.IndexInfo{{FieldID: 101, IndexID: 10}, {FieldID: 101, IndexID: 20}}
+			case 3:
+				idxs = nil
+			}
+			return &fakeCollectionRuntimeGuard{
+				schemaVersion:  1,
+				schema:         &schemapb.CollectionSchema{Version: 1},
+				updatedIndexes: idxs,
+			}, false, nil
+		}).Build()
+
+		acquireAndWait := func(version int64, load uint64) (AcquireSegments, map[int64][]int64) {
+			req := f.request(version, 1, load)
+			pushed := make(chan map[int64][]int64, 1)
+			req.OnReady = func(_ map[int64][]int64, loaded ...map[int64][]int64) {
+				if len(loaded) > 0 {
+					pushed <- loaded[0]
+				} else {
+					pushed <- nil
+				}
+			}
+			f.manager.Acquire(req)
+			select {
+			case got := <-pushed:
+				return req, got
+			case <-time.After(5 * time.Second):
+				t.Fatal("OnReady did not fire")
+				return req, nil
+			}
+		}
+
+		v1, ids1 := acquireAndWait(1, 1)
+		idsFor1, ok1 := ids1[1000]
+		require.True(t, ok1)
+		require.Equal(t, []int64{10}, idsFor1)
+
+		v2, ids2 := acquireAndWait(2, 2)
+		idsFor2, ok2 := ids2[1000]
+		require.True(t, ok2)
+		require.Equal(t, []int64{10, 20}, idsFor2)
+
+		v3, ids3 := acquireAndWait(3, 3)
+		idsFor3, ok3 := ids3[1000]
+		require.True(t, ok3)
+		require.Empty(t, idsFor3)
 
 		f.drop(t, v1)
 		f.drop(t, v2)

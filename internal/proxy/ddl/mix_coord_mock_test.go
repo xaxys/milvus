@@ -83,6 +83,12 @@ type showPartitionsFuncType func(ctx context.Context, request *milvuspb.ShowPart
 
 var _ types.MixCoordClient = (*MixCoordMock)(nil)
 
+// GetIndexLoadStatus is part of types.MixCoordClient; the DDL tests never ask for
+// load status, so the mock answers with an empty, successful response.
+func (m *MixCoordMock) GetIndexLoadStatus(ctx context.Context, req *querypb.GetIndexLoadStatusRequest, opts ...grpc.CallOption) (*querypb.GetIndexLoadStatusResponse, error) {
+	return &querypb.GetIndexLoadStatusResponse{Status: merr.Success()}, nil
+}
+
 type MixCoordMock struct {
 	nodeID  typeutil.UniqueID
 	address string
