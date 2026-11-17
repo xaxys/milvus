@@ -1,6 +1,8 @@
 package qnview
 
 import (
+	"sort"
+
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/views/qviews"
@@ -32,6 +34,9 @@ type QNQueryViewStateMachine struct {
 	state  qviews.QueryViewState
 	meta   *viewpb.QueryViewMeta
 	qnView *viewpb.QueryViewOfQueryNode
+	// loadedIndexes returns the index ids a segment actually loaded; nil when the
+	// node cannot tell (the report then carries no per-segment index evidence).
+	loadedIndexes func(segmentID int64) []int64
 
 	// Per-partition ready segment set, updated incrementally by OnSegmentsReady.
 	readySegments map[int64]map[int64]struct{}
@@ -52,13 +57,18 @@ type QNQueryViewStateMachine struct {
 // After construction:
 //   - State is Preparing. No pendingReport (subsequent OnSegmentsReady /
 //     OnUnrecoverable will drive progress and generate reports).
-func NewQNQueryViewStateMachine(meta *viewpb.QueryViewMeta, qnView *viewpb.QueryViewOfQueryNode) *QNQueryViewStateMachine {
+func NewQNQueryViewStateMachine(
+	meta *viewpb.QueryViewMeta,
+	qnView *viewpb.QueryViewOfQueryNode,
+	loadedIndexes func(segmentID int64) []int64,
+) *QNQueryViewStateMachine {
 	readySegments := make(map[int64]map[int64]struct{}, len(qnView.Partitions))
 	for _, p := range qnView.Partitions {
 		readySegments[p.PartitionId] = make(map[int64]struct{})
 	}
 	assignedSegments, total := buildAssignedSegmentSet(qnView)
 	return &QNQueryViewStateMachine{
+		loadedIndexes:    loadedIndexes,
 		state:            qviews.QueryViewStatePreparing,
 		meta:             meta,
 		qnView:           qnView,
@@ -240,15 +250,47 @@ func (sm *QNQueryViewStateMachine) readySegmentSlice(partitionID int64) []int64 
 	return segs
 }
 
+// loadedIndexesOf reports, for every segment that finished loading, the indexes
+// it can answer from. A node that cannot tell leaves the list empty, which the
+// coordinator reads as "no evidence" rather than "loaded nothing".
+func (sm *QNQueryViewStateMachine) loadedIndexesOf(segmentIDs []int64) []*viewpb.SegmentLoadedIndexes {
+	if sm.loadedIndexes == nil || len(segmentIDs) == 0 {
+		return nil
+	}
+	loaded := make([]*viewpb.SegmentLoadedIndexes, 0, len(segmentIDs))
+	for _, segmentID := range segmentIDs {
+		indexes := sm.loadedIndexes(segmentID)
+		if len(indexes) == 0 {
+			continue
+		}
+		ids := make([]int64, 0, len(indexes))
+		seen := make(map[int64]struct{}, len(indexes))
+		for _, id := range indexes {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		loaded = append(loaded, &viewpb.SegmentLoadedIndexes{
+			SegmentId: segmentID,
+			IndexIds:  ids,
+		})
+	}
+	return loaded
+}
+
 // buildReport constructs a QueryViewOfShard report from the QN's current state.
 func (sm *QNQueryViewStateMachine) buildReport() *viewpb.QueryViewOfShard {
 	meta := proto.Clone(sm.meta).(*viewpb.QueryViewMeta)
 	meta.State = viewpb.QueryViewState(sm.state)
 
 	qnView := proto.Clone(sm.qnView).(*viewpb.QueryViewOfQueryNode)
-	// Populate ReadySegmentIds from tracked sets.
+	// Populate ReadySegmentIds and the indexes each ready segment actually loaded.
 	for _, p := range qnView.Partitions {
 		p.ReadySegmentIds = sm.readySegmentSlice(p.PartitionId)
+		p.SegmentLoadedIndexes = sm.loadedIndexesOf(p.ReadySegmentIds)
 	}
 
 	return &viewpb.QueryViewOfShard{
