@@ -52,7 +52,8 @@ class PhyColumnExpr : public Expr {
                   milvus::OpContext* op_ctx,
                   const segcore::SegmentInternalInterface* segment,
                   int64_t active_count,
-                  int64_t batch_size)
+                  int64_t batch_size,
+                  const query::PlanOptions& plan_options = {})
         : Expr(expr->type(), std::move(input), name, op_ctx),
           segment_(segment),
           active_count_(active_count),
@@ -63,7 +64,8 @@ class PhyColumnExpr : public Expr {
                         op_ctx,
                         expr->GetColumn().field_id_,
                         expr->GetColumn().data_type_,
-                        active_count) {
+                        active_count,
+                        plan_options) {
         if (segment->type() == SegmentType::Growing && segment->is_chunked()) {
             num_chunk_ = segment_chunk_reader_.NumChunkData(
                 expr_->GetColumn().field_id_);

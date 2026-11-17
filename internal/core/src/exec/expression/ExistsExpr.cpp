@@ -99,7 +99,7 @@ PhyExistsFilterExpr::EvalJsonExistsForIndex() {
         auto cached = ExprCacheHelper::GetOrCompute(
             segment_,
             snapshot_,
-            [this]() { return this->ToString(); },
+            [this]() { return this->MakeLeafCacheSignature(); },
             active_count_,
             [&]() -> ExprCacheHelper::ComputeResult {
                 auto pointer =
@@ -218,7 +218,7 @@ PhyExistsFilterExpr::EvalJsonExistsForDataSegmentByStats() {
         auto cached = ExprCacheHelper::GetOrCompute(
             segment_,
             snapshot_,
-            [this]() { return this->ToString(); },
+            [this]() { return this->MakeLeafCacheSignature(); },
             active_count_,
             [&]() -> ExprCacheHelper::ComputeResult {
                 auto segment =

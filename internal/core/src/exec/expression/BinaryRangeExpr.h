@@ -317,6 +317,14 @@ class PhyBinaryRangeFilterExpr : public SegmentExpr {
     DetermineExecPath() override;
 
     bool
+    UsesIndexWithOffsetInput() const override {
+        return exec_path_ == ExprExecPath::ScalarIndex &&
+               ((expr_->column_.data_type_ == DataType::JSON &&
+                 (!SelectedJsonIndexIsFlat() || num_data_chunk_ == 0)) ||
+                (num_data_chunk_ == 0 && !expr_->column_.element_level_));
+    }
+
+    bool
     SupportsRawExprCache() const override {
         return !expr_->column_.element_level_;
     }

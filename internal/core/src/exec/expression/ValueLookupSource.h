@@ -22,9 +22,11 @@
 
 #include "common/EasyAssert.h"
 #include "common/OpContext.h"
+#include "common/QueryInfo.h"
 #include "common/Types.h"
 #include "exec/expression/IndexPathSelection.h"
 #include "index/contracts/query/IScalarValueReader.h"
+#include "query/PlanNode.h"
 #include "segcore/SegmentInterface.h"
 
 namespace milvus::exec {
@@ -40,14 +42,26 @@ class ValueLookupSource final {
                       OpContext* op_ctx,
                       FieldId field_id,
                       DataType data_type,
-                      int64_t active_count) {
+                      int64_t active_count,
+                      const query::PlanOptions& plan_options = {}) {
+        if (active_count <= 0) {
+            return;
+        }
         const auto capabilities =
             segment->ResolveIndexCapability(op_ctx, field_id);
-        const auto decision =
-            DetermineExecPath({.field_id = field_id,
-                               .reader = RequiredReader::ValueLookup,
-                               .value_type = data_type},
-                              capabilities);
+        ExprIndexRequirement req{
+            .field_id = field_id,
+            .reader = RequiredReader::ValueLookup,
+            .value_type = data_type,
+            .index_hints = plan_options.index_hints.empty()
+                               ? nullptr
+                               : &plan_options.index_hints,
+            // ValueLookupSource backs column-value reads (CallExpr / CompareExpr),
+            // not filter predicate routing: honor matching hints as a preference,
+            // never fail strict mode when the hinted filter index has no lookup.
+            .index_hint_strict = false,
+        };
+        const auto decision = DetermineExecPath(req, capabilities);
         if (!decision.key.has_value()) {
             return;
         }
@@ -74,8 +88,8 @@ class ValueLookupSource final {
             covered_end_ = active_count;
         }
         AssertInfo(segcore::SameCaps(entry->caps, reader->Caps()),
-                   "value index metadata for field {} does not match reader "
-                   "capabilities",
+                   "value index metadata for field {} does not match "
+                   "reader capabilities",
                    field_id.get());
         ValidateReader(field_id, data_type, reader);
         reader_ = reader;

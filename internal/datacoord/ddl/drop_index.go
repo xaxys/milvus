@@ -19,6 +19,7 @@ package ddl
 import (
 	"context"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	qvresource "github.com/milvus-io/milvus/internal/views/coord/resource"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 )
@@ -29,5 +30,8 @@ func (c *Callbacks) dropIndexV2Callback(ctx context.Context, result message.Broa
 		return err
 	}
 	c.Meta.RecomputeDataView(ctx, header.GetCollectionId())
-	return qvresource.PublishIndexes(ctx, header.GetCollectionId())
+	if err := qvresource.PublishIndexes(ctx, header.GetCollectionId()); err != nil {
+		return err
+	}
+	return c.invalidateCollectionIndexMeta(ctx, header.GetCollectionId(), commonpb.MsgType_DropIndex)
 }

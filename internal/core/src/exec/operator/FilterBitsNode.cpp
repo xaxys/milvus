@@ -51,6 +51,8 @@ BuildExprCacheKey(const plan::FilterBitsNode& filter,
                 schema->get_ttl_field_id()->get(),
                 query_context->get_entity_ttl_physical_time_us());
         }
+        key += query::FormatIndexHintsForCacheKey(
+            query_context->get_plan_options());
     }
     return key;
 }

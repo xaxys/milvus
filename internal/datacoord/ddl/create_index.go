@@ -19,6 +19,7 @@ package ddl
 import (
 	"context"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	qvresource "github.com/milvus-io/milvus/internal/views/coord/resource"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
@@ -36,5 +37,5 @@ func (c *Callbacks) createIndexV2AckCallback(ctx context.Context, result message
 	case c.NotifyIndexChan <- index.IndexInfo.CollectionID:
 	default:
 	}
-	return nil
+	return c.invalidateCollectionIndexMeta(ctx, index.IndexInfo.GetCollectionID(), commonpb.MsgType_CreateIndex)
 }

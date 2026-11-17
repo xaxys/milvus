@@ -1139,3 +1139,616 @@ TEST(MultiScalarIndexExprTest,
     EXPECT_EQ(decision.key->identity,
               milvus::segcore::IndexIdentity::PreBuiltIndex(7402));
 }
+
+// A query hint outranks the rule-based score: the named index is used even when
+// another one scores better, and the hint's own order decides among several.
+TEST(MultiScalarIndexExprTest, HintOutranksScore) {
+    constexpr FieldId kField(100);
+    const auto make_entry = [](int64_t id, const char* family) {
+        milvus::segcore::IndexCapabilityEntry entry{milvus::segcore::IndexKey{
+            kField, milvus::segcore::IndexIdentity::PreBuiltIndex(id)}};
+        entry.family = family;
+        entry.value_type = DataType::INT64;
+        entry.caps.predicate = true;
+        entry.caps.exact = true;
+        return entry;
+    };
+    milvus::segcore::FieldIndexCapability caps(
+        kField, {make_entry(6001, "inverted"), make_entry(6002, "bitmap")});
+
+    milvus::exec::ExprIndexRequirement req;
+    req.field_id = kField;
+    req.reader = milvus::exec::RequiredReader::Predicate;
+    req.value_type = DataType::INT64;
+    EXPECT_EQ(milvus::exec::DetermineExecPath(req, caps).key->identity,
+              milvus::segcore::IndexIdentity::PreBuiltIndex(6002));
+
+    const std::vector<milvus::IndexHintOption> hint{
+        {.field_id = kField.get(), .index_id = 6001}};
+    req.index_hints = &hint;
+    EXPECT_EQ(milvus::exec::DetermineExecPath(req, caps).key->identity,
+              milvus::segcore::IndexIdentity::PreBuiltIndex(6001));
+
+    const std::vector<milvus::IndexHintOption> other_field{
+        {.field_id = 999, .index_id = 6001}};
+    req.index_hints = &other_field;
+    EXPECT_EQ(milvus::exec::DetermineExecPath(req, caps).key->identity,
+              milvus::segcore::IndexIdentity::PreBuiltIndex(6002));
+}
+
+TEST(MultiScalarIndexExprTest,
+     StrictHintRejectsLoadedIncompatibleAndAllowsAbsentIndex) {
+    constexpr FieldId kField(100);
+    milvus::segcore::IndexCapabilityEntry ngram_entry{milvus::segcore::IndexKey{
+        kField, milvus::segcore::IndexIdentity::PreBuiltIndex(6101)}};
+    ngram_entry.family = "ngram";
+    ngram_entry.value_type = DataType::VARCHAR;
+    ngram_entry.caps.ngram_candidates = true;
+    ngram_entry.caps.exact = false;
+    milvus::segcore::FieldIndexCapability caps(kField, {ngram_entry});
+
+    milvus::exec::ExprIndexRequirement req;
+    req.field_id = kField;
+    req.reader = milvus::exec::RequiredReader::Predicate;
+    req.value_type = DataType::INT64;
+    const std::vector<milvus::IndexHintOption> hint{
+        {.field_id = kField.get(), .index_id = 6101}};
+    req.index_hints = &hint;
+
+    EXPECT_EQ(milvus::exec::DetermineExecPath(req, caps).path,
+              milvus::exec::ExprExecPath::RawData);
+
+    req.index_hint_strict = true;
+    EXPECT_THROW(milvus::exec::DetermineExecPath(req, caps),
+                 milvus::SegcoreError);
+
+    // When a segment does NOT carry the hinted index (6199) at all (for example
+    // a newly flushed, low-cardinality, or <1024-row segment), strict mode lets
+    // the segment proceed with normal selection instead of failing the query.
+    milvus::segcore::IndexCapabilityEntry old_entry{milvus::segcore::IndexKey{
+        kField, milvus::segcore::IndexIdentity::PreBuiltIndex(6101)}};
+    old_entry.family = "inverted";
+    old_entry.value_type = DataType::INT64;
+    old_entry.caps.predicate = true;
+    old_entry.caps.exact = true;
+    milvus::segcore::FieldIndexCapability old_caps(kField, {old_entry});
+    const std::vector<milvus::IndexHintOption> unloaded_hint{
+        {.field_id = kField.get(), .index_id = 6199}};
+    req.index_hints = &unloaded_hint;
+    auto decision = milvus::exec::DetermineExecPath(req, old_caps);
+    EXPECT_EQ(decision.path, milvus::exec::ExprExecPath::ScalarIndex);
+    ASSERT_TRUE(decision.key.has_value());
+    EXPECT_EQ(decision.key->identity,
+              milvus::segcore::IndexIdentity::PreBuiltIndex(6101));
+}
+
+TEST(MultiScalarIndexExprTest, HintOrderOutranksFamilyPriority) {
+    constexpr FieldId kField(100);
+    auto make_entry = [&](int64_t index_id, const char* family) {
+        milvus::segcore::IndexCapabilityEntry entry{milvus::segcore::IndexKey{
+            kField, milvus::segcore::IndexIdentity::PreBuiltIndex(index_id)}};
+        entry.family = family;
+        entry.value_type = DataType::INT64;
+        entry.caps.predicate = true;
+        entry.caps.exact = true;
+        return entry;
+    };
+    milvus::segcore::FieldIndexCapability caps(
+        kField, {make_entry(6101, "bitmap"), make_entry(6102, "inverted")});
+
+    milvus::exec::ExprIndexRequirement req;
+    req.field_id = kField;
+    req.reader = milvus::exec::RequiredReader::Predicate;
+    req.value_type = DataType::INT64;
+    const std::vector<milvus::IndexHintOption> hint{
+        {.field_id = kField.get(), .index_id = 6102},
+        {.field_id = kField.get(), .index_id = 6101},
+    };
+    req.index_hints = &hint;
+
+    auto decision = milvus::exec::DetermineExecPath(req, caps);
+    ASSERT_TRUE(decision.key.has_value());
+    EXPECT_EQ(decision.key->identity,
+              milvus::segcore::IndexIdentity::PreBuiltIndex(6102));
+}
+
+TEST(MultiScalarIndexExprTest, StrictHintAllowsRawWhenFieldHasNoEntry) {
+    constexpr FieldId kField(100);
+    milvus::segcore::FieldIndexCapability caps(kField, {});
+
+    milvus::exec::ExprIndexRequirement req;
+    req.field_id = kField;
+    req.reader = milvus::exec::RequiredReader::Predicate;
+    req.value_type = DataType::INT64;
+    const std::vector<milvus::IndexHintOption> hint{
+        {.field_id = kField.get(), .index_id = 6101}};
+    req.index_hints = &hint;
+    req.index_hint_strict = true;
+
+    auto decision = milvus::exec::DetermineExecPath(req, caps);
+    EXPECT_EQ(decision.path, milvus::exec::ExprExecPath::RawData);
+}
+
+TEST(MultiScalarIndexExprTest, StrictHintIsScopedToItsJsonPath) {
+    constexpr FieldId kField(100);
+    const std::string path_a = "/a";
+    const std::string path_b = "/b";
+    auto make_entry = [&](int64_t index_id, const std::string& path) {
+        milvus::segcore::IndexCapabilityEntry entry{milvus::segcore::IndexKey{
+            kField, milvus::segcore::IndexIdentity::PreBuiltIndex(index_id)}};
+        entry.family = "inverted";
+        entry.json_path = path;
+        entry.json_cast_type = JsonCastType::FromString("DOUBLE");
+        entry.value_type = DataType::DOUBLE;
+        entry.caps.predicate = true;
+        entry.caps.exact = true;
+        return entry;
+    };
+    milvus::segcore::FieldIndexCapability caps(
+        kField, {make_entry(6101, path_a), make_entry(6102, path_b)});
+
+    const std::vector<milvus::IndexHintOption> hint{
+        {.field_id = kField.get(), .index_id = 6101}};
+
+    milvus::exec::ExprIndexRequirement req_a;
+    req_a.field_id = kField;
+    req_a.reader = milvus::exec::RequiredReader::Predicate;
+    req_a.value_type = DataType::DOUBLE;
+    req_a.is_json_field = true;
+    req_a.json_path = path_a;
+    req_a.index_hints = &hint;
+    req_a.index_hint_strict = true;
+    EXPECT_EQ(milvus::exec::DetermineExecPath(req_a, caps).path,
+              milvus::exec::ExprExecPath::ScalarIndex);
+
+    milvus::exec::ExprIndexRequirement req_b = req_a;
+    req_b.json_path = path_b;
+    auto decision_b = milvus::exec::DetermineExecPath(req_b, caps);
+    EXPECT_EQ(decision_b.path, milvus::exec::ExprExecPath::ScalarIndex);
+    ASSERT_TRUE(decision_b.key.has_value());
+    EXPECT_EQ(decision_b.key->identity,
+              milvus::segcore::IndexIdentity::PreBuiltIndex(6102));
+
+    // Conversely, hinting an unloaded index on /b lets the segment fall back to
+    // raw data on /b without failing strict mode even when /a is loaded; only a
+    // loaded incompatible index on /b fails strict mode.
+    const std::vector<milvus::IndexHintOption> unloaded_b_hint{
+        {.field_id = kField.get(), .index_id = 6199}};
+    milvus::segcore::FieldIndexCapability only_a_caps(
+        kField, {make_entry(6101, path_a)});
+    req_b.index_hints = &unloaded_b_hint;
+    EXPECT_EQ(milvus::exec::DetermineExecPath(req_b, only_a_caps).path,
+              milvus::exec::ExprExecPath::RawData);
+}
+
+TEST(MultiScalarIndexExprTest,
+     StrictHintExemptsConstantFoldAndHonorsValueLookupAndNonInvalidErrors) {
+    constexpr int64_t kNgramIndexId = 7451;
+    constexpr int64_t kSortIndexId = 7452;
+
+    auto schema = std::make_shared<Schema>();
+    auto varchar_fid =
+        schema->AddDebugField("varchar_field", DataType::VARCHAR);
+    auto left_int_fid = schema->AddDebugField("left_int", DataType::INT64);
+    auto right_int_fid = schema->AddDebugField("right_int", DataType::INT64);
+
+    auto varchar_data = milvus::test::expr_index::StringField(kVarCharValues);
+    auto int_data =
+        std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+    int_data->FillFieldData(kInt64Values.data(), kInt64Values.size());
+
+    RawFieldFiles files;
+    auto segment = CreateSealedSegment(schema);
+    segment->LoadFieldData(files.Prepare(varchar_fid, {varchar_data}));
+    segment->LoadFieldData(files.Prepare(left_int_fid, {int_data}));
+    segment->LoadFieldData(files.Prepare(right_int_fid, {int_data}));
+
+    InstallIndexWithId(*segment,
+                       varchar_fid,
+                       DataType::VARCHAR,
+                       kNgramIndexId,
+                       BuildIndex(varchar_fid,
+                                  DataType::VARCHAR,
+                                  milvus::index::NGRAM_INDEX_TYPE,
+                                  {varchar_data},
+                                  {{milvus::index::MIN_GRAM, 3},
+                                   {milvus::index::MAX_GRAM, 4}}));
+    InstallIndexWithId(*segment,
+                       left_int_fid,
+                       DataType::INT64,
+                       kSortIndexId,
+                       BuildIndex(left_int_fid,
+                                  DataType::INT64,
+                                  milvus::index::ASCENDING_SORT,
+                                  {int_data}));
+
+    // 1. Non-nullable IS NOT NULL is constant-folded from schema and must not
+    //    fail strict mode even when the loaded NGRAM index cannot serve Null
+    //    or when strict raw-fallback check runs.
+    {
+        auto is_not_null = std::make_shared<expr::NullExpr>(
+            expr::ColumnInfo(
+                varchar_fid, DataType::VARCHAR, {}, /*nullable=*/false),
+            proto::plan::NullExpr_NullOp_IsNotNull);
+        query::PlanOptions opts;
+        opts.index_hints = {
+            {.field_id = varchar_fid.get(), .index_id = kNgramIndexId}};
+        opts.index_hint_strict = true;
+
+        std::vector<expr::TypedExprPtr> filters{is_not_null};
+        auto qc = std::make_shared<exec::QueryContext>(DEAFULT_QUERY_ID,
+                                                       segment.get(),
+                                                       kVarCharValues.size(),
+                                                       MAX_TIMESTAMP,
+                                                       0,
+                                                       0,
+                                                       opts);
+        auto ec = std::make_unique<exec::ExecContext>(qc.get());
+        auto exprs = std::make_unique<exec::ExprSet>(filters, ec.get());
+        std::vector<VectorPtr> results;
+        exec::EvalCtx eval_ctx(ec.get());
+        ASSERT_NO_THROW(exprs->Eval(0, 1, true, eval_ctx, results));
+        auto col = milvus::test::GetColumnVectorForTest(results[0]);
+        ASSERT_NE(col, nullptr);
+        EXPECT_EQ(col->size(), kVarCharValues.size());
+    }
+
+    // 2. PhyCompareFilterExpr forwards PlanOptions into ValueLookupSource:
+    //    strict hint on an index without value_lookup (NGRAM on varchar_fid)
+    //    throws InvalidParameter, while strict hint on STL_SORT succeeds.
+    {
+        auto str_cmp =
+            std::make_shared<expr::CompareExpr>(varchar_fid,
+                                                varchar_fid,
+                                                DataType::VARCHAR,
+                                                DataType::VARCHAR,
+                                                proto::plan::OpType::Equal);
+        query::PlanOptions bad_opts;
+        bad_opts.index_hints = {
+            {.field_id = varchar_fid.get(), .index_id = kNgramIndexId}};
+        bad_opts.index_hint_strict = true;
+
+        std::vector<expr::TypedExprPtr> bad_filters{str_cmp};
+        auto bad_qc =
+            std::make_shared<exec::QueryContext>(DEAFULT_QUERY_ID,
+                                                 segment.get(),
+                                                 kVarCharValues.size(),
+                                                 MAX_TIMESTAMP,
+                                                 0,
+                                                 0,
+                                                 bad_opts);
+        auto bad_ec = std::make_unique<exec::ExecContext>(bad_qc.get());
+        // ValueLookupSource backs column-value reads rather than filter
+        // predicate routing, so a hinted filter index without value_lookup
+        // falls back to raw column values instead of failing strict mode.
+        auto fallback_exprs =
+            std::make_unique<exec::ExprSet>(bad_filters, bad_ec.get());
+        std::vector<VectorPtr> fallback_results;
+        exec::EvalCtx fallback_eval_ctx(bad_ec.get());
+        ASSERT_NO_THROW(fallback_exprs->Eval(
+            0, 1, true, fallback_eval_ctx, fallback_results));
+
+        auto int_cmp =
+            std::make_shared<expr::CompareExpr>(left_int_fid,
+                                                right_int_fid,
+                                                DataType::INT64,
+                                                DataType::INT64,
+                                                proto::plan::OpType::Equal);
+        query::PlanOptions ok_opts;
+        ok_opts.index_hints = {
+            {.field_id = left_int_fid.get(), .index_id = kSortIndexId}};
+        ok_opts.index_hint_strict = true;
+
+        std::vector<expr::TypedExprPtr> ok_filters{int_cmp};
+        auto ok_qc = std::make_shared<exec::QueryContext>(DEAFULT_QUERY_ID,
+                                                          segment.get(),
+                                                          kInt64Values.size(),
+                                                          MAX_TIMESTAMP,
+                                                          0,
+                                                          0,
+                                                          ok_opts);
+        auto ok_ec = std::make_unique<exec::ExecContext>(ok_qc.get());
+        auto exprs = std::make_unique<exec::ExprSet>(ok_filters, ok_ec.get());
+        std::vector<VectorPtr> results;
+        exec::EvalCtx eval_ctx(ok_ec.get());
+        ASSERT_NO_THROW(exprs->Eval(0, 1, true, eval_ctx, results));
+    }
+
+    // 3. Offset-input evaluation that bypasses a hinted ScalarIndex / Ngram
+    //    when raw column chunks are present must fail in strict mode.
+    {
+        auto eq_expr = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(left_int_fid, DataType::INT64),
+            proto::plan::OpType::Equal,
+            Int64Literal(kInt64Values[0]));
+        query::PlanOptions strict_opts;
+        strict_opts.index_hints = {
+            {.field_id = left_int_fid.get(), .index_id = kSortIndexId}};
+        strict_opts.index_hint_strict = true;
+
+        std::vector<expr::TypedExprPtr> filters{eq_expr};
+        auto qc = std::make_shared<exec::QueryContext>(DEAFULT_QUERY_ID,
+                                                       segment.get(),
+                                                       kInt64Values.size(),
+                                                       MAX_TIMESTAMP,
+                                                       0,
+                                                       0,
+                                                       strict_opts);
+        auto ec = std::make_unique<exec::ExecContext>(qc.get());
+        auto exprs = std::make_unique<exec::ExprSet>(filters, ec.get());
+        // Trigger path determination before offset_input is bound (as async
+        // prefetch does), then evaluate with OffsetVector input.
+        EXPECT_TRUE(exprs->expr(0)->CanExecuteAllAtOnce());
+        exec::OffsetVector offsets{0, 2};
+        exec::EvalCtx eval_ctx(ec.get(), &offsets);
+        std::vector<VectorPtr> results;
+        EXPECT_THROW(exprs->Eval(0, 1, true, eval_ctx, results), SegcoreError);
+    }
+}
+
+TEST(MultiScalarIndexExprTest, PatternMatchHintOrderAndStrictNgramReason) {
+    constexpr int64_t kTrieIndexId = 7401;
+    constexpr int64_t kNgramIndexId = 7402;
+
+    auto schema = std::make_shared<Schema>();
+    auto varchar_fid =
+        schema->AddDebugField("varchar_field", DataType::VARCHAR);
+    auto field_data = milvus::test::expr_index::StringField(kVarCharValues);
+
+    RawFieldFiles files;
+    auto segment = CreateSealedSegment(schema);
+    segment->LoadFieldData(files.Prepare(varchar_fid, {field_data}));
+    InstallIndexWithId(*segment,
+                       varchar_fid,
+                       DataType::VARCHAR,
+                       kTrieIndexId,
+                       BuildIndex(varchar_fid,
+                                  DataType::VARCHAR,
+                                  milvus::index::MARISA_TRIE,
+                                  {field_data}));
+    InstallIndexWithId(*segment,
+                       varchar_fid,
+                       DataType::VARCHAR,
+                       kNgramIndexId,
+                       BuildIndex(varchar_fid,
+                                  DataType::VARCHAR,
+                                  milvus::index::NGRAM_INDEX_TYPE,
+                                  {field_data},
+                                  {{milvus::index::MIN_GRAM, 3},
+                                   {milvus::index::MAX_GRAM, 4}}));
+
+    auto eval_with_options = [&](const expr::TypedExprPtr& expr,
+                                 const query::PlanOptions& opts) {
+        std::vector<expr::TypedExprPtr> filters{expr};
+        auto qc = std::make_shared<exec::QueryContext>(DEAFULT_QUERY_ID,
+                                                       segment.get(),
+                                                       kVarCharValues.size(),
+                                                       MAX_TIMESTAMP,
+                                                       0,
+                                                       0,
+                                                       opts);
+        auto ec = std::make_unique<exec::ExecContext>(qc.get());
+        auto exprs = std::make_unique<exec::ExprSet>(filters, ec.get());
+        std::vector<VectorPtr> results;
+        exec::EvalCtx eval_ctx(ec.get());
+        exprs->Eval(0, 1, true, eval_ctx, results);
+        return milvus::test::GetColumnVectorForTest(results[0]);
+    };
+
+    proto::plan::GenericValue alpha_pat;
+    alpha_pat.set_string_val("alpha");
+    auto inner_alpha = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(varchar_fid, DataType::VARCHAR),
+        proto::plan::OpType::InnerMatch,
+        alpha_pat,
+        std::vector<proto::plan::GenericValue>{});
+
+    // 1. Hint [Trie, Ngram] must pick Marisa Trie (index 0 in hint order)
+    //    rather than letting Ngram preempt it.
+    {
+        query::PlanOptions opts;
+        opts.feature_recorder = std::make_shared<FeatureRecorder>();
+        opts.index_hints = {
+            {.field_id = varchar_fid.get(), .index_id = kTrieIndexId},
+            {.field_id = varchar_fid.get(), .index_id = kNgramIndexId},
+        };
+        auto res = eval_with_options(inner_alpha, opts);
+        ExpectHitRows(res, {0, 1}, "InnerMatch alpha via hinted Trie");
+        const uint64_t bits = opts.feature_recorder->Bits();
+        const auto has_bit = [bits](FeatureBit b) {
+            return (bits & (uint64_t{1} << static_cast<uint32_t>(b))) != 0;
+        };
+        EXPECT_TRUE(has_bit(FeatureBit::ScalarIndexTrie));
+        EXPECT_FALSE(has_bit(FeatureBit::ScalarIndexNgram));
+    }
+
+    // 2. Reversing the hint [Ngram, Trie] must pick Ngram.
+    {
+        query::PlanOptions opts;
+        opts.feature_recorder = std::make_shared<FeatureRecorder>();
+        opts.index_hints = {
+            {.field_id = varchar_fid.get(), .index_id = kNgramIndexId},
+            {.field_id = varchar_fid.get(), .index_id = kTrieIndexId},
+        };
+        auto res = eval_with_options(inner_alpha, opts);
+        ExpectHitRows(res, {0, 1}, "InnerMatch alpha via hinted Ngram");
+        const uint64_t bits = opts.feature_recorder->Bits();
+        const auto has_bit = [bits](FeatureBit b) {
+            return (bits & (uint64_t{1} << static_cast<uint32_t>(b))) != 0;
+        };
+        EXPECT_TRUE(has_bit(FeatureBit::ScalarIndexNgram));
+        EXPECT_FALSE(has_bit(FeatureBit::ScalarIndexTrie));
+    }
+
+    // 3. Single NGRAM strict hint on a too-short literal ("al", min_gram=3)
+    //    must preserve "literal_not_supported" instead of "capability_mismatch".
+    {
+        proto::plan::GenericValue short_pat;
+        short_pat.set_string_val("al");
+        auto inner_short = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(varchar_fid, DataType::VARCHAR),
+            proto::plan::OpType::InnerMatch,
+            short_pat,
+            std::vector<proto::plan::GenericValue>{});
+
+        query::PlanOptions opts;
+        opts.index_hints = {
+            {.field_id = varchar_fid.get(), .index_id = kNgramIndexId}};
+        opts.index_hint_strict = true;
+        try {
+            eval_with_options(inner_short, opts);
+            FAIL() << "expected SegcoreError for strict too-short ngram hint";
+        } catch (const SegcoreError& err) {
+            EXPECT_EQ(err.get_error_code(), ErrorCode::InvalidParameter);
+            EXPECT_NE(std::string(err.what()).find("literal_not_supported"),
+                      std::string::npos)
+                << err.what();
+        }
+    }
+}
+
+TEST(MultiScalarIndexExprTest, StrictHintParentJsonFlatRejectsIntegerSubpath) {
+    constexpr FieldId kJsonField(102);
+
+    milvus::segcore::IndexCapabilityEntry flat_entry{milvus::segcore::IndexKey{
+        kJsonField, milvus::segcore::IndexIdentity::PreBuiltIndex(7501)}};
+    flat_entry.json_path = "/a";
+    flat_entry.json_cast_type = JsonCastType::FromString("JSON");
+    flat_entry.family = "json_flat";
+    flat_entry.value_type = DataType::JSON;
+    flat_entry.caps = {.predicate = true, .json_paths = true, .exact = true};
+
+    milvus::segcore::FieldIndexCapability caps(kJsonField, {flat_entry});
+    std::vector<milvus::IndexHintOption> hints{
+        {.field_id = kJsonField.get(), .index_id = 7501}};
+
+    milvus::exec::ExprIndexRequirement req;
+    req.field_id = kJsonField;
+    req.reader = milvus::exec::RequiredReader::Predicate;
+    req.value_type = DataType::VARCHAR;
+    req.is_json_field = true;
+    req.json_path = "/a/0/x";
+    req.index_hints = &hints;
+    req.index_hint_strict = true;
+
+    try {
+        (void)milvus::exec::DetermineExecPath(req, caps);
+        FAIL() << "expected strict hint failure on integer array subpath";
+    } catch (const SegcoreError& err) {
+        EXPECT_EQ(err.get_error_code(), ErrorCode::InvalidParameter);
+        EXPECT_NE(std::string(err.what()).find("json_path_not_covered"),
+                  std::string::npos)
+            << err.what();
+    }
+}
+
+TEST(MultiScalarIndexExprTest,
+     TextMatchAndEntityTTLIgnoreStrictScalarIndexHints) {
+    // 1. RequiredReader::TextMatch must ignore scalar index_hints even when
+    //    the same VARCHAR/TEXT field carries a hinted scalar index.
+    {
+        constexpr FieldId kTextField(105);
+        milvus::segcore::IndexCapabilityEntry ngram_entry{
+            milvus::segcore::IndexKey{
+                kTextField,
+                milvus::segcore::IndexIdentity::PreBuiltIndex(7601)}};
+        ngram_entry.family = "ngram";
+        ngram_entry.value_type = DataType::VARCHAR;
+        ngram_entry.caps = {.ngram_candidates = true};
+
+        milvus::segcore::IndexCapabilityEntry text_entry{
+            milvus::segcore::IndexKey{
+                kTextField,
+                milvus::segcore::IndexIdentity::PreBuiltIndex(7602)}};
+        text_entry.family = "text";
+        text_entry.value_type = DataType::VARCHAR;
+        text_entry.caps = {.text_match = true, .exact = true};
+
+        milvus::segcore::FieldIndexCapability caps(kTextField,
+                                                   {ngram_entry, text_entry});
+        std::vector<milvus::IndexHintOption> hints{
+            {.field_id = kTextField.get(), .index_id = 7601}};
+
+        milvus::exec::ExprIndexRequirement req;
+        req.field_id = kTextField;
+        req.reader = milvus::exec::RequiredReader::TextMatch;
+        req.value_type = DataType::VARCHAR;
+        req.index_hints = &hints;
+        req.index_hint_strict = true;
+
+        const auto decision = milvus::exec::DetermineExecPath(req, caps);
+        EXPECT_EQ(decision.path, milvus::exec::ExprExecPath::TextIndex);
+        ASSERT_TRUE(decision.key.has_value());
+        EXPECT_EQ(*decision.key, text_entry.key);
+    }
+
+    // 2. Internal Entity-TTL expression compiled alongside a user filter must
+    //    not inherit user index_hints / index_hint_strict when evaluated with
+    //    OffsetVector input (IterativeFilterNode).
+    {
+        auto schema = std::make_shared<Schema>();
+        auto pk_fid = schema->AddDebugField("pk", DataType::INT64);
+        schema->set_primary_field_id(pk_fid);
+        auto ttl_fid =
+            schema->AddDebugField("ttl_ts", DataType::TIMESTAMPTZ, true);
+        schema->set_ttl_field_id(ttl_fid);
+
+        const std::vector<int64_t> pks = {1, 2, 3, 4};
+        const std::vector<int64_t> ttls = {1000, 2000, 3000, 4000};
+        const uint8_t valid = 0x0F;
+        auto pk_data =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        pk_data->FillFieldData(pks.data(), pks.size());
+        auto ttl_data =
+            std::make_shared<FieldData<int64_t>>(DataType::TIMESTAMPTZ, true);
+        ttl_data->FillFieldData(ttls.data(), &valid, ttls.size(), 0);
+
+        RawFieldFiles files;
+        auto segment = CreateSealedSegment(schema);
+        segment->LoadFieldData(files.Prepare(pk_fid, {pk_data}));
+        segment->LoadFieldData(files.Prepare(ttl_fid, {ttl_data}));
+        InstallIndexWithId(*segment,
+                           ttl_fid,
+                           DataType::TIMESTAMPTZ,
+                           7603,
+                           BuildIndex(ttl_fid,
+                                      DataType::TIMESTAMPTZ,
+                                      milvus::index::ASCENDING_SORT,
+                                      {ttl_data}));
+
+        auto pk_gt = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(pk_fid, DataType::INT64),
+            proto::plan::OpType::GreaterThan,
+            Int64Literal(1));
+        query::PlanOptions opts;
+        opts.index_hints = {{.field_id = ttl_fid.get(), .index_id = 7603}};
+        opts.index_hint_strict = true;
+
+        std::vector<expr::TypedExprPtr> filters{pk_gt};
+        auto qc = std::make_shared<exec::QueryContext>(
+            DEAFULT_QUERY_ID,
+            segment.get(),
+            pks.size(),
+            MAX_TIMESTAMP,
+            0,
+            0,
+            opts,
+            std::make_shared<exec::QueryConfig>(),
+            nullptr,
+            std::unordered_map<std::string,
+                               std::shared_ptr<exec::BaseConfig>>{},
+            /*entity_ttl_physical_time_us=*/2500);
+        qc->set_read_schema(schema);
+        auto ec = std::make_unique<exec::ExecContext>(qc.get());
+        auto exprs = std::make_unique<exec::ExprSet>(
+            filters, ec.get(), /*null_rejecting=*/true);
+
+        exec::OffsetVector offsets{0, 1, 2, 3};
+        exec::EvalCtx eval_ctx(ec.get(), &offsets);
+        std::vector<VectorPtr> results;
+        ASSERT_NO_THROW(exprs->Eval(0, 1, true, eval_ctx, results));
+        auto col = milvus::test::GetColumnVectorForTest(results[0]);
+        ExpectHitRows(
+            col, {2, 3}, "pk > 1 AND ttl > 2500 with strict hint on ttl");
+    }
+}

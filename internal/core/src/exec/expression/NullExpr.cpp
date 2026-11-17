@@ -135,6 +135,14 @@ PhyNullExpr::Eval(EvalCtx& context, VectorPtr& result) {
 
 void
 PhyNullExpr::DetermineExecPath() {
+    const bool schema_not_nullable = expr_->column_.element_level_
+                                         ? !is_element_nullable_
+                                         : !expr_->column_.nullable_;
+    if (schema_not_nullable) {
+        is_constant_folded_ = true;
+        exec_path_ = ExprExecPath::RawData;
+        return;
+    }
     // Element validity is read from raw data; a field without null elements
     // is not read at all.
     if (expr_->column_.element_level_ ||

@@ -25,6 +25,7 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/proxypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
@@ -45,6 +46,9 @@ type Broker interface {
 	// DropCollection drops a collection via RootCoord.
 	// Used for rollback when snapshot restore fails.
 	DropCollection(ctx context.Context, dbName, collectionName string) error
+
+	// InvalidateCollectionMetaCache notifies RootCoord to evict Proxy collection metadata caches.
+	InvalidateCollectionMetaCache(ctx context.Context, collectionID int64, msgType commonpb.MsgType) error
 }
 
 type coordinatorBroker struct {
@@ -149,5 +153,27 @@ func (b *coordinatorBroker) DropCollection(ctx context.Context, dbName, collecti
 	}
 
 	log.Info(ctx, "DropCollection succeeded")
+	return nil
+}
+
+// InvalidateCollectionMetaCache notifies RootCoord to evict Proxy collection metadata caches.
+func (b *coordinatorBroker) InvalidateCollectionMetaCache(ctx context.Context, collectionID int64, msgType commonpb.MsgType) error {
+	ctx, cancel := context.WithTimeout(ctx, paramtable.Get().QueryCoordCfg.BrokerTimeout.GetAsDuration(time.Millisecond))
+	defer cancel()
+
+	resp, err := b.mixCoord.InvalidateCollectionMetaCache(ctx, &proxypb.InvalidateCollMetaCacheRequest{
+		Base: commonpbutil.NewMsgBase(
+			commonpbutil.WithMsgType(msgType),
+			commonpbutil.WithSourceID(paramtable.GetNodeID()),
+		),
+		CollectionID: collectionID,
+	})
+	if err := merr.CheckRPCCall(resp, err); err != nil {
+		mlog.Warn(ctx, "InvalidateCollectionMetaCache failed",
+			mlog.FieldCollectionID(collectionID),
+			mlog.String("msgType", msgType.String()),
+			mlog.Err(err))
+		return err
+	}
 	return nil
 }

@@ -176,7 +176,8 @@ class PhyCompareFilterExpr : public Expr {
         milvus::OpContext* op_ctx,
         const segcore::SegmentInternalInterface* segment,
         int64_t active_count,
-        int64_t batch_size)
+        int64_t batch_size,
+        const query::PlanOptions& plan_options = {})
         : Expr(DataType::BOOL, std::move(input), name, op_ctx),
           left_field_(expr->left_field_id_),
           right_field_(expr->right_field_id_),
@@ -189,12 +190,14 @@ class PhyCompareFilterExpr : public Expr {
                              op_ctx,
                              left_field_,
                              expr->left_data_type_,
-                             active_count),
+                             active_count,
+                             plan_options),
           right_value_lookup_(segment,
                               op_ctx,
                               right_field_,
                               expr->right_data_type_,
-                              active_count) {
+                              active_count,
+                              plan_options) {
         is_left_indexed_ = left_value_lookup_.HasReader();
         is_right_indexed_ = right_value_lookup_.HasReader();
         if (segment->type() == SegmentType::Growing && segment->is_chunked()) {

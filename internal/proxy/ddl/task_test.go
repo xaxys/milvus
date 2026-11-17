@@ -3618,6 +3618,7 @@ func Test_describeIndexTask_Execute_DynamicFieldFiltering(t *testing.T) {
 
 	cache := NewMockCache(t)
 	cache.EXPECT().GetCollectionID(mock.Anything, dbName, collectionName).Return(collectionID, nil).Maybe()
+	cache.EXPECT().InvalidateCollectionIndexes(mock.Anything, collectionID).Return().Maybe()
 	cache.EXPECT().GetCollectionSchema(mock.Anything, dbName, collectionName).Return(
 		mustNewSchemaInfo(&schemapb.CollectionSchema{
 			Name:               collectionName,
@@ -3749,6 +3750,7 @@ func Test_AlterIndexTask_VisibleOnLoadedCollectionAndUnambiguousEmptyIndexName(t
 	)
 	cache := NewMockCache(t)
 	cache.EXPECT().GetCollectionID(mock.Anything, dbName, collectionName).Return(collectionID, nil).Maybe()
+	cache.EXPECT().InvalidateCollectionIndexes(mock.Anything, collectionID).Return().Maybe()
 	cache.EXPECT().GetCollectionSchema(mock.Anything, dbName, collectionName).Return(
 		mustNewSchemaInfo(&schemapb.CollectionSchema{
 			Name:               collectionName,

@@ -970,6 +970,11 @@ class PhyUnaryRangeFilterExpr : public SegmentExpr {
     DetermineExecPath() override;
 
     bool
+    UsesIndexWithOffsetInput() const override {
+        return IndexOnlyScalarWithOffsets(expr_->column_.element_level_);
+    }
+
+    bool
     SupportsRawExprCache() const override {
         return !expr_->column_.element_level_ &&
                !IsTextIndexOpType(expr_->op_type_) && !CanUseNgramIndex();

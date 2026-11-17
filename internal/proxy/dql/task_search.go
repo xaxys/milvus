@@ -168,6 +168,7 @@ type SearchTask struct {
 
 	hybridSubSearchInfos []hybridSubSearchInfo
 	hybridElementLevel   bool
+	outerIndexHint       parsedIndexHint
 
 	chMgr channelmgr.ChannelsMgr
 }
@@ -692,6 +693,9 @@ func (t *SearchTask) initAdvancedSearchRequest(ctx context.Context) error {
 	// Parse order_by_fields from main search params
 	if t.orderByFields, err = parseOrderByFields(t.request.GetSearchParams(), t.schema.CollectionSchema); err != nil {
 		log.Error(ctx, "parseOrderByFields failed", mlog.Err(err))
+		return err
+	}
+	if t.outerIndexHint, err = parseIndexHintParams(t.request.GetSearchParams()); err != nil {
 		return err
 	}
 
@@ -1448,6 +1452,27 @@ func (t *SearchTask) tryGeneratePlan(
 			mlog.String("anns field", annsFieldName), mlog.Any("query info", searchInfo.planInfo))
 		metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), "search", metrics.FailLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, WrapPlanCreationError(planErr, "failed to create query plan")
+	}
+	var (
+		hintNames  []string
+		hintStrict bool
+	)
+	if t.IsAdvanced {
+		subHint, hintErr := parseIndexHintParams(params)
+		if hintErr != nil {
+			return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, hintErr
+		}
+		hintNames, hintStrict = mergeIndexHint(t.outerIndexHint, subHint)
+	} else {
+		var hintErr error
+		hintNames, hintStrict, hintErr = indexHintNames(params)
+		if hintErr != nil {
+			return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, hintErr
+		}
+	}
+	if err := applyResolvedIndexHint(t.ctx, t.node, t.GetCollectionID(), t.schema.CollectionSchema, plan, hintNames, hintStrict); err != nil {
+		// A hint the user asked to be strict about must surface, not be swallowed.
+		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, err
 	}
 	collectExprTemplateFeatures(exprTemplateValues, t.featureSink())
 	collectExecFeatureBits(plan, t.collectFeatures)

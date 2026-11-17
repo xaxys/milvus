@@ -138,6 +138,25 @@ CreateTTLFieldFilterExpression(QueryContext* query_context) {
     return ttl_or_expr;
 }
 
+namespace {
+
+ExprPtr
+CompileExpressionWithOptions(
+    const expr::TypedExprPtr& expr,
+    QueryContext* context,
+    const query::PlanOptions& plan_options,
+    const std::unordered_set<std::string>& flatten_candidates,
+    bool enable_constant_folding);
+
+std::vector<ExprPtr>
+CompileInputsWithOptions(
+    const expr::TypedExprPtr& expr,
+    QueryContext* context,
+    const query::PlanOptions& plan_options,
+    const std::unordered_set<std::string>& flatten_candidates);
+
+}  // namespace
+
 std::vector<ExprPtr>
 CompileExpressions(const std::vector<expr::TypedExprPtr>& sources,
                    ExecContext* context,
@@ -146,22 +165,49 @@ CompileExpressions(const std::vector<expr::TypedExprPtr>& sources,
     std::vector<std::shared_ptr<Expr>> exprs;
     exprs.reserve(sources.size());
 
-    // Create TTL filter expression if schema has TTL field
-    auto ttl_expr =
-        CreateTTLFieldFilterExpression(context->get_query_context());
+    auto* query_context = context->get_query_context();
+    const auto effective_options = context->effective_plan_options();
 
-    // Merge TTL expression with the first source expression if TTL exists
+    // Create TTL filter expression if schema has TTL field. Internal TTL
+    // predicates never inherit user index_hints / index_hint_strict.
+    auto ttl_expr = CreateTTLFieldFilterExpression(query_context);
+
     for (size_t i = 0; i < sources.size(); ++i) {
-        expr::TypedExprPtr expr_to_compile = sources[i];
+        auto compiled = CompileExpressionWithOptions(sources[i],
+                                                     query_context,
+                                                     effective_options,
+                                                     flatten_candidate,
+                                                     enable_constant_folding);
         if (i == 0 && ttl_expr != nullptr) {
-            // Merge TTL expression with the first expression using AND
-            expr_to_compile = std::make_shared<expr::LogicalBinaryExpr>(
-                expr::LogicalBinaryExpr::OpType::And, sources[i], ttl_expr);
-        }
-        exprs.emplace_back(CompileExpression(expr_to_compile,
-                                             context->get_query_context(),
+            auto ttl_options = effective_options;
+            ttl_options.index_hints.clear();
+            ttl_options.index_hint_strict = false;
+            auto compiled_ttl =
+                CompileExpressionWithOptions(ttl_expr,
+                                             query_context,
+                                             ttl_options,
                                              flatten_candidate,
-                                             enable_constant_folding));
+                                             enable_constant_folding);
+            if (auto conjunct =
+                    std::dynamic_pointer_cast<PhyConjunctFilterExpr>(compiled);
+                conjunct != nullptr && conjunct->IsAnd()) {
+                auto inputs = conjunct->GetInputsRef();
+                inputs.push_back(std::move(compiled_ttl));
+                conjunct->RebuildInputs(std::move(inputs));
+            } else {
+                std::vector<ExprPtr> and_inputs;
+                and_inputs.reserve(2);
+                and_inputs.push_back(std::move(compiled));
+                and_inputs.push_back(std::move(compiled_ttl));
+                compiled = std::make_shared<PhyConjunctFilterExpr>(
+                    std::move(and_inputs),
+                    /*is_and=*/true,
+                    query_context->get_op_context());
+                compiled->SetSnapshot(query_context->get_read_snapshot().get());
+                compiled->SetPlanOptions(effective_options);
+            }
+        }
+        exprs.emplace_back(std::move(compiled));
     }
 
     if (OPTIMIZE_EXPR_ENABLED.load()) {
@@ -169,7 +215,6 @@ CompileExpressions(const std::vector<expr::TypedExprPtr>& sources,
     }
 
     if (ExprResCacheManager::IsEnabled()) {
-        auto* query_context = context->get_query_context();
         DecorateRawExprCache(exprs,
                              query_context->get_op_context(),
                              query_context->get_enable_sub_expr_cache_write());
@@ -224,10 +269,14 @@ FlattenInput(const expr::TypedExprPtr& input,
     }
 }
 
+namespace {
+
 std::vector<ExprPtr>
-CompileInputs(const expr::TypedExprPtr& expr,
-              QueryContext* context,
-              const std::unordered_set<std::string>& flatten_cadidates) {
+CompileInputsWithOptions(
+    const expr::TypedExprPtr& expr,
+    QueryContext* context,
+    const query::PlanOptions& plan_options,
+    const std::unordered_set<std::string>& flatten_cadidates) {
     std::vector<ExprPtr> compiled_inputs;
     auto flatten = ShouldFlatten(expr);
     for (auto& input : expr->inputs()) {
@@ -240,12 +289,16 @@ CompileInputs(const expr::TypedExprPtr& expr,
                 std::vector<expr::TypedExprPtr> flat_exprs;
                 FlattenInput(input, flatten.value(), flat_exprs);
                 for (auto& flat_input : flat_exprs) {
-                    compiled_inputs.push_back(CompileExpression(
-                        flat_input, context, flatten_cadidates, false));
+                    compiled_inputs.push_back(
+                        CompileExpressionWithOptions(flat_input,
+                                                     context,
+                                                     plan_options,
+                                                     flatten_cadidates,
+                                                     false));
                 }
             } else {
-                compiled_inputs.push_back(CompileExpression(
-                    input, context, flatten_cadidates, false));
+                compiled_inputs.push_back(CompileExpressionWithOptions(
+                    input, context, plan_options, flatten_cadidates, false));
             }
         }
     }
@@ -253,12 +306,15 @@ CompileInputs(const expr::TypedExprPtr& expr,
 }
 
 ExprPtr
-CompileExpression(const expr::TypedExprPtr& expr,
-                  QueryContext* context,
-                  const std::unordered_set<std::string>& flatten_candidates,
-                  bool enable_constant_folding) {
+CompileExpressionWithOptions(
+    const expr::TypedExprPtr& expr,
+    QueryContext* context,
+    const query::PlanOptions& plan_options,
+    const std::unordered_set<std::string>& flatten_candidates,
+    bool enable_constant_folding) {
     ExprPtr result;
-    auto compiled_inputs = CompileInputs(expr, context, flatten_candidates);
+    auto compiled_inputs = CompileInputsWithOptions(
+        expr, context, plan_options, flatten_candidates);
 
     auto GetTypes = [](const std::vector<ExprPtr>& exprs) {
         std::vector<DataType> types;
@@ -270,7 +326,6 @@ CompileExpression(const expr::TypedExprPtr& expr,
     };
     auto input_types = GetTypes(compiled_inputs);
     auto op_ctx = context->get_op_context();
-    const auto& plan_options = context->get_plan_options();
 
     if (auto call = std::dynamic_pointer_cast<const expr::CallExpr>(expr)) {
         result = std::make_shared<PhyCallExpr>(
@@ -386,7 +441,8 @@ CompileExpression(const expr::TypedExprPtr& expr,
             op_ctx,
             context->get_segment(),
             context->get_active_count(),
-            context->query_config()->get_expr_batch_size());
+            context->query_config()->get_expr_batch_size(),
+            plan_options);
     } else if (auto casted_expr =
                    std::dynamic_pointer_cast<const milvus::expr::ExistsExpr>(
                        expr)) {
@@ -434,7 +490,8 @@ CompileExpression(const expr::TypedExprPtr& expr,
             op_ctx,
             context->get_segment(),
             context->get_active_count(),
-            context->query_config()->get_expr_batch_size());
+            context->query_config()->get_expr_batch_size(),
+            plan_options);
     } else if (auto column_expr =
                    std::dynamic_pointer_cast<const milvus::expr::NullExpr>(
                        expr)) {
@@ -495,14 +552,37 @@ CompileExpression(const expr::TypedExprPtr& expr,
         ThrowInfo(UnexpectedError, "unsupport expr: {}", expr->ToString());
     }
     // Bind the request-scoped sealed read snapshot (nullptr for growing /
-    // non-pinned paths) to this expression. Runs for the whole compiled tree
-    // because CompileExpression is recursive over inputs.
+    // non-pinned paths) and plan options to this expression. Runs for the
+    // whole compiled tree because CompileExpression is recursive over inputs.
     result->SetSnapshot(context->get_read_snapshot().get());
+    result->SetPlanOptions(plan_options);
     if (plan_options.feature_recorder) {
         result->SetFeatureRecorder(plan_options.feature_recorder.get(),
                                    *context->get_read_schema());
     }
     return result;
+}
+
+}  // namespace
+
+std::vector<ExprPtr>
+CompileInputs(const expr::TypedExprPtr& expr,
+              QueryContext* context,
+              const std::unordered_set<std::string>& flatten_cadidates) {
+    return CompileInputsWithOptions(
+        expr, context, context->get_plan_options(), flatten_cadidates);
+}
+
+ExprPtr
+CompileExpression(const expr::TypedExprPtr& expr,
+                  QueryContext* context,
+                  const std::unordered_set<std::string>& flatten_candidates,
+                  bool enable_constant_folding) {
+    return CompileExpressionWithOptions(expr,
+                                        context,
+                                        context->get_plan_options(),
+                                        flatten_candidates,
+                                        enable_constant_folding);
 }
 
 bool
@@ -628,12 +708,14 @@ SplitFuseGISConjunct(std::shared_ptr<milvus::exec::PhyConjunctFilterExpr>& expr,
                 active,
                 bs,
                 cl);
+            const auto effective_options = context->effective_plan_options();
+            coarse->SetPlanOptions(effective_options);
             // The coarse pass is where the R-Tree serves the group. The refine
             // pass always re-checks its candidates on raw data by design, so
             // it records nothing.
-            if (qc->get_plan_options().feature_recorder) {
+            if (effective_options.feature_recorder) {
                 coarse->SetFeatureRecorder(
-                    qc->get_plan_options().feature_recorder.get(),
+                    effective_options.feature_recorder.get(),
                     *qc->get_read_schema());
             }
             out.push_back(std::move(coarse));

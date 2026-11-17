@@ -234,6 +234,11 @@ func (node *Proxy) InvalidateCollectionMetaCache(ctx context.Context, request *p
 			aliasName = node.GetMetaCache().InvalidateCollectionMeta(ctx, request.GetDbName(), collectionName, collectionID, false)
 			deprecateShardCaches(append(aliasName, collectionName)...)
 			mlog.Info(ctx, "complete to invalidate collection meta cache", mlog.String("type", request.GetBase().GetMsgType().String()))
+		case commonpb.MsgType_CreateIndex, commonpb.MsgType_AlterIndex, commonpb.MsgType_DropIndex:
+			if mc := node.GetMetaCache(); mc != nil && collectionID != UniqueID(0) {
+				mc.InvalidateCollectionIndexes(ctx, collectionID)
+			}
+			mlog.Info(ctx, "complete to invalidate collection index meta cache", mlog.String("type", request.GetBase().GetMsgType().String()))
 		default:
 			mlog.Warn(ctx, "receive unexpected msgType of invalidate collection meta cache", mlog.String("msgType", request.GetBase().GetMsgType().String()))
 			aliasName = node.GetMetaCache().InvalidateCollectionMeta(ctx, request.GetDbName(), collectionName, collectionID, false)

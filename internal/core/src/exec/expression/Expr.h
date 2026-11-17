@@ -430,7 +430,7 @@ class Expr : public std::enable_shared_from_this<Expr> {
         ThrowInfo(ErrorCode::NotImplemented, "not implemented");
     }
 
-    void
+    virtual void
     SetHasOffsetInput(bool has_offset_input) {
         has_offset_input_ = has_offset_input;
     }
@@ -556,6 +556,10 @@ class Expr : public std::enable_shared_from_this<Expr> {
     SetFeatureRecorder(FeatureRecorder* recorder, const Schema& schema) {
     }
 
+    virtual void
+    SetPlanOptions(const query::PlanOptions& plan_options) {
+    }
+
  protected:
     DataType type_;
     std::vector<std::shared_ptr<Expr>> inputs_;
@@ -607,6 +611,11 @@ class SegmentExpr : public Expr {
     }
 
     virtual ~SegmentExpr();
+
+    void
+    SetPlanOptions(const query::PlanOptions& plan_options) override {
+        plan_options_ = plan_options;
+    }
 
     void
     InitSegmentExpr() {
@@ -877,6 +886,16 @@ class SegmentExpr : public Expr {
         // and namespace both modes away from other execution paths' keys.
         return fmt::format(
             "raw:null_rejecting={}:{}", null_rejecting_, ToString());
+    }
+
+    std::string
+    MakeLeafCacheSignature() const {
+        auto sig = this->ToString();
+        if (selected_index_entry_.has_value()) {
+            sig += fmt::format("|idx:{}",
+                               selected_index_entry_->key.identity.ToString());
+        }
+        return sig;
     }
 
     void
@@ -1225,7 +1244,7 @@ class SegmentExpr : public Expr {
             if (!manager.CanCacheSegment(segment_->type())) {
                 return;
             }
-            auto key = MakeExprCacheKey(this->ToString());
+            auto key = MakeExprCacheKey(MakeLeafCacheSignature());
             ExprResCacheManager::Value got;
             got.active_count = active_count_;
             if (manager.Get(key, got)) {
@@ -1256,7 +1275,7 @@ class SegmentExpr : public Expr {
             if (!manager.CanCacheSegment(segment_->type())) {
                 return;
             }
-            auto key = MakeExprCacheKey(this->ToString());
+            auto key = MakeExprCacheKey(MakeLeafCacheSignature());
             ExprResCacheManager::Value v;
             v.result = cached_index_chunk_res_;
             v.valid_result = cached_index_chunk_valid_res_;
@@ -3364,7 +3383,7 @@ class SegmentExpr : public Expr {
             auto cached = ExprCacheHelper::GetOrCompute(
                 segment_,
                 snapshot_,
-                [this]() { return this->ToString(); },
+                [this]() { return this->MakeLeafCacheSignature(); },
                 active_count_,
                 [&]() -> ExprCacheHelper::ComputeResult {
                     TargetBitmap res = func(predicate, values...);
@@ -3990,6 +4009,7 @@ class SegmentExpr : public Expr {
     bool
     SelectAndCreateIndexReader(const ExprIndexRequirement& base_req,
                                Validator&& post_pin_validator) {
+        ran_index_selector_ = true;
         const segcore::CapabilityResolveHint resolve_hint{
             .json_path =
                 base_req.is_json_field
@@ -3998,6 +4018,9 @@ class SegmentExpr : public Expr {
         };
         auto capabilities =
             segment_->ResolveIndexCapability(op_ctx_, field_id_, resolve_hint);
+        saw_hinted_entry_ =
+            index_path_detail::HasHintForField(base_req) &&
+            index_path_detail::HasHintedEntryOnSegment(base_req, capabilities);
         ExprIndexRequirement req = base_req;
         while (true) {
             auto decision = exec::DetermineExecPath(req, capabilities);
@@ -4042,6 +4065,15 @@ class SegmentExpr : public Expr {
             .json_array_cast = is_json_contains_,
             .accepts_candidates = true,
             .is_range = IsRangeExpr(),
+            // Hints come from the query, not from the leaf: every scalar expression of
+            // this request sees the same ordered list, while TEXT_MATCH uses its
+            // dedicated full-text index rather than scalar index_hint routing.
+            .index_hints = (reader == RequiredReader::TextMatch ||
+                            plan_options_.index_hints.empty())
+                               ? nullptr
+                               : &plan_options_.index_hints,
+            .index_hint_strict = reader != RequiredReader::TextMatch &&
+                                 plan_options_.index_hint_strict,
             .has_offset_input = has_offset_input_,
         };
     }
@@ -4194,6 +4226,71 @@ class SegmentExpr : public Expr {
     }
 
     void
+    SetHasOffsetInput(bool has_offset_input) override {
+        Expr::SetHasOffsetInput(has_offset_input);
+        if (!has_offset_input || !plan_options_.index_hint_strict ||
+            plan_options_.index_hints.empty() || active_count_ <= 0 ||
+            !ReportsExecPath()) {
+            return;
+        }
+        EnsureExecPathDetermined();
+        if (saw_hinted_entry_ && !is_constant_folded_ &&
+            exec_path_ == ExprExecPath::ScalarIndex &&
+            !UsesIndexWithOffsetInput()) {
+            EnforceStrictIndexHintOnOffsetBypass();
+        }
+    }
+
+    virtual bool
+    UsesIndexWithOffsetInput() const {
+        return true;
+    }
+
+    bool
+    IndexOnlyScalarWithOffsets(bool element_level) const {
+        return exec_path_ == ExprExecPath::ScalarIndex &&
+               num_data_chunk_ == 0 && !element_level;
+    }
+
+    void
+    EnforceStrictIndexHintOnOffsetBypass() const {
+        const bool is_ngram = selected_index_entry_.has_value() &&
+                              selected_index_entry_->caps.ngram_candidates;
+        ThrowInfo(InvalidParameter,
+                  "index_hint cannot be satisfied on field {} (strict "
+                  "mode): {}",
+                  field_id_.get(),
+                  is_ngram ? milvus::exec::ToString(
+                                 DeclineReason::kOffsetInputWithNgram)
+                           : "offset_input_bypasses_index");
+    }
+
+    void
+    EnforceStrictIndexHintOnRawFallback() const {
+        if (!plan_options_.index_hint_strict ||
+            plan_options_.index_hints.empty()) {
+            return;
+        }
+        const auto req = MakeIndexRequirement();
+        if (!index_path_detail::HasHintForField(req)) {
+            return;
+        }
+        const segcore::CapabilityResolveHint resolve_hint{
+            .json_path = req.is_json_field
+                             ? std::optional<std::string_view>(req.json_path)
+                             : std::nullopt,
+        };
+        auto capabilities =
+            segment_->ResolveIndexCapability(op_ctx_, field_id_, resolve_hint);
+        if (index_path_detail::HasHintedEntryOnSegment(req, capabilities)) {
+            ThrowInfo(InvalidParameter,
+                      "index_hint cannot be satisfied on field {} (strict "
+                      "mode): expression requires raw data scan",
+                      field_id_.get());
+        }
+    }
+
+    void
     EnsureExecPathDetermined() const {
         std::call_once(determine_exec_path_once_, [this]() {
             // Publish a terminal failure as well as a successful path. Letting
@@ -4202,6 +4299,11 @@ class SegmentExpr : public Expr {
             try {
                 auto self = const_cast<SegmentExpr*>(this);
                 self->DetermineExecPath();
+                if (self->ReportsExecPath() && !self->is_constant_folded_ &&
+                    self->exec_path_ == ExprExecPath::RawData &&
+                    !self->ran_index_selector_ && self->active_count_ > 0) {
+                    self->EnforceStrictIndexHintOnRawFallback();
+                }
                 self->FallbackToJsonStatsIfEligible();
                 self->RecordExecPath();
             } catch (...) {
@@ -4610,6 +4712,9 @@ class SegmentExpr : public Expr {
     // Execution path determined once, preferably by PrefetchAsync() on the
     // prefetch pool. Direct callers that do not prefetch determine it lazily.
     ExprExecPath exec_path_{ExprExecPath::RawData};
+    bool ran_index_selector_{false};
+    bool saw_hinted_entry_{false};
+    bool is_constant_folded_{false};
     mutable std::once_flag determine_exec_path_once_;
     // Flag set by SetExecuteAllAtOnce() to enable move-based fast paths,
     // avoiding bitmap copies in ProcessIndexChunks/SliceCachedResult.
@@ -4833,8 +4938,7 @@ class ExprSet {
     // active sets early. See Expr::MarkNullRejecting.
     explicit ExprSet(const std::vector<expr::TypedExprPtr>& logical_exprs,
                      ExecContext* exec_ctx,
-                     bool null_rejecting = false)
-        : exec_ctx_(exec_ctx) {
+                     bool null_rejecting = false) {
         exprs_ = CompileExpressions(logical_exprs, exec_ctx);
         if (null_rejecting) {
             for (auto& compiled_expr : exprs_) {
@@ -4915,7 +5019,6 @@ class ExprSet {
 
  private:
     std::vector<std::shared_ptr<Expr>> exprs_;
-    ExecContext* exec_ctx_;
 };
 
 // Forward declaration for CreateTTLFieldFilterExpression

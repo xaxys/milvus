@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/datacoord/broker"
 	"github.com/milvus-io/milvus/internal/datacoord/bulkimport"
 	"github.com/milvus-io/milvus/internal/datacoord/externalrefresh"
@@ -63,6 +64,20 @@ func (c *Callbacks) RegisterIndexCallbacks() {
 	registry.RegisterCreateIndexV2AckCallback(c.createIndexV2AckCallback)
 	registry.RegisterAlterIndexV2AckCallback(c.alterIndexV2AckCallback)
 	registry.RegisterDropIndexV2AckCallback(c.dropIndexV2Callback)
+}
+
+func (c *Callbacks) invalidateCollectionIndexMeta(ctx context.Context, collectionID int64, msgType commonpb.MsgType) error {
+	if collectionID == 0 || c.Broker == nil {
+		return nil
+	}
+	if err := c.Broker.InvalidateCollectionMetaCache(ctx, collectionID, msgType); err != nil {
+		mlog.Warn(ctx, "failed to invalidate proxy collection index meta cache",
+			mlog.FieldCollectionID(collectionID),
+			mlog.String("msgType", msgType.String()),
+			mlog.Err(err))
+		return err
+	}
+	return nil
 }
 
 func (c *Callbacks) RegisterSnapshotCallbacks() {

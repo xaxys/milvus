@@ -99,6 +99,11 @@ class PhyExistsFilterExpr : public SegmentExpr {
     void
     DetermineExecPath() override;
 
+    bool
+    UsesIndexWithOffsetInput() const override {
+        return false;
+    }
+
  private:
     VectorPtr
     EvalJsonExistsForDataSegment(EvalCtx& context);

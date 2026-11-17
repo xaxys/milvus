@@ -21,6 +21,7 @@ import (
 
 	"github.com/samber/lo"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	qvresource "github.com/milvus-io/milvus/internal/views/coord/resource"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
@@ -40,7 +41,10 @@ func (c *Callbacks) alterIndexV2AckCallback(ctx context.Context, result message.
 		collectionID = indexModels[0].CollectionID
 	}
 	if collectionID != 0 {
-		return qvresource.PublishIndexes(ctx, collectionID)
+		if err := qvresource.PublishIndexes(ctx, collectionID); err != nil {
+			return err
+		}
+		return c.invalidateCollectionIndexMeta(ctx, collectionID, commonpb.MsgType_AlterIndex)
 	}
 	return nil
 }
