@@ -166,30 +166,29 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
         st_->coarse_cursor_complete = current_pos_ == active_count_;
     }
 
+    void
+    DetermineExecPath() override {
+        auto req = MakeIndexRequirement(RequiredReader::Spatial);
+        req.value_type = DataType::GEOMETRY;
+        SelectAndCreateIndexReader(req);
+    }
+
+    // Must return false even when an R-Tree is present so FilterBits does not
+    // force all-at-once execution on the paired Refine node.
+    bool
+    CanExecuteAllAtOnce() const override {
+        EnsureExecPathDetermined();
+        return false;
+    }
+
     // The coarse node never reads the raw geometry column: it either queries
-    // the R-Tree (base DetermineExecPath pins the index early on the prefetch
-    // pool when one is pinnable; RunRTreeQuery re-checks the pin) or emits an
-    // all-set bitmap. The base decision is kept on purpose -- but when it
-    // lands on RawData (no usable index), prefetching the raw column would
-    // only warm data this node never touches, so make it a no-op. The Refine
-    // node, which does read that column, prefetches it itself.
+    // the R-Tree pinned in DetermineExecPath or emits an all-set bitmap. When
+    // selection lands on RawData (no usable index), prefetching the raw column
+    // would only warm data this node never touches, so make it a no-op. The
+    // Refine node, which does read that column, prefetches it itself.
     void
     PrefetchRawData() override {
     }
-
-    // DELIBERATELY NOT overridden to return true. It is tempting to: this node
-    // self-manages its cursor and its Eval handles a single active_count_-sized
-    // batch, so it *could* run all-at-once, which would restore parity with the
-    // baseline PhyGISFunctionFilterExpr (that reaches all-at-once via ScalarIndex
-    // when the field has an R-Tree). But a conjunction is all-at-once eligible
-    // only if EVERY child is, and the Refine node forces RawData -> base returns
-    // false -> the whole Coarse+Refine conjunction stays batched. Inheriting the
-    // base here (index -> true, no-index -> false) keeps that invariant: if this
-    // node ever *did* qualify, SetExecuteAllAtOnce would set batch_size_ =
-    // active_count_ and Refine would bulk_subscript the ENTIRE WKB column in one
-    // Eval (all-ones coarse + default-off geometry cache), turning a batch-bounded
-    // query into a whole-column one and risking a QueryNode OOM. Losing the
-    // all-at-once fast path is the favorable trade. See PR #50675 review.
 
  private:
     int64_t

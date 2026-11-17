@@ -72,4 +72,9 @@ class INgramReader {
                TargetBitmap& candidates) const = 0;
 };
 
+// Metadata-only literal eligibility check shared by pre-pin selection and
+// NgramIndexReader::CanHandle so selection and execution never drift apart.
+bool
+AcceptsNgramLiteral(std::string_view literal, PatternOp op, size_t min_gram);
+
 }  // namespace milvus::index

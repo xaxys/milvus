@@ -50,14 +50,11 @@ PhyExistsFilterExpr::DetermineExecPath() {
     // readers both answer Exists(Any); path matching still prevents a projected
     // reader from serving a sibling path.
     req.value_type = DataType::NONE;
-    if (!SelectAndCreateIndexReader(req)) {
-        return;
-    }
     const auto pointer = milvus::Json::pointer(expr_->column_.nested_path_);
-    if (json_reader_->CastTypesOf(pointer).empty()) {
-        ClearSelectedIndex();
-        exec_path_ = ExprExecPath::RawData;
-    }
+    SelectAndCreateIndexReader(req, [&]() {
+        return json_reader_ != nullptr &&
+               !json_reader_->CastTypesOf(pointer).empty();
+    });
 }
 
 void

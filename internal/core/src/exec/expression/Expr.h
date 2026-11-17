@@ -3484,48 +3484,7 @@ class SegmentExpr : public Expr {
             return ProcessDataChunksForValid<T>();
         } else {
             if (use_index) {
-                // when T is ArrayView, the ScalarIndex<T> shall be ScalarIndex<ElementType>
-                // NOT ScalarIndex<ArrayView>
-                if constexpr (std::is_same_v<T, ArrayView>) {
-                    auto element_type =
-                        segment_->get_field_meta(field_id_).get_element_type();
-                    switch (element_type) {
-                        case DataType::BOOL: {
-                            return ProcessIndexChunksForValid<bool>();
-                        }
-                        case DataType::INT8: {
-                            return ProcessIndexChunksForValid<int8_t>();
-                        }
-                        case DataType::INT16: {
-                            return ProcessIndexChunksForValid<int16_t>();
-                        }
-                        case DataType::INT32: {
-                            return ProcessIndexChunksForValid<int32_t>();
-                        }
-                        case DataType::INT64: {
-                            return ProcessIndexChunksForValid<int64_t>();
-                        }
-                        case DataType::FLOAT: {
-                            return ProcessIndexChunksForValid<float>();
-                        }
-                        case DataType::DOUBLE: {
-                            return ProcessIndexChunksForValid<double>();
-                        }
-                        case DataType::STRING:
-                        case DataType::VARCHAR: {
-                            return ProcessIndexChunksForValid<std::string>();
-                        }
-                        case DataType::GEOMETRY: {
-                            return ProcessIndexChunksForValid<std::string>();
-                        }
-                        default:
-                            ThrowInfo(UnexpectedError,
-                                      "unsupported element type: {}",
-                                      element_type);
-                    }
-                } else {
-                    return ProcessIndexChunksForValid<T>();
-                }
+                return ProcessIndexChunksForValid<T>();
             } else {
                 return ProcessDataChunksForValid<T>();
             }
@@ -3552,58 +3511,12 @@ class SegmentExpr : public Expr {
             apply_field_valid_data();
         } else {
             if (use_index) {
-                // when T is ArrayView, the ScalarIndex<T> shall be ScalarIndex<ElementType>
-                // NOT ScalarIndex<ArrayView>
-                if constexpr (std::is_same_v<T, ArrayView>) {
-                    auto element_type =
-                        segment_->get_field_meta(field_id_).get_element_type();
-                    switch (element_type) {
-                        case DataType::BOOL: {
-                            return ProcessChunksForValidByOffsets<bool>(
-                                use_index, input);
-                        }
-                        case DataType::INT8: {
-                            return ProcessChunksForValidByOffsets<int8_t>(
-                                use_index, input);
-                        }
-                        case DataType::INT16: {
-                            return ProcessChunksForValidByOffsets<int16_t>(
-                                use_index, input);
-                        }
-                        case DataType::INT32: {
-                            return ProcessChunksForValidByOffsets<int32_t>(
-                                use_index, input);
-                        }
-                        case DataType::INT64: {
-                            return ProcessChunksForValidByOffsets<int64_t>(
-                                use_index, input);
-                        }
-                        case DataType::FLOAT: {
-                            return ProcessChunksForValidByOffsets<float>(
-                                use_index, input);
-                        }
-                        case DataType::DOUBLE: {
-                            return ProcessChunksForValidByOffsets<double>(
-                                use_index, input);
-                        }
-                        case DataType::STRING:
-                        case DataType::VARCHAR: {
-                            return ProcessChunksForValidByOffsets<std::string>(
-                                use_index, input);
-                        }
-                        default:
-                            ThrowInfo(UnexpectedError,
-                                      "unsupported element type: {}",
-                                      element_type);
+                const auto& res = GetCachedIndexValidBitmap();
+                if (!cached_index_all_valid_) {
+                    for (auto i = 0; i < batch_size; ++i) {
+                        valid_result[i] = res[input[i]];
                     }
-                } else {
-                    const auto& res = GetCachedIndexValidBitmap();
-                    if (!cached_index_all_valid_) {
-                        for (auto i = 0; i < batch_size; ++i) {
-                            valid_result[i] = res[input[i]];
-                        }
-                    }  // else: valid_result is already all-set
-                }
+                }  // else: valid_result is already all-set
             } else {
                 apply_field_valid_data();
             }
@@ -3901,16 +3814,11 @@ class SegmentExpr : public Expr {
     }
 
     bool
-    SelectAndCreateIndexReader(const ExprIndexRequirement& req) {
-        auto capabilities =
-            segment_->ResolveIndexCapability(op_ctx_, field_id_);
-        auto decision = exec::DetermineExecPath(req, capabilities);
-        exec_path_ = decision.path;
-        if (!decision.key.has_value()) {
-            return exec_path_ != ExprExecPath::RawData;
-        }
-
-        const auto* entry = capabilities.Find(*decision.key);
+    TryOpenSelectedIndexReader(
+        const ExprIndexRequirement& req,
+        const segcore::FieldIndexCapability& capabilities,
+        const segcore::IndexKey& key) {
+        const auto* entry = capabilities.Find(key);
         AssertInfo(entry != nullptr,
                    "selected index key is absent from field {} metadata",
                    field_id_.get());
@@ -3927,8 +3835,7 @@ class SegmentExpr : public Expr {
             AssertInfo(segcore::SameCaps(entry->caps, selected_reader_->Caps()),
                        "growing index metadata does not match reader caps");
         } else {
-            selected_index_reader_ =
-                segment_->CreateIndexReader(op_ctx_, *decision.key);
+            selected_index_reader_ = segment_->CreateIndexReader(op_ctx_, key);
             if (!selected_index_reader_) {
                 ClearSelectedIndex();
                 exec_path_ = ExprExecPath::RawData;
@@ -3936,10 +3843,13 @@ class SegmentExpr : public Expr {
             }
             selected_reader_ = selected_index_reader_.get();
             selected_covered_row_end_ = active_count_;
+            AssertInfo(segcore::SameCaps(entry->caps, selected_reader_->Caps()),
+                       "sealed index metadata does not match reader caps");
         }
         selected_index_entry_ = *entry;
+        const bool has_json_paths = selected_index_entry_->caps.json_paths;
 
-        if (entry->caps.json_paths) {
+        if (has_json_paths) {
             json_reader_ =
                 dynamic_cast<const index::IJsonIndexReader*>(selected_reader_);
             if (json_reader_ == nullptr) {
@@ -3971,7 +3881,7 @@ class SegmentExpr : public Expr {
         }
 
         const auto interface_type =
-            entry->caps.json_paths
+            has_json_paths
                 ? index_path_detail::NormalizeJsonValueType(req.value_type)
                 : entry->value_type;
         const auto reader_caps = selected_reader_->Caps();
@@ -3990,7 +3900,7 @@ class SegmentExpr : public Expr {
             if (reader_caps.predicate) {
                 predicate_available =
                     ExposesPredicateReader(interface_type, selected_reader_);
-                if (!entry->caps.json_paths) {
+                if (!has_json_paths) {
                     AssertInfo(predicate_available,
                                "selected index reader does not expose "
                                "predicate type {}",
@@ -4000,7 +3910,7 @@ class SegmentExpr : public Expr {
             if (reader_caps.value_lookup) {
                 value_available =
                     ExposesValueReader(interface_type, selected_reader_);
-                if (!entry->caps.json_paths) {
+                if (!has_json_paths) {
                     AssertInfo(value_available,
                                "selected index reader does not expose value "
                                "type {}",
@@ -4033,11 +3943,10 @@ class SegmentExpr : public Expr {
                 case RequiredReader::Predicate:
                     return predicate_available;
                 case RequiredReader::PatternMatch:
-                    return pattern_reader_ != nullptr;
+                    return pattern_reader_ != nullptr ||
+                           ngram_reader_ != nullptr;
                 case RequiredReader::TextMatch:
                     return text_reader_ != nullptr;
-                case RequiredReader::Ngram:
-                    return ngram_reader_ != nullptr;
                 case RequiredReader::Spatial:
                     return spatial_reader_ != nullptr;
                 case RequiredReader::Null:
@@ -4052,7 +3961,7 @@ class SegmentExpr : public Expr {
         const bool needs_null = req.reader != RequiredReader::TextMatch &&
                                 req.reader != RequiredReader::JsonPath;
         if (!interface_available || (needs_null && null_reader_ == nullptr)) {
-            if (entry->caps.json_paths) {
+            if (has_json_paths) {
                 ClearSelectedIndex();
                 exec_path_ = ExprExecPath::RawData;
                 return false;
@@ -4064,7 +3973,59 @@ class SegmentExpr : public Expr {
                        "selected scalar reader has no null interface");
         }
         num_index_chunk_ = 1;
+        // One line per leaf that commits to an index, naming the entry that was
+        // chosen: with several indexes on one field the choice is the only way
+        // to tell which one served a query.
+        LOG_DEBUG(
+            "scalar index selected, fieldID:{}, indexID:{}, family:{}, "
+            "reader:{}",
+            field_id_.get(),
+            entry->key.identity.ToString(),
+            entry->family,
+            static_cast<int>(req.reader));
         return true;
+    }
+
+    template <typename Validator>
+    bool
+    SelectAndCreateIndexReader(const ExprIndexRequirement& base_req,
+                               Validator&& post_pin_validator) {
+        const segcore::CapabilityResolveHint resolve_hint{
+            .json_path =
+                base_req.is_json_field
+                    ? std::optional<std::string_view>(base_req.json_path)
+                    : std::nullopt,
+        };
+        auto capabilities =
+            segment_->ResolveIndexCapability(op_ctx_, field_id_, resolve_hint);
+        ExprIndexRequirement req = base_req;
+        while (true) {
+            auto decision = exec::DetermineExecPath(req, capabilities);
+            exec_path_ = decision.path;
+            if (!decision.key.has_value()) {
+                return exec_path_ != ExprExecPath::RawData;
+            }
+            const auto candidate_key = *decision.key;
+            if (TryOpenSelectedIndexReader(req, capabilities, candidate_key) &&
+                post_pin_validator()) {
+                return true;
+            }
+            ClearSelectedIndex();
+            exec_path_ = ExprExecPath::RawData;
+            req.excluded_keys.push_back(candidate_key);
+        }
+    }
+
+    bool
+    SelectAndCreateIndexReader(const ExprIndexRequirement& req) {
+        return SelectAndCreateIndexReader(req, []() { return true; });
+    }
+
+    // Ordered comparison leaves (>, >=, <, <=) tell the selector to prefer a
+    // range-friendly family. Purely static: no literal is needed to answer it.
+    virtual bool
+    IsRangeExpr() const {
+        return false;
     }
 
     ExprIndexRequirement
@@ -4080,6 +4041,7 @@ class SegmentExpr : public Expr {
                              : std::string{},
             .json_array_cast = is_json_contains_,
             .accepts_candidates = true,
+            .is_range = IsRangeExpr(),
             .has_offset_input = has_offset_input_,
         };
     }

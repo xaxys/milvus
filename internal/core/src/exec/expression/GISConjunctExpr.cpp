@@ -99,12 +99,6 @@ GISGroupState::~GISGroupState() {
 PhyGISCoarseConjunctExpr::CoarseOutcome
 PhyGISCoarseConjunctExpr::RunRTreeQuery(GISGroupState::Pred& p) {
     if (spatial_reader_ == nullptr) {
-        auto req = MakeIndexRequirement(RequiredReader::Spatial);
-        req.value_type = DataType::GEOMETRY;
-        SelectAndCreateIndexReader(req);
-        exec_path_ = ExprExecPath::RawData;
-    }
-    if (spatial_reader_ == nullptr) {
         // Degrade to an all-set coarse: results stay correct (Refine still
         // evaluates the exact predicate) but this segment loses R-Tree pruning.
         // The caller aggregates this across the group's predicates and warns
@@ -163,11 +157,9 @@ void
 PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
     // Self-guard like every other SegmentExpr subclass: block until the
     // prefetch-pool DetermineExecPath() has finished before RunRTreeQuery()
-    // selects and pins the exact spatial entry on the query thread. No-op once
-    // the future is drained (subsequent batches hit the cheap
-    // EnsureExecPathDetermined() branch). FilterBits already waits before the
-    // first Eval, so this only hardens direct/other callers.
+    // reads spatial_reader_ on the query thread.
     WaitPrefetch();
+    EnsureExecPathDetermined();
     auto real_batch_size = NextBatchSize();
     if (real_batch_size == 0) {
         result = nullptr;
