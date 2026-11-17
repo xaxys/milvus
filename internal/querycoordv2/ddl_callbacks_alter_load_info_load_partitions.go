@@ -97,7 +97,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadPartitions(ctx conte
 			ExpectedReplicaNumber:            expectedReplicasNumber,
 			ExpectedFieldIndexID:             req.GetFieldIndexID(),
 			ExpectedLoadFields:               loadmgr.PreloadFieldIDsForSchema(coll.Schema, req.GetLoadFields()),
-			ExpectedRequiredFields:           loadmgr.FieldsToMessage(loadmgr.RequiredFieldsForSchema(coll.Schema)),
+			ExpectedRequiredFields:           s.resolveExpectedRequiredFields(coll.ID, coll.Schema, req.GetFieldIndexID()),
 			ExpectedPriority:                 req.GetPriority(),
 			ExpectedUserSpecifiedReplicaMode: userSpecifiedReplicaMode,
 		},

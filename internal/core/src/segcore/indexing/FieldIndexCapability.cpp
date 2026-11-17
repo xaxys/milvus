@@ -73,6 +73,22 @@ IndexIdentity::operator<(const IndexIdentity& other) const {
     return std::get<uint64_t>(value_) < std::get<uint64_t>(other.value_);
 }
 
+std::string
+IndexIdentity::ToString() const {
+    if (value_.index() == 0) {
+        return std::to_string(std::get<int64_t>(value_));
+    }
+    return "local:" + std::to_string(std::get<uint64_t>(value_));
+}
+
+std::optional<int64_t>
+IndexIdentity::pre_built_id() const {
+    if (kind() != Kind::PreBuiltIndex) {
+        return std::nullopt;
+    }
+    return std::get<int64_t>(value_);
+}
+
 size_t
 IndexKeyHash::operator()(const IndexKey& key) const {
     size_t identity_hash;
@@ -90,8 +106,10 @@ IndexKeyHash::operator()(const IndexKey& key) const {
 }
 
 FieldIndexCapability::FieldIndexCapability(
-    FieldId field_id, std::vector<IndexCapabilityEntry> entries)
-    : field_id_(field_id) {
+    FieldId field_id,
+    std::vector<IndexCapabilityEntry> entries,
+    bool has_unmatched_entries)
+    : field_id_(field_id), has_unmatched_entries_(has_unmatched_entries) {
     for (const auto& entry : entries) {
         AssertInfo(entry.key.field_id == field_id_,
                    "field index capability for field {} contains field {}",
@@ -155,8 +173,13 @@ RegistrationFromCapability(const IndexCapabilityEntry& entry) {
     } else if (entry.family == index::families::kNgram) {
         kind = IndexKind::Ngram;
     }
-    return IndexRegistration{
-        entry.key, kind, entry.json_path, entry.json_cast_type};
+    return IndexRegistration{entry.key,
+                             kind,
+                             entry.json_path,
+                             entry.json_cast_type,
+                             entry.params,
+                             entry.json_cast_function,
+                             entry.has_raw_data};
 }
 
 }  // namespace milvus::segcore

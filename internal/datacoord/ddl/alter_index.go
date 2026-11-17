@@ -22,6 +22,7 @@ import (
 	"github.com/samber/lo"
 
 	"github.com/milvus-io/milvus/internal/metastore/model"
+	qvresource "github.com/milvus-io/milvus/internal/views/coord/resource"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 )
@@ -31,5 +32,15 @@ func (c *Callbacks) alterIndexV2AckCallback(ctx context.Context, result message.
 	indexModels := lo.Map(indexes, func(index *indexpb.FieldIndex, _ int) *model.Index {
 		return model.UnmarshalIndexModel(index)
 	})
-	return c.IndexMeta.AlterIndex(ctx, indexModels...)
+	if err := c.IndexMeta.AlterIndex(ctx, indexModels...); err != nil {
+		return err
+	}
+	collectionID := result.Message.Header().GetCollectionId()
+	if collectionID == 0 && len(indexModels) > 0 {
+		collectionID = indexModels[0].CollectionID
+	}
+	if collectionID != 0 {
+		return qvresource.PublishIndexes(ctx, collectionID)
+	}
+	return nil
 }

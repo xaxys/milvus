@@ -34,6 +34,7 @@
 #include "common/FieldData.h"
 #include "common/FieldDataInterface.h"
 #include "common/FieldMeta.h"
+#include "common/JsonCastFunction.h"
 #include "common/JsonCastType.h"
 #include "common/TypeTraits.h"
 #include "common/Types.h"
@@ -43,6 +44,7 @@
 #include "google/protobuf/descriptor.h"
 #include "index/IndexTypeAdapter.h"
 #include "index/Families.h"
+#include "index/LoadResource.h"
 #include "index/Meta.h"
 #include "index/contracts/Registry.h"
 #include "index/ParamUtils.h"
@@ -1551,6 +1553,46 @@ PrepareSealedIndexLoadConfig(const LoadIndexInfo& load_index_info) {
 
 }  // namespace
 
+namespace {
+
+ScalarIndexRuntimeParams
+ParseScalarIndexRuntimeParams(const LoadIndexInfo& info, bool is_ngram) {
+    ScalarIndexRuntimeParams params;
+    if (!is_ngram) {
+        return params;
+    }
+    if (const auto it = info.index_params.find(index::MIN_GRAM);
+        it != info.index_params.end() && !it->second.empty()) {
+        params.ngram.min_gram = static_cast<size_t>(std::stoul(it->second));
+    }
+    return params;
+}
+
+bool
+SealedIndexCarriesRawData(const LoadIndexInfo& info) {
+    if (info.load_resource_request.has_value()) {
+        return index::CanUseIndexRawDataForField(
+            info.field_type, info.load_resource_request->has_raw_data);
+    }
+    const auto type_it = info.index_params.find(index::INDEX_TYPE);
+    if (type_it != info.index_params.end() &&
+        type_it->second == index::HYBRID_INDEX_TYPE) {
+        return false;
+    }
+    if (!info.index_family.empty()) {
+        const bool raw = info.index_family == index::families::kSort ||
+                         info.index_family == index::families::kMarisa;
+        return index::CanUseIndexRawDataForField(info.field_type, raw);
+    }
+    if (type_it != info.index_params.end()) {
+        return index::ScalarIndexTypeHasRawData(info.field_type,
+                                                type_it->second);
+    }
+    return false;
+}
+
+}  // namespace
+
 void
 PrepareLazySealedIndexSlot(LoadIndexInfo& load_index_info) {
     // Validate load parameters without inspecting the artifact or deriving its
@@ -1591,8 +1633,36 @@ MakeSealedIndexRegistration(const LoadIndexInfo& info) {
     IndexRegistration registration{IndexKey{
         FieldId(info.field_id), IndexIdentity::PreBuiltIndex(info.index_id)}};
     const auto type = info.index_params.find(index::INDEX_TYPE);
+    const auto elem_type =
+        info.element_type != DataType::NONE
+            ? info.element_type
+            : static_cast<DataType>(info.schema.element_type());
+
+    std::optional<index::AdaptedIndexType> adapted;
+    if (info.index_family.empty() && !IsVectorDataType(info.field_type) &&
+        type != info.index_params.end() &&
+        (info.field_type != DataType::ARRAY || elem_type != DataType::NONE)) {
+        auto config = index::ParseConfigFromIndexParams(info.index_params);
+        config[index::INDEX_FILES] = info.index_files;
+        const auto nested =
+            index::ReadNestedConfigParam(config, "sealed index registration")
+                .value_or(IsStructSubField(info.schema.name()));
+        adapted.emplace(index::AdaptIndexType({
+            .index_type = type->second,
+            .field_type = info.field_type,
+            .element_type = elem_type,
+            .index_engine_version =
+                static_cast<IndexVersion>(info.index_engine_version),
+            .params = std::move(config),
+            .is_nested = nested,
+            .is_text_match = false,
+        }));
+    }
+
     bool is_ngram = !info.index_family.empty()
                         ? info.index_family == index::families::kNgram
+                    : adapted.has_value()
+                        ? adapted->family == index::families::kNgram
                         : type != info.index_params.end() &&
                               type->second == index::NGRAM_INDEX_TYPE;
     if (info.field_type == DataType::JSON) {
@@ -1603,20 +1673,6 @@ MakeSealedIndexRegistration(const LoadIndexInfo& info) {
             "loaded JSON index for field {} lacks normalized path or "
             "cast metadata",
             info.field_id);
-        if (info.index_family.empty()) {
-            // Registration needs the runtime kind, but no artifact inspection.
-            // The adapter also handles NGRAM spellings that load as INVERTED.
-            const auto adapted = index::AdaptIndexType({
-                .index_type = info.index_params.at(index::INDEX_TYPE),
-                .field_type = info.field_type,
-                .element_type = info.element_type,
-                .index_engine_version = info.index_engine_version,
-                .params = index::ParseConfigFromIndexParams(info.index_params),
-                .is_nested = IsStructSubField(info.schema.name()),
-                .is_text_match = false,
-            });
-            is_ngram = adapted.family == index::families::kNgram;
-        }
         const auto cast_type = JsonCastType::FromString(cast->second);
         // Full JSON uses the json_flat reader, including its NGRAM spelling.
         is_ngram =
@@ -1624,10 +1680,60 @@ MakeSealedIndexRegistration(const LoadIndexInfo& info) {
         registration.json_path = path->second;
         registration.json_cast_type = index::RuntimeJsonCastType(
             is_ngram ? index::NGRAM_INDEX_TYPE : "", cast_type);
+        if (!is_ngram && registration.json_cast_type.data_type() ==
+                             JsonCastType::DataType::DOUBLE) {
+            if (const auto fn = info.index_params.find(JSON_CAST_FUNCTION);
+                fn != info.index_params.end() &&
+                JsonCastFunction::FromString(fn->second).match<double>()) {
+                registration.json_cast_function = fn->second;
+            }
+        }
     }
     registration.kind = IsVectorDataType(info.field_type) ? IndexKind::Vector
                         : is_ngram                        ? IndexKind::Ngram
                                                           : IndexKind::Scalar;
+    registration.params = ParseScalarIndexRuntimeParams(info, is_ngram);
+    registration.has_raw_data = SealedIndexCarriesRawData(info);
+
+    // Typed JSON projections determine caps.json_paths from persisted artifact
+    // completeness metadata at load time; leave static_capability unset for them
+    // so ResolveCapability never exposes half-derived caps while CapabilityResolveHint
+    // still keeps unrelated JSON paths cold.
+    const bool is_typed_json_projection =
+        info.field_type == DataType::JSON &&
+        registration.json_cast_type.data_type() != JsonCastType::DataType::JSON;
+    if (adapted.has_value() && adapted->family != index::families::kHybrid &&
+        !is_typed_json_projection) {
+        if (const auto loader_entry =
+                index::LoaderRegistry::Instance().Lookup(adapted->family);
+            static_cast<bool>(loader_entry)) {
+            registration.static_capability = StaticIndexCapability{
+                .family = std::move(adapted->family),
+                .value_type = adapted->value_type,
+                .caps = loader_entry.derive_caps(adapted->params),
+            };
+        }
+    }
+    return registration;
+}
+
+IndexRegistration
+MakeLazyTextIndexRegistration(const IndexKey& key, DataType value_type) {
+    IndexRegistration registration{key, IndexKind::Text};
+    if (const auto loader_entry =
+            index::LoaderRegistry::Instance().Lookup(index::families::kText);
+        static_cast<bool>(loader_entry)) {
+        milvus::Config config;
+        config["field_type"] = static_cast<int32_t>(value_type);
+        config["value_type"] = static_cast<int32_t>(value_type);
+        config["nested"] = false;
+        config["is_nested"] = false;
+        registration.static_capability = StaticIndexCapability{
+            .family = std::string(index::families::kText),
+            .value_type = value_type,
+            .caps = loader_entry.derive_caps(config),
+        };
+    }
     return registration;
 }
 
@@ -1643,6 +1749,9 @@ MakeSealedIndexCapability(const LoadIndexInfo& info) {
     meta.family = info.index_family;
     meta.value_type = info.index_value_type;
     meta.caps = info.index_caps;
+    meta.params = registration.params;
+    meta.json_cast_function = std::move(registration.json_cast_function);
+    meta.has_raw_data = registration.has_raw_data;
     return meta;
 }
 

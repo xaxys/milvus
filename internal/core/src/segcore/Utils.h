@@ -210,6 +210,9 @@ PrepareLazySealedIndexSlot(LoadIndexInfo& load_index_info);
 IndexRegistration
 MakeSealedIndexRegistration(const LoadIndexInfo& info);
 
+IndexRegistration
+MakeLazyTextIndexRegistration(const IndexKey& key, DataType value_type);
+
 IndexCapabilityEntry
 MakeSealedIndexCapability(const LoadIndexInfo& info);
 

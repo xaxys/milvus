@@ -90,6 +90,9 @@ func (c *IndexChecker) Check(ctx context.Context) []task.Task {
 			mlog.Warn(ctx, "failed to list indexes", mlog.Int64("collection", collectionID), mlog.Err(err))
 			continue
 		}
+		indexInfos = lo.Filter(indexInfos, func(info *indexpb.IndexInfo, _ int) bool {
+			return common.IsIndexInfoVisible(info.GetIndexParams(), info.GetUserIndexParams())
+		})
 
 		collection := c.meta.GetCollection(ctx, collectionID)
 		if collection == nil {

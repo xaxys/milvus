@@ -19,7 +19,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -59,6 +61,17 @@ class IndexIdentity {
     bool
     operator<(const IndexIdentity& other) const;
 
+    // The persisted index id when this identity names a pre-built index. Used by
+    // selection to match a query hint without knowing how identities are encoded.
+    std::optional<int64_t>
+    pre_built_id() const;
+
+    // Renders the identity for logs: the pre-built index id as it was persisted,
+    // or "local:<n>" for a segment-local registration. The two namespaces are
+    // kept apart so a logged id always names the same index.
+    std::string
+    ToString() const;
+
  private:
     explicit IndexIdentity(std::variant<int64_t, uint64_t> value);
 
@@ -87,6 +100,16 @@ struct IndexKeyHash {
 };
 
 // Resolved metadata for one index, used to select and validate its reader.
+// Runtime parameters of one scalar index, grouped by family. Every family fills only
+// its own member; the rest stay default and mean "not carried by this family".
+struct ScalarIndexRuntimeParams {
+    struct Ngram {
+        // 0 means the metadata did not carry the value; selection then defers to the
+        // reader's own check after the pin rather than refusing the index.
+        size_t min_gram{0};
+    } ngram;
+};
+
 struct IndexCapabilityEntry {
     IndexKey key;
 
@@ -110,6 +133,18 @@ struct IndexCapabilityEntry {
     // Metadata-derived caps must equal the opened reader's Caps(); the inventory
     // checks that invariant after pinning.
     index::ReaderCaps caps;
+
+    // Parameters selection needs to decide, BEFORE pinning, whether this index can
+    // serve a specific literal. Structured on purpose: the reader of these values is
+    // the selector, and adding a family adds a member here instead of changing the
+    // selector interface (LiteralSupported(req, entry)).
+    ScalarIndexRuntimeParams params;
+
+    // Effective JSON cast function (e.g. "STRING_TO_DOUBLE") when applicable.
+    std::string json_cast_function;
+
+    // Whether this scalar index carries raw values usable for column-skip/retrieve.
+    bool has_raw_data{false};
 };
 
 // Index category available without initializing a lazy entry.
@@ -120,11 +155,31 @@ enum class IndexKind : uint8_t {
     Ngram,
 };
 
+struct StaticIndexCapability {
+    std::string family;
+    DataType value_type{DataType::NONE};
+    index::ReaderCaps caps;
+};
+
+struct CapabilityResolveHint {
+    // Target JSON path when selecting for a JSON expression; unrelated lazy
+    // typed JSON path entries stay cold instead of inspecting remote metadata.
+    std::optional<std::string_view> json_path;
+};
+
 struct IndexRegistration {
     IndexKey key;
     IndexKind kind{IndexKind::Scalar};
     std::string json_path;
     JsonCastType json_cast_type{JsonCastType::UNKNOWN};
+    // Parameters the selection layer needs before pinning (e.g. NGRAM gram
+    // bounds). Carried here so the inventory can hand them back unchanged.
+    ScalarIndexRuntimeParams params;
+    std::string json_cast_function;
+    bool has_raw_data{false};
+    // Populated at sealed registration time whenever family and capabilities
+    // are completely known without artifact I/O.
+    std::optional<StaticIndexCapability> static_capability;
 };
 
 // Copies registration metadata and classifies the resolved family.
@@ -134,7 +189,9 @@ RegistrationFromCapability(const IndexCapabilityEntry& entry);
 class FieldIndexCapability {
  public:
     explicit FieldIndexCapability(
-        FieldId field_id, std::vector<IndexCapabilityEntry> entries = {});
+        FieldId field_id,
+        std::vector<IndexCapabilityEntry> entries = {},
+        bool has_unmatched_entries = false);
 
     FieldId
     field_id() const {
@@ -144,6 +201,11 @@ class FieldIndexCapability {
     bool
     empty() const {
         return entries_->empty();
+    }
+
+    bool
+    has_unmatched_entries() const noexcept {
+        return has_unmatched_entries_;
     }
 
     const std::vector<IndexCapabilityEntry>&
@@ -160,6 +222,7 @@ class FieldIndexCapability {
  private:
     FieldId field_id_;
     std::shared_ptr<const std::vector<IndexCapabilityEntry>> entries_;
+    bool has_unmatched_entries_{false};
 };
 
 // Capability equality for the inventory's post-pin consistency check.

@@ -400,3 +400,96 @@ func TestEstimateSegmentLoadingResourceKeepsMilvusTableRealPKEager(t *testing.T)
 	require.Zero(t, usage.DiskBytes)
 	require.EqualValues(t, 100, loadInfo.GetEstimatedBytesPerRow())
 }
+
+func TestSkipColumnsOnlyWhenEveryIndexProvidesRawData(t *testing.T) {
+	mk := func() map[int64]*datapb.FieldBinlog {
+		return map[int64]*datapb.FieldBinlog{
+			101: {FieldID: 101},
+			102: {FieldID: 102},
+		}
+	}
+
+	// Both indexes of field 101 provide raw data: the column can be skipped.
+	// Field 102 has one index without it, so its column must stay in the estimate.
+	got := mk()
+	skipColumnsAllIndexesProvideRawData(got,
+		map[int64]bool{101: true, 102: false}, false)
+	if _, ok := got[101]; ok {
+		t.Fatal("field 101: every index provides raw data, the column should be skipped")
+	}
+	if _, ok := got[102]; !ok {
+		t.Fatal("field 102: an index cannot provide raw data, the column must be counted")
+	}
+
+	// A field absent from the map (no usable index) keeps its column.
+	got2 := mk()
+	skipColumnsAllIndexesProvideRawData(got2, map[int64]bool{101: true}, false)
+	if _, ok := got2[102]; !ok {
+		t.Fatal("field 102: no index information, the column must be counted")
+	}
+
+	// PreferFieldDataWhenIndexHasRawData keeps every column.
+	got3 := mk()
+	skipColumnsAllIndexesProvideRawData(got3, map[int64]bool{101: true, 102: true}, true)
+	if len(got3) != 2 {
+		t.Fatalf("preferFieldData=true must keep both columns, got %d", len(got3))
+	}
+}
+
+func TestPrimaryKeyColumnNeverSkippedEvenWhenAllIndexesHaveRawData(t *testing.T) {
+	paramtable.Init()
+	schema := &schemapb.CollectionSchema{
+		Name: "pk_raw_test",
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: 100, Name: "pk", DataType: schemapb.DataType_VarChar, IsPrimaryKey: true, TypeParams: []*commonpb.KeyValuePair{{Key: common.MaxLengthKey, Value: "64"}}},
+			{FieldID: 101, Name: "val", DataType: schemapb.DataType_VarChar, TypeParams: []*commonpb.KeyValuePair{{Key: common.MaxLengthKey, Value: "64"}}},
+		},
+	}
+	mkLoadInfo := func(pkMem, valMem int64) *querypb.SegmentLoadInfo {
+		return &querypb.SegmentLoadInfo{
+			CollectionID: 1,
+			PartitionID:  2,
+			SegmentID:    3,
+			NumOfRows:    10,
+			BinlogPaths: []*datapb.FieldBinlog{
+				{FieldID: 100, Binlogs: []*datapb.Binlog{{MemorySize: pkMem, LogSize: pkMem, EntriesNum: 10}}},
+				{FieldID: 101, Binlogs: []*datapb.Binlog{{MemorySize: valMem, LogSize: valMem, EntriesNum: 10}}},
+			},
+			IndexInfos: []*querypb.FieldIndexInfo{
+				{
+					FieldID:        100,
+					IndexID:        1,
+					BuildID:        11,
+					IndexSize:      50,
+					IndexFilePaths: []string{"pk_trie"},
+					IndexParams:    []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "TRIE"}},
+				},
+				{
+					FieldID:        101,
+					IndexID:        2,
+					BuildID:        12,
+					IndexSize:      50,
+					IndexFilePaths: []string{"val_trie"},
+					IndexParams:    []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "TRIE"}},
+				},
+			},
+		}
+	}
+
+	baseFinal, err := EstimateSegmentFinalResource(context.Background(), schema, mkLoadInfo(0, 600), SegmentFinalEstimateOptions{}, nil)
+	require.NoError(t, err)
+	withPKFinal, err := EstimateSegmentFinalResource(context.Background(), schema, mkLoadInfo(400, 600), SegmentFinalEstimateOptions{}, nil)
+	require.NoError(t, err)
+	// Non-PK val (600) is skipped because TRIE provides raw data; changing valMem to 0 leaves usage unchanged.
+	zeroValFinal, err := EstimateSegmentFinalResource(context.Background(), schema, mkLoadInfo(400, 0), SegmentFinalEstimateOptions{}, nil)
+	require.NoError(t, err)
+	require.Equal(t, zeroValFinal.MemoryBytes, withPKFinal.MemoryBytes)
+	// PK (400 * 2 for doubleMemoryDataField VarChar = 800) is NEVER skipped.
+	require.EqualValues(t, 800, withPKFinal.MemoryBytes-baseFinal.MemoryBytes)
+
+	baseLoading, err := EstimateSegmentLoadingResource(context.Background(), schema, mkLoadInfo(0, 600), SegmentLoadingEstimateOptions{}, nil)
+	require.NoError(t, err)
+	withPKLoading, err := EstimateSegmentLoadingResource(context.Background(), schema, mkLoadInfo(400, 600), SegmentLoadingEstimateOptions{}, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 800, withPKLoading.MemoryBytes-baseLoading.MemoryBytes)
+}

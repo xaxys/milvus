@@ -44,6 +44,9 @@ inline constexpr uint64_t kScalarIndexFixedResidentBytes = 2 * 1024;
 bool
 CanUseIndexRawDataForField(DataType field_type, bool has_raw_data);
 
+bool
+ScalarIndexTypeHasRawData(DataType field_type, std::string_view index_type);
+
 LoadResourceRequest
 IndexLoadResource(DataType field_type,
                   DataType element_type,

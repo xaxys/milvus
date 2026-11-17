@@ -14,6 +14,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/internal/views/qviews"
+	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -411,5 +412,157 @@ func TestSegmentResourceManagerListsQueryViewCollections(t *testing.T) {
 		require.Equal(t, []int64{testCollectionID}, f.manager.CollectionIDs())
 		f.drop(t, second)
 		require.Empty(t, f.manager.CollectionIDs())
+	})
+}
+
+func TestSegmentResourceRefreshesSnapshotWhenLoadInfoVersionAdvances(t *testing.T) {
+	mockey.PatchConvey("advancing LoadInfoVersion with missing required index refreshes StorageV3 snapshot once", t, func() {
+		f := setupResourceTest(t, nil)
+		f.dependencyMock.UnPatch()
+		mockey.Mock((*fakeQueryViewCollectionRuntimeManager).Acquire).To(func(_ *fakeQueryViewCollectionRuntimeManager, _ context.Context, view *qviews.QueryViewAtQueryNode) (CollectionRuntimeGuard, bool, error) {
+			loadVer := view.IntoProto().GetMeta().GetLoadInfoVersion()
+			var indexes []*indexpb.IndexInfo
+			if loadVer >= 2 {
+				indexes = []*indexpb.IndexInfo{{FieldID: 100, IndexID: 301}}
+			}
+			return &fakeCollectionRuntimeGuard{schemaVersion: 1, schema: &schemapb.CollectionSchema{Version: 1}, updatedIndexes: indexes}, false, nil
+		}).Build()
+
+		v1 := f.acquire(1, 1, 1)
+		f.await(t, 1)
+		require.EqualValues(t, 1, f.gets.Load())
+
+		// Re-LoadCollection bumps LoadInfoVersion (1 -> 2) requiring IndexID 301 without changing manifest version.
+		v2 := f.acquire(2, 1, 2)
+		f.await(t, 1)
+		require.EqualValues(t, 2, f.gets.Load())
+		require.EqualValues(t, 1, f.loads.Load(), "physical base is still shared")
+
+		f.drop(t, v1)
+		f.drop(t, v2)
+	})
+
+	mockey.PatchConvey("in-flight GetQueryViewSegmentLoadInfo does not stamp concurrent future LoadInfoVersion", t, func() {
+		f := setupResourceTest(t, nil)
+		entered := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		var getCall atomic.Int32
+		var indexBuilt atomic.Bool
+
+		f.getMock.UnPatch()
+		f.getMock = mockey.Mock((*resourceTestMetadata).GetQueryViewSegmentLoadInfo).To(func(_ *resourceTestMetadata, _ context.Context, collectionID, segmentID int64) (SegmentLoadInfoSnapshot, error) {
+			call := getCall.Add(1)
+			f.gets.Add(1)
+			snap := resourceSnapshot(collectionID, segmentID, f.manifest.Load())
+			if call == 1 {
+				close(entered)
+				<-releaseFirst
+			} else if indexBuilt.Load() {
+				snap.LoadInfo.IndexInfos = []*querypb.FieldIndexInfo{{FieldID: 100, IndexID: 301}}
+			}
+			return snap, nil
+		}).Build()
+
+		f.dependencyMock.UnPatch()
+		mockey.Mock((*fakeQueryViewCollectionRuntimeManager).Acquire).To(func(_ *fakeQueryViewCollectionRuntimeManager, _ context.Context, view *qviews.QueryViewAtQueryNode) (CollectionRuntimeGuard, bool, error) {
+			loadVer := view.IntoProto().GetMeta().GetLoadInfoVersion()
+			var indexes []*indexpb.IndexInfo
+			if loadVer >= 2 {
+				indexes = []*indexpb.IndexInfo{{FieldID: 100, IndexID: 301}}
+			}
+			return &fakeCollectionRuntimeGuard{schemaVersion: 1, schema: &schemapb.CollectionSchema{Version: 1}, updatedIndexes: indexes}, false, nil
+		}).Build()
+
+		var preparedWith301 atomic.Int32
+		f.prepareMock.UnPatch()
+		f.prepareMock = mockey.Mock((*resourceTestLoader).PrepareReadState).To(func(_ *resourceTestLoader, _ context.Context, _ TransformSegment, _ segments.ReadState, _ CollectionRuntime, snap SegmentLoadInfoSnapshot) (segments.ReadState, error) {
+			f.prepares.Add(1)
+			for _, idx := range snap.LoadInfo.GetIndexInfos() {
+				if idx.GetIndexID() == 301 {
+					preparedWith301.Add(1)
+				}
+			}
+			return &resourceTestRead{}, nil
+		}).Build()
+
+		v1 := f.acquire(1, 1, 1)
+		<-entered
+
+		// While v1's RPC is in flight, index 301 finishes and v2 (load=2) arrives.
+		indexBuilt.Store(true)
+		v2 := f.acquire(2, 1, 2)
+		// Wait until v2's collection dependency is installed so v2 is in r.bindings with LoadInfoVersion=2.
+		require.Eventually(t, func() bool {
+			f.manager.mu.Lock()
+			defer f.manager.mu.Unlock()
+			vr := f.manager.views[v2.Key]
+			return vr != nil && vr.collection != nil
+		}, 5*time.Second, time.Millisecond)
+
+		close(releaseFirst)
+		f.await(t, 1)
+		f.await(t, 1)
+		require.EqualValues(t, 2, f.gets.Load(), "v2 must trigger its own snapshot refresh instead of inheriting v1's stale snapshot")
+		require.EqualValues(t, 1, preparedWith301.Load())
+
+		f.drop(t, v1)
+		f.drop(t, v2)
+	})
+
+	mockey.PatchConvey("unpublished index build finishing after LoadCollection refreshes on next view without manifest bump", t, func() {
+		f := setupResourceTest(t, nil)
+		var indexBuilt atomic.Bool
+
+		f.getMock.UnPatch()
+		f.getMock = mockey.Mock((*resourceTestMetadata).GetQueryViewSegmentLoadInfo).To(func(_ *resourceTestMetadata, _ context.Context, collectionID, segmentID int64) (SegmentLoadInfoSnapshot, error) {
+			f.gets.Add(1)
+			snap := resourceSnapshot(collectionID, segmentID, f.manifest.Load())
+			if indexBuilt.Load() {
+				snap.LoadInfo.IndexInfos = []*querypb.FieldIndexInfo{{FieldID: 100, IndexID: 301}}
+			}
+			return snap, nil
+		}).Build()
+
+		f.dependencyMock.UnPatch()
+		mockey.Mock((*fakeQueryViewCollectionRuntimeManager).Acquire).To(func(_ *fakeQueryViewCollectionRuntimeManager, _ context.Context, view *qviews.QueryViewAtQueryNode) (CollectionRuntimeGuard, bool, error) {
+			loadVer := view.IntoProto().GetMeta().GetLoadInfoVersion()
+			var indexes []*indexpb.IndexInfo
+			if loadVer >= 2 {
+				indexes = []*indexpb.IndexInfo{{FieldID: 100, IndexID: 301}}
+			}
+			return &fakeCollectionRuntimeGuard{schemaVersion: 1, schema: &schemapb.CollectionSchema{Version: 1}, updatedIndexes: indexes}, false, nil
+		}).Build()
+
+		var preparedWith301 atomic.Int32
+		f.prepareMock.UnPatch()
+		f.prepareMock = mockey.Mock((*resourceTestLoader).PrepareReadState).To(func(_ *resourceTestLoader, _ context.Context, _ TransformSegment, _ segments.ReadState, _ CollectionRuntime, snap SegmentLoadInfoSnapshot) (segments.ReadState, error) {
+			f.prepares.Add(1)
+			for _, idx := range snap.LoadInfo.GetIndexInfos() {
+				if idx.GetIndexID() == 301 {
+					preparedWith301.Add(1)
+				}
+			}
+			return &resourceTestRead{}, nil
+		}).Build()
+
+		v1 := f.acquire(1, 1, 1)
+		f.await(t, 1)
+
+		// User calls LoadCollection (load=2) BEFORE index 301 finishes building.
+		v2 := f.acquire(2, 1, 2)
+		f.await(t, 1)
+		require.Zero(t, preparedWith301.Load())
+		require.EqualValues(t, 2, f.gets.Load())
+
+		// Index 301 finishes via finishUnpublishedTask (manifest stays 1, load stays 2).
+		indexBuilt.Store(true)
+		v3 := f.acquire(3, 1, 2)
+		f.await(t, 1)
+		require.EqualValues(t, 3, f.gets.Load())
+		require.EqualValues(t, 1, preparedWith301.Load(), "v3 must refresh snapshot and open newly built index 301")
+
+		f.drop(t, v1)
+		f.drop(t, v2)
+		f.drop(t, v3)
 	})
 }

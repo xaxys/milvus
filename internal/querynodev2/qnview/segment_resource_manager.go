@@ -68,20 +68,22 @@ type segmentBinding struct {
 	partitionID int64
 	manifest    int64
 	// Zero-manifest requirements validate fresh metadata before reusing a read.
-	snapshot     *SegmentLoadInfoSnapshot
-	prepared     *preparedSegmentRead
-	reported     bool
-	retryAfter   time.Time
-	retryBackoff *backoff.ExponentialBackOff
+	snapshot            *SegmentLoadInfoSnapshot
+	prepared            *preparedSegmentRead
+	reported            bool
+	indexRefreshChecked bool
+	retryAfter          time.Time
+	retryBackoff        *backoff.ExponentialBackOff
 }
 
 type preparedSegmentRead struct {
-	schema   int32
-	load     uint64
-	manifest int64
-	snapshot *querypb.SegmentLoadInfo
-	base     *segmentBase
-	read     segments.ReadState
+	schema        int32
+	load          uint64
+	manifest      int64
+	loadedIndexes map[int64]struct{}
+	snapshot      *querypb.SegmentLoadInfo
+	base          *segmentBase
+	read          segments.ReadState
 }
 
 type segmentBase struct {
@@ -100,15 +102,16 @@ type segmentBase struct {
 // A resource remains in the registry through Closing. Bindings arriving during
 // closure wait for its done channel before installing a replacement owner.
 type segmentResource struct {
-	manager      *SegmentResourceManager
-	id           int64
-	collectionID int64
-	ctx          context.Context
-	cancel       context.CancelFunc
-	bindings     []*segmentBinding
-	snapshot     *SegmentLoadInfoSnapshot
-	bases        []*segmentBase
-	reads        []*preparedSegmentRead
+	manager             *SegmentResourceManager
+	id                  int64
+	collectionID        int64
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	bindings            []*segmentBinding
+	snapshot            *SegmentLoadInfoSnapshot
+	snapshotLoadVersion uint64
+	bases               []*segmentBase
+	reads               []*preparedSegmentRead
 	// scheduled covers only running or immediately queued work, never backoff.
 	taskHandle         nodescheduler.TaskHandle
 	prioritySelections int
@@ -348,7 +351,15 @@ func (r *segmentResource) reconcile(schedulerCtx context.Context) error {
 			r.dirty = true
 			b = nil
 		}
-		if b != nil && (r.snapshot == nil || snapshotManifestVersion(*r.snapshot) < b.manifest || (b.manifest == 0 && b.snapshot == nil)) {
+		if b != nil && (r.snapshot == nil ||
+			snapshotManifestVersion(*r.snapshot) < b.manifest ||
+			(b.manifest == 0 && b.snapshot == nil) ||
+			r.snapshotNeedsIndexRefreshLocked(b)) {
+			requestedLoadVer := b.view.req.Meta.GetLoadInfoVersion()
+			requestedCollection := b.view.collection
+			if r.snapshotNeedsIndexRefreshLocked(b) {
+				b.indexRefreshChecked = true
+			}
 			m.mu.Unlock()
 			ctx, cancel := mergeTaskContext(schedulerCtx, r.ctx)
 			snapshot, err := m.metadata.GetQueryViewSegmentLoadInfo(ctx, r.collectionID, r.id)
@@ -363,6 +374,11 @@ func (r *segmentResource) reconcile(schedulerCtx context.Context) error {
 			if err == nil {
 				snapshot.LoadInfo = proto.Clone(snapshot.LoadInfo).(*querypb.SegmentLoadInfo)
 				r.snapshot = &snapshot
+				if requestedCollection != nil &&
+					snapshotCoversRequiredIndexes(snapshot, requestedCollection) &&
+					requestedLoadVer > r.snapshotLoadVersion {
+					r.snapshotLoadVersion = requestedLoadVer
+				}
 				if b.manifest == 0 {
 					b.snapshot = r.snapshot
 				}
@@ -523,8 +539,76 @@ func readMatchesBinding(read *preparedSegmentRead, b *segmentBinding) bool {
 	if b.manifest == 0 && (b.snapshot == nil || !proto.Equal(read.snapshot, b.snapshot.LoadInfo)) {
 		return false
 	}
-	return read.schema == b.view.req.Meta.GetSchemaVersion() && read.load == b.view.req.Meta.GetLoadInfoVersion() &&
-		read.manifest >= b.manifest && (!typeutil.IsExternalCollection(b.view.collection.Schema()) || b.manifest == 0 || read.manifest == b.manifest)
+	if read.schema != b.view.req.Meta.GetSchemaVersion() ||
+		read.load != b.view.req.Meta.GetLoadInfoVersion() ||
+		read.manifest < b.manifest ||
+		(typeutil.IsExternalCollection(b.view.collection.Schema()) && b.manifest != 0 && read.manifest != b.manifest) {
+		return false
+	}
+	return readCoversRequiredIndexes(read, b)
+}
+
+func readCoversRequiredIndexes(read *preparedSegmentRead, b *segmentBinding) bool {
+	if b.view.collection == nil {
+		return true
+	}
+	required := b.view.collection.IndexInfos()
+	if len(required) == 0 {
+		return true
+	}
+	missingRequired := false
+	for _, req := range required {
+		if _, ok := read.loadedIndexes[req.GetIndexID()]; !ok {
+			missingRequired = true
+			break
+		}
+	}
+	if !missingRequired {
+		return true
+	}
+	r := b.resource
+	if r == nil {
+		return true
+	}
+	if b.manifest > 0 && !b.indexRefreshChecked && r.snapshotLoadVersion < b.view.req.Meta.GetLoadInfoVersion() {
+		return false
+	}
+	if r.snapshot == nil {
+		return false
+	}
+	present := make(map[int64]struct{}, len(r.snapshot.LoadInfo.GetIndexInfos()))
+	for _, info := range r.snapshot.LoadInfo.GetIndexInfos() {
+		present[info.GetIndexID()] = struct{}{}
+	}
+	for _, req := range required {
+		id := req.GetIndexID()
+		if _, loaded := read.loadedIndexes[id]; !loaded {
+			if _, inSnapshot := present[id]; inSnapshot {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func snapshotCoversRequiredIndexes(snapshot SegmentLoadInfoSnapshot, collection CollectionRuntime) bool {
+	if collection == nil {
+		return true
+	}
+	required := collection.IndexInfos()
+	if len(required) == 0 {
+		return true
+	}
+	present := make(map[int64]struct{}, len(snapshot.LoadInfo.GetIndexInfos()))
+	for _, info := range snapshot.LoadInfo.GetIndexInfos() {
+		present[info.GetIndexID()] = struct{}{}
+	}
+	for _, req := range required {
+		if _, ok := present[req.GetIndexID()]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *segmentResource) validateSnapshot(snapshot SegmentLoadInfoSnapshot) error {
@@ -541,6 +625,16 @@ func (r *segmentResource) validateSnapshot(snapshot SegmentLoadInfoSnapshot) err
 		return merr.WrapErrServiceNotReadyMsg("segment %d has no certified transform replay cursor", r.id)
 	}
 	return nil
+}
+
+func (r *segmentResource) snapshotNeedsIndexRefreshLocked(b *segmentBinding) bool {
+	if b.manifest <= 0 || r.snapshot == nil || b.view.collection == nil || b.indexRefreshChecked {
+		return false
+	}
+	if r.snapshotLoadVersion >= b.view.req.Meta.GetLoadInfoVersion() {
+		return false
+	}
+	return !snapshotCoversRequiredIndexes(*r.snapshot, b.view.collection)
 }
 
 func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collection CollectionRuntime, snapshot SegmentLoadInfoSnapshot) (*preparedSegmentRead, error) {
@@ -598,13 +692,24 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 		m.mu.Unlock()
 		go r.catchup(base)
 	}
+	loadedIndexes := make(map[int64]struct{}, len(info.GetIndexInfos()))
+	for _, index := range info.GetIndexInfos() {
+		loadedIndexes[index.GetIndexID()] = struct{}{}
+	}
 	// Only this operation uses the filtered copy; the base retains the immutable source snapshot.
 	snapshot.LoadInfo = info
 	read, err := m.loader.PrepareReadState(ctx, base.segment, reuse, collection, snapshot)
 	if err != nil {
 		return nil, err
 	}
-	return &preparedSegmentRead{schema: b.view.req.Meta.GetSchemaVersion(), load: b.view.req.Meta.GetLoadInfoVersion(), manifest: snapshotManifestVersion(snapshot), base: base, read: read}, nil
+	return &preparedSegmentRead{
+		schema:        b.view.req.Meta.GetSchemaVersion(),
+		load:          b.view.req.Meta.GetLoadInfoVersion(),
+		manifest:      snapshotManifestVersion(snapshot),
+		loadedIndexes: loadedIndexes,
+		base:          base,
+		read:          read,
+	}, nil
 }
 
 func (r *segmentResource) catchup(base *segmentBase) {
@@ -670,6 +775,7 @@ func (r *segmentResource) close() {
 		for _, b := range next.bindings {
 			b.resource = next
 			b.prepared = nil
+			b.indexRefreshChecked = false
 		}
 		next.wakeLocked()
 	}

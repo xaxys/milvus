@@ -892,11 +892,13 @@ ChunkedSegmentSealedImpl::PinPkIndex(
 }
 
 FieldIndexCapability
-ChunkedSegmentSealedImpl::ResolveIndexCapability(milvus::OpContext* op_ctx,
-                                                 FieldId field_id) const {
+ChunkedSegmentSealedImpl::ResolveIndexCapability(
+    milvus::OpContext* op_ctx,
+    FieldId field_id,
+    CapabilityResolveHint hint) const {
     auto runtime = CaptureRuntimeResourceState();
     return runtime != nullptr
-               ? runtime->indexes.ResolveCapability(op_ctx, field_id)
+               ? runtime->indexes.ResolveCapability(op_ctx, field_id, hint)
                : FieldIndexCapability(field_id);
 }
 
@@ -1258,43 +1260,56 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(
              info.field_id,
              id_,
              is_pk);
-    // if segment is pk sorted, user created indexes bring no performance gain but extra memory usage
-    if (is_pk && is_sorted_by_pk_) {
-        LOG_INFO(
-            "segment pk sorted, skip user index loading for primary key "
-            "field");
-        return;
-    }
 
-    const auto& visible_state =
-        staged_state != nullptr ? *staged_state : *snapshot;
-    bool has_index =
-        get_bit_if_present(visible_state.index_ready_bitset, field_id);
+    // A field may carry several scalar indexes now, so a load never displaces a
+    // sibling: the entry is keyed by its own indexID. This is where the old
+    // AssertInfo(!has_index) went -- with one index per field it could never fire
+    // twice, and with several it would refuse every second index on the field.
+    const IndexKey key{field_id, IndexIdentity::PreBuiltIndex(info.index_id)};
 
     std::unique_lock lck(mutex_);
+    // Idempotent per index identity: a reopen that re-lists an index, or a retried
+    // load, is a no-op. Check staged target_runtime first when batching.
+    const auto* active_runtime =
+        target_runtime != nullptr ? target_runtime : snapshot->runtime.get();
+    if (!is_replace && active_runtime != nullptr) {
+        const auto registrations = active_runtime->indexes.Entries(field_id);
+        const bool already_loaded =
+            std::any_of(registrations.begin(),
+                        registrations.end(),
+                        [&](const IndexRegistration& registration) {
+                            return registration.key == key;
+                        });
+        if (already_loaded) {
+            LOG_INFO(
+                "scalar index {} already loaded for field {} in segment {}, "
+                "skipping",
+                info.index_id,
+                field_id.get(),
+                id_);
+            return;
+        }
+    }
     if (is_replace) {
         if (target_runtime == nullptr) {
             owned_runtime = CloneRuntimeResourceState(snapshot->runtime);
             target_runtime = owned_runtime.get();
         }
-        LOG_INFO("Replacing scalar index for field {} in segment {}",
+        LOG_INFO("Replacing scalar index {} for field {} in segment {}",
+                 info.index_id,
                  field_id.get(),
                  id_);
-    } else {
-        AssertInfo(
-            !has_index,
-            "scalar index has been exist at " + std::to_string(field_id.get()));
     }
 
     if (field_meta.get_data_type() == DataType::JSON) {
-        auto path = info.index_params.at(JSON_PATH);
         if (target_runtime == nullptr) {
             owned_runtime = CloneRuntimeResourceState(snapshot->runtime);
             target_runtime = owned_runtime.get();
         }
-        for (auto& retired :
-             EraseJsonIndexesAtPath(*target_runtime, field_id, path)) {
-            retire_indexing(std::move(retired));
+        // Drop exactly this indexID: erasing by path would take a sibling cast
+        // type on the same path with it.
+        if (is_replace) {
+            retire_indexing(target_runtime->indexes.Drop(key));
         }
         auto entry = make_persisted_index_entry(info);
         const bool is_ngram = entry->registration().kind == IndexKind::Ngram;
@@ -1341,19 +1356,8 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(
         target_runtime = owned_runtime.get();
     }
     if (is_replace) {
-        for (auto& retired :
-             erase_index_entries(target_runtime->indexes,
-                                 field_id,
-                                 [](const IndexRegistration& entry) {
-                                     return !is_vector_registration(entry) &&
-                                            !is_text_registration(entry);
-                                 })) {
-            retire_indexing(std::move(retired));
-        }
+        retire_indexing(target_runtime->indexes.Drop(key));
     }
-    retire_indexing(
-        target_runtime->indexes.Register(make_persisted_index_entry(info)));
-
     LoadResourceRequest request{};
     if (info.load_resource_request.has_value()) {
         request = *info.load_resource_request;
@@ -1369,6 +1373,11 @@ ChunkedSegmentSealedImpl::LoadScalarIndex(
 
     request.has_raw_data = milvus::index::CanUseIndexRawDataForField(
         field_meta.get_data_type(), request.has_raw_data);
+    info.load_resource_request = request;
+
+    retire_indexing(
+        target_runtime->indexes.Register(make_persisted_index_entry(info)));
+
     // Note: raw data lifecycle (eviction/drop) is handled by LoadDiff + ApplyLoadDiff,
     // not here. This avoids unsafe ManualEvictCache on column groups.
     LOG_INFO(
@@ -1861,18 +1870,6 @@ ChunkedSegmentSealedImpl::CreateIndexReader(
                : index::IIndexReaderBasePtr{};
 }
 
-std::vector<std::shared_ptr<IndexInventory::Entry>>
-ChunkedSegmentSealedImpl::EraseJsonIndexesAtPath(RuntimeResourceState& runtime,
-                                                 FieldId field_id,
-                                                 std::string_view nested_path) {
-    return erase_index_entries(
-        runtime.indexes, field_id, [&](const IndexRegistration& entry) {
-            return entry.json_cast_type.data_type() !=
-                       JsonCastType::DataType::UNKNOWN &&
-                   entry.json_path == nested_path;
-        });
-}
-
 void
 ChunkedSegmentSealedImpl::SyncJsonIndexState(
     PublishedSegmentState& state,
@@ -1981,6 +1978,7 @@ ChunkedSegmentSealedImpl::NormalizePublishedState(
 
     if (state.fields) {
         ResizeStateBitsets(state, *state.fields);
+        std::unordered_map<FieldId, bool> scalar_raw_data;
         if (state.runtime != nullptr) {
             for (const auto& [field_id, column] : state.runtime->fields) {
                 if (column == nullptr ||
@@ -1991,6 +1989,8 @@ ChunkedSegmentSealedImpl::NormalizePublishedState(
                 set_bit(state.field_data_ready_bitset, field_id, true);
             }
 
+            const auto pk_fid =
+                state.fields->get_primary_field_id().value_or(FieldId(-1));
             for (const auto& entry : state.runtime->indexes.Entries()) {
                 const auto field_id = entry.key.field_id;
                 if (!field_exists_in_schema(state.fields, field_id) ||
@@ -1998,16 +1998,22 @@ ChunkedSegmentSealedImpl::NormalizePublishedState(
                     is_text_registration(entry)) {
                     continue;
                 }
+                const bool entry_carries_raw =
+                    field_id != pk_fid && entry.has_raw_data &&
+                    milvus::index::CanUseIndexRawDataForField(
+                        state.fields->operator[](field_id).get_data_type(),
+                        true);
+                auto [it, inserted] =
+                    scalar_raw_data.emplace(field_id, entry_carries_raw);
+                if (!inserted) {
+                    it->second = it->second && entry_carries_raw;
+                }
                 const bool is_json_entry = entry.json_cast_type.data_type() !=
                                            JsonCastType::DataType::UNKNOWN;
                 if (is_json_entry && entry.kind != IndexKind::Ngram) {
                     continue;
                 }
                 set_bit(state.index_ready_bitset, field_id, true);
-                auto raw_it = state.published_index_has_raw_data.find(field_id);
-                if (raw_it != state.published_index_has_raw_data.end()) {
-                    state.index_has_raw_data[field_id] = raw_it->second;
-                }
             }
         }
 
@@ -2037,6 +2043,14 @@ ChunkedSegmentSealedImpl::NormalizePublishedState(
             auto raw_it = state.published_index_has_raw_data.find(field_id);
             if (raw_it != state.published_index_has_raw_data.end()) {
                 state.index_has_raw_data[field_id] = raw_it->second;
+            }
+        }
+
+        for (const auto& [field_id, all_carry_raw] : scalar_raw_data) {
+            state.published_index_has_raw_data[field_id] = all_carry_raw;
+            if (get_bit_if_present(state.index_ready_bitset, field_id) ||
+                get_bit_if_present(state.binlog_index_bitset, field_id)) {
+                state.index_has_raw_data[field_id] = all_carry_raw;
             }
         }
     }
@@ -6412,7 +6426,8 @@ ChunkedSegmentSealedImpl::BuildTextIndexFromFiles(
     auto metadata =
         std::make_shared<proto::indexcgo::LoadTextIndexInfo>(*info_proto);
     metadata->set_warmup_policy("disable");
-    IndexRegistration registration{key, IndexKind::Text};
+    auto registration =
+        MakeLazyTextIndexRegistration(key, field_meta.get_data_type());
     IndexInventory::Factory factory = [metadata = std::move(metadata),
                                        segment_id = id_,
                                        num_rows,
@@ -8251,6 +8266,35 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
     StagedStateCommitter& committer) {
     milvus::tracer::TraceContext trace_ctx;
 
+    // Retire dropped scalar and vector indexes in the private staged state BEFORE
+    // loading replacement field data, so LoadBatchFieldData sees the target index
+    // raw-data coverage rather than skipping binlog backfill due to a soon-to-be-dropped
+    // raw-data-carrying index (e.g. STL_SORT / MARISA_TRIE / FLAT).
+    CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
+    for (const auto& [field_id, index_ids] : diff.indexes_to_drop) {
+        for (auto index_id : index_ids) {
+            committer.Commit([&, field_id = field_id, index_id = index_id](
+                                 RuntimeResourceState& runtime,
+                                 PublishedSegmentState& staged_state) {
+                DropScalarIndex(
+                    IndexKey{field_id, IndexIdentity::PreBuiltIndex(index_id)},
+                    schema_snapshot,
+                    runtime,
+                    staged_state,
+                    committer);
+            });
+        }
+    }
+
+    CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
+    for (auto field_id : diff.vector_indexes_to_drop) {
+        committer.Commit(
+            [&](RuntimeResourceState&, PublishedSegmentState& staged_state) {
+                committer.StageVectorIndexDropLocked(field_id);
+                DropIndexFromState(staged_state, field_id);
+            });
+    }
+
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
     if (!diff.indexes_to_load.empty()) {
         LoadBatchIndexes(trace_ctx,
@@ -8543,43 +8587,57 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
 }
 
 void
+ChunkedSegmentSealedImpl::DropScalarIndex(
+    const IndexKey& key,
+    const SealedFieldLayoutPtr& schema_snapshot,
+    RuntimeResourceState& runtime,
+    PublishedSegmentState& staged_state,
+    StagedStateCommitter& committer) {
+    const auto field_id = key.field_id;
+    auto retired = runtime.indexes.Drop(key);
+    if (retired == nullptr) {
+        return;
+    }
+    committer.RetireCacheIndexingLocked(std::move(retired));
+
+    if (!field_exists_in_schema(schema_snapshot, field_id)) {
+        // The field is being removed from the schema: every indexID of it lands in
+        // indexes_to_drop and this runs once per index against a layout that no
+        // longer knows the field. Finish the field-level cleanup instead of
+        // indexing into it (which asserts).
+        DropIndexFromState(staged_state, field_id);
+        return;
+    }
+
+    if (schema_snapshot->operator[](field_id).get_data_type() ==
+        DataType::JSON) {
+        // A JSON field's readiness bit belongs to an NGRAM entry only, so it -- and
+        // the raw-data flag with it -- has to be re-derived from what the field
+        // still carries.
+        SyncJsonIndexState(staged_state, runtime, field_id);
+        return;
+    }
+
+    size_t scalar_left = 0;
+    for (const auto& entry : runtime.indexes.Entries(field_id)) {
+        if (entry.kind == IndexKind::Text || entry.kind == IndexKind::Vector) {
+            continue;
+        }
+        ++scalar_left;
+    }
+    if (scalar_left == 0) {
+        // The field's last index is gone: run the field-level cleanup.
+        DropIndexFromState(staged_state, field_id);
+    }
+}
+
+void
 ChunkedSegmentSealedImpl::FinalizeLoadDiffForReopen(
     milvus::OpContext* op_ctx,
     SegmentLoadInfo& segment_load_info,
     LoadDiff& diff,
     const SealedFieldLayoutPtr& schema_snapshot,
     StagedStateCommitter& committer) {
-    CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
-    if (!diff.indexes_to_drop.empty()) {
-        for (auto field_id : diff.indexes_to_drop) {
-            if (diff.indexes_to_replace.count(field_id) > 0 ||
-                diff.indexes_to_load.count(field_id) > 0) {
-                continue;
-            }
-            committer.Commit([&](RuntimeResourceState& runtime,
-                                 PublishedSegmentState& staged_state) {
-                DropIndex(
-                    field_id, schema_snapshot, &runtime, nullptr, &committer);
-                DropIndexFromState(staged_state, field_id);
-            });
-        }
-    }
-
-    CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
-    for (const auto& [field_id, nested_paths] : diff.json_indexes_to_drop) {
-        for (const auto& nested_path : nested_paths) {
-            committer.Commit([&, field_id = field_id, nested_path](
-                                 RuntimeResourceState& runtime,
-                                 PublishedSegmentState& staged_state) {
-                for (auto& retired :
-                     EraseJsonIndexesAtPath(runtime, field_id, nested_path)) {
-                    committer.RetireCacheIndexingLocked(std::move(retired));
-                }
-                SyncJsonIndexState(staged_state, runtime, field_id);
-            });
-        }
-    }
-
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
     if (!diff.json_stats_to_drop.empty()) {
         for (auto field_id : diff.json_stats_to_drop) {
@@ -10138,6 +10196,8 @@ ChunkedSegmentSealedImpl::LoadBatchFieldData(
         bool mmap_enabled = false;
         bool is_vector = false;
 
+        const auto pk_fid =
+            schema_snapshot->get_primary_field_id().value_or(FieldId(-1));
         std::string aggregated_warmup_policy;
         for (const auto& child_field_id : fields_to_load) {
             auto& field_meta = schema_snapshot->operator[](child_field_id);
@@ -10153,7 +10213,8 @@ ChunkedSegmentSealedImpl::LoadBatchFieldData(
             has_mmap_setting = has_mmap_setting || field_has_setting;
             mmap_enabled = mmap_enabled || field_mmap_enabled;
 
-            if (!SystemProperty::Instance().IsSystem(child_field_id) &&
+            if (child_field_id != pk_fid &&
+                !SystemProperty::Instance().IsSystem(child_field_id) &&
                 (get_bit_if_present(visible_state.index_ready_bitset,
                                     child_field_id) ||
                  get_bit_if_present(visible_state.binlog_index_bitset,

@@ -8,6 +8,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
@@ -156,31 +158,91 @@ func (s *LoadConfigStore) collectCollectionLoadInfo(ctx context.Context, id int6
 	return nil
 }
 
-func (s *LoadConfigStore) normalize(ctx context.Context, cfg *LoadConfig) (*LoadConfig, error) {
-	cfg = cfg.Clone()
-	fields := make(map[int64][]int64, len(cfg.RequiredFields))
-	for _, field := range cfg.RequiredFields {
-		fields[field.GetFieldId()] = nil
+func (s *LoadConfigStore) visibleFieldIndexes(collectionID int64, targetFields map[int64]bool) map[int64][]int64 {
+	fields := make(map[int64][]int64, len(targetFields))
+	if s.indexes == nil || len(targetFields) == 0 {
+		return fields
 	}
-	if s.indexes != nil {
-		for _, index := range s.indexes(cfg.CollectionID) {
-			if _, required := fields[index.GetFieldID()]; required {
-				fields[index.GetFieldID()] = append(fields[index.GetFieldID()], index.GetIndexID())
-			}
+	for _, index := range s.indexes(collectionID) {
+		if !targetFields[index.GetFieldID()] {
+			continue
 		}
+		if !common.IsIndexInfoVisible(index.GetIndexParams(), index.GetUserIndexParams()) {
+			continue
+		}
+		fields[index.GetFieldID()] = append(fields[index.GetFieldID()], index.GetIndexID())
 	}
 	for field, ids := range fields {
 		slices.Sort(ids)
 		fields[field] = slices.Compact(ids)
 	}
+	return fields
+}
+
+// HasIndexSource reports whether IndexMeta resolution is wired into this store.
+func (s *LoadConfigStore) HasIndexSource() bool {
+	return s != nil && s.indexes != nil
+}
+
+// ResolveSchemaFields builds canonical RequiredFields for schema, attaching all
+// currently visible index IDs from IndexMeta when wired, or falling back to
+// fallbackFieldIndexID otherwise.
+func (s *LoadConfigStore) ResolveSchemaFields(
+	collectionID int64,
+	schema *schemapb.CollectionSchema,
+	fallbackFieldIndexID map[int64]int64,
+) []*viewpb.LoadFieldConfig {
+	required := RequiredFieldsForSchema(schema)
+	if s != nil && s.indexes != nil {
+		targetFields := make(map[int64]bool, len(required))
+		for _, field := range required {
+			targetFields[field.GetFieldId()] = true
+		}
+		visible := s.visibleFieldIndexes(collectionID, targetFields)
+		for _, field := range required {
+			field.IndexIds = slices.Clone(visible[field.GetFieldId()])
+		}
+	} else if len(fallbackFieldIndexID) > 0 {
+		for _, field := range required {
+			if id := fallbackFieldIndexID[field.GetFieldId()]; id != 0 {
+				field.IndexIds = []int64{id}
+			}
+		}
+	}
+	return required
+}
+
+func (s *LoadConfigStore) normalize(ctx context.Context, cfg *LoadConfig) (*LoadConfig, error) {
+	cfg = cfg.Clone()
+	if s.indexes != nil {
+		targetFields := make(map[int64]bool, len(cfg.RequiredFields))
+		for _, field := range cfg.RequiredFields {
+			targetFields[field.GetFieldId()] = true
+		}
+		fields := s.visibleFieldIndexes(cfg.CollectionID, targetFields)
+		for _, scope := range [][]*viewpb.LoadFieldConfig{cfg.RequiredFields, cfg.LoadFields} {
+			for _, field := range scope {
+				field.IndexIds = slices.Clone(fields[field.FieldId])
+			}
+		}
+	}
+	return canonicalizeLoadConfig(cfg), nil
+}
+
+func canonicalizeLoadConfig(cfg *LoadConfig) *LoadConfig {
+	cfg = cfg.Clone()
 	for _, scope := range [][]*viewpb.LoadFieldConfig{cfg.RequiredFields, cfg.LoadFields} {
 		for _, field := range scope {
-			field.IndexIds = slices.Clone(fields[field.FieldId])
+			slices.Sort(field.IndexIds)
+			field.IndexIds = slices.Compact(field.IndexIds)
+			if len(field.IndexIds) == 0 {
+				field.IndexIds = nil
+			}
 		}
 		slices.SortFunc(scope, func(a, b *viewpb.LoadFieldConfig) int { return cmp.Compare(a.FieldId, b.FieldId) })
 	}
 	slices.Sort(cfg.PartitionIDs)
 	cfg.PartitionIDs = slices.Compact(cfg.PartitionIDs)
 	slices.SortFunc(cfg.Replicas, func(a, b *ReplicaAssignment) int { return cmp.Compare(a.ReplicaID, b.ReplicaID) })
-	return cfg, nil
+	return cfg
 }

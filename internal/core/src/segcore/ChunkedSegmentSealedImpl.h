@@ -180,7 +180,8 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
 
     FieldIndexCapability
     ResolveIndexCapability(milvus::OpContext* op_ctx,
-                           FieldId field_id) const override;
+                           FieldId field_id,
+                           CapabilityResolveHint hint = {}) const override;
 
     std::vector<IndexRegistration>
     IndexRegistrations(FieldId field_id) const override;
@@ -1626,11 +1627,6 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         const std::shared_ptr<const RuntimeResourceState>& runtime,
         FieldId field_id);
 
-    static std::vector<std::shared_ptr<IndexInventory::Entry>>
-    EraseJsonIndexesAtPath(RuntimeResourceState& runtime,
-                           FieldId field_id,
-                           std::string_view nested_path);
-
     static void
     SyncJsonIndexState(PublishedSegmentState& state,
                        const RuntimeResourceState& runtime,
@@ -2017,6 +2013,15 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
               RuntimeResourceState* runtime = nullptr,
               milvus::OpContext* op_ctx = nullptr,
               StagedStateCommitter* committer = nullptr);
+
+    // Removes one (field, indexID). Unlike DropIndex, which retires every index of
+    // the field and its vector index, this keeps the field's siblings alive.
+    void
+    DropScalarIndex(const IndexKey& key,
+                    const SealedFieldLayoutPtr& schema_snapshot,
+                    RuntimeResourceState& runtime,
+                    PublishedSegmentState& staged_state,
+                    StagedStateCommitter& committer);
 
     void
     DropFieldData(
