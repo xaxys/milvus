@@ -20,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -64,6 +65,11 @@ class PhyCallExpr : public Expr {
     Eval(EvalCtx& context, VectorPtr& result) override;
 
     void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        explain_ = explain;
+    }
+
+    void
     MoveCursor() override {
         if (!has_offset_input_) {
             for (const auto& input : inputs_) {
@@ -106,14 +112,30 @@ class PhyCallExpr : public Expr {
     }
 
  private:
+    void
+    RecordExplainDecision();
+
     std::shared_ptr<const milvus::expr::CallExpr> expr_;
 
     int64_t active_count_{0};
     int64_t num_chunk_{0};
     int64_t size_per_chunk_{0};
 
+    struct CachedOperandExplain {
+        FieldId field_id{0};
+        bool used_index{false};
+        int64_t index_id{0};
+        std::string family;
+        bool nested{false};
+        std::string path;
+        std::string decline_reason;
+    };
+
     const segcore::SegmentInternalInterface* segment_;
     int64_t batch_size_;
+    ExecutionExplainRecorder* explain_{nullptr};
+    bool explain_recorded_{false};
+    std::unordered_map<const Expr*, CachedOperandExplain> operand_explains_;
 };
 
 }  // namespace exec

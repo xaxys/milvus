@@ -20,6 +20,7 @@
 
 #include "common/Utils.h"
 #include "exec/VectorHasher.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/operator/query-agg/AggregateInfo.h"
 #include "plan/PlanNode.h"
 
@@ -63,7 +64,14 @@ PhyAggregationNode::GetOutput() {
         input_ = nullptr;
         return nullptr;
     }
-    DeferLambda([&]() { finished_ = true; });
+    DeferLambda([&]() {
+        finished_ = true;
+        if (auto* explain = operator_context_->get_exec_context()->explain();
+            explain != nullptr) {
+            explain->SetOperatorRows(
+                get_operator_id(), numInputRows_, numOutputRows_);
+        }
+    });
     const auto outputRowCount = isGlobal_ ? 1 : grouping_set_->outputRowCount();
     output_ = std::make_shared<RowVector>(output_type_, outputRowCount);
     const bool hasData = grouping_set_->getOutput(output_);

@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <future>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -37,7 +38,9 @@
 #include "common/Types.h"
 #include "common/protobuf_utils.h"
 #include "exec/expression/BinaryRangeExpr.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/expression/ExprBatchTestUtils.h"
+#include "exec/expression/ExprCache.h"
 #include "exec/expression/ExprIndexIntegrationTestUtils.h"
 #include "exec/expression/JsonContainsExpr.h"
 #include "index/Meta.h"
@@ -53,6 +56,7 @@
 #include "milvus-storage/common/metadata.h"
 #include "mmap/ChunkedColumn.h"
 #include "pb/common.pb.h"
+#include "pb/internal.pb.h"
 #include "pb/plan.pb.h"
 #include "pb/schema.pb.h"
 #include "parquet/arrow/writer.h"
@@ -2052,5 +2056,172 @@ TEST(JsonStatsExecPathTest, TypedArrayIndexWinsOverJsonStatsForContains) {
 
         EXPECT_EQ(ContainsPath(ContainsInt(f, 9007199254740993), f),
                   exec::ExprExecPath::JsonStats);
+    }
+}
+
+TEST(JsonStatsExecPathTest, ExplainJsonStatsRecordsRawScanAndZeroOnCacheHit) {
+    auto& cache_mgr = exec::ExprResCacheManager::Instance();
+    struct CacheCleanup {
+        exec::ExprResCacheManager& mgr;
+        ~CacheCleanup() {
+            mgr.Clear();
+            exec::ExprResCacheManager::SetEnabled(false);
+        }
+    } cleanup{cache_mgr};
+
+    exec::ExprResCacheManager::SetEnabled(false);
+    cache_mgr.Clear();
+    exec::CacheConfig cache_cfg;
+    cache_cfg.mode = exec::CacheMode::Memory;
+    cache_cfg.mem_max_bytes = 16U << 20;
+    cache_cfg.materialization_max_bytes = 16U << 20;
+    cache_cfg.compression_enabled = false;
+    cache_cfg.admission_threshold = 1;
+    cache_cfg.mem_min_eval_duration_us = 0;
+    ASSERT_TRUE(cache_mgr.SetConfig(cache_cfg));
+    exec::ExprResCacheManager::SetEnabled(true);
+
+    std::vector<std::string> rows;
+    constexpr int64_t N = 50;
+    for (int64_t i = 0; i < N; ++i) {
+        switch (i % 5) {
+            case 0:
+                rows.emplace_back(R"({"price": 5, "tags": [1, 2]})");
+                break;
+            case 1:
+                rows.emplace_back(R"({"price": 7.5, "tags": [3]})");
+                break;
+            case 2:
+                rows.emplace_back(R"({"price": 20, "other": 1})");
+                break;
+            case 3:
+                rows.emplace_back(R"({"price": "five", "tags": 1})");
+                break;
+            default:
+                rows.emplace_back(R"({"tags": null})");
+                break;
+        }
+    }
+
+    auto f = MakeExecPathFixture(rows, /*with_stats=*/true, 1510);
+
+    auto run_and_parse = [&](const expr::TypedExprPtr& e) {
+        auto explain = std::make_shared<exec::ExecutionExplainRecorder>(f.n);
+        auto qc = std::make_shared<exec::QueryContext>(
+            DEAFULT_QUERY_ID, f.segment.get(), f.n, MAX_TIMESTAMP);
+        qc->set_read_schema(f.schema);
+        qc->set_read_snapshot(f.segment->CaptureReadSnapshot());
+        qc->SetExplain(explain);
+        exec::ExecContext ec(qc.get());
+        ec.SetExplain(explain);
+        std::vector<expr::TypedExprPtr> filters{e};
+        exec::ExprSet exprs(filters, &ec);
+        exec::EvalCtx eval_ctx(&ec);
+        auto res = exec::EvalExprSetOverAllBatches(
+            exprs, eval_ctx, f.n, "JsonStatsExplainCacheTest");
+        EXPECT_GT(res.count(), 0u);
+        proto::internal::ExecutionExplain node;
+        EXPECT_TRUE(node.ParseFromString(explain->Finish()));
+        return node;
+    };
+
+    auto attrs_of = [](const proto::internal::ExecutionExplain& n) {
+        std::map<std::string, std::string> out;
+        for (const auto& [k, v] : n.attributes()) {
+            out[k] = v;
+        }
+        return out;
+    };
+    auto counters_of = [](const proto::internal::ExecutionExplain& n) {
+        std::map<std::string, int64_t> out;
+        for (const auto& [k, v] : n.counters()) {
+            out[k] = v;
+        }
+        return out;
+    };
+
+    // 1. BinaryRangeFilterExpr: 0 < json["price"] < 10 via JsonStats.
+    proto::plan::GenericValue low;
+    low.set_int64_val(0);
+    proto::plan::GenericValue high;
+    high.set_int64_val(10);
+    auto range_expr = std::make_shared<expr::BinaryRangeFilterExpr>(
+        expr::ColumnInfo(f.json_fid, DataType::JSON, {"price"}),
+        low,
+        high,
+        /*lower_inclusive=*/false,
+        /*upper_inclusive=*/false);
+    range_expr->SetExprId(88001);
+
+    {
+        exec::PhyBinaryRangeFilterExpr probe({},
+                                             range_expr,
+                                             "range-probe",
+                                             nullptr,
+                                             f.segment.get(),
+                                             f.n,
+                                             f.n,
+                                             0);
+        probe.EnsureExecPathDetermined();
+        ASSERT_EQ(probe.GetExecPath(), exec::ExprExecPath::JsonStats);
+    }
+
+    {
+        auto cold_node = run_and_parse(range_expr);
+        ASSERT_EQ(cold_node.children_size(), 1);
+        const auto attrs = attrs_of(cold_node.children(0));
+        const auto ctrs = counters_of(cold_node.children(0));
+        EXPECT_EQ(attrs.at("expr_id"), "88001");
+        EXPECT_EQ(attrs.count("index_id"), 0u);
+        EXPECT_EQ(attrs.at("decline_reason"), "no_index_on_field");
+        EXPECT_EQ(ctrs.at("rows_in"), N);
+        EXPECT_EQ(ctrs.at("idx_scan"), 0);
+        EXPECT_GT(ctrs.at("raw_scan"), 0);
+        EXPECT_LE(ctrs.at("raw_scan"), N);
+        EXPECT_EQ(ctrs.at("rows_out"), 20);
+    }
+
+    {
+        auto warm_node = run_and_parse(range_expr);
+        ASSERT_EQ(warm_node.children_size(), 1);
+        const auto attrs = attrs_of(warm_node.children(0));
+        const auto ctrs = counters_of(warm_node.children(0));
+        EXPECT_EQ(attrs.at("decline_reason"), "cached");
+        EXPECT_EQ(ctrs.at("rows_in"), N);
+        EXPECT_EQ(ctrs.at("idx_scan"), 0);
+        EXPECT_EQ(ctrs.at("raw_scan"), 0);
+        EXPECT_EQ(ctrs.at("rows_out"), 20);
+    }
+
+    // 2. JsonContainsExpr: json_contains(json["tags"], 1) via JsonStats.
+    auto contains_expr = ContainsInt(f, 1);
+    contains_expr->SetExprId(88002);
+    ASSERT_EQ(ContainsPath(contains_expr, f), exec::ExprExecPath::JsonStats);
+
+    {
+        auto cold_node = run_and_parse(contains_expr);
+        ASSERT_EQ(cold_node.children_size(), 1);
+        const auto attrs = attrs_of(cold_node.children(0));
+        const auto ctrs = counters_of(cold_node.children(0));
+        EXPECT_EQ(attrs.at("expr_id"), "88002");
+        EXPECT_EQ(attrs.count("index_id"), 0u);
+        EXPECT_EQ(attrs.at("decline_reason"), "no_index_on_field");
+        EXPECT_EQ(ctrs.at("rows_in"), N);
+        EXPECT_EQ(ctrs.at("idx_scan"), 0);
+        EXPECT_GT(ctrs.at("raw_scan"), 0);
+        EXPECT_LE(ctrs.at("raw_scan"), N);
+        EXPECT_EQ(ctrs.at("rows_out"), 10);
+    }
+
+    {
+        auto warm_node = run_and_parse(contains_expr);
+        ASSERT_EQ(warm_node.children_size(), 1);
+        const auto attrs = attrs_of(warm_node.children(0));
+        const auto ctrs = counters_of(warm_node.children(0));
+        EXPECT_EQ(attrs.at("decline_reason"), "cached");
+        EXPECT_EQ(ctrs.at("rows_in"), N);
+        EXPECT_EQ(ctrs.at("idx_scan"), 0);
+        EXPECT_EQ(ctrs.at("raw_scan"), 0);
+        EXPECT_EQ(ctrs.at("rows_out"), 10);
     }
 }

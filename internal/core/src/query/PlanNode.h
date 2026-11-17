@@ -37,6 +37,7 @@ struct PlanOptions {
     // selection only.
     std::vector<std::pair<int64_t, int64_t>> index_hints;
     bool index_hint_strict = false;
+    bool enable_explain = false;
     // Non-null only when the plan collects execution feature bits. Shared by
     // every copy of the options (query contexts, compiled expressions) so all
     // segments of the request record into one set.

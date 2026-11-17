@@ -33,6 +33,7 @@
 #include "common/protobuf_utils.h"
 #include "exec/QueryContext.h"
 #include "exec/Task.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/operator/AggregationNode.h"
 #include "exec/operator/CallbackSink.h"
 #include "exec/operator/ElementFilterBitsNode.h"
@@ -58,6 +59,117 @@
 namespace milvus {
 namespace exec {
 
+namespace {
+
+std::pair<const char*, const char*>
+ExplainOperatorSpec(const std::shared_ptr<const plan::PlanNode>& plannode,
+                    bool element_level_search,
+                    bool has_element_filter,
+                    bool has_aggregation) {
+    const char* elem =
+        (element_level_search || has_element_filter) ? "element" : "";
+    const char* order_elem =
+        (element_level_search || (has_element_filter && !has_aggregation))
+            ? "element"
+            : "";
+    if (std::dynamic_pointer_cast<const plan::FilterBitsNode>(plannode)) {
+        return {"filter", ""};
+    }
+    if (std::dynamic_pointer_cast<const plan::RandomSampleNode>(plannode)) {
+        return {"random_sample", ""};
+    }
+    if (std::dynamic_pointer_cast<const plan::MvccNode>(plannode)) {
+        return {"mvcc", ""};
+    }
+    if (std::dynamic_pointer_cast<const plan::ElementFilterBitsNode>(
+            plannode)) {
+        return {"element_filter", "element"};
+    }
+    if (std::dynamic_pointer_cast<const plan::VectorSearchNode>(plannode)) {
+        return {"vector_search", element_level_search ? "element" : ""};
+    }
+    if (std::dynamic_pointer_cast<const plan::IterativeElementFilterNode>(
+            plannode)) {
+        return {"iterative_element_filter", "element"};
+    }
+    if (std::dynamic_pointer_cast<const plan::IterativeFilterNode>(plannode)) {
+        return {"iterative_filter", element_level_search ? "element" : ""};
+    }
+    if (std::dynamic_pointer_cast<const plan::SearchGroupByNode>(plannode)) {
+        return {"group_by", element_level_search ? "element" : ""};
+    }
+    if (std::dynamic_pointer_cast<const plan::RescoresNode>(plannode)) {
+        return {"rescore", element_level_search ? "element" : ""};
+    }
+    if (std::dynamic_pointer_cast<const plan::ProjectNode>(plannode)) {
+        return {"project", elem};
+    }
+    if (std::dynamic_pointer_cast<const plan::AggregationNode>(plannode)) {
+        return {"aggregation", ""};
+    }
+    if (std::dynamic_pointer_cast<const plan::OrderByNode>(plannode)) {
+        return {"order_by", order_elem};
+    }
+    return {"", ""};
+}
+
+void
+RegisterOperatorsFromNodes(
+    const std::vector<std::shared_ptr<const plan::PlanNode>>& plannodes,
+    bool element_level_search,
+    ExecutionExplainRecorder* explain) {
+    if (explain == nullptr) {
+        return;
+    }
+    bool has_element_filter = false;
+    bool has_aggregation = false;
+    for (const auto& node : plannodes) {
+        if (std::dynamic_pointer_cast<const plan::ElementFilterBitsNode>(
+                node)) {
+            has_element_filter = true;
+        }
+        if (std::dynamic_pointer_cast<const plan::AggregationNode>(node)) {
+            has_aggregation = true;
+        }
+    }
+    for (size_t i = 0; i < plannodes.size(); ++i) {
+        auto [name, domain] = ExplainOperatorSpec(plannodes[i],
+                                                  element_level_search,
+                                                  has_element_filter,
+                                                  has_aggregation);
+        if (name[0] != '\0') {
+            explain->RegisterOperator(static_cast<int32_t>(i), name, domain);
+        }
+    }
+}
+
+void
+LinearizePlanNodes(const std::shared_ptr<const plan::PlanNode>& node,
+                   std::vector<std::shared_ptr<const plan::PlanNode>>& out) {
+    if (!node) {
+        return;
+    }
+    const auto& sources = node->sources();
+    if (!sources.empty()) {
+        LinearizePlanNodes(sources[0], out);
+    }
+    out.push_back(node);
+}
+
+}  // namespace
+
+void
+RegisterPlanOperators(const std::shared_ptr<const plan::PlanNode>& root,
+                      bool element_level_search,
+                      ExecutionExplainRecorder* explain) {
+    if (explain == nullptr || !root) {
+        return;
+    }
+    std::vector<std::shared_ptr<const plan::PlanNode>> nodes;
+    LinearizePlanNodes(root, nodes);
+    RegisterOperatorsFromNodes(nodes, element_level_search, explain);
+}
+
 std::atomic_uint64_t BlockingState::num_blocked_drivers_{0};
 
 std::shared_ptr<QueryConfig>
@@ -71,6 +183,14 @@ DriverFactory::CreateDriver(
     const std::function<int(int pipelineid)>& num_drivers) {
     auto driver = std::shared_ptr<Driver>(new Driver());
     ctx->driver_ = driver.get();
+    if (auto* qc = ctx->task_ ? ctx->task_->query_context().get() : nullptr;
+        qc != nullptr && qc->explain() != nullptr) {
+        const auto* pg = qc->get_placeholder_group();
+        const bool element_level_search =
+            pg != nullptr && !pg->empty() && pg->at(0).element_level_;
+        RegisterOperatorsFromNodes(
+            plannodes_, element_level_search, qc->explain());
+    }
     std::vector<std::shared_ptr<Operator>> operators;
     operators.reserve(plannodes_.size());
 

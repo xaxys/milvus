@@ -45,11 +45,12 @@ func genericScalarKey(value *planpb.GenericValue) (scalarValueKey, bool) {
 }
 
 type inNotEqualGroup struct {
-	col      *planpb.ColumnInfo
-	termIdxs []int
-	term     *planpb.TermExpr
-	neqIdxs  []int
-	neqVals  []*planpb.GenericValue
+	col       *planpb.ColumnInfo
+	termIdxs  []int
+	term      *planpb.TermExpr
+	neqIdxs   []int
+	neqVals   []*planpb.GenericValue
+	templates []string
 }
 
 func collectInNotEqualGroups(parts []*planpb.Expr) map[string]*inNotEqualGroup {
@@ -67,6 +68,7 @@ func collectInNotEqualGroups(parts []*planpb.Expr) map[string]*inNotEqualGroup {
 			}
 			group.termIdxs = append(group.termIdxs, i)
 			group.term = term
+			group.templates = append(group.templates, term.GetTemplateVariableName())
 		} else if unary := part.GetUnaryRangeExpr(); unary != nil && unary.GetOp() == planpb.OpType_NotEqual {
 			key, ok := valueGroupKey(unary.GetColumnInfo(), unary.GetValue())
 			if !ok {
@@ -79,6 +81,7 @@ func collectInNotEqualGroups(parts []*planpb.Expr) map[string]*inNotEqualGroup {
 			}
 			group.neqIdxs = append(group.neqIdxs, i)
 			group.neqVals = append(group.neqVals, unary.GetValue())
+			group.templates = append(group.templates, unary.GetTemplateVariableName())
 		}
 	}
 	return groups
@@ -164,7 +167,7 @@ func combineInNotEqual(parts []*planpb.Expr, op planpb.BinaryExpr_BinaryOp) []*p
 			if len(filtered) == 0 {
 				replacements[termIdx] = newAlwaysFalseExpr()
 			} else if len(filtered) != len(values) {
-				replacements[termIdx] = newTermExpr(group.col, filtered)
+				replacements[termIdx] = newTermExpr(group.col, filtered, group.templates...)
 			}
 		} else {
 			containsAny := false

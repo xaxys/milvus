@@ -48,6 +48,7 @@
 #include "plan/PlanNode.h"
 #include "plan/PlanNodeIdGenerator.h"
 #include "prometheus/histogram.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "query/ExecPlanNodeVisitor.h"
 #include "query/PlanImpl.h"
 #include "query/PlanNode.h"
@@ -223,9 +224,22 @@ SegmentInternalInterface::Search(
     visitor.SetReadSchema(plan->schema_);
     visitor.SetFilterOnly(filter_only);
     visitor.SetEnableExprCache(enable_expr_cache);
+    // Explain carries the segment row count for the payload's rows_total.
+    // get_active_count only reads the timestamps of this segment; get_real_count
+    // can run a count(*) Retrieve, which would re-enter this function and
+    // recurse on growing segments that have deletes.
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain;
+    if (plan->plan_node_->plan_options_.enable_explain) {
+        explain = std::make_shared<milvus::exec::ExecutionExplainRecorder>(
+            get_active_count(timestamp));
+        visitor.SetExplainRecorder(explain);
+    }
     auto results = std::make_unique<SearchResult>();
     *results = visitor.get_moved_result(*plan->plan_node_);
     results->segment_ = (void*)this;
+    if (explain != nullptr) {
+        results->explain_blob_ = explain->Finish();
+    }
     return results;
 }
 
@@ -303,6 +317,12 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
         visitor.SetRetrieveCandidateBudget(limit_size,
                                            plan->max_candidate_rows_);
     }
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain;
+    if (plan->plan_node_->plan_options_.enable_explain) {
+        explain = std::make_shared<milvus::exec::ExecutionExplainRecorder>(
+            get_active_count(timestamp));
+        visitor.SetExplainRecorder(explain);
+    }
     auto retrieve_results = visitor.get_retrieve_result(*plan->plan_node_);
 
     retrieve_results.segment_ = (void*)this;
@@ -331,6 +351,8 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
 
     if (candidates) {
         // Grep only needs segment-local offsets; defer all field reads.
+        // Attach explain only after checking the candidate byte budget so
+        // explain metadata does not count against limit_size.
         milvus::futures::throwIfCancelled(cancel_token);
         if (results->ByteSizeLong() > static_cast<uint64_t>(limit_size)) {
             ThrowInfo(InvalidParameter,
@@ -340,7 +362,14 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
                       "(a row cap may produce incomplete results)",
                       limit_size);
         }
+        if (explain != nullptr) {
+            results->set_explain(explain->Finish());
+        }
         return results;
+    }
+
+    if (explain != nullptr) {
+        results->set_explain(explain->Finish());
     }
 
     // Element-level query support: serialize element_level flag and element_indices

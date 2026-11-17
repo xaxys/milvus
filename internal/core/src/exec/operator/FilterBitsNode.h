@@ -82,22 +82,28 @@ class PhyFilterBitsNode : public Operator {
     void
     PrefetchAsync(const std::shared_ptr<folly::CPUThreadPoolExecutor>
                       prefetch_pool) override {
+        prefetch_started_ = true;
         exprs_->PrefetchAsync(prefetch_pool);
     }
 
     void
     WaitPrefetch() override {
+        if (whole_filter_cache_hit_ && !prefetch_started_) {
+            return;
+        }
         exprs_->WaitPrefetch();
     }
 
  private:
     std::unique_ptr<ExprSet> exprs_;
     QueryContext* query_context_;
-    int64_t num_processed_rows_;
     int64_t need_process_rows_;
+    int64_t num_processed_rows_;
     // Expression filter cache for two-stage search.
     // Cache backend is the process-level ExprResCacheManager.
     bool enable_expr_cache_ = false;
+    bool prefetch_started_ = false;
+    bool whole_filter_cache_hit_ = false;
     std::string expr_cache_key_;
 };
 }  // namespace exec

@@ -25,6 +25,7 @@
 #include "common/FastMem.h"
 #include "common/FieldData.h"
 #include "exec/QueryContext.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/expression/Utils.h"
 #include "exec/operator/Operator.h"
 #include "plan/PlanNode.h"
@@ -141,6 +142,12 @@ PhyProjectNode::GetOutput() {
     auto col_input = GetColumnVector(input_);
     // raw data view
     TargetBitmapView raw_data_view(col_input->GetRawData(), col_input->size());
+    const int64_t rows_in =
+        static_cast<int64_t>(col_input->size()) - raw_data_view.count();
+    auto* explain = query_context_->explain();
+    if (explain != nullptr && query_context_->bitset_is_element_level()) {
+        explain->SetOperatorDomain(get_operator_id(), "element");
+    }
 
     // When no fields need to be projected (e.g., count(*) only), count valid
     // logical rows directly from the bitmap.  For element-level bitmaps this is
@@ -148,8 +155,10 @@ PhyProjectNode::GetOutput() {
     // segments (OffsetOrderedMap), which would undercount rows with duplicate
     // PKs.
     if (fields_to_project_.empty()) {
-        auto valid_count =
-            static_cast<int64_t>(col_input->size()) - raw_data_view.count();
+        auto valid_count = rows_in;
+        if (explain != nullptr) {
+            explain->SetOperatorRows(get_operator_id(), rows_in, valid_count);
+        }
         is_finished_ = true;
         if (valid_count == 0) {
             return nullptr;
@@ -163,6 +172,10 @@ PhyProjectNode::GetOutput() {
     auto& selected_offsets = selected.row_offsets;
     auto& selected_element_indices = selected.element_indices;
     auto selected_count = selected_offsets.size();
+    if (explain != nullptr) {
+        explain->SetOperatorRows(
+            get_operator_id(), rows_in, static_cast<int64_t>(selected_count));
+    }
     // When all rows are filtered out, return nullptr.
     // Driver requires GetOutput to return nullptr or a non-empty vector.
     if (selected_count == 0) {

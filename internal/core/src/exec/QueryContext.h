@@ -35,6 +35,8 @@
 
 namespace milvus::exec {
 
+class ExecutionExplainRecorder;
+
 enum class ContextScope { GLOBAL = 0, SESSION = 1, QUERY = 2, Executor = 3 };
 
 class BaseConfig {
@@ -183,6 +185,22 @@ class QueryContext : public Context {
     folly::Executor*
     executor() const {
         return executor_;
+    }
+
+    milvus::exec::ExecutionExplainRecorder*
+    explain() const {
+        return explain_.get();
+    }
+
+    const std::shared_ptr<milvus::exec::ExecutionExplainRecorder>&
+    explain_shared() const {
+        return explain_;
+    }
+
+    void
+    SetExplain(
+        std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain) {
+        explain_ = std::move(explain);
     }
 
     std::shared_ptr<QueryConfig>
@@ -403,10 +421,11 @@ class QueryContext : public Context {
     // physical time in microseconds (for entity-level TTL filtering)
     // This is already converted from TSO timestamp to physical time in Go layer
     int64_t entity_ttl_physical_time_us_;
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain_{nullptr};
     milvus::Timestamp collection_ttl_timestamp_;
     // used for vector search
     milvus::SearchInfo search_info_;
-    const query::PlaceholderGroup* placeholder_group_;
+    const query::PlaceholderGroup* placeholder_group_{nullptr};
 
     // used for store segment search result
     milvus::SearchResult search_result_;
@@ -464,8 +483,60 @@ class ExecContext : public Context {
         return query_context_->query_config();
     }
 
+    milvus::exec::ExecutionExplainRecorder*
+    explain() const {
+        if (explain_disabled_) {
+            return nullptr;
+        }
+        // Executors built outside the filter node (for example the iterative
+        // filter) never call SetExplain; the request's recorder still lives on
+        // the owning QueryContext.
+        if (explain_ != nullptr) {
+            return explain_.get();
+        }
+        return query_context_ != nullptr ? query_context_->explain() : nullptr;
+    }
+
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder>
+    explain_shared() const {
+        if (explain_disabled_) {
+            return nullptr;
+        }
+        if (explain_ != nullptr) {
+            return explain_;
+        }
+        return query_context_ != nullptr ? query_context_->explain_shared()
+                                         : nullptr;
+    }
+
+    void
+    SetExplain(
+        std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain) {
+        explain_disabled_ = false;
+        explain_ = std::move(explain);
+    }
+
+    void
+    DisableExplain() {
+        explain_disabled_ = true;
+        explain_.reset();
+    }
+
+    void
+    SetOperatorStep(int32_t step) {
+        operator_step_ = step;
+    }
+
+    int32_t
+    operator_step() const {
+        return operator_step_;
+    }
+
  private:
     QueryContext* query_context_;
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain_{nullptr};
+    bool explain_disabled_{false};
+    int32_t operator_step_{-1};
 };
 
 /// @brief Helper function to check cancellation token and throw if cancelled.

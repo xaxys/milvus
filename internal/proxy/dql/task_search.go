@@ -33,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proxy/shardclient"
 	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/exprutil"
 	"github.com/milvus-io/milvus/internal/util/function/chain"
 	"github.com/milvus-io/milvus/internal/util/function/embedding"
@@ -108,6 +109,12 @@ type SearchTask struct {
 	// on its first line, so a request that will not be counted pays for no
 	// parameter scan, no expression walk and no JSON decode.
 	collectFeatures bool
+	// explainLeaves describes the predicate leaves this request's plans tagged
+	// with expr_id; explainNextExprID keeps the ids unique across hybrid
+	// sub-plans.
+	explainLeaves      map[int64]explain.LeafInfo
+	explainNextExprID  int64
+	explainSubSearches []explain.SubSearchMeta
 	// countFeatures is set only on the first task built for a user request, so
 	// the repeat runs above add nothing.
 	countFeatures          bool
@@ -130,6 +137,7 @@ type SearchTask struct {
 	reducedSubResults      []*milvuspb.SearchResults
 	reducedSubScoreInfos   []searchScoreInfo
 	reducedFeatureBits     uint64
+	reducedExplains        []*internalpb.ExecutionExplain
 
 	partitionIDsSet *typeutil.ConcurrentSet[UniqueID]
 
@@ -658,6 +666,9 @@ func (t *SearchTask) initAdvancedSearchRequest(ctx context.Context) error {
 	_, errGroupByField := funcutil.GetAttrByKeyFromRepeatedKV(GroupByFieldKey, t.request.GetSearchParams())
 	_, errGroupByFields := funcutil.GetAttrByKeyFromRepeatedKV(GroupByFieldsKey, t.request.GetSearchParams())
 	t.legacyGroupByWire = errGroupByField == nil && errGroupByFields != nil && t.request.GetSearchAggregation() == nil
+	t.explainLeaves = nil
+	t.explainNextExprID = 0
+	t.explainSubSearches = nil
 
 	var err error
 	var filterPlanSize int64
@@ -739,12 +750,13 @@ func (t *SearchTask) initAdvancedSearchRequest(ctx context.Context) error {
 				"sub-search[%d] function chains only support L0 and L1 stages", index)
 		}
 		// For hybrid search, order_by_fields comes from main search params, not sub-search params
-		plan, queryInfo, offset, subIsIterator, _, searchType, err := t.tryGeneratePlan(
+		plan, queryInfo, offset, subIsIterator, _, searchType, err := t.tryGeneratePlanWithSubReq(
 			subReq.GetSearchParams(),
 			subReq.GetDsl(),
 			subReq.GetExprTemplateValues(),
 			membershipPreflightBudget,
 			t.request.GetFunctionScore() != nil || len(querynodeFunctionChains) > 0,
+			index,
 		)
 		if err != nil {
 			return err
@@ -1079,6 +1091,9 @@ func (t *SearchTask) initSearchRequest(ctx context.Context) error {
 	_, errGroupByField := funcutil.GetAttrByKeyFromRepeatedKV(GroupByFieldKey, t.request.GetSearchParams())
 	_, errGroupByFields := funcutil.GetAttrByKeyFromRepeatedKV(GroupByFieldsKey, t.request.GetSearchParams())
 	t.legacyGroupByWire = errGroupByField == nil && errGroupByFields != nil && t.request.GetSearchAggregation() == nil
+	t.explainLeaves = nil
+	t.explainNextExprID = 0
+	t.explainSubSearches = nil
 
 	plan, queryInfo, offset, isIterator, orderByFields, searchType, err := t.tryGeneratePlan(
 		t.request.GetSearchParams(),
@@ -1389,6 +1404,17 @@ func (t *SearchTask) tryGeneratePlan(
 	membershipBudget *planparserv2.MembershipPreflightBudget,
 	functionRerank bool,
 ) (*planpb.PlanNode, *planpb.QueryInfo, int64, bool, []OrderByField, internalpb.SearchType, error) {
+	return t.tryGeneratePlanWithSubReq(params, dsl, exprTemplateValues, membershipBudget, functionRerank, -1)
+}
+
+func (t *SearchTask) tryGeneratePlanWithSubReq(
+	params []*commonpb.KeyValuePair,
+	dsl string,
+	exprTemplateValues map[string]*schemapb.TemplateValue,
+	membershipBudget *planparserv2.MembershipPreflightBudget,
+	functionRerank bool,
+	subReqIndex int,
+) (*planpb.PlanNode, *planpb.QueryInfo, int64, bool, []OrderByField, internalpb.SearchType, error) {
 	annsFieldName, err := funcutil.GetAttrByKeyFromRepeatedKV(AnnsFieldKey, params)
 	if err != nil || len(annsFieldName) == 0 {
 		vecFields := typeutil.GetVectorFieldSchemas(t.schema.CollectionSchema)
@@ -1449,7 +1475,17 @@ func (t *SearchTask) tryGeneratePlan(
 		metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), "search", metrics.FailLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, WrapPlanCreationError(planErr, "failed to create query plan")
 	}
-	if err := applyIndexHint(t.ctx, t.node, t.GetCollectionID(), plan, t.request.GetSearchParams()); err != nil {
+	hasUserExpr := strings.TrimSpace(dsl) != ""
+	if err := configureExplainPlan(plan, t.request.GetSearchParams(), false, hasUserExpr, subReqIndex, t.schema.CollectionSchema, &t.explainNextExprID, &t.explainLeaves); err != nil {
+		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, err
+	}
+	if subReqIndex >= 0 && plan.GetPlanOptions().GetEnableExplain() {
+		t.explainSubSearches = append(t.explainSubSearches, explain.SubSearchMeta{
+			SubReqIndex: subReqIndex,
+			AnnsField:   annField.GetName(),
+		})
+	}
+	if err := applyIndexHint(t.ctx, t.node, t.GetCollectionID(), plan, effectiveIndexHintParams(t.request.GetSearchParams(), params)); err != nil {
 		// A hint the user asked to be strict about must surface, not be swallowed.
 		return nil, nil, 0, false, nil, internalpb.SearchType_DEFAULT, err
 	}
@@ -1595,6 +1631,7 @@ func (t *SearchTask) executeByQueryView(ctx context.Context) error {
 	var lastErr error
 	var retryErrors []error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		t.reducedExplains = nil
 		result, err := legacy.Search(ctx, &queryclient.LegacySearchRequest{
 			Req:                    searchRequest,
 			BarrierMVCC:            t.MvccTimestamp,
@@ -1627,6 +1664,7 @@ func (t *SearchTask) executeByQueryView(ctx context.Context) error {
 		var relatedDataSize int64
 		var featureBits uint64
 		var isTopkReduce, isRecallEvaluation bool
+		var streamExplains []*internalpb.ExecutionExplain
 		storageCost := segcore.StorageCost{}
 		metricType := t.GetMetricType()
 		collectMetadata := func(r *internalpb.SearchResults) {
@@ -1639,6 +1677,7 @@ func (t *SearchTask) executeByQueryView(ctx context.Context) error {
 			}
 			storageCost.ScannedRemoteBytes += r.GetScannedRemoteBytes()
 			storageCost.ScannedTotalBytes += r.GetScannedTotalBytes()
+			streamExplains = explain.Splice(streamExplains, r.GetExplain())
 		}
 
 		var reducedResult *milvuspb.SearchResults
@@ -1646,8 +1685,20 @@ func (t *SearchTask) executeByQueryView(ctx context.Context) error {
 		var reducedSubResults []*milvuspb.SearchResults
 		var reducedSubScoreInfos []searchScoreInfo
 		var recvErr, closeErr error
+		t.reducedExplains = nil
 		if result.SubStreams != nil {
-			reducedSubResults, reducedSubScoreInfos, recvErr = t.consumeHybridResultStreams(result.SubStreams, collectMetadata)
+			reducedSubResults, reducedSubScoreInfos, recvErr = t.consumeHybridResultStreams(result.SubStreams, func(r *internalpb.SearchResults) {
+				featureBits |= r.GetFeatureBits()
+				isTopkReduce = isTopkReduce || r.GetIsTopkReduce()
+				isRecallEvaluation = isRecallEvaluation || r.GetIsRecallEvaluation()
+				relatedDataSize += r.GetCostAggregation().GetTotalRelatedDataSize()
+				for channel, timestamp := range r.GetChannelsMvcc() {
+					queryChannelsTs[channel] = timestamp
+				}
+				storageCost.ScannedRemoteBytes += r.GetScannedRemoteBytes()
+				storageCost.ScannedTotalBytes += r.GetScannedTotalBytes()
+			})
+			streamExplains = t.reducedExplains
 		} else {
 			scoreInfo := newSearchScoreInfo(metricType, chain.QueryNodeChainsWriteScore(t.request.GetFunctionChains()))
 			reducedResult, reducedScoreInfo, recvErr = t.consumeSearchResultStream(result.Stream, searchRequest, scoreInfo, collectMetadata)
@@ -1685,6 +1736,7 @@ func (t *SearchTask) executeByQueryView(ctx context.Context) error {
 		t.reducedScoreInfo = reducedScoreInfo
 		t.reducedSubResults, t.reducedSubScoreInfos = reducedSubResults, reducedSubScoreInfos
 		t.reducedFeatureBits = featureBits
+		t.reducedExplains = streamExplains
 		t.queryChannelsTs = queryChannelsTs
 		t.relatedDataSize = relatedDataSize
 		t.isTopkReduce = isTopkReduce
@@ -1979,14 +2031,17 @@ func (t *SearchTask) consumeHybridResultStreams(
 	}
 	results = make([]*milvuspb.SearchResults, len(streams))
 	scoreInfos = make([]searchScoreInfo, len(streams))
+	subExplains := make([]*internalpb.ExecutionExplain, len(streams))
 	rewritten := t.subSearchScoresRewritten()
 	var metadataMu sync.Mutex
 	var group errgroup.Group
 	for index, stream := range streams {
 		group.Go(func() error {
 			var recvErr error
+			var collected []*internalpb.ExecutionExplain
 			scoreInfo := newSearchScoreInfo(requests[index].GetMetricType(), scoreRewrittenAt(rewritten, index))
 			results[index], scoreInfos[index], recvErr = t.consumeSearchResultStream(stream, requests[index], scoreInfo, func(chunk *internalpb.SearchResults) {
+				collected = explain.Splice(collected, chunk.GetExplain())
 				metadataMu.Lock()
 				defer metadataMu.Unlock()
 				collectMetadata(chunk)
@@ -1996,13 +2051,24 @@ func (t *SearchTask) consumeHybridResultStreams(
 					receiveErr = recvErr
 					closeStreams()
 				})
+				return recvErr
 			}
-			return recvErr
+			subExplains[index] = explain.WrapSubSearch(index, collected)
+			return nil
 		})
 	}
 	if group.Wait() != nil {
 		return nil, nil, receiveErr
 	}
+	closeStreams()
+	if closeErr != nil {
+		return nil, nil, closeErr
+	}
+	var explains []*internalpb.ExecutionExplain
+	for _, subExplain := range subExplains {
+		explains = explain.Splice(explains, subExplain)
+	}
+	t.reducedExplains = explains
 	return results, scoreInfos, nil
 }
 
@@ -2145,10 +2211,12 @@ func (t *SearchTask) PostExecute(ctx context.Context) error {
 		toReduceResults   []*internalpb.SearchResults
 		reducedResult     = t.reducedResult
 		reducedSubResults = t.reducedSubResults
+		reducedExplains   = t.reducedExplains
 		err               error
 	)
 	t.reducedResult = nil
 	t.reducedSubResults = nil
+	t.reducedExplains = nil
 	if reducedResult == nil && reducedSubResults == nil {
 		t.queryChannelsTs = make(map[string]uint64)
 		t.relatedDataSize = 0
@@ -2306,6 +2374,31 @@ func (t *SearchTask) PostExecute(ctx context.Context) error {
 			rd.GroupByFieldValues = nil
 		}
 	}
+
+	// Execution explain: what the shards did, rendered for the client. The
+	// pipeline keeps no explain, so it comes from the results it consumed.
+	explains := reducedExplains
+	if len(explains) == 0 && len(toReduceResults) > 0 {
+		explains = make([]*internalpb.ExecutionExplain, 0, len(toReduceResults))
+		for _, result := range toReduceResults {
+			explains = explain.Splice(explains, result.GetExplain())
+		}
+	}
+	var collectionSchema *schemapb.CollectionSchema
+	if t.schema != nil {
+		collectionSchema = t.schema.CollectionSchema
+	}
+	rendered, explainErr := renderExplain(
+		t.request.GetSearchParams(),
+		explains,
+		t.explainLeaves,
+		collectionSchema,
+		t.explainSubSearches,
+		func(ids []int64) map[int64]string { return explainIndexNames(ctx, t.node, t.GetCollectionID(), ids) })
+	if explainErr != nil {
+		return explainErr
+	}
+	attachExplain(&t.result.Status, rendered)
 
 	log.Debug(ctx, "Search post execute done",
 		mlog.Int64("collection", t.GetCollectionID()),

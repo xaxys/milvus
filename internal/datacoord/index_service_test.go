@@ -43,6 +43,7 @@ import (
 	mockkv "github.com/milvus-io/milvus/internal/kv/mocks"
 	"github.com/milvus-io/milvus/internal/metacache"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
+	catalogkv "github.com/milvus-io/milvus/internal/metastore/kv/queryview"
 	catalogmocks "github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/mocks"
@@ -57,7 +58,6 @@ import (
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster/broadcast"
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster/registry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
-	catalogkv "github.com/milvus-io/milvus/internal/metastore/kv/queryview"
 	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
 	qvresource "github.com/milvus-io/milvus/internal/views/coord/resource"
 	"github.com/milvus-io/milvus/pkg/v3/common"
@@ -3635,13 +3635,13 @@ func TestServer_CreateIndex_MultiIndexNamingAndCap(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	for i := len(s.indexMeta.GetFieldIndexes(multiIndexCollID, multiIndexScalarFID, "")); i < maxScalarIndexesPerField; i++ {
 		require.NoError(t, s.indexMeta.CreateIndex(ctx, &model.Index{
-			CollectionID:    multiIndexCollID,
-			FieldID:         multiIndexScalarFID,
-			IndexName:       fmt.Sprintf("cap_index_%d", i),
-			IndexID:         int64(9000 + i),
-			IndexParams:     ngram(i),
-			TypeParams:      nil,
-			IsDeleted:       false,
+			CollectionID: multiIndexCollID,
+			FieldID:      multiIndexScalarFID,
+			IndexName:    fmt.Sprintf("cap_index_%d", i),
+			IndexID:      int64(9000 + i),
+			IndexParams:  ngram(i),
+			TypeParams:   nil,
+			IsDeleted:    false,
 		}))
 	}
 	require.Len(t, s.indexMeta.GetFieldIndexes(multiIndexCollID, multiIndexScalarFID, ""), maxScalarIndexesPerField)

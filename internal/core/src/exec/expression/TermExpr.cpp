@@ -58,13 +58,10 @@ namespace exec {
 
 void
 PhyTermFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    WaitPrefetch();
+    auto eval_guard = PrepareLeafEval(context);
     tracer::AutoSpan span(
         "PhyTermFilterExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("data_type", static_cast<int>(expr_->column_.data_type_));
-
-    auto input = context.get_offset_input();
-    SetHasOffsetInput((input != nullptr));
     if (exec_path_ == ExprExecPath::PkIndex && !has_offset_input_) {
         result = ExecPkTermImpl();
         return;
@@ -626,6 +623,8 @@ PhyTermFilterExpr::ExecJsonInVariableByStats() {
         TargetBitmapView valid_res_view(*cached_index_chunk_valid_res_);
 
         // process shredding data
+        int64_t shredded_scanned = 0;
+        int64_t shared_scanned = 0;
         auto try_execute = [&](milvus::index::JSONType json_type,
                                auto get_type) {
             auto target_field = index->GetShreddingField(pointer, json_type);
@@ -656,12 +655,14 @@ PhyTermFilterExpr::ExecJsonInVariableByStats() {
                         }
                     }
                 };
-                index->ExecutorForShreddingData<ColType>(op_ctx_,
-                                                         target_field,
-                                                         shredding_executor,
-                                                         nullptr,
-                                                         target_res_view,
-                                                         target_valid_view);
+                const auto scanned =
+                    index->ExecutorForShreddingData<ColType>(op_ctx_,
+                                                             target_field,
+                                                             shredding_executor,
+                                                             nullptr,
+                                                             target_res_view,
+                                                             target_valid_view);
+                shredded_scanned = std::max(shredded_scanned, scanned);
                 res_view.inplace_or_with_count(target_res_view, active_count_);
                 valid_res_view.inplace_or_with_count(target_valid_view,
                                                      active_count_);
@@ -744,9 +745,19 @@ PhyTermFilterExpr::ExecJsonInVariableByStats() {
                 "term_json_stats_shared_data",
                 [this](double us) { json_stats_shared_latency_us_ += us; });
 
-            index->ExecuteForSharedData(
-                op_ctx_, bson_index_, pointer, shared_executor);
+            index->ExecuteForSharedData(op_ctx_,
+                                        bson_index_,
+                                        pointer,
+                                        [&](milvus::BsonView bson,
+                                            uint32_t row_offset,
+                                            uint32_t value_offset) {
+                                            ++shared_scanned;
+                                            shared_executor(
+                                                bson, row_offset, value_offset);
+                                        });
         }
+        RecordRawScan(std::min<int64_t>(active_count_,
+                                        shredded_scanned + shared_scanned));
         cached_index_chunk_id_ = 0;
         CachePut(CacheElapsedUs(cache_compute_start));
     }
@@ -979,6 +990,7 @@ PhyTermFilterExpr::ExecVisitorImplForIndex() {
     auto args =
         std::dynamic_pointer_cast<FlatVectorElement<ReaderType>>(arg_set_);
     if (field_type_ == DataType::JSON && args->values_.empty()) {
+        SetConstantOutcome(false);
         MoveCursor();
         return std::make_shared<ColumnVector>(
             TargetBitmap(real_batch_size, false),
@@ -1025,6 +1037,7 @@ PhyTermFilterExpr::ExecVisitorImplForIndex<bool>() {
         };
     auto args = std::dynamic_pointer_cast<FlatVectorElement<uint8_t>>(arg_set_);
     if (field_type_ == DataType::JSON && args->values_.empty()) {
+        SetConstantOutcome(false);
         MoveCursor();
         return std::make_shared<ColumnVector>(
             TargetBitmap(real_batch_size, false),
@@ -1251,6 +1264,11 @@ PhyTermFilterExpr::ExecVisitorImplForData(EvalCtx& context) {
 
 void
 PhyTermFilterExpr::DetermineExecPath() {
+    if (expr_->column_.element_level_ && expr_->vals_.empty()) {
+        SetConstantOutcome(false);
+        exec_path_ = ExprExecPath::RawData;
+        return;
+    }
     // Validate before execution-path selection or asynchronous prefetch can
     // consume values using the type selected from vals_[0].
     if (expr_->column_.data_type_ == DataType::JSON &&
@@ -1275,6 +1293,7 @@ PhyTermFilterExpr::DetermineExecPath() {
     }
 
     if (expr_->column_.data_type_ == DataType::JSON && expr_->is_in_field_) {
+        decline_reason_ = DeclineReason::kCapabilityMismatch;
         exec_path_ = ExprExecPath::RawData;
         return;
     }
@@ -1290,6 +1309,7 @@ PhyTermFilterExpr::DetermineExecPath() {
 
     // ARRAY type cannot use scalar index.
     if (data_type == DataType::ARRAY) {
+        decline_reason_ = DeclineReason::kCapabilityMismatch;
         exec_path_ = ExprExecPath::RawData;
         return;
     }

@@ -12,6 +12,7 @@ func (v *visitor) combineOrEqualsToIn(parts []*planpb.Expr) []*planpb.Expr {
 	type group struct {
 		col         *planpb.ColumnInfo
 		values      []*planpb.GenericValue
+		templates   []string
 		origIndices []int
 	}
 	others := make([]*planpb.Expr, 0, len(parts))
@@ -39,6 +40,7 @@ func (v *visitor) combineOrEqualsToIn(parts []*planpb.Expr) []*planpb.Expr {
 			groups[key] = g
 		}
 		g.values = append(g.values, u.GetValue())
+		g.templates = append(g.templates, u.GetTemplateVariableName())
 		g.origIndices = append(g.origIndices, idx)
 	}
 	out := make([]*planpb.Expr, 0, len(parts))
@@ -46,7 +48,7 @@ func (v *visitor) combineOrEqualsToIn(parts []*planpb.Expr) []*planpb.Expr {
 	for _, g := range groups {
 		if len(g.values) >= 2 {
 			g.values = sortGenericValues(g.values)
-			out = append(out, newTermExpr(g.col, g.values))
+			out = append(out, newTermExpr(g.col, g.values, g.templates...))
 		} else {
 			for _, i := range g.origIndices {
 				out = append(out, indexToExpr[i])
@@ -60,6 +62,7 @@ func (v *visitor) combineAndNotEqualsToNotIn(parts []*planpb.Expr) []*planpb.Exp
 	type group struct {
 		col         *planpb.ColumnInfo
 		values      []*planpb.GenericValue
+		templates   []string
 		origIndices []int
 	}
 	others := make([]*planpb.Expr, 0, len(parts))
@@ -87,6 +90,7 @@ func (v *visitor) combineAndNotEqualsToNotIn(parts []*planpb.Expr) []*planpb.Exp
 			groups[key] = g
 		}
 		g.values = append(g.values, u.GetValue())
+		g.templates = append(g.templates, u.GetTemplateVariableName())
 		g.origIndices = append(g.origIndices, idx)
 	}
 	out := make([]*planpb.Expr, 0, len(parts))
@@ -111,7 +115,7 @@ func (v *visitor) combineAndNotEqualsToNotIn(parts []*planpb.Expr) []*planpb.Exp
 				continue
 			}
 			g.values = sortGenericValues(g.values)
-			in := newTermExpr(g.col, g.values)
+			in := newTermExpr(g.col, g.values, g.templates...)
 			out = append(out, notExpr(in))
 		} else {
 			for _, i := range g.origIndices {
@@ -136,11 +140,12 @@ func notExpr(child *planpb.Expr) *planpb.Expr {
 // AND: (a IN S) AND (a = v) with v in S -> a = v
 func (v *visitor) combineAndInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 	type agg struct {
-		termIdxs []int
-		eqIdxs   []int
-		term     *planpb.TermExpr
-		eqValues []*planpb.GenericValue
-		col      *planpb.ColumnInfo
+		termIdxs  []int
+		eqIdxs    []int
+		term      *planpb.TermExpr
+		eqValues  []*planpb.GenericValue
+		templates []string
+		col       *planpb.ColumnInfo
 	}
 	groups := map[string]*agg{}
 	others := []int{}
@@ -157,6 +162,7 @@ func (v *visitor) combineAndInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 			}
 			g.termIdxs = append(g.termIdxs, idx)
 			g.term = te
+			g.templates = append(g.templates, te.GetTemplateVariableName())
 			groups[k] = g
 			continue
 		}
@@ -172,6 +178,7 @@ func (v *visitor) combineAndInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 			}
 			g.eqIdxs = append(g.eqIdxs, idx)
 			g.eqValues = append(g.eqValues, ue.GetValue())
+			g.templates = append(g.templates, ue.GetTemplateVariableName())
 			groups[k] = g
 			continue
 		}
@@ -243,7 +250,7 @@ func (v *visitor) combineAndInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 		}
 		if inSet {
 			// reduce to equality
-			out = append(out, newUnaryRangeExpr(g.col, planpb.OpType_Equal, ev))
+			out = append(out, newUnaryRangeExpr(g.col, planpb.OpType_Equal, ev, g.templates...))
 		} else {
 			// contradiction -> false
 			out = append(out, newAlwaysFalseExpr())
@@ -261,11 +268,12 @@ func (v *visitor) combineAndInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 // Optional extension (not enabled here): if v not in S, could union.
 func (v *visitor) combineOrInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 	type agg struct {
-		termIdx int
-		term    *planpb.TermExpr
-		col     *planpb.ColumnInfo
-		eqIdxs  []int
-		eqVals  []*planpb.GenericValue
+		termIdx   int
+		term      *planpb.TermExpr
+		col       *planpb.ColumnInfo
+		eqIdxs    []int
+		eqVals    []*planpb.GenericValue
+		templates []string
 	}
 	groups := map[string]*agg{}
 	others := []int{}
@@ -283,6 +291,7 @@ func (v *visitor) combineOrInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 			}
 			g.termIdx = idx
 			g.term = te
+			g.templates = append(g.templates, te.GetTemplateVariableName())
 			continue
 		}
 		if ue := e.GetUnaryRangeExpr(); ue != nil && ue.GetOp() == planpb.OpType_Equal && ue.GetValue() != nil && ue.GetColumnInfo() != nil {
@@ -298,6 +307,7 @@ func (v *visitor) combineOrInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 			}
 			g.eqIdxs = append(g.eqIdxs, idx)
 			g.eqVals = append(g.eqVals, ue.GetValue())
+			g.templates = append(g.templates, ue.GetTemplateVariableName())
 			continue
 		}
 		others = append(others, idx)
@@ -320,7 +330,7 @@ func (v *visitor) combineOrInWithEqual(parts []*planpb.Expr) []*planpb.Expr {
 		}
 		union = sortGenericValues(union)
 		used[g.termIdx] = true
-		out = append(out, newTermExpr(g.col, union))
+		out = append(out, newTermExpr(g.col, union, g.templates...))
 	}
 	for i := range parts {
 		if !used[i] {
@@ -370,6 +380,7 @@ func (v *visitor) combineAndInWithRange(parts []*planpb.Expr) []*planpb.Expr {
 		upper          *planpb.GenericValue
 		upperInc       bool
 		rangeIdxs      []int
+		templates      []string
 	}
 	groups := map[string]*group{}
 	others := []int{}
@@ -404,6 +415,7 @@ func (v *visitor) combineAndInWithRange(parts []*planpb.Expr) []*planpb.Expr {
 			}
 			g.term = te
 			g.termIdx = idx
+			g.templates = append(g.templates, te.GetTemplateVariableName())
 			continue
 		}
 		if ue := e.GetUnaryRangeExpr(); ue != nil && isRange(ue.GetOp()) && ue.GetValue() != nil && ue.GetColumnInfo() != nil {
@@ -436,6 +448,7 @@ func (v *visitor) combineAndInWithRange(parts []*planpb.Expr) []*planpb.Expr {
 				}
 			}
 			g.rangeIdxs = append(g.rangeIdxs, idx)
+			g.templates = append(g.templates, ue.GetTemplateVariableName())
 			continue
 		}
 		others = append(others, idx)
@@ -463,7 +476,7 @@ func (v *visitor) combineAndInWithRange(parts []*planpb.Expr) []*planpb.Expr {
 			// Empty IN list after filtering → AlwaysFalse
 			out = append(out, newAlwaysFalseExpr())
 		} else {
-			out = append(out, newTermExpr(g.col, filtered))
+			out = append(out, newTermExpr(g.col, filtered, g.templates...))
 		}
 	}
 	for i := range parts {
@@ -477,9 +490,10 @@ func (v *visitor) combineAndInWithRange(parts []*planpb.Expr) []*planpb.Expr {
 // OR: (a IN S1) OR (a IN S2) -> a IN union(S1, S2)
 func (v *visitor) combineOrInWithIn(parts []*planpb.Expr) []*planpb.Expr {
 	type agg struct {
-		col    *planpb.ColumnInfo
-		idxs   []int
-		values [][]*planpb.GenericValue
+		col       *planpb.ColumnInfo
+		idxs      []int
+		values    [][]*planpb.GenericValue
+		templates []string
 	}
 	groups := map[string]*agg{}
 	others := []int{}
@@ -497,6 +511,7 @@ func (v *visitor) combineOrInWithIn(parts []*planpb.Expr) []*planpb.Expr {
 			}
 			g.idxs = append(g.idxs, idx)
 			g.values = append(g.values, te.GetValues())
+			g.templates = append(g.templates, te.GetTemplateVariableName())
 			continue
 		}
 		others = append(others, idx)
@@ -519,7 +534,7 @@ func (v *visitor) combineOrInWithIn(parts []*planpb.Expr) []*planpb.Expr {
 		for _, i := range g.idxs {
 			used[i] = true
 		}
-		out = append(out, newTermExpr(g.col, union))
+		out = append(out, newTermExpr(g.col, union, g.templates...))
 	}
 	for i := range parts {
 		if !used[i] {
@@ -532,9 +547,10 @@ func (v *visitor) combineOrInWithIn(parts []*planpb.Expr) []*planpb.Expr {
 // AND: (a IN S1) AND (a IN S2) ... -> a IN intersection(S1, S2, ...)
 func (v *visitor) combineAndInWithIn(parts []*planpb.Expr) []*planpb.Expr {
 	type agg struct {
-		col    *planpb.ColumnInfo
-		idxs   []int
-		values [][]*planpb.GenericValue
+		col       *planpb.ColumnInfo
+		idxs      []int
+		values    [][]*planpb.GenericValue
+		templates []string
 	}
 	groups := map[string]*agg{}
 	others := []int{}
@@ -552,6 +568,7 @@ func (v *visitor) combineAndInWithIn(parts []*planpb.Expr) []*planpb.Expr {
 			}
 			g.idxs = append(g.idxs, idx)
 			g.values = append(g.values, te.GetValues())
+			g.templates = append(g.templates, te.GetTemplateVariableName())
 			continue
 		}
 		others = append(others, idx)
@@ -579,7 +596,7 @@ func (v *visitor) combineAndInWithIn(parts []*planpb.Expr) []*planpb.Expr {
 		if len(inter) == 0 {
 			out = append(out, newAlwaysFalseExpr())
 		} else {
-			out = append(out, newTermExpr(g.col, inter))
+			out = append(out, newTermExpr(g.col, inter, g.templates...))
 		}
 	}
 	for i := range parts {

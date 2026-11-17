@@ -192,6 +192,23 @@ func TestAssembleAdvancedSearchResults(t *testing.T) {
 	assert.Same(t, firstData, result.GetSubResults()[0].GetResultData())
 	assert.Equal(t, int64(1), result.GetSubResults()[1].GetReqIndex())
 	assert.Same(t, secondData, result.GetSubResults()[1].GetResultData())
+
+	withExplain := assembleAdvancedSearchResults([]*internalpb.SearchResults{
+		{
+			ResultData: firstData,
+			Explain:    &internalpb.ExecutionExplain{Kind: "segment", Name: "segA"},
+		},
+		{
+			ResultData: secondData,
+			Explain:    &internalpb.ExecutionExplain{Kind: "segment", Name: "segB"},
+		},
+	})
+	require.NotNil(t, withExplain.GetExplain())
+	require.Len(t, withExplain.GetExplain().GetChildren(), 2)
+	assert.Equal(t, "sub_search", withExplain.GetExplain().GetChildren()[0].GetKind())
+	assert.Equal(t, "0", withExplain.GetExplain().GetChildren()[0].GetAttributes()["sub_req_index"])
+	assert.Equal(t, "sub_search", withExplain.GetExplain().GetChildren()[1].GetKind())
+	assert.Equal(t, "1", withExplain.GetExplain().GetChildren()[1].GetAttributes()["sub_req_index"])
 }
 
 func TestServerSearchOnViewExecutesAdvancedSubSearches(t *testing.T) {

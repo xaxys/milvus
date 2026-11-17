@@ -498,3 +498,63 @@ func TestLegacyTwoStageSearchChannelCountWithRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestTwoStageSearchMergesStage1ExplainOnlyWhenCompleted(t *testing.T) {
+	stage1Explain := &internalpb.ExecutionExplain{
+		Kind: "querynode",
+		Name: "11",
+		Children: []*internalpb.ExecutionExplain{{
+			Kind:     "segment",
+			Name:     "seg1",
+			Counters: map[string]int64{"rows_total": 100, "rows_in": 100, "rows_out": 20},
+			Children: []*internalpb.ExecutionExplain{{
+				Kind:       "operator",
+				Attributes: map[string]string{"name": "filter", "step": "0"},
+				Counters:   map[string]int64{"rows_in": 100, "rows_out": 20},
+				Children: []*internalpb.ExecutionExplain{{
+					Kind:       "filter_group",
+					Attributes: map[string]string{"expr_id": "1", "field_id": "101", "index_id": "901", "family": "sort"},
+					Counters:   map[string]int64{"rows_in": 100, "idx_scan": 100, "raw_scan": 0, "rows_out": 20},
+				}},
+			}},
+		}},
+	}
+	makeStage2Response := func() *viewpb.SearchOnViewResponse {
+		return &viewpb.SearchOnViewResponse{
+			LegacyResults: &internalpb.SearchResults{
+				Explain: &internalpb.ExecutionExplain{
+					Kind: "querynode",
+					Name: "11",
+					Children: []*internalpb.ExecutionExplain{{
+						Kind:     "segment",
+						Name:     "seg1",
+						Counters: map[string]int64{"rows_total": 100},
+						Children: []*internalpb.ExecutionExplain{{
+							Kind:       "operator",
+							Attributes: map[string]string{"name": "filter", "step": "0", "cached": "true"},
+							Counters:   map[string]int64{"rows_in": 100, "rows_out": 20},
+						}},
+					}},
+				},
+			},
+		}
+	}
+
+	incomplete := twoStageSearch{
+		completed: false,
+		filters:   map[int64]*internalpb.SearchResults{11: {Explain: stage1Explain}},
+	}
+	respFallback := makeStage2Response()
+	incomplete.mergeFeatures(qviews.NewQueryNode(11), respFallback)
+	require.Empty(t, respFallback.GetLegacyResults().GetExplain().GetChildren()[0].GetChildren()[0].GetChildren())
+
+	complete := twoStageSearch{
+		completed: true,
+		filters:   map[int64]*internalpb.SearchResults{11: {Explain: stage1Explain}},
+	}
+	respMerged := makeStage2Response()
+	complete.mergeFeatures(qviews.NewQueryNode(11), respMerged)
+	filterOp := respMerged.GetLegacyResults().GetExplain().GetChildren()[0].GetChildren()[0]
+	require.Len(t, filterOp.GetChildren(), 1)
+	require.Empty(t, filterOp.GetAttributes()["cached"])
+}

@@ -21,6 +21,7 @@
 
 #include "common/Tracer.h"
 #include "exec/QueryContext.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/expression/Utils.h"
 #include "fmt/core.h"
 #include "plan/PlanNode.h"
@@ -37,7 +38,7 @@ PhyMvccNode::PhyMvccNode(int32_t operator_id,
                mvcc_node->output_type(),
                operator_id,
                mvcc_node->id(),
-               "PhyIterativeFilterNode") {
+               "PhyMvccNode") {
     ExecContext* exec_context = operator_context_->get_exec_context();
     QueryContext* query_context = exec_context->get_query_context();
     segment_ = query_context->get_segment();
@@ -93,6 +94,12 @@ PhyMvccNode::GetOutput() {
         if (data.none()) {
             query_context->set_all_rows_visible(true);
         }
+        if (auto* explain = query_context->explain(); explain != nullptr) {
+            explain->SetOperatorRows(
+                get_operator_id(),
+                active_count_,
+                active_count_ - static_cast<int64_t>(data.count()));
+        }
 
         is_finished_ = true;
         return std::make_shared<RowVector>(std::vector<VectorPtr>{col_input});
@@ -107,9 +114,18 @@ PhyMvccNode::GetOutput() {
                                      : GetColumnVector(input_);
 
     TargetBitmapView data(col_input->GetRawData(), col_input->size());
+    const int64_t rows_in =
+        is_source_node_ ? active_count_
+                        : static_cast<int64_t>(data.size() - data.count());
     segment_->mask_with_timestamps(
         data, query_timestamp_, collection_ttl_timestamp_);
     segment_->mask_with_delete(data, active_count_, query_timestamp_);
+    if (auto* explain = query_context->explain(); explain != nullptr) {
+        explain->SetOperatorRows(
+            get_operator_id(),
+            rows_in,
+            static_cast<int64_t>(data.size() - data.count()));
+    }
     is_finished_ = true;
 
     // input_ have already been updated

@@ -506,8 +506,27 @@ class PhyJsonContainsFilterExpr : public SegmentExpr {
         return true;
     }
 
+    bool
+    UsesIndexWithOffsetInput() const override {
+        return IndexOnlyScalarWithOffsets(expr_->column_.element_level_);
+    }
+
     void
     DetermineExecPath() override {
+        const bool is_element_level_array =
+            expr_->column_.data_type_ == DataType::ARRAY &&
+            expr_->column_.element_level_;
+        if (expr_->vals_.empty() && !is_element_level_array &&
+            !IsNestedArrayElementOperand()) {
+            if (!(expr_->column_.data_type_ == DataType::ARRAY &&
+                  expr_->column_.nullable_)) {
+                SetConstantOutcome(
+                    expr_->op_ ==
+                    proto::plan::JSONContainsExpr_JSONOp_ContainsAll);
+            }
+            exec_path_ = ExprExecPath::RawData;
+            return;
+        }
         // JsonStats is the fallback applied by EnsureExecPathDetermined()
         // when no index below serves this expression; see SegmentExpr::
         // FallbackToJsonStatsIfEligible().
@@ -519,12 +538,14 @@ class PhyJsonContainsFilterExpr : public SegmentExpr {
                              return value.val_case() ==
                                     proto::plan::GenericValue::kArrayVal;
                          }))) {
+            decline_reason_ = DeclineReason::kLiteralNotSupported;
             exec_path_ = ExprExecPath::RawData;
             return;
         }
         if (expr_->column_.data_type_ == DataType::ARRAY &&
             (expr_->column_.element_level_ || expr_->vals_.empty() ||
              is_native_list_array_)) {
+            decline_reason_ = DeclineReason::kCapabilityMismatch;
             exec_path_ = ExprExecPath::RawData;
             return;
         }
@@ -536,6 +557,7 @@ class PhyJsonContainsFilterExpr : public SegmentExpr {
                             return !IsInt64SafeForJsonDoubleIndex(
                                 value.int64_val());
                         })) {
+            decline_reason_ = DeclineReason::kFlatJsonRequired;
             exec_path_ = ExprExecPath::RawData;
             return;
         }

@@ -23,6 +23,7 @@ import (
 
 	"github.com/samber/lo"
 
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/searchutil/optimizers"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -42,7 +43,7 @@ func (sd *shardDelegator) executeFilterStage(
 	req *querypb.SearchRequest,
 	sealed []SnapshotItem,
 	sealedRowCount map[int64]int64,
-) ([]int64, uint64, error) {
+) ([]int64, uint64, []*internalpb.ExecutionExplain, error) {
 	originalFilterOnly := req.FilterOnly
 	originalEnableExprCache := req.EnableExprCache
 	req.FilterOnly = true
@@ -60,7 +61,7 @@ func (sd *shardDelegator) executeFilterStage(
 	if err != nil {
 		log := sd.getLogger(ctx)
 		log.Warn(ctx, "Two-stage search: filter stage failed", mlog.Err(err))
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 
 	// NOTE: validCounts ordering is non-deterministic because filterResults
@@ -70,17 +71,21 @@ func (sd *shardDelegator) executeFilterStage(
 	// TODO: if a future consumer needs per-segment association, pair each
 	// count with its SegmentID before returning.
 	validCounts := make([]int64, 0, len(sealedRowCount))
+	explains := make([]*internalpb.ExecutionExplain, 0, len(filterResults))
 	var featureBits uint64
 	for _, result := range filterResults {
+		if node := result.GetExplain(); node != nil {
+			explains = append(explains, node)
+		}
 		featureBits |= result.GetFeatureBits()
 		for _, vc := range result.GetFilterValidCounts() {
 			if vc < 0 {
-				return nil, 0, merr.WrapErrServiceInternalMsg("filter stage returned negative valid_count %d, segment may not support filter-only search", vc)
+				return nil, 0, nil, merr.WrapErrServiceInternalMsg("filter stage returned negative valid_count %d, segment may not support filter-only search", vc)
 			}
 			validCounts = append(validCounts, vc)
 		}
 	}
-	return validCounts, featureBits, nil
+	return validCounts, featureBits, explains, nil
 }
 
 // twoStageSearch implements the two-stage search flow:
@@ -109,7 +114,7 @@ func (sd *shardDelegator) twoStageSearch(
 	collectionID := fmt.Sprint(sd.collectionID)
 
 	stage1Start := time.Now()
-	validCounts, stage1Bits, err := sd.executeFilterStage(ctx, req, sealed, sealedRowCount)
+	validCounts, stage1Bits, stage1Explains, err := sd.executeFilterStage(ctx, req, sealed, sealedRowCount)
 	stage1Dur := float64(time.Since(stage1Start).Milliseconds())
 	metrics.QueryNodeTwoStageFilterLatency.WithLabelValues(nodeID, collectionID).Observe(stage1Dur)
 	if err != nil {
@@ -162,9 +167,23 @@ func (sd *shardDelegator) twoStageSearch(
 		return nil, false, 0, err
 	}
 	orFeatureBits(results, stage1Bits)
+	mergeStage1Explain(results, stage1Explains)
 
 	log.Debug(ctx, "Two-stage search completed", mlog.Int("results", len(results)))
 	return results, false, stage1Bits, nil
+}
+
+// mergeStage1Explain fills the filter groups stage one recorded into the stage
+// two tree via explain.MergeStage1Explain.
+func mergeStage1Explain(results []*internalpb.SearchResults, stage1 []*internalpb.ExecutionExplain) {
+	if len(stage1) == 0 {
+		return
+	}
+	for _, result := range results {
+		if merged, ok := explain.MergeStage1Explain(result.GetExplain(), stage1...); ok {
+			result.Explain = merged
+		}
+	}
 }
 
 // orFeatureBits adds bits to the execution feature bits of every result.

@@ -119,11 +119,22 @@ PhyIterativeElementFilterNode::GetOutput() {
     wrapped_iterators.reserve(base_iterators.size());
 
     ExecContext* exec_context = operator_context_->get_exec_context();
+    auto explain_shared = exec_context->explain_shared();
+    const int32_t downstream_step =
+        has_doc_predicate_ ? get_operator_id() + 1 : -1;
 
     for (auto& base_iter : base_iterators) {
         // Wrap each iterator with ElementFilterIterator
-        auto wrapped_iter = std::make_shared<ElementFilterIterator>(
-            base_iter, exec_context, element_exprs_.get());
+        std::shared_ptr<VectorIterator> wrapped_iter =
+            std::make_shared<ElementFilterIterator>(
+                base_iter, exec_context, element_exprs_.get());
+        if (explain_shared != nullptr) {
+            wrapped_iter = std::make_shared<CountingVectorIterator>(
+                std::move(wrapped_iter),
+                explain_shared,
+                get_operator_id(),
+                downstream_step);
+        }
 
         wrapped_iterators.push_back(std::move(wrapped_iter));
     }

@@ -162,7 +162,8 @@ class PhyGISFunctionFilterExpr : public SegmentExpr {
         const segcore::SegmentInternalInterface* segment,
         int64_t active_count,
         int64_t batch_size,
-        int32_t consistency_level)
+        int32_t consistency_level,
+        const query::PlanOptions& plan_options = {})
         : SegmentExpr(std::move(input),
                       name,
                       op_ctx,
@@ -172,7 +173,10 @@ class PhyGISFunctionFilterExpr : public SegmentExpr {
                       DataType::GEOMETRY,
                       active_count,
                       batch_size,
-                      consistency_level),
+                      consistency_level,
+                      /*allow_any_json_cast_type=*/false,
+                      /*is_json_contains=*/false,
+                      plan_options),
           expr_(expr) {
         // DetermineExecPath();
     }
@@ -189,6 +193,46 @@ class PhyGISFunctionFilterExpr : public SegmentExpr {
     bool
     ReportsIndexDecline() const override {
         return expr_->op_ != proto::plan::GISFunctionFilterExpr_GISOp_STIsValid;
+    }
+
+    void
+    RecordExplainDecision() override {
+        auto* explain = explain_;
+        if (explain == nullptr) {
+            return;
+        }
+        const bool used_index =
+            exec_path_ == ExprExecPath::ScalarIndex && !short_index_degraded_;
+        int64_t index_id = 0;
+        std::string family;
+        std::string path;
+        bool nested = false;
+        if (used_index && selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                index_id = *id;
+            }
+            family = selected_index_entry_->family;
+            path = selected_index_entry_->json_path;
+            nested = selected_index_entry_->caps.nested;
+        }
+        std::string reason;
+        if (!used_index) {
+            const DeclineReason resolved =
+                short_index_degraded_
+                    ? DeclineReason::kIndexUnusable
+                    : ResolveExplainDeclineReason(/*offset_bypassed=*/false,
+                                                  /*served_from_cache=*/false);
+            reason = milvus::exec::ToString(resolved);
+        }
+        explain->RecordDecision(field_id_,
+                                expr_id_,
+                                used_index,
+                                index_id,
+                                family,
+                                nested,
+                                path,
+                                reason);
     }
 
     std::optional<milvus::expr::ColumnInfo>
@@ -254,6 +298,7 @@ class PhyGISFunctionFilterExpr : public SegmentExpr {
      */
     // whether coarse results have been prefetched once
     bool coarse_cached_ = false;
+    bool short_index_degraded_ = false;
     // global coarse bitmap (segment-level)
     TargetBitmap coarse_global_;
     // global not-null bitmap (segment-level)

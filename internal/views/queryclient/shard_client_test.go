@@ -793,3 +793,20 @@ func newTestSearchQueryPlan(shardID qviews.ShardID, mvcc *viewpb.QueryPlanMVCC) 
 		},
 	}
 }
+
+func TestIsEmptySuccessfulQueryResponsePreservesExplainAndComputedResults(t *testing.T) {
+	okStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
+	emptyResp := &viewpb.QueryOnViewResponse{
+		LegacyResults: &internalpb.RetrieveResults{Status: okStatus},
+	}
+	require.True(t, isEmptySuccessfulQueryResponse(emptyResp))
+
+	withExplain := &viewpb.QueryOnViewResponse{
+		LegacyResults: &internalpb.RetrieveResults{
+			Status:  okStatus,
+			Explain: &internalpb.ExecutionExplain{Kind: "segment", Name: "s1"},
+		},
+	}
+	require.False(t, isEmptySuccessfulQueryResponse(withExplain),
+		"zero-hit query carrying execution explain must not be dropped before reducer")
+}

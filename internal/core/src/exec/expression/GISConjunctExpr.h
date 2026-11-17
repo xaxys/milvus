@@ -41,6 +41,8 @@ struct GISGroupState {
         proto::plan::GISFunctionFilterExpr_GISOp op;
         std::string query_wkt;
         bool has_index{false};
+        int64_t expr_id{0};
+        bool explain_recorded{false};
         // Per-predicate R-Tree coarse bitmap (segment-level, computed once).
         // An all-ones coarse is always CORRECT -- Refine still evaluates the
         // exact predicate -- but it prunes nothing, so the pruning gain
@@ -69,6 +71,31 @@ struct GISGroupState {
     // per-segment batch execution is single-threaded, so this guard needs no
     // atomicity -- it is only read/written inside PhyGISCoarseConjunctExpr::Eval.
     bool coarse_done{false};
+    // Whether Coarse actually pinned and queried an R-Tree index for explain.
+    bool explain_meta_ready{false};
+    bool explain_used_index{false};
+    int64_t explain_index_id{0};
+    std::string explain_family;
+    std::string explain_path;
+    bool explain_nested{false};
+    std::string explain_decline_reason;
+
+    void
+    RecordPredDecision(ExecutionExplainRecorder* explain, Pred& p) {
+        if (explain == nullptr || !explain_meta_ready || p.expr_id == 0 ||
+            p.explain_recorded) {
+            return;
+        }
+        p.explain_recorded = true;
+        explain->RecordDecision(field_id,
+                                p.expr_id,
+                                explain_used_index,
+                                explain_index_id,
+                                explain_family,
+                                explain_nested,
+                                explain_path,
+                                explain_decline_reason);
+    }
 
     // A state may be destroyed without being evaluated to completion: the
     // FilterBits result cache can bypass the expression tree entirely,
@@ -125,7 +152,8 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
                              const segcore::SegmentInternalInterface* segment,
                              int64_t active_count,
                              int64_t batch_size,
-                             int32_t consistency_level)
+                             int32_t consistency_level,
+                             const query::PlanOptions& plan_options = {})
         : SegmentExpr({},
                       name,
                       op_ctx,
@@ -135,7 +163,10 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
                       DataType::GEOMETRY,
                       active_count,
                       batch_size,
-                      consistency_level),
+                      consistency_level,
+                      /*allow_any_json_cast_type=*/false,
+                      /*is_json_contains=*/false,
+                      plan_options),
           st_(std::move(state)) {
     }
 
@@ -145,6 +176,63 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
     std::string
     ToString() const override {
         return "PhyGISCoarseConjunctExpr";
+    }
+
+    const GISGroupState&
+    group_state() const {
+        return *st_;
+    }
+
+    void
+    DetermineExecPath() override {
+        auto req = MakeIndexRequirement(RequiredReader::Spatial);
+        req.value_type = DataType::GEOMETRY;
+        SelectAndCreateIndexReader(req);
+    }
+
+    // Must return false even when an R-Tree is present so FilterBits does not
+    // force all-at-once execution on the paired Refine node.
+    bool
+    CanExecuteAllAtOnce() const override {
+        EnsureExecPathDetermined();
+        return false;
+    }
+
+    void
+    RecordExplainDecision() override {
+        const bool used_index = exec_path_ == ExprExecPath::ScalarIndex &&
+                                spatial_reader_ != nullptr &&
+                                !coarse_index_degraded_;
+        st_->explain_used_index = used_index;
+        st_->explain_meta_ready = true;
+        if (explain_ == nullptr) {
+            return;
+        }
+        if (used_index && selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                st_->explain_index_id = *id;
+            }
+            st_->explain_family = selected_index_entry_->family;
+            st_->explain_path = selected_index_entry_->json_path;
+            st_->explain_nested = selected_index_entry_->caps.nested;
+        }
+        if (!used_index) {
+            const bool has_geom_cache =
+                !coarse_index_degraded_ &&
+                segment_->GetGeometryCache(st_->field_id) != nullptr;
+            const DeclineReason resolved =
+                coarse_index_degraded_
+                    ? DeclineReason::kIndexUnusable
+                    : ResolveExplainDeclineReason(/*offset_bypassed=*/false,
+                                                  has_geom_cache);
+            st_->explain_decline_reason = milvus::exec::ToString(resolved);
+        }
+        if (active_count_ == 0) {
+            for (auto& p : st_->preds) {
+                st_->RecordPredDecision(explain_, p);
+            }
+        }
     }
 
     // The split nodes slice their output by the self-managed segment cursor
@@ -177,20 +265,6 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
     PrefetchRawData() override {
     }
 
-    // DELIBERATELY NOT overridden to return true. It is tempting to: this node
-    // self-manages its cursor and its Eval handles a single active_count_-sized
-    // batch, so it *could* run all-at-once, which would restore parity with the
-    // baseline PhyGISFunctionFilterExpr (that reaches all-at-once via ScalarIndex
-    // when the field has an R-Tree). But a conjunction is all-at-once eligible
-    // only if EVERY child is, and the Refine node forces RawData -> base returns
-    // false -> the whole Coarse+Refine conjunction stays batched. Inheriting the
-    // base here (index -> true, no-index -> false) keeps that invariant: if this
-    // node ever *did* qualify, SetExecuteAllAtOnce would set batch_size_ =
-    // active_count_ and Refine would bulk_subscript the ENTIRE WKB column in one
-    // Eval (all-ones coarse + default-off geometry cache), turning a batch-bounded
-    // query into a whole-column one and risking a QueryNode OOM. Losing the
-    // all-at-once fast path is the favorable trade. See PR #50675 review.
-
  private:
     int64_t
     NextBatchSize() const {
@@ -216,6 +290,7 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
 
     GISGroupStatePtr st_;
     int64_t current_pos_{0};
+    bool coarse_index_degraded_{false};
 };
 
 // Refine node: consumes bitmap_input (== scalars AND B_coarse), and for each
@@ -249,6 +324,20 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
     std::string
     ToString() const override {
         return "PhyGISRefineConjunctExpr";
+    }
+
+    const GISGroupState&
+    group_state() const {
+        return *st_;
+    }
+
+    bool
+    ReportsExecPath() const override {
+        return false;
+    }
+
+    void
+    RecordExplainDecision() override {
     }
 
     // See PhyGISCoarseConjunctExpr::SupportOffsetInput: the Refine node also
