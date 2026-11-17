@@ -400,3 +400,38 @@ func TestEstimateSegmentLoadingResourceKeepsMilvusTableRealPKEager(t *testing.T)
 	require.Zero(t, usage.DiskBytes)
 	require.EqualValues(t, 100, loadInfo.GetEstimatedBytesPerRow())
 }
+
+func TestSkipColumnsOnlyWhenEveryIndexProvidesRawData(t *testing.T) {
+	mk := func() map[int64]*datapb.FieldBinlog {
+		return map[int64]*datapb.FieldBinlog{
+			101: {FieldID: 101},
+			102: {FieldID: 102},
+		}
+	}
+
+	// Both indexes of field 101 provide raw data: the column can be skipped.
+	// Field 102 has one index without it, so its column must stay in the estimate.
+	got := mk()
+	skipColumnsAllIndexesProvideRawData(got,
+		map[int64]bool{101: true, 102: false}, false)
+	if _, ok := got[101]; ok {
+		t.Fatal("field 101: every index provides raw data, the column should be skipped")
+	}
+	if _, ok := got[102]; !ok {
+		t.Fatal("field 102: an index cannot provide raw data, the column must be counted")
+	}
+
+	// A field absent from the map (no usable index) keeps its column.
+	got2 := mk()
+	skipColumnsAllIndexesProvideRawData(got2, map[int64]bool{101: true}, false)
+	if _, ok := got2[102]; !ok {
+		t.Fatal("field 102: no index information, the column must be counted")
+	}
+
+	// PreferFieldDataWhenIndexHasRawData keeps every column.
+	got3 := mk()
+	skipColumnsAllIndexesProvideRawData(got3, map[int64]bool{101: true, 102: true}, true)
+	if len(got3) != 2 {
+		t.Fatalf("preferFieldData=true must keep both columns, got %d", len(got3))
+	}
+}

@@ -73,6 +73,22 @@ IndexIdentity::operator<(const IndexIdentity& other) const {
     return std::get<uint64_t>(value_) < std::get<uint64_t>(other.value_);
 }
 
+std::string
+IndexIdentity::ToString() const {
+    if (value_.index() == 0) {
+        return std::to_string(std::get<int64_t>(value_));
+    }
+    return "local:" + std::to_string(std::get<uint64_t>(value_));
+}
+
+std::optional<int64_t>
+IndexIdentity::pre_built_id() const {
+    if (kind() != Kind::PreBuiltIndex) {
+        return std::nullopt;
+    }
+    return std::get<int64_t>(value_);
+}
+
 size_t
 IndexKeyHash::operator()(const IndexKey& key) const {
     size_t identity_hash;
@@ -156,7 +172,7 @@ RegistrationFromCapability(const IndexCapabilityEntry& entry) {
         kind = IndexKind::Ngram;
     }
     return IndexRegistration{
-        entry.key, kind, entry.json_path, entry.json_cast_type};
+        entry.key, kind, entry.json_path, entry.json_cast_type, entry.params};
 }
 
 }  // namespace milvus::segcore

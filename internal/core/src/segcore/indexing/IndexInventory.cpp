@@ -29,7 +29,8 @@ IndexInventory::Entry::Entry(IndexCapabilityEntry meta, index::IndexPtr index)
       resolved_(ResolvedData{std::move(meta.family),
                              meta.value_type,
                              meta.caps,
-                             std::move(index)}),
+                             std::move(index),
+                             meta.params}),
       ready_(true) {
     AssertInfo(resolved_->index != nullptr,
                "eager index entry for field {} has no index owner",
@@ -141,7 +142,8 @@ IndexInventory::ResolveCapability(milvus::OpContext* op_ctx,
                                                registration.json_cast_type,
                                                resolved.family,
                                                resolved.value_type,
-                                               resolved.caps});
+                                               resolved.caps,
+                                               resolved.params});
     }
     return FieldIndexCapability(field_id, std::move(entries));
 }
