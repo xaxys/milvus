@@ -133,9 +133,10 @@ type indexPlacement struct {
 	// viewShard is the shard this placement came from when it was read out of a
 	// query view; nil on the legacy distribution path.
 	viewShard *qviews.ShardID
-	// indexes is the set of index ids the serving load requirement selected for
-	// this placement. Nil means no serving requirement is known, so nothing on
-	// this placement can be certified.
+	// indexes is the set of index ids this placement can actually answer from.
+	// A query view reports it per segment; when an older node sends no report the
+	// caller falls back to the ids its load requirement selected. Nil means
+	// nothing on this placement can be certified.
 	indexes map[int64]struct{}
 }
 
@@ -195,11 +196,18 @@ func qviewsPlacements(
 		}
 		shardID := shard
 		// Assignments maps segmentID -> nodeID: one placement per served segment.
-		for _, node := range stat.UpPlacement.Assignments {
+		// The view's per-segment report supersedes the load requirement: the
+		// requirement says what the view asked for, the report says what the
+		// segment actually loaded.
+		for segmentID, node := range stat.UpPlacement.Assignments {
+			indexes := required
+			if loaded, ok := stat.UpPlacement.SegmentIndexes[segmentID]; ok {
+				indexes = loaded
+			}
 			placements = append(placements, indexPlacement{
 				node:      node,
 				viewShard: &shardID,
-				indexes:   required,
+				indexes:   indexes,
 			})
 		}
 	}

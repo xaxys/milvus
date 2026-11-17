@@ -225,3 +225,62 @@ func TestQViewsPlacementsCertifyOnlySelectedIndexes(t *testing.T) {
 	assert.Equal(t, 2, ready, "only the serving shard certifies the index")
 	assert.ElementsMatch(t, []int64{10, 11, 12}, nodes.Collect())
 }
+
+func TestQViewsPlacementsPreferPerSegmentLoadedIndexes(t *testing.T) {
+	servingID := qviews.ShardID{ReplicaID: 1000, VChannel: "v0"}
+	serving := &coordview.ShardStats{
+		UpVersion:         &qviews.QueryViewVersion{},
+		UpLoadInfoVersion: 7,
+		UpPlacement: &coordview.ViewPlacement{
+			Assignments: map[int64]int64{1: 10, 2: 11},
+			// The view requires 2001, but only segment 1 reports it as loaded;
+			// segment 2 reports an empty set (it loaded, without that index).
+			SegmentIndexes: map[int64]map[int64]struct{}{
+				1: {2001: {}},
+				2: {},
+			},
+		},
+	}
+	placements := qviewsPlacements(map[qviews.ShardID]*coordview.ShardStats{
+		servingID: serving,
+	}, func(uint64) (*querypb.GetQueryViewLoadInfoResponse, error) {
+		return &querypb.GetQueryViewLoadInfoResponse{
+			RequiredFields: []*viewpb.LoadFieldConfig{
+				{FieldId: 100, IndexIds: []int64{2001}},
+			},
+		}, nil
+	})
+
+	require.Len(t, placements, 2)
+	carrying := 0
+	for _, placement := range placements {
+		if placement.carries(2001) {
+			carrying++
+		}
+	}
+	assert.Equal(t, 1, carrying,
+		"only the segment that reported the index may be certified, not every segment the requirement covers")
+}
+
+func TestQViewsPlacementsFallBackWhenSegmentsReportNoIndexes(t *testing.T) {
+	servingID := qviews.ShardID{ReplicaID: 1000, VChannel: "v0"}
+	serving := &coordview.ShardStats{
+		UpVersion:         &qviews.QueryViewVersion{},
+		UpLoadInfoVersion: 7,
+		// No SegmentIndexes: an older node sends no per-segment report, so the
+		// view's requirement remains the only evidence.
+		UpPlacement: &coordview.ViewPlacement{Assignments: map[int64]int64{1: 10}},
+	}
+	placements := qviewsPlacements(map[qviews.ShardID]*coordview.ShardStats{
+		servingID: serving,
+	}, func(uint64) (*querypb.GetQueryViewLoadInfoResponse, error) {
+		return &querypb.GetQueryViewLoadInfoResponse{
+			RequiredFields: []*viewpb.LoadFieldConfig{
+				{FieldId: 100, IndexIds: []int64{2001}},
+			},
+		}, nil
+	})
+
+	require.Len(t, placements, 1)
+	assert.True(t, placements[0].carries(2001))
+}

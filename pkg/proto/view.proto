@@ -167,6 +167,15 @@ message QueryViewVersion {
 }
 
 // QueryViewOfPartition tracks assigned and ready segments for one partition.
+message SegmentLoadedIndexes {
+    int64 segment_id = 1;
+    // Indexes this segment actually loaded and can answer from. Reported by the
+    // QueryNode after the load completes; a segment that is absent from
+    // segment_loaded_indexes has no report (older node) and must not be read as
+    // "loaded nothing".
+    repeated int64 index_ids = 2;
+}
+
 message QueryViewOfPartition {
     int64 partition_id = 1;
     repeated int64 segment_ids = 2;
@@ -174,6 +183,7 @@ message QueryViewOfPartition {
     // Minimum physical base version required before this view reports Ready.
     // Parallel to segment_ids; zero preserves legacy metadata resolution.
     repeated int64 segment_manifest_versions = 4 [packed = true];
+    repeated SegmentLoadedIndexes segment_loaded_indexes = 5;
 }
 
 // SyncRequest carries an atomic state-machine input or closes the stream.
