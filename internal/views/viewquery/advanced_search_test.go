@@ -192,6 +192,50 @@ func TestAssembleAdvancedSearchResults(t *testing.T) {
 	assert.Same(t, firstData, result.GetSubResults()[0].GetResultData())
 	assert.Equal(t, int64(1), result.GetSubResults()[1].GetReqIndex())
 	assert.Same(t, secondData, result.GetSubResults()[1].GetResultData())
+
+	withExplain := assembleAdvancedSearchResults([]*internalpb.SearchResults{
+		{
+			ResultData: firstData,
+			Explain: &internalpb.ExecutionExplain{
+				Version: 1,
+				Group: &internalpb.ExplainSegmentGroup{
+					Segments:       1,
+					SealedSegments: 1,
+					RowsTotal:      100,
+					SegmentRefs: []*internalpb.ExplainSegmentRef{
+						{SegmentId: 1001, RowsTotal: 100, IsGrowing: false},
+					},
+				},
+			},
+		},
+		{
+			ResultData: secondData,
+			Explain: &internalpb.ExecutionExplain{
+				Version: 1,
+				Group: &internalpb.ExplainSegmentGroup{
+					Segments:        2,
+					SealedSegments:  1,
+					GrowingSegments: 1,
+					RowsTotal:       150,
+					SegmentRefs: []*internalpb.ExplainSegmentRef{
+						{SegmentId: 1001, RowsTotal: 100, IsGrowing: false},
+						{SegmentId: 1002, RowsTotal: 50, IsGrowing: true},
+					},
+				},
+			},
+		},
+	})
+	require.NotNil(t, withExplain.GetExplain())
+	assert.Equal(t, int64(2), withExplain.GetExplain().GetGroup().GetSegments())
+	assert.Equal(t, int64(1), withExplain.GetExplain().GetGroup().GetSealedSegments())
+	assert.Equal(t, int64(1), withExplain.GetExplain().GetGroup().GetGrowingSegments())
+	assert.Equal(t, int64(150), withExplain.GetExplain().GetGroup().GetRowsTotal())
+	assert.Empty(t, withExplain.GetExplain().GetGroup().GetSegmentRefs())
+	require.Len(t, withExplain.GetExplain().GetSubSearches(), 2)
+	assert.Equal(t, int32(0), withExplain.GetExplain().GetSubSearches()[0].GetSubReqIndex())
+	assert.Empty(t, withExplain.GetExplain().GetSubSearches()[0].GetGroup().GetSegmentRefs())
+	assert.Equal(t, int32(1), withExplain.GetExplain().GetSubSearches()[1].GetSubReqIndex())
+	assert.Empty(t, withExplain.GetExplain().GetSubSearches()[1].GetGroup().GetSegmentRefs())
 }
 
 func TestServerSearchOnViewExecutesAdvancedSubSearches(t *testing.T) {

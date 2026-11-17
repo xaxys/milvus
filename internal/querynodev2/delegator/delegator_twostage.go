@@ -23,6 +23,7 @@ import (
 
 	"github.com/samber/lo"
 
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/searchutil/optimizers"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -43,6 +44,16 @@ func (sd *shardDelegator) executeFilterStage(
 	sealed []SnapshotItem,
 	sealedRowCount map[int64]int64,
 ) ([]int64, uint64, error) {
+	validCounts, _, featureBits, err := sd.executeFilterStageWithExplain(ctx, req, sealed, sealedRowCount)
+	return validCounts, featureBits, err
+}
+
+func (sd *shardDelegator) executeFilterStageWithExplain(
+	ctx context.Context,
+	req *querypb.SearchRequest,
+	sealed []SnapshotItem,
+	sealedRowCount map[int64]int64,
+) ([]int64, map[int64]*internalpb.ExecutionExplain, uint64, error) {
 	originalFilterOnly := req.FilterOnly
 	originalEnableExprCache := req.EnableExprCache
 	req.FilterOnly = true
@@ -56,31 +67,41 @@ func (sd *shardDelegator) executeFilterStage(
 	// SegmentIDs) are owned by the proto and may share backing arrays across
 	// merged worker responses. Treat all slices on these results as read-only;
 	// copy before any mutation (append/sort/dedup).
-	filterResults, err := sd.executeSearchSubTasks(ctx, req, sealed, []SegmentEntry{}, sealedRowCount)
+	filterItems, err := sd.executeSearchSubTasksWithMeta(ctx, req, sealed, []SegmentEntry{}, sealedRowCount)
 	if err != nil {
 		log := sd.getLogger(ctx)
 		log.Warn(ctx, "Two-stage search: filter stage failed", mlog.Err(err))
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 
-	// NOTE: validCounts ordering is non-deterministic because filterResults
+	// NOTE: validCounts ordering is non-deterministic because filterItems
 	// come from concurrent worker goroutines. This is safe for the current
 	// consumer (CalculateEffectiveSegmentNum) which only cares about the
 	// aggregate distribution, not per-segment identity.
-	// TODO: if a future consumer needs per-segment association, pair each
-	// count with its SegmentID before returning.
 	validCounts := make([]int64, 0, len(sealedRowCount))
+	var stage1Explains map[int64]*internalpb.ExecutionExplain
 	var featureBits uint64
-	for _, result := range filterResults {
+	for _, item := range filterItems {
+		result := item.result
 		featureBits |= result.GetFeatureBits()
 		for _, vc := range result.GetFilterValidCounts() {
 			if vc < 0 {
-				return nil, 0, merr.WrapErrServiceInternalMsg("filter stage returned negative valid_count %d, segment may not support filter-only search", vc)
+				return nil, nil, 0, merr.WrapErrServiceInternalMsg("filter stage returned negative valid_count %d, segment may not support filter-only search", vc)
 			}
 			validCounts = append(validCounts, vc)
 		}
+		if exp := result.GetExplain(); exp != nil {
+			if stage1Explains == nil {
+				stage1Explains = make(map[int64]*internalpb.ExecutionExplain, len(filterItems))
+			}
+			if prev := stage1Explains[item.nodeID]; prev != nil {
+				stage1Explains[item.nodeID] = explain.Merge(prev, exp)
+			} else {
+				stage1Explains[item.nodeID] = exp
+			}
+		}
 	}
-	return validCounts, featureBits, nil
+	return validCounts, stage1Explains, featureBits, nil
 }
 
 // twoStageSearch implements the two-stage search flow:
@@ -109,7 +130,7 @@ func (sd *shardDelegator) twoStageSearch(
 	collectionID := fmt.Sprint(sd.collectionID)
 
 	stage1Start := time.Now()
-	validCounts, stage1Bits, err := sd.executeFilterStage(ctx, req, sealed, sealedRowCount)
+	validCounts, stage1ByNode, stage1Bits, err := sd.executeFilterStageWithExplain(ctx, req, sealed, sealedRowCount)
 	stage1Dur := float64(time.Since(stage1Start).Milliseconds())
 	metrics.QueryNodeTwoStageFilterLatency.WithLabelValues(nodeID, collectionID).Observe(stage1Dur)
 	if err != nil {
@@ -154,14 +175,55 @@ func (sd *shardDelegator) twoStageSearch(
 	optimizedReq.EnableExprCache = true
 	// vector search stage need to search both sealed and growing segments
 	stage2Start := time.Now()
-	results, err := sd.executeSearchSubTasks(ctx, optimizedReq, sealed, growing, sealedRowCount)
+	stage2Items, err := sd.executeSearchSubTasksWithMeta(ctx, optimizedReq, sealed, growing, sealedRowCount)
 	stage2Dur := float64(time.Since(stage2Start).Milliseconds())
 	metrics.QueryNodeTwoStageSearchLatency.WithLabelValues(nodeID, collectionID).Observe(stage2Dur)
 	if err != nil {
 		log.Warn(ctx, "Two-stage search: vector search stage failed", mlog.Err(err))
 		return nil, false, 0, err
 	}
+	results := make([]*internalpb.SearchResults, len(stage2Items))
+	for i, item := range stage2Items {
+		results[i] = item.result
+	}
 	orFeatureBits(results, stage1Bits)
+	if len(stage1ByNode) > 0 && len(stage2Items) > 0 {
+		firstExplainIdx := -1
+		pairedExplains := make([]*internalpb.ExecutionExplain, 0, len(stage2Items))
+		for i, item := range stage2Items {
+			r := item.result
+			if r == nil || r.GetExplain() == nil {
+				continue
+			}
+			if firstExplainIdx < 0 {
+				firstExplainIdx = i
+			}
+			if item.scope == querypb.DataScope_Streaming {
+				pairedExplains = append(pairedExplains, r.GetExplain())
+				continue
+			}
+			if s1 := stage1ByNode[item.nodeID]; s1 != nil {
+				if mergedSub, ok := explain.MergeStage1Explain(r.GetExplain(), s1); ok {
+					pairedExplains = append(pairedExplains, mergedSub)
+					continue
+				}
+			}
+			pairedExplains = append(pairedExplains, r.GetExplain())
+		}
+		if firstExplainIdx >= 0 && len(pairedExplains) > 0 {
+			merged := explain.Merge(pairedExplains...)
+			for i, r := range results {
+				if r == nil {
+					continue
+				}
+				if i == firstExplainIdx {
+					r.Explain = merged
+				} else {
+					r.Explain = nil
+				}
+			}
+		}
+	}
 
 	log.Debug(ctx, "Two-stage search completed", mlog.Int("results", len(results)))
 	return results, false, stage1Bits, nil

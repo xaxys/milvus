@@ -100,8 +100,8 @@ func parseIndexHintParams(params []*commonpb.KeyValuePair) (parsedIndexHint, err
 	return parsedIndexHint{
 		names:   names,
 		strict:  strict,
-		hasHint: hasHint,
-		hasMode: hasMode,
+		hasHint: len(names) > 0,
+		hasMode: hasMode && mode != "",
 	}, nil
 }
 

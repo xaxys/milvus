@@ -30,6 +30,7 @@
 #include "common/Exception.h"
 #include "common/StructElementOffsets.h"
 #include "common/OpContext.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "segcore/SegmentInterface.h"
 #include "segcore/Utils.h"
 
@@ -183,6 +184,25 @@ class QueryContext : public Context {
     folly::Executor*
     executor() const {
         return executor_;
+    }
+
+    milvus::exec::ExecutionExplainRecorder*
+    explain() const {
+        return explain_.get();
+    }
+
+    const std::shared_ptr<milvus::exec::ExecutionExplainRecorder>&
+    explain_shared() const {
+        return explain_;
+    }
+
+    void
+    SetExplain(
+        std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain) {
+        explain_ = std::move(explain);
+        if (explain_ != nullptr && segment_ != nullptr) {
+            explain_->SetGrowing(segment_->type() == SegmentType::Growing);
+        }
     }
 
     std::shared_ptr<QueryConfig>
@@ -378,6 +398,17 @@ class QueryContext : public Context {
         return read_schema_ ? read_schema_ : segment_->get_schema_snapshot();
     }
 
+    SchemaPtr
+    get_optional_read_schema() const {
+        if (read_schema_) {
+            return read_schema_;
+        }
+        if (segment_ != nullptr && !segment_->RequiresExplicitReadSchema()) {
+            return segment_->get_schema_snapshot();
+        }
+        return nullptr;
+    }
+
     void
     set_read_snapshot(std::shared_ptr<const segcore::SegmentReadSnapshot> s) {
         read_snapshot_ = std::move(s);
@@ -403,10 +434,11 @@ class QueryContext : public Context {
     // physical time in microseconds (for entity-level TTL filtering)
     // This is already converted from TSO timestamp to physical time in Go layer
     int64_t entity_ttl_physical_time_us_;
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain_{nullptr};
     milvus::Timestamp collection_ttl_timestamp_;
     // used for vector search
     milvus::SearchInfo search_info_;
-    const query::PlaceholderGroup* placeholder_group_;
+    const query::PlaceholderGroup* placeholder_group_{nullptr};
 
     // used for store segment search result
     milvus::SearchResult search_result_;
@@ -484,9 +516,52 @@ class ExecContext : public Context {
         return opts;
     }
 
+    milvus::exec::ExecutionExplainRecorder*
+    explain() const {
+        if (explain_disabled_ || query_context_ == nullptr) {
+            return nullptr;
+        }
+        return query_context_->explain();
+    }
+
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder>
+    explain_shared() const {
+        if (explain_disabled_ || query_context_ == nullptr) {
+            return nullptr;
+        }
+        return query_context_->explain_shared();
+    }
+
+    void
+    SetExplain(
+        std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain) {
+        explain_disabled_ = false;
+        if (query_context_ != nullptr &&
+            query_context_->explain() != explain.get()) {
+            query_context_->SetExplain(std::move(explain));
+        }
+    }
+
+    void
+    DisableExplain() {
+        explain_disabled_ = true;
+    }
+
+    void
+    SetOperatorStep(int32_t step) {
+        operator_step_ = step;
+    }
+
+    int32_t
+    operator_step() const {
+        return operator_step_;
+    }
+
  private:
     QueryContext* query_context_;
     bool disable_index_hints_{false};
+    bool explain_disabled_{false};
+    int32_t operator_step_{-1};
 };
 
 /// @brief Helper function to check cancellation token and throw if cancelled.

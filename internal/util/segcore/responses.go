@@ -10,6 +10,11 @@ package segcore
 import "C"
 
 import (
+	"unsafe"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/segcorepb"
 )
 
@@ -48,6 +53,23 @@ func (r *SearchResult) GetMetadata() SearchResultMetadata {
 			ScannedTotalBytes:  int64(total),
 		},
 	}
+}
+
+// GetExplain returns the execution explain recorded by the segment search, or nil
+// when nothing was recorded.
+func (r *SearchResult) GetExplain() (*internalpb.ExecutionExplain, error) {
+	var blob unsafe.Pointer
+	var size C.int
+	C.GetSearchResultExplain(r.cSearchResult, &blob, &size)
+	if blob == nil || size == 0 {
+		return nil, nil
+	}
+	defer C.free(blob)
+	explain := &internalpb.ExecutionExplain{}
+	if err := proto.Unmarshal(C.GoBytes(blob, size), explain); err != nil {
+		return nil, err
+	}
+	return explain, nil
 }
 
 // ValidCount returns the count of rows that pass the filter (for two-stage search).

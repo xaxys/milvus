@@ -152,6 +152,9 @@ var (
 	MarshalPlanWithMembershipFilterSizeLimit = dql.MarshalPlanWithMembershipFilterSizeLimit
 	NormalizeFP32ToFP16BF16VectorFieldData   = dql.NormalizeFP32ToFP16BF16VectorFieldData
 	FormatTimestamptzFields                  = dql.FormatTimestamptzFields
+	ValidateExplainParams                    = dql.ValidateExplainParams
+	AttachZeroSegmentExplain                 = dql.AttachZeroSegmentExplain
+	IsExplainFormatJSON                      = dql.IsExplainFormatJSON
 	NewInsertTask                            = dml.NewInsertTask
 	NewDeleteRunner                          = dml.NewDeleteRunner
 	NewUpsertTask                            = dml.NewUpsertTask

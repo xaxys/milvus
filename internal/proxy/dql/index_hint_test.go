@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
@@ -121,11 +122,11 @@ func TestIndexHintNames(t *testing.T) {
 		names, _ = mergeIndexHint(outerOverride, subOverride)
 		assert.Equal(t, []string{"idx_outer"}, names)
 
-		// Blank outer index_hint explicitly clears sub-request hint.
+		// Blank outer index_hint is ignored so sub-request hint remains active.
 		outerBlank, err := parseIndexHintParams([]*commonpb.KeyValuePair{kv(IndexHintKey, " ")})
 		require.NoError(t, err)
 		names, _ = mergeIndexHint(outerBlank, subOverride)
-		assert.Empty(t, names)
+		assert.Equal(t, []string{"idx_sub"}, names)
 	})
 }
 
@@ -334,4 +335,101 @@ func TestApplyIndexHintCoordinatorFailure(t *testing.T) {
 	mix.EXPECT().ListIndexes(mock.Anything, mock.Anything).
 		Return(nil, merr.ErrServiceNotReady).Once()
 	assert.NoError(t, applyIndexHint(context.Background(), node, 1, nil, plan, fallback))
+}
+
+// When the outer HybridSearch params carry no index_hint, each sub-search's own
+// params govern; when the outer params specify index_hint, outer overrides
+// sub-search hints across all sub-plans.
+func TestHybridSubSearchIndexHintUsesSubParamsAndOuterOverride(t *testing.T) {
+	newMockHintNode := func(t *testing.T) *fakeHintNode {
+		t.Helper()
+		mix := mocks.NewMockMixCoordClient(t)
+		mix.EXPECT().ListIndexes(mock.Anything, mock.Anything).Return(&indexpb.ListIndexesResponse{
+			Status: merr.Success(),
+			IndexInfos: []*indexpb.IndexInfo{
+				{CollectionID: 1, FieldID: 101, IndexID: 3001, IndexName: "outer_idx"},
+				{CollectionID: 1, FieldID: 101, IndexID: 3002, IndexName: "sub_idx"},
+			},
+		}, nil).Maybe()
+		return &fakeHintNode{mix: mix}
+	}
+
+	t.Run("sub-search strict hint applies when outer omits index_hint", func(t *testing.T) {
+		task := newHybridDynamicSearchTask(t, false, []string{"pk"}, nil)
+		task.node = newMockHintNode(t)
+		require.NotEmpty(t, task.request.GetSubReqs())
+		task.request.SubReqs[1].SearchParams = append(task.request.SubReqs[1].SearchParams,
+			kv(IndexHintKey, "missing_idx"), kv(IndexHintModeKey, "strict"))
+
+		err := task.initAdvancedSearchRequest(context.Background())
+		require.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "missing_idx")
+	})
+
+	t.Run("outer strict hint applies to sub-searches", func(t *testing.T) {
+		task := newHybridDynamicSearchTask(t, false, []string{"pk"}, nil)
+		task.node = newMockHintNode(t)
+		task.request.SearchParams = append(task.request.SearchParams,
+			kv(IndexHintKey, "missing_outer"), kv(IndexHintModeKey, "strict"))
+
+		err := task.initAdvancedSearchRequest(context.Background())
+		require.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "missing_outer")
+	})
+
+	t.Run("outer index_hint overrides sub-search index_hint", func(t *testing.T) {
+		task := newHybridDynamicSearchTask(t, false, []string{"pk"}, nil)
+		task.node = newMockHintNode(t)
+		task.request.SearchParams = append(task.request.SearchParams,
+			kv(IndexHintKey, "outer_idx"), kv(IndexHintModeKey, "fallback"))
+		task.request.SubReqs[0].SearchParams = append(task.request.SubReqs[0].SearchParams,
+			kv(IndexHintKey, "sub_idx"), kv(IndexHintModeKey, "strict"))
+		task.request.SubReqs[1].SearchParams = append(task.request.SubReqs[1].SearchParams,
+			kv(IndexHintKey, "missing_sub"), kv(IndexHintModeKey, "strict"))
+
+		require.NoError(t, task.initAdvancedSearchRequest(context.Background()))
+		for i, sub := range task.GetSubReqs() {
+			plan := &planpb.PlanNode{}
+			require.NoError(t, proto.Unmarshal(sub.GetSerializedExprPlan(), plan), "sub[%d]", i)
+			require.Len(t, plan.GetPlanOptions().GetIndexHints(), 1, "sub[%d]", i)
+			assert.Equal(t, int64(3001), plan.GetPlanOptions().GetIndexHints()[0].GetIndexId(), "sub[%d]", i)
+			assert.False(t, plan.GetPlanOptions().GetIndexHintStrict(), "sub[%d]", i)
+		}
+	})
+
+	t.Run("sub-search inherits outer index_hint_mode when outer omits index_hint", func(t *testing.T) {
+		task := newHybridDynamicSearchTask(t, false, []string{"pk"}, nil)
+		task.node = newMockHintNode(t)
+		task.request.SearchParams = append(task.request.SearchParams,
+			kv(IndexHintModeKey, "strict"))
+		task.request.SubReqs[0].SearchParams = append(task.request.SubReqs[0].SearchParams,
+			kv(IndexHintKey, "sub_idx"))
+
+		require.NoError(t, task.initAdvancedSearchRequest(context.Background()))
+		firstPlan := &planpb.PlanNode{}
+		require.NoError(t, proto.Unmarshal(task.GetSubReqs()[0].GetSerializedExprPlan(), firstPlan))
+		require.Len(t, firstPlan.GetPlanOptions().GetIndexHints(), 1)
+		assert.Equal(t, int64(3002), firstPlan.GetPlanOptions().GetIndexHints()[0].GetIndexId())
+		assert.True(t, firstPlan.GetPlanOptions().GetIndexHintStrict())
+
+		secondPlan := &planpb.PlanNode{}
+		require.NoError(t, proto.Unmarshal(task.GetSubReqs()[1].GetSerializedExprPlan(), secondPlan))
+		assert.Empty(t, secondPlan.GetPlanOptions().GetIndexHints())
+	})
+
+	t.Run("comma-only outer index_hint and blank sub index_hint_mode inherit outer strict mode", func(t *testing.T) {
+		outer, err := parseIndexHintParams([]*commonpb.KeyValuePair{
+			kv(IndexHintKey, " , "),
+			kv(IndexHintModeKey, "strict"),
+		})
+		require.NoError(t, err)
+		sub, err := parseIndexHintParams([]*commonpb.KeyValuePair{
+			kv(IndexHintKey, "sub_idx"),
+			kv(IndexHintModeKey, "   "),
+		})
+		require.NoError(t, err)
+		names, strict := mergeIndexHint(outer, sub)
+		assert.Equal(t, []string{"sub_idx"}, names)
+		assert.True(t, strict)
+	})
 }

@@ -25,6 +25,7 @@ import (
 
 	commonpb "github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/queryutil"
 	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -311,6 +312,9 @@ func SplitSearchResult(result *internalpb.SearchResults, chunkBytes int) ([]*int
 	first.ScannedTotalBytes = result.GetScannedTotalBytes()
 	first.FeatureBits = result.GetFeatureBits()
 	first.FilterValidCounts = append([]int64(nil), result.GetFilterValidCounts()...)
+	if result.GetExplain() != nil {
+		first.Explain = proto.Clone(result.GetExplain()).(*internalpb.ExecutionExplain)
+	}
 	first.ResultData.AllSearchCount = data.GetAllSearchCount()
 	return chunks, nil
 }
@@ -611,6 +615,13 @@ func (s *OrderedReduceStream) acceptMetadata(chunk *internalpb.SearchResults, da
 	s.metadata.ScannedRemoteBytes += chunk.GetScannedRemoteBytes()
 	s.metadata.ScannedTotalBytes += chunk.GetScannedTotalBytes()
 	s.metadata.FeatureBits |= chunk.GetFeatureBits()
+	if chunk.GetExplain() != nil {
+		if s.metadata.GetExplain() == nil {
+			s.metadata.Explain = chunk.GetExplain()
+		} else {
+			s.metadata.Explain = explain.Merge(s.metadata.GetExplain(), chunk.GetExplain())
+		}
+	}
 	s.metadata.ResultData.AllSearchCount += data.GetAllSearchCount()
 }
 
@@ -816,6 +827,7 @@ func (s *OrderedReduceStream) attachMetadata(chunk *internalpb.SearchResults) {
 	chunk.ScannedTotalBytes = s.metadata.GetScannedTotalBytes()
 	chunk.FeatureBits = s.metadata.GetFeatureBits()
 	chunk.FilterValidCounts = append([]int64(nil), s.metadata.GetFilterValidCounts()...)
+	chunk.Explain = s.metadata.GetExplain()
 	chunk.ResultData.AllSearchCount = s.metadata.GetResultData().GetAllSearchCount()
 	s.metadataEmitted = true
 	s.metadata = nil

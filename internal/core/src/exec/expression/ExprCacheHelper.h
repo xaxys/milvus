@@ -71,6 +71,7 @@ class ExprCacheHelper {
     struct CachedBitmaps {
         std::shared_ptr<TargetBitmap> result;
         std::shared_ptr<TargetBitmap> valid;
+        bool from_cache{false};
     };
 
     // Return type of the compute lambda: (result_bitmap, valid_bitmap).
@@ -137,7 +138,7 @@ class ExprCacheHelper {
             });
             if (cache_hit) {
                 MarkFeature(recorder, FeatureBit::ExprCacheHit);
-                return {got.result, got.valid_result};
+                return {got.result, got.valid_result, true};
             }
         }
 

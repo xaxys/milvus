@@ -16,7 +16,9 @@
 
 #include "exec/expression/LikeConjunctExpr.h"
 
+#include <algorithm>
 #include <utility>
+#include <vector>
 
 #include "bitset/bitset.h"
 #include "common/EasyAssert.h"
@@ -58,43 +60,107 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         return;
     }
 
-    // Phase 1: Execute once for entire segment (no bitmap_input needed)
-    if (cached_phase1_res_ == nullptr) {
-        TargetBitmap candidates(active_count_, true);
-
-        // Execute all ngram index queries, AND merge results
-        for (auto& expr : ngram_exprs_) {
-            expr->ExecuteNgramPhase1(candidates);
-            if (candidates.none()) {
-                break;
-            }
-        }
-
-        cached_phase1_res_ =
-            std::make_shared<TargetBitmap>(std::move(candidates));
-    }
-
-    // Phase 2: Execute per batch with batch-level bitmap_input
-    // Extract current batch from Phase1 result
-    TargetBitmap batch_candidates;
-    batch_candidates.append(*cached_phase1_res_, current_pos_, real_batch_size);
-
-    // Apply batch-level pre_filter from previous expressions in conjunction
     const auto& bitmap_input = context.get_bitmap_input();
     if (!bitmap_input.empty()) {
         AssertInfo(static_cast<int64_t>(bitmap_input.size()) == real_batch_size,
                    "bitmap_input size {} != real_batch_size {}",
                    bitmap_input.size(),
                    real_batch_size);
+        if (bitmap_input.none()) {
+            current_pos_ += real_batch_size;
+            result = std::make_shared<ColumnVector>(
+                TargetBitmap(real_batch_size, false),
+                TargetBitmap(real_batch_size, true));
+            return;
+        }
+    }
+
+    auto* explain = context.get_exec_context() == nullptr
+                        ? nullptr
+                        : context.get_exec_context()->explain();
+    const bool track_leaf_rows =
+        explain != nullptr &&
+        std::any_of(ngram_exprs_.begin(),
+                    ngram_exprs_.end(),
+                    [](const auto& e) { return e && e->expr_id() != 0; });
+
+    if (cached_phase1_res_ == nullptr) {
+        TargetBitmap candidates(active_count_, true);
+        if (track_leaf_rows) {
+            phase1_cum_.clear();
+            phase1_cum_.reserve(ngram_exprs_.size());
+        }
+        for (auto& expr : ngram_exprs_) {
+            const int64_t p1_in = explain != nullptr
+                                      ? static_cast<int64_t>(candidates.count())
+                                      : 0;
+            expr->EnsureExplainDecisionRecorded();
+            if (explain != nullptr && expr->expr_id() != 0) {
+                if (auto* slot = expr->explain_slot(); slot != nullptr) {
+                    ExecutionExplainRecorder::AddSlotPhase1IdxScan(slot, p1_in);
+                } else {
+                    explain->AddPhase1IdxScan(expr->expr_id(), p1_in);
+                }
+            }
+            expr->ExecuteNgramPhase1(candidates);
+            if (track_leaf_rows) {
+                phase1_cum_.push_back(candidates.clone());
+            }
+            if (candidates.none()) {
+                break;
+            }
+        }
+        cached_phase1_res_ =
+            std::make_shared<TargetBitmap>(std::move(candidates));
+    }
+
+    // Phase 2: Execute per batch with batch-level bitmap_input
+    TargetBitmap batch_candidates;
+    batch_candidates.append(*cached_phase1_res_, current_pos_, real_batch_size);
+    if (!bitmap_input.empty()) {
         batch_candidates &= bitmap_input;
     }
 
-    // Execute Phase2 (post-filter) on this batch
-    if (!batch_candidates.none()) {
-        for (auto& expr : ngram_exprs_) {
-            expr->ExecuteNgramPhase2(
+    const int64_t batch_in =
+        !track_leaf_rows ? 0
+                         : (bitmap_input.empty()
+                                ? real_batch_size
+                                : static_cast<int64_t>(bitmap_input.count()));
+    if (batch_candidates.none()) {
+        if (track_leaf_rows && batch_in > 0) {
+            int64_t prev_out = batch_in;
+            for (size_t i = 0; i < phase1_cum_.size() && prev_out > 0; ++i) {
+                TargetBitmap slice;
+                slice.append(phase1_cum_[i], current_pos_, real_batch_size);
+                if (!bitmap_input.empty()) {
+                    slice &= bitmap_input;
+                }
+                const int64_t out_rows = static_cast<int64_t>(slice.count());
+                if (ngram_exprs_[i]->expr_id() != 0) {
+                    explain->AddRows(
+                        ngram_exprs_[i]->expr_id(), prev_out, out_rows);
+                }
+                prev_out = out_rows;
+            }
+        }
+    } else {
+        int64_t prev_out = batch_in;
+        for (size_t i = 0; i < ngram_exprs_.size(); ++i) {
+            const int64_t in_rows = (i == 0) ? batch_in : prev_out;
+            ngram_exprs_[i]->ExecuteNgramPhase2(
                 batch_candidates, current_pos_, real_batch_size);
-            if (batch_candidates.none()) {
+            if (track_leaf_rows) {
+                const int64_t out_rows =
+                    static_cast<int64_t>(batch_candidates.count());
+                if (ngram_exprs_[i]->expr_id() != 0) {
+                    explain->AddRows(
+                        ngram_exprs_[i]->expr_id(), in_rows, out_rows);
+                }
+                prev_out = out_rows;
+                if (out_rows == 0) {
+                    break;
+                }
+            } else if (batch_candidates.none()) {
                 break;
             }
         }

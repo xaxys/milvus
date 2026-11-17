@@ -114,6 +114,9 @@ PhyElementFilterBitsNode::GetOutput() {
     query_context_->set_active_element_count(first_elem);
 
     if (first_elem == 0) {
+        if (auto* explain = query_context_->explain(); explain != nullptr) {
+            explain->SetOperatorRows(get_operator_id(), 0, 0);
+        }
         // No active row has struct elements. Keep the output as a doc-level
         // all-filtered bitmap so downstream operators can still consume a
         // non-empty filter and convert it if they need element-level input.
@@ -208,6 +211,12 @@ PhyElementFilterBitsNode::EvaluateElementExpression(
         // (expressions return nullptr on empty input) and mark all elements
         // as filtered out.
         if (element_offsets.empty()) {
+            if (auto* explain = query_context_->explain(); explain != nullptr) {
+                explain->SetOperatorRows(get_operator_id(), 0, 0);
+                if (total_elements > 0) {
+                    MarkExplainEvalEntered(element_exprs_->exprs(), explain);
+                }
+            }
             TargetBitmap bitset(total_elements, true);
             TargetBitmap valid_bitset(total_elements, true);
             return std::make_pair(std::move(bitset), std::move(valid_bitset));
@@ -252,6 +261,12 @@ PhyElementFilterBitsNode::EvaluateElementExpression(
         }
 
         bitset.flip();
+        if (auto* explain = query_context_->explain(); explain != nullptr) {
+            explain->SetOperatorRows(
+                get_operator_id(),
+                static_cast<int64_t>(element_offsets.size()),
+                total_elements - static_cast<int64_t>(bitset.count()));
+        }
 
         tracer::AddEvent(
             fmt::format("evaluated_elements: {}, total_elements: {}",
@@ -337,6 +352,15 @@ PhyElementFilterBitsNode::EvaluateElementExpression(
         }
 
         eval_bitset.flip();
+        if (auto* explain = query_context_->explain(); explain != nullptr) {
+            const int64_t input_elements =
+                all_parents ? total_elements
+                            : static_cast<int64_t>(elem_bitset.count());
+            explain->SetOperatorRows(
+                get_operator_id(),
+                input_elements,
+                total_elements - static_cast<int64_t>(eval_bitset.count()));
+        }
 
         tracer::AddEvent(
             fmt::format("evaluated_elements: {}, total_elements: {}",

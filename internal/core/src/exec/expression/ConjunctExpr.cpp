@@ -18,6 +18,7 @@
 
 #include <folly/ScopeGuard.h>
 #include <algorithm>
+#include <optional>
 
 #include "LikeConjunctExpr.h"
 #include "RawExprCacheAdapter.h"
@@ -95,8 +96,20 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         "PhyConjunctFilterExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("is_and", is_and_);
 
+    auto* explain = context.get_exec_context() == nullptr
+                        ? nullptr
+                        : context.get_exec_context()->explain();
     EvalCtx::BitmapInput inherited_bitmap;
+    // Rows the next child is handed. A scalar-index child may return a
+    // batch-wide bitmap even when only a few rows are alive, so its hit count
+    // must be masked by this before it is attributed.
+    // Snapshotted into a bitset before the child consumes the context bitmap,
+    // only when explain recording is active.
+    TargetBitmap next_mask;
     bool has_result = false;
+    // Rows handed to the next child: the parent's mask for the first one, then
+    // the active set the previous child left behind.
+    int64_t next_rows_in = -1;
     auto restore_bitmap =
         folly::makeGuard([&context, &inherited_bitmap, &has_result] {
             if (has_result) {
@@ -124,6 +137,10 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         // instance's offset mode is fixed for its lifetime, so no later
         // call could have used the batch path anyway.)
         std::vector<std::shared_ptr<PhyUnaryRangeFilterExpr>> ngram_exprs;
+        // The fused batch path evaluates eligible LIKE leaves through a shared
+        // Phase 1 candidate bitmap and refines survivors sequentially in
+        // Phase 2 per batch, attributing funnel row counts without disabling
+        // fusion when explain is active.
         if (!has_input_offset) {
             for (size_t idx : like_indices_) {
                 auto input = inputs_[idx];
@@ -152,6 +169,12 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
             auto like_conjunct = std::make_shared<PhyLikeConjunctExpr>(
                 std::move(ngram_exprs), op_ctx_, active_count, batch_size);
             inputs_.push_back(like_conjunct);
+            if (explain != nullptr && eval_order_base_ > 0) {
+                int32_t next_order = eval_order_base_;
+                std::vector<ExprPtr> root{
+                    std::shared_ptr<Expr>(this, [](Expr*) {})};
+                AssignExplainEvalOrders(root, explain, next_order);
+            }
         } else {
             batch_ngram_indices_.clear();
             // Remove the like_conjunct index from input_order_ since we're not
@@ -186,19 +209,31 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
             continue;
         }
 
+        const bool first_input = !has_result;
+        if (explain != nullptr && !first_input && inputs_[idx] != nullptr &&
+            inputs_[idx]->expr_id() != 0) {
+            const auto& input = context.get_bitmap_input();
+            next_mask.clear();
+            if (!input.empty()) {
+                next_mask.append(input, 0, input.size());
+            }
+        }
         VectorPtr input_result;
         inputs_[idx]->Eval(context, input_result);
 
+        ColumnVectorPtr child_bitmap;
         ColumnVectorPtr all_flat_result;
-        if (!has_result) {
+        if (first_input) {
             // The first input needs the parent's mask in context. Take it only
             // after that input succeeds, then restore its storage on every exit.
             inherited_bitmap = context.take_bitmap_input();
             has_result = true;
             result = input_result;
             all_flat_result = GetColumnVector(result);
+            child_bitmap = all_flat_result;
         } else {
             auto input_flat_result = GetColumnVector(input_result);
+            child_bitmap = input_flat_result;
             all_flat_result = GetColumnVector(result);
             if (is_and_) {
                 common::ThreeValuedLogicOp::And(all_flat_result,
@@ -207,6 +242,30 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                 common::ThreeValuedLogicOp::Or(all_flat_result,
                                                input_flat_result);
             }
+        }
+
+        // Attribute this child's input and hits before the accumulated bitmap is
+        // mutated further. A child that is itself logical carries no expr_id and
+        // counts its own children.
+        if (explain != nullptr && child_bitmap != nullptr &&
+            inputs_[idx] != nullptr && inputs_[idx]->expr_id() != 0) {
+            const auto inherited_view = inherited_bitmap.view();
+            int64_t rows_in;
+            if (first_input) {
+                rows_in = inherited_view.empty()
+                              ? static_cast<int64_t>(child_bitmap->size())
+                              : static_cast<int64_t>(inherited_view.count());
+            } else {
+                rows_in = next_rows_in >= 0
+                              ? next_rows_in
+                              : static_cast<int64_t>(child_bitmap->size());
+            }
+            const TargetBitmapView mask_view =
+                first_input ? inherited_view : next_mask.view();
+            const int64_t rows_out =
+                CountExplainBitmapMatches(child_bitmap.get(), mask_view);
+            ExecutionExplainRecorder::AddSlotRows(
+                inputs_[idx]->explain_slot(), rows_in, rows_out);
         }
 
         // The last evaluated expression needs neither a skip decision nor a
@@ -231,6 +290,10 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
             }
             return;
         }
+        if (explain != nullptr) {
+            next_rows_in = static_cast<int64_t>(active_rows.count());
+        }
+
         context.set_bitmap_input(std::move(active_rows));
     }
 }

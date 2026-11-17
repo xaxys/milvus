@@ -220,7 +220,7 @@ class PhyMembershipFilterExpr : public SegmentExpr {
                 req, [this]() { return IndexSupportsReverseLookup(); })) {
             return;
         }
-        ClearSelectedIndex();
+        ClearSelectedIndex(DeclineReason::kCapabilityMismatch);
         // No usable index: keep RawData (either raw field data is present, or
         // ExecVisitorImpl detects num_data_chunk_ == 0 and throws a clear
         // SegcoreError instead of asserting).

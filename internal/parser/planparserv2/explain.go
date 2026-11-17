@@ -1272,11 +1272,24 @@ func indexLabel(f FieldRef) string {
 	return " indexes=[" + strings.Join(names, ",") + "]"
 }
 
+// FormatIntervalISO spells a planpb.Interval as an ISO 8601 duration such as
+// P1DT12H; a zero or nil interval is PT0S.
+func FormatIntervalISO(iv *planpb.Interval) string {
+	return formatDurationParts(iv.GetYears(), iv.GetMonths(), iv.GetDays(), iv.GetHours(), iv.GetMinutes(), iv.GetSeconds())
+}
+
 // isoDuration spells an interval the way the expression language accepts it,
 // as an ISO 8601 duration such as P1DT12H; a zero interval is PT0S.
 func isoDuration(iv *IntervalExplanation) string {
-	date := durationPart(iv.Years, "Y") + durationPart(iv.Months, "M") + durationPart(iv.Days, "D")
-	clock := durationPart(iv.Hours, "H") + durationPart(iv.Minutes, "M") + durationPart(iv.Seconds, "S")
+	if iv == nil {
+		return "PT0S"
+	}
+	return formatDurationParts(iv.Years, iv.Months, iv.Days, iv.Hours, iv.Minutes, iv.Seconds)
+}
+
+func formatDurationParts(years, months, days, hours, minutes, seconds int64) string {
+	date := durationPart(years, "Y") + durationPart(months, "M") + durationPart(days, "D")
+	clock := durationPart(hours, "H") + durationPart(minutes, "M") + durationPart(seconds, "S")
 	switch {
 	case clock != "":
 		return "P" + date + "T" + clock

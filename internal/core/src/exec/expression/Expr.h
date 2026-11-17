@@ -38,6 +38,7 @@
 #include "common/OpContext.h"
 #include "common/Types.h"
 #include "exec/expression/EvalCtx.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/expression/IndexPathSelection.h"
 #include "exec/expression/ValueLookupSource.h"
 #include "exec/expression/ExprCacheHelper.h"
@@ -394,6 +395,31 @@ ApplyValidMaskForCandidates(ValidityView validity,
     }
 }
 
+inline int64_t
+CountExplainBitmapMatches(ColumnVector* col, const TargetBitmapView& mask) {
+    if (col == nullptr || col->size() == 0) {
+        return 0;
+    }
+    const auto size = col->size();
+    TargetBitmapView raw_view(col->GetRawData(), size);
+    const bool has_valid = col->GetValidRawData() != nullptr;
+    TargetBitmapView valid_view(col->GetValidRawData(), has_valid ? size : 0);
+    const bool need_valid = has_valid && !valid_view.all();
+    if (mask.empty() && !need_valid) {
+        return static_cast<int64_t>(raw_view.count());
+    }
+    TargetBitmap tmp;
+    tmp.append(raw_view, 0, size);
+    if (need_valid) {
+        tmp.inplace_and(valid_view, size);
+    }
+    if (!mask.empty()) {
+        const auto common = std::min(tmp.size(), mask.size());
+        return static_cast<int64_t>(tmp.inplace_and_with_count(mask, common));
+    }
+    return static_cast<int64_t>(tmp.count());
+}
+
 class Expr : public std::enable_shared_from_this<Expr> {
  public:
     Expr(DataType type,
@@ -411,6 +437,29 @@ class Expr : public std::enable_shared_from_this<Expr> {
     const DataType&
     type() const {
         return type_;
+    }
+
+    // Request-unique id of the logical expression node this was compiled from;
+    // zero for nodes the proxy did not tag. Read by the explain recorder.
+    int64_t
+    expr_id() const {
+        return expr_id_;
+    }
+
+    void
+    SetExprId(int64_t expr_id) {
+        expr_id_ = expr_id;
+        RefreshExplainSlot();
+    }
+
+    ExecutionExplainRecorder*
+    explain_recorder() const {
+        return explain_;
+    }
+
+    ExecutionExplainRecorder::LeafSlot*
+    explain_slot() const {
+        return explain_slot_;
     }
 
     std::string
@@ -488,6 +537,20 @@ class Expr : public std::enable_shared_from_this<Expr> {
     // mark and propagate it to their inputs; everywhere else (in particular
     // NOT, where FALSE and UNKNOWN produce different results) the default
     // no-op stops the propagation.
+    // Optional execution-explain sink, set once after construction for the leaves
+    // that can record decisions.
+    virtual void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) {
+        explain_ = explain;
+        RefreshExplainSlot();
+    }
+
+    void
+    SetOperatorExplain(std::weak_ptr<ExecutionExplainRecorder> op_explain) {
+        op_explain_ = std::move(op_explain);
+        RefreshExplainSlot();
+    }
+
     virtual void
     MarkNullRejecting() {
     }
@@ -561,10 +624,21 @@ class Expr : public std::enable_shared_from_this<Expr> {
     }
 
  protected:
+    void
+    RefreshExplainSlot() {
+        explain_slot_ = (expr_id_ != 0 && explain_ != nullptr)
+                            ? explain_->EnsureLeafSlot(expr_id_)
+                            : nullptr;
+    }
+
     DataType type_;
     std::vector<std::shared_ptr<Expr>> inputs_;
     std::string name_;
     milvus::OpContext* op_ctx_;
+    int64_t expr_id_{0};
+    ExecutionExplainRecorder* explain_{nullptr};
+    ExecutionExplainRecorder::LeafSlot* explain_slot_{nullptr};
+    std::weak_ptr<ExecutionExplainRecorder> op_explain_;
 
     // whether we have offset input and do expr filtering on these data
     // default is false which means we will do expr filtering on the total segment data
@@ -590,7 +664,8 @@ class SegmentExpr : public Expr {
                 int32_t consistency_level,
                 bool allow_any_json_cast_type = false,
                 bool is_json_contains = false,
-                const query::PlanOptions& plan_options = {})
+                const query::PlanOptions& plan_options = {},
+                ExecutionExplainRecorder* explain = nullptr)
         : Expr(DataType::BOOL, std::move(input), name, op_ctx),
           segment_(const_cast<segcore::SegmentInternalInterface*>(segment)),
           field_id_(field_id),
@@ -602,6 +677,8 @@ class SegmentExpr : public Expr {
           consistency_level_(consistency_level),
           is_json_contains_(is_json_contains),
           plan_options_(plan_options) {
+        explain_ = explain;
+        RefreshExplainSlot();
         size_per_chunk_ = segment_->size_per_chunk();
         AssertInfo(
             batch_size_ > 0,
@@ -685,6 +762,11 @@ class SegmentExpr : public Expr {
         return feature_recorder_;
     }
 
+    FieldId
+    field_id() const {
+        return field_id_;
+    }
+
     // The TTL filter the compiler adds on its own and the namespace
     // predicate the plan parser merges in (MergeExprWithNamespace) are not
     // user filters, so an expression on either field records nothing.
@@ -695,13 +777,8 @@ class SegmentExpr : public Expr {
             feature_recorder_ = nullptr;
             return;
         }
-        auto ttl_field = schema.get_ttl_field_id();
-        auto namespace_field = schema.get_namespace_field_id();
-        const bool internal =
-            (ttl_field.has_value() && ttl_field.value() == field_id_) ||
-            (namespace_field.has_value() &&
-             namespace_field.value() == field_id_);
-        feature_recorder_ = internal ? nullptr : recorder;
+        feature_recorder_ =
+            schema.is_internal_filter_field(field_id_) ? nullptr : recorder;
     }
 
     void
@@ -1255,6 +1332,7 @@ class SegmentExpr : public Expr {
             }
         });
         if (cache_hit) {
+            served_from_cache_ = true;
             MarkFeature(feature_recorder_, FeatureBit::ExprCacheHit);
         }
         return cache_hit;
@@ -1735,6 +1813,8 @@ class SegmentExpr : public Expr {
                              const TargetBitmapView* candidate_mask,
                              const ValTypes&... values) {
         int64_t processed_size = 0;
+        int64_t read_rows = 0;
+        const bool track_raw_scan = explain_slot_ != nullptr;
         const bool has_candidate_mask =
             candidate_mask != nullptr && !candidate_mask->empty();
         AssertInfo(
@@ -1832,6 +1912,11 @@ class SegmentExpr : public Expr {
                             ? ValidityView{}
                             : ValidityView::FromExpanded(valid_data.data() + i);
                     if (!skip) {
+                        if (track_raw_scan &&
+                            (!has_candidate_mask ||
+                             (*candidate_mask)[processed_size])) {
+                            ++read_rows;
+                        }
                         evaluate_batch.template operator()<FilterType::random>(
                             data_vec.data() + i,
                             validity,
@@ -1856,6 +1941,7 @@ class SegmentExpr : public Expr {
                     ++processed_size;
                 }
             }
+            RecordRawScan(read_rows);
             return input->size();
         };
 
@@ -1877,6 +1963,10 @@ class SegmentExpr : public Expr {
                     std::make_pair(chunk_offset, int64_t{1}));
                 const auto& [data_vec, valid_data] = pw.get();
                 if (!skip_func || !skip_func(skip_view_, chunk_id)) {
+                    if (track_raw_scan && (!has_candidate_mask ||
+                                           (*candidate_mask)[processed_size])) {
+                        ++read_rows;
+                    }
                     evaluate_batch.template operator()<FilterType::random>(
                         data_vec.data(),
                         valid_data,
@@ -1902,6 +1992,7 @@ class SegmentExpr : public Expr {
                 }
                 processed_size++;
             }
+            RecordRawScan(read_rows);
             return input->size();
         } else if (segment_->type() == SegmentType::Sealed) {
             if constexpr (std::is_same_v<T, std::string_view> ||
@@ -1945,6 +2036,10 @@ class SegmentExpr : public Expr {
                     chunk_base != nullptr ? chunk_base + chunk_offset : nullptr;
                 const auto validity = chunk_validity.Subview(chunk_offset);
                 if (!cached_skip) {
+                    if (track_raw_scan && (!has_candidate_mask ||
+                                           (*candidate_mask)[processed_size])) {
+                        ++read_rows;
+                    }
                     evaluate_batch.template operator()<FilterType::random>(
                         data,
                         validity,
@@ -1970,6 +2065,7 @@ class SegmentExpr : public Expr {
                 }
                 processed_size++;
             }
+            RecordRawScan(read_rows);
             return input->size();
         } else {
             // growing segment. Validity lives in chunked, append-only storage
@@ -1998,6 +2094,10 @@ class SegmentExpr : public Expr {
                 const T* data = chunk_base + chunk_offset;
                 const auto validity = chunk_validity.Subview(chunk_offset);
                 if (!cached_skip) {
+                    if (track_raw_scan && (!has_candidate_mask ||
+                                           (*candidate_mask)[processed_size])) {
+                        ++read_rows;
+                    }
                     evaluate_batch.template operator()<FilterType::random>(
                         data,
                         validity,
@@ -2023,6 +2123,7 @@ class SegmentExpr : public Expr {
                 }
                 processed_size++;
             }
+            RecordRawScan(read_rows);
             return input->size();
         }
     }
@@ -2122,6 +2223,7 @@ class SegmentExpr : public Expr {
                 res,
                 valid_res,
                 values...);
+            RecordRawScan(owned.size);
             return owned.size;
         }
 
@@ -2131,6 +2233,7 @@ class SegmentExpr : public Expr {
                    items.Size(),
                    input_view.size);
         const T invalid_value{};
+        int64_t read_rows = 0;
         for (int64_t logical_pos = 0;
              logical_pos < static_cast<int64_t>(input->size());
              ++logical_pos) {
@@ -2167,6 +2270,7 @@ class SegmentExpr : public Expr {
                     values...);
                 continue;
             }
+            ++read_rows;
             if (!valid) {
                 const auto validity = ValidityView::FromExpanded(&valid);
                 // Match the regular Scan/Chunk path: the evaluator sees an
@@ -2197,6 +2301,7 @@ class SegmentExpr : public Expr {
                 valid_res + logical_pos,
                 values...);
         }
+        RecordRawScan(read_rows);
         return input->size();
     }
 
@@ -2684,6 +2789,7 @@ class SegmentExpr : public Expr {
         // that is not the expected consecutive one simply starts a fresh
         // run), so correctness never depends on the input being sorted.
         size_t processed_size = 0;
+        int64_t read_elems = 0;
         size_t i = 0;
 
         // Reuse these buffers to avoid repeated heap allocations. The first
@@ -2790,9 +2896,11 @@ class SegmentExpr : public Expr {
                        batch_pos,
                        batch_size);
 
+            read_elems += static_cast<int64_t>(batch_pos);
             processed_size += batch_size;
         }
 
+        RecordRawScan(read_elems);
         return processed_size;
     }
 
@@ -2821,6 +2929,7 @@ class SegmentExpr : public Expr {
         const auto expected_rows = GetNextBatchSize();
         int64_t processed_rows = 0;
         int64_t processed_elems = 0;
+        int64_t read_elems = 0;
         ElementValueBuffer<ElementType> value_buffer;
         FixedVector<bool> valid_buffer;
         const bool use_skip = CanSkipElementLevelChunks(skip_func);
@@ -2890,6 +2999,7 @@ class SegmentExpr : public Expr {
                            "ARRAY element count mismatch: {} vs {}",
                            chunk_processed_elems,
                            element_count);
+                read_elems += chunk_processed_elems;
                 processed_elems += chunk_processed_elems;
             }
 
@@ -2906,6 +3016,7 @@ class SegmentExpr : public Expr {
                    processed_rows,
                    expected_rows);
         CommitLegacyDataProgress(processed_rows);
+        RecordRawScan(read_elems);
         return processed_elems;
     }
 
@@ -2919,9 +3030,11 @@ class SegmentExpr : public Expr {
                                     TargetBitmapView res,
                                     TargetBitmapView valid_res,
                                     const TargetBitmapView* candidate_mask,
+                                    int64_t* evaluated_rows,
                                     const ValTypes&... values) {
         const auto expected_rows = GetNextBatchSize();
         int64_t processed_size = 0;
+        int64_t read_rows = 0;
 
         for (size_t i = current_data_chunk_; i < num_data_chunk_; i++) {
             auto data_pos =
@@ -2936,6 +3049,7 @@ class SegmentExpr : public Expr {
             auto process_chunk = [&](const T* data, ValidityView valid_data) {
                 auto skipped = skip_func && skip_func(skip_view_, i);
                 if (!skipped) {
+                    read_rows += size;
                     if constexpr (NeedSegmentOffsets) {
                         // For GIS functions: construct segment offsets array
                         std::vector<int32_t> segment_offsets_array(size);
@@ -3027,6 +3141,9 @@ class SegmentExpr : public Expr {
                    processed_size,
                    expected_rows);
         CommitLegacyDataProgress(processed_size);
+        if (evaluated_rows != nullptr) {
+            *evaluated_rows = read_rows;
+        }
         return processed_size;
     }
 
@@ -3040,12 +3157,19 @@ class SegmentExpr : public Expr {
                             TargetBitmapView res,
                             TargetBitmapView valid_res,
                             const TargetBitmapView* candidate_mask,
+                            int64_t* evaluated_rows,
                             const ValTypes&... values) {
         if constexpr (!milvus::HasTargetType<T>) {
             return -1;
         } else {
             return ProcessDataChunksByScanWithTarget<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                evaluated_rows,
+                values...);
         }
     }
 
@@ -3059,6 +3183,7 @@ class SegmentExpr : public Expr {
                                       TargetBitmapView res,
                                       TargetBitmapView valid_res,
                                       const TargetBitmapView* candidate_mask,
+                                      int64_t* evaluated_rows,
                                       const ValTypes&... values) {
         static_assert(milvus::HasTargetType<T>);
         const auto real_batch_size = GetNextBatchSize();
@@ -3108,6 +3233,10 @@ class SegmentExpr : public Expr {
             }
         };
 
+        // Rows this call actually read from the column; skip-index batches are
+        // advanced without data and are not part of it.
+        int64_t read_rows = 0;
+
         const auto advance_without_data = [&](int64_t row, int64_t size) {
             AssertInfo(size > 0,
                        "invalid data-free scan batch at row {} with size {}",
@@ -3154,6 +3283,7 @@ class SegmentExpr : public Expr {
                            "data scan batch [{}, {}) has no values",
                            batch.row_id_start,
                            batch.row_id_start + batch.size);
+                read_rows += batch.size;
                 evaluate_batch(batch.values.data_as<T>(),
                                batch.validity,
                                batch.row_id_start,
@@ -3163,6 +3293,9 @@ class SegmentExpr : public Expr {
         }
 
         AdvanceDataCursor(real_batch_size);
+        if (evaluated_rows != nullptr) {
+            *evaluated_rows = read_rows;
+        }
         return real_batch_size;
     }
 
@@ -3212,17 +3345,41 @@ class SegmentExpr : public Expr {
                           TargetBitmapView valid_res,
                           const TargetBitmapView* candidate_mask,
                           const ValTypes&... values) {
+        int64_t read_rows = 0;
         const auto processed_size =
-            ProcessDataChunksByScan<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
+            ProcessDataChunksByScan<T, NeedSegmentOffsets>(func,
+                                                           skip_func,
+                                                           res,
+                                                           valid_res,
+                                                           candidate_mask,
+                                                           &read_rows,
+                                                           values...);
         if (processed_size >= 0) {
+            RecordRawScan(read_rows);
             return processed_size;
         }
         AssertInfo(!segment_->is_chunked(),
                    "sealed field {} does not provide a data scan cursor",
                    field_id_.get());
-        return ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
-            func, skip_func, res, valid_res, candidate_mask, values...);
+        const auto single_chunk_size =
+            ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                &read_rows,
+                values...);
+        RecordRawScan(read_rows);
+        return single_chunk_size;
+    }
+
+    // Records rows this leaf read from the raw column, after the fact: a leaf
+    // that a conjunction skipped never reaches here, and a chunk whose data was
+    // skipped by the SkipIndex is not counted as read.
+    void
+    RecordRawScan(int64_t rows) {
+        ExecutionExplainRecorder::AddSlotRawScan(explain_slot_, rows);
     }
 
     // Specialized method for ngram post-filter: processes data in a specific range
@@ -3243,6 +3400,14 @@ class SegmentExpr : public Expr {
 
         AssertInfo(segment_->type() == SegmentType::Sealed,
                    "ProcessDataChunkForRange requires sealed segment");
+
+        // Record candidate count in res before func clears non-matching bits.
+        int64_t scanned_candidates = 0;
+        if (explain_ != nullptr && size > 0) {
+            scanned_candidates = static_cast<int64_t>(
+                res.view(0, std::min(res.size(), static_cast<size_t>(size)))
+                    .count());
+        }
 
         int64_t processed_size = 0;
         int64_t remaining = size;
@@ -3276,6 +3441,7 @@ class SegmentExpr : public Expr {
             }
         }
 
+        RecordRawScan(scanned_candidates);
         return processed_size;
     }
 
@@ -3473,6 +3639,9 @@ class SegmentExpr : public Expr {
                 feature_recorder_);
             cached_index_chunk_res_ = cached.result;
             cached_index_chunk_valid_res_ = cached.valid;
+            if (cached.from_cache) {
+                served_from_cache_ = true;
+            }
             cached_index_chunk_id_ = 0;
         }
 
@@ -3493,7 +3662,26 @@ class SegmentExpr : public Expr {
                                                *cached_index_chunk_valid_res_,
                                                *offsets);
         }
-        return SliceCachedIndexResult(need_element_slicing);
+        auto sliced = SliceCachedIndexResult(need_element_slicing);
+        // Row-level hits are counted where the leaf's output is consumed (the
+        // filter or conjunction that owns it). A nested index sliced at element
+        // level is the exception: those hits live in the element domain and the
+        // caller folds them to rows afterwards, so they stay a separate counter.
+        if (explain_ != nullptr && need_element_slicing &&
+            !served_from_cache_ && selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                int64_t matched = 0;
+                if (auto col = std::dynamic_pointer_cast<ColumnVector>(sliced);
+                    col != nullptr && col->IsBitmap()) {
+                    matched = CountExplainBitmapMatches(col.get(),
+                                                        current_bitmap_input_);
+                }
+                EnsureExplainDecisionRecorded();
+                explain_->AddElementHits(field_id_, *id, expr_id(), matched);
+            }
+        }
+        return sliced;
     }
 
     template <typename T>
@@ -3524,6 +3712,9 @@ class SegmentExpr : public Expr {
                                          offsets.data(),
                                          batch_size,
                                          TargetBitmapView(valid_result));
+            if (is_nullable_) {
+                RecordRawScan(static_cast<int64_t>(batch_size));
+            }
         };
 
         if constexpr (std::is_same_v<T, VectorArray>) {
@@ -3544,7 +3735,7 @@ class SegmentExpr : public Expr {
     }
 
     TargetBitmap
-    ProcessGrowingDataChunksForValid() {
+    ProcessGrowingDataChunksForValid(bool record_raw_scan = true) {
         const auto expected_rows = GetNextBatchSize();
         TargetBitmap valid_result(expected_rows);
         valid_result.set();
@@ -3576,13 +3767,16 @@ class SegmentExpr : public Expr {
                    "growing validity processed {} rows, expected {}",
                    processed_size,
                    expected_rows);
+        if (record_raw_scan && is_nullable_) {
+            RecordRawScan(processed_size);
+        }
         CommitLegacyDataProgress(processed_size);
         return valid_result;
     }
 
     template <typename T>
     TargetBitmap
-    ProcessDataChunksForValid() {
+    ProcessDataChunksForValid(bool record_raw_scan = true) {
         const auto batch_size = GetNextBatchSize();
         TargetBitmap valid_result(batch_size);
         valid_result.set();
@@ -3593,7 +3787,7 @@ class SegmentExpr : public Expr {
                        "sealed field {} does not provide a validity scan "
                        "cursor",
                        field_id_.get());
-            return ProcessGrowingDataChunksForValid();
+            return ProcessGrowingDataChunksForValid(record_raw_scan);
         }
         if (!data_scan_column_->IsNullable()) {
             AdvanceDataCursor(batch_size);
@@ -3630,6 +3824,9 @@ class SegmentExpr : public Expr {
                    "validity scan processed {} rows, expected {}",
                    processed_size,
                    batch_size);
+        if (record_raw_scan) {
+            RecordRawScan(processed_size);
+        }
         AdvanceDataCursor(processed_size);
         return valid_result;
     }
@@ -3640,6 +3837,13 @@ class SegmentExpr : public Expr {
         AssertInfo(num_index_chunk_ == 1,
                    "scalar index should have exactly 1 chunk, got {}",
                    num_index_chunk_);
+
+        auto data_pos = current_index_chunk_pos_;
+        auto size = std::min(active_count_ - data_pos, batch_size_);
+        if (!is_nullable_ && !SelectedIndexIsNested()) {
+            current_index_chunk_pos_ = data_pos + size;
+            return TargetBitmap(size, true);
+        }
 
         // Cache valid result (execute only once)
         if (cached_index_chunk_id_ != 0) {
@@ -3664,8 +3868,6 @@ class SegmentExpr : public Expr {
         TargetBitmap valid_result;
         valid_result.set();
 
-        auto data_pos = current_index_chunk_pos_;
-        auto size = std::min(active_count_ - data_pos, batch_size_);
         AssertInfo(
             int64_t(cached_index_chunk_valid_res_->size()) >= data_pos + size,
             "index valid bitmap covers {} rows, batch needs rows [{}, {})",
@@ -3815,7 +4017,10 @@ class SegmentExpr : public Expr {
     }
 
     void
-    ClearSelectedIndex() {
+    ClearSelectedIndex(DeclineReason reason = DeclineReason::kNone) {
+        if (reason != DeclineReason::kNone) {
+            decline_reason_ = reason;
+        }
         selected_json_view_ = {};
         selected_reader_ = nullptr;
         json_reader_ = nullptr;
@@ -3844,7 +4049,7 @@ class SegmentExpr : public Expr {
         if (segment_->type() == SegmentType::Growing) {
             growing_index_pin_ = segment_->PinGrowingIndex(op_ctx_, field_id_);
             if (!growing_index_pin_) {
-                ClearSelectedIndex();
+                ClearSelectedIndex(DeclineReason::kIndexUnusable);
                 exec_path_ = ExprExecPath::RawData;
                 return false;
             }
@@ -3856,7 +4061,7 @@ class SegmentExpr : public Expr {
         } else {
             selected_index_reader_ = segment_->CreateIndexReader(op_ctx_, key);
             if (!selected_index_reader_) {
-                ClearSelectedIndex();
+                ClearSelectedIndex(DeclineReason::kIndexUnusable);
                 exec_path_ = ExprExecPath::RawData;
                 return false;
             }
@@ -3872,14 +4077,14 @@ class SegmentExpr : public Expr {
             json_reader_ =
                 dynamic_cast<const index::IJsonIndexReader*>(selected_reader_);
             if (json_reader_ == nullptr) {
-                ClearSelectedIndex();
+                ClearSelectedIndex(DeclineReason::kIndexUnusable);
                 exec_path_ = ExprExecPath::RawData;
                 return false;
             }
             if (req.reader != RequiredReader::JsonPath && req.is_json_field) {
                 const auto cast = JsonCastForRequirement(req);
                 if (!cast.has_value()) {
-                    ClearSelectedIndex();
+                    ClearSelectedIndex(DeclineReason::kValueTypeMismatch);
                     exec_path_ = ExprExecPath::RawData;
                     return false;
                 }
@@ -3891,7 +4096,11 @@ class SegmentExpr : public Expr {
                 selected_json_view_ =
                     json_reader_->Resolve(req.json_path, *cast);
                 if (!selected_json_view_) {
-                    ClearSelectedIndex();
+                    const bool path_exists =
+                        !json_reader_->CastTypesOf(req.json_path).empty();
+                    ClearSelectedIndex(
+                        path_exists ? DeclineReason::kValueTypeMismatch
+                                    : DeclineReason::kJsonPathNotCovered);
                     exec_path_ = ExprExecPath::RawData;
                     return false;
                 }
@@ -3909,7 +4118,7 @@ class SegmentExpr : public Expr {
         selected_element_level_result_ =
             selected_reader_->CoordDomain() == index::Domain::Element;
         if (needs_refine && !req.accepts_candidates) {
-            ClearSelectedIndex();
+            ClearSelectedIndex(DeclineReason::kCandidatesNeedRefine);
             exec_path_ = ExprExecPath::RawData;
             return false;
         }
@@ -3981,7 +4190,7 @@ class SegmentExpr : public Expr {
                                 req.reader != RequiredReader::JsonPath;
         if (!interface_available || (needs_null && null_reader_ == nullptr)) {
             if (has_json_paths) {
-                ClearSelectedIndex();
+                ClearSelectedIndex(DeclineReason::kCapabilityMismatch);
                 exec_path_ = ExprExecPath::RawData;
                 return false;
             }
@@ -4022,16 +4231,27 @@ class SegmentExpr : public Expr {
             index_path_detail::HasHintForField(base_req) &&
             index_path_detail::HasHintedEntryOnSegment(base_req, capabilities);
         ExprIndexRequirement req = base_req;
+        DeclineReason post_pin_decline = DeclineReason::kNone;
         while (true) {
             auto decision = exec::DetermineExecPath(req, capabilities);
             exec_path_ = decision.path;
+            decline_reason_ = decision.fallback_reason;
             if (!decision.key.has_value()) {
+                if (post_pin_decline != DeclineReason::kNone &&
+                    (decline_reason_ == DeclineReason::kNone ||
+                     decline_reason_ == DeclineReason::kCapabilityMismatch)) {
+                    decline_reason_ = post_pin_decline;
+                }
                 return exec_path_ != ExprExecPath::RawData;
             }
             const auto candidate_key = *decision.key;
+            decline_reason_ = DeclineReason::kNone;
             if (TryOpenSelectedIndexReader(req, capabilities, candidate_key) &&
                 post_pin_validator()) {
                 return true;
+            }
+            if (decline_reason_ != DeclineReason::kNone) {
+                post_pin_decline = decline_reason_;
             }
             ClearSelectedIndex();
             exec_path_ = ExprExecPath::RawData;
@@ -4337,6 +4557,214 @@ class SegmentExpr : public Expr {
     // whole-filter cache hit or a conjunction that runs out of rows can skip
     // the evaluation. The report counts feature use, so that only affects
     // how often, never whether.
+    // Record the leaf's explain decision once on the evaluation thread after
+    // prefetch/capability probes have settled, has_offset_input_ reflects the
+    // actual Eval() mode, and batch-0 cache/overflow/short-circuit checks have
+    // completed.
+    struct LeafEvalGuard {
+        SegmentExpr* self{nullptr};
+        ~LeafEvalGuard() noexcept {
+            if (self != nullptr) {
+                self->current_bitmap_input_ = TargetBitmapView{};
+                if (!self->explain_decision_recorded_ &&
+                    std::uncaught_exceptions() == 0) {
+                    self->EnsureExplainDecisionRecorded();
+                }
+            }
+        }
+    };
+
+    LeafEvalGuard
+    PrepareLeafEval(EvalCtx& context, bool bind_offset_before_wait = true) {
+        auto* input = context.get_offset_input();
+        if (bind_offset_before_wait && input != nullptr &&
+            !prefetch_future_.has_value()) {
+            SetHasOffsetInput(true);
+        }
+        WaitPrefetch();
+        SetHasOffsetInput(input != nullptr);
+        EnsureExecPathDetermined();
+        if (explain_ != nullptr) {
+            current_bitmap_input_ = context.get_bitmap_input();
+        }
+        return LeafEvalGuard{explain_ != nullptr ? this : nullptr};
+    }
+
+    void
+    SetConstantOutcome(bool match_value) {
+        is_constant_folded_ = true;
+        constant_outcome_ =
+            match_value ? ConstantOutcome::kTrue : ConstantOutcome::kFalse;
+    }
+
+    void
+    SetSchemaNotNullable() {
+        is_constant_folded_ = true;
+        schema_not_nullable_ = true;
+    }
+
+    void
+    RecordCachedExplainDecision() {
+        if (explain_ == nullptr || explain_decision_recorded_) {
+            return;
+        }
+        explain_decision_recorded_ = true;
+        explain_->RecordDecision(
+            field_id_,
+            expr_id_,
+            /*used_index=*/false,
+            /*index_id=*/0,
+            /*family=*/"",
+            /*nested=*/false,
+            /*path=*/"",
+            milvus::exec::ToString(DeclineReason::kCached));
+    }
+
+    void
+    EnsureExplainDecisionRecorded() {
+        if (explain_ == nullptr || explain_decision_recorded_) {
+            return;
+        }
+        EnsureExecPathDetermined();
+        explain_decision_recorded_ = true;
+        RecordExplainDecision();
+    }
+
+    virtual void
+    RecordExplainDecision() {
+        auto* explain = explain_;
+        if (explain == nullptr) {
+            return;
+        }
+        if (schema_not_nullable_) {
+            explain->RecordDecision(field_id_,
+                                    expr_id_,
+                                    /*used_index=*/false,
+                                    /*index_id=*/0,
+                                    /*family=*/"",
+                                    /*nested=*/false,
+                                    /*path=*/"",
+                                    "schema_not_nullable");
+            return;
+        }
+        if (constant_outcome_ != ConstantOutcome::kNone) {
+            explain->RecordDecision(field_id_,
+                                    expr_id_,
+                                    /*used_index=*/false,
+                                    /*index_id=*/0,
+                                    /*family=*/"",
+                                    /*nested=*/false,
+                                    /*path=*/"",
+                                    constant_outcome_ == ConstantOutcome::kTrue
+                                        ? "constant_true"
+                                        : "constant_false");
+            return;
+        }
+        const bool path_is_index = exec_path_ == ExprExecPath::ScalarIndex ||
+                                   exec_path_ == ExprExecPath::TextIndex ||
+                                   exec_path_ == ExprExecPath::PkIndex;
+        const bool offset_bypassed =
+            path_is_index && has_offset_input_ && !UsesIndexWithOffsetInput();
+        const bool used_index =
+            path_is_index && !offset_bypassed && !served_from_cache_;
+        int64_t index_id = 0;
+        std::string family;
+        std::string path;
+        bool nested = false;
+        if (used_index) {
+            if (exec_path_ == ExprExecPath::PkIndex) {
+                // The primary-key index has no entry in the scalar index inventory.
+                family = "pk";
+            }
+            if (selected_index_entry_.has_value()) {
+                if (auto id =
+                        selected_index_entry_->key.identity.pre_built_id();
+                    id.has_value()) {
+                    index_id = *id;
+                }
+                family = selected_index_entry_->family;
+                path = selected_index_entry_->json_path;
+                nested = selected_index_entry_->caps.nested;
+            }
+        }
+        std::string reason;
+        if (!used_index) {
+            reason = milvus::exec::ToString(ResolveExplainDeclineReason(
+                offset_bypassed, served_from_cache_));
+        }
+        explain->RecordDecision(field_id_,
+                                expr_id_,
+                                used_index,
+                                index_id,
+                                family,
+                                nested,
+                                path,
+                                reason);
+    }
+
+    DeclineReason
+    ResolveExplainDeclineReason(bool offset_bypassed,
+                                bool served_from_cache) const {
+        if (served_from_cache) {
+            return DeclineReason::kCached;
+        }
+        if (offset_bypassed) {
+            return DeclineReason::kIndexUnusable;
+        }
+        if (!FieldHasAnyIndex()) {
+            return DeclineReason::kNoIndexOnField;
+        }
+        if (!ReportsIndexDecline()) {
+            return DeclineReason::kCapabilityMismatch;
+        }
+        if (field_type_ == DataType::JSON && !JsonPathHasAnyIndex()) {
+            return DeclineReason::kJsonPathNotCovered;
+        }
+        if (decline_reason_ != DeclineReason::kNone &&
+            decline_reason_ != DeclineReason::kNoIndexOnField) {
+            return decline_reason_;
+        }
+        return DeclineReason::kIndexUnusable;
+    }
+
+    bool
+    FieldHasAnyIndex() const {
+        if (segment_->HasIndex(field_id_)) {
+            return true;
+        }
+        for (const auto& registration :
+             segment_->IndexRegistrations(field_id_)) {
+            if (registration.kind == segcore::IndexKind::Scalar ||
+                registration.kind == segcore::IndexKind::Ngram ||
+                registration.kind == segcore::IndexKind::Text) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool
+    JsonPathHasAnyIndex() const {
+        const auto path = milvus::Json::pointer(nested_path_);
+        for (const auto& registration :
+             segment_->IndexRegistrations(field_id_)) {
+            if (registration.kind != segcore::IndexKind::Scalar &&
+                registration.kind != segcore::IndexKind::Ngram &&
+                registration.kind != segcore::IndexKind::Text) {
+                continue;
+            }
+            if (registration.json_cast_type.data_type() ==
+                    JsonCastType::DataType::JSON &&
+                index_path_detail::IsPathPrefix(registration.json_path, path)) {
+                return true;
+            }
+            if (registration.json_path == path) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void
     RecordExecPath() {
         auto* recorder = feature_recorder_;
@@ -4674,11 +5102,22 @@ class SegmentExpr : public Expr {
                selected_element_level_result_;
     }
 
+    enum class ConstantOutcome : uint8_t {
+        kNone = 0,
+        kTrue,
+        kFalse,
+    };
+
     const segcore::SegmentInternalInterface* segment_;
     // Request-scoped sealed read snapshot, borrowed from the owning
     // QueryContext. Null for growing segments and non-pinned paths.
     const segcore::SegmentReadSnapshot* snapshot_{nullptr};
     const FieldId field_id_;
+    bool explain_decision_recorded_{false};
+    bool served_from_cache_{false};
+    bool schema_not_nullable_{false};
+    ConstantOutcome constant_outcome_{ConstantOutcome::kNone};
+    DeclineReason decline_reason_{DeclineReason::kNone};
     bool is_pk_field_{false};
     // Whether the column carries a validity (null) bitmap. When false, a chunk
     // skipped by SkipIndex needs no per-row validity work, so the multi-chunk
@@ -4715,6 +5154,7 @@ class SegmentExpr : public Expr {
     bool ran_index_selector_{false};
     bool saw_hinted_entry_{false};
     bool is_constant_folded_{false};
+    TargetBitmapView current_bitmap_input_;
     mutable std::once_flag determine_exec_path_once_;
     // Flag set by SetExecuteAllAtOnce() to enable move-based fast paths,
     // avoiding bitmap copies in ProcessIndexChunks/SliceCachedResult.
@@ -4912,6 +5352,35 @@ IsLikeExpr(std::shared_ptr<Expr> expr);
 void
 OptimizeCompiledExprs(ExecContext* context, const std::vector<ExprPtr>& exprs);
 
+void
+AssignExplainEvalOrders(const std::vector<ExprPtr>& exprs,
+                        ExecutionExplainRecorder* explain,
+                        int32_t& next_order);
+
+void
+MarkExplainEvalEntered(const std::vector<ExprPtr>& exprs,
+                       ExecutionExplainRecorder* explain);
+
+void
+RecordWholeFilterCacheHitExplain(const std::vector<ExprPtr>& exprs,
+                                 ExecutionExplainRecorder* explain,
+                                 int64_t rows_in,
+                                 int64_t rows_out);
+
+void
+MarkExplainDomainEmpty(const ExprPtr& expr, ExecutionExplainRecorder* explain);
+
+void
+MarkExplainDomainNonEmpty(const ExprPtr& expr,
+                          ExecutionExplainRecorder* explain);
+
+void
+BindExplainExprsToOperator(
+    const std::vector<ExprPtr>& exprs,
+    const std::shared_ptr<ExecutionExplainRecorder>& explain_shared,
+    ExecutionExplainRecorder* explain,
+    int32_t operator_step);
+
 std::vector<ExprPtr>
 CompileExpressions(const std::vector<expr::TypedExprPtr>& logical_exprs,
                    ExecContext* context,
@@ -4922,13 +5391,15 @@ CompileExpressions(const std::vector<expr::TypedExprPtr>& logical_exprs,
 std::vector<ExprPtr>
 CompileInputs(const expr::TypedExprPtr& expr,
               QueryContext* config,
-              const std::unordered_set<std::string>& flatten_cadidates);
+              const std::unordered_set<std::string>& flatten_cadidates,
+              ExecutionExplainRecorder* explain = nullptr);
 
 ExprPtr
 CompileExpression(const expr::TypedExprPtr& expr,
                   QueryContext* context,
                   const std::unordered_set<std::string>& flatten_cadidates,
-                  bool enable_constant_folding);
+                  bool enable_constant_folding,
+                  ExecutionExplainRecorder* explain = nullptr);
 
 class ExprSet {
  public:
@@ -4940,6 +5411,12 @@ class ExprSet {
                      ExecContext* exec_ctx,
                      bool null_rejecting = false) {
         exprs_ = CompileExpressions(logical_exprs, exec_ctx);
+        if (exec_ctx != nullptr && exec_ctx->explain() != nullptr) {
+            BindExplainExprsToOperator(exprs_,
+                                       exec_ctx->explain_shared(),
+                                       exec_ctx->explain(),
+                                       exec_ctx->operator_step());
+        }
         if (null_rejecting) {
             for (auto& compiled_expr : exprs_) {
                 compiled_expr->MarkNullRejecting();
@@ -5019,6 +5496,7 @@ class ExprSet {
 
  private:
     std::vector<std::shared_ptr<Expr>> exprs_;
+    bool explain_eval_marked_{false};
 };
 
 // Forward declaration for CreateTTLFieldFilterExpression

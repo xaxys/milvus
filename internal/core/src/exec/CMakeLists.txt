@@ -9,6 +9,7 @@
 # is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 # or implied. See the License for the specific language governing permissions and limitations under the License
 
+# Includes Driver, ExecutionExplainRecorder, expression/, and operator/.
 add_source_at_current_directory_recursively()
 
 # Keep the generated unity composition platform-independent. CMake excludes

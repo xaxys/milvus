@@ -28,6 +28,7 @@ import (
 	commonpb "github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/agg"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/queryutil"
 	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -475,6 +476,13 @@ func (s *OrderedReduceStream) acceptMetadata(chunk *internalpb.RetrieveResults) 
 	s.metadata.ScannedRemoteBytes += chunk.GetScannedRemoteBytes()
 	s.metadata.ScannedTotalBytes += chunk.GetScannedTotalBytes()
 	s.metadata.FeatureBits |= chunk.GetFeatureBits()
+	if chunk.GetExplain() != nil {
+		if s.metadata.GetExplain() == nil {
+			s.metadata.Explain = chunk.GetExplain()
+		} else {
+			s.metadata.Explain = explain.Merge(s.metadata.GetExplain(), chunk.GetExplain())
+		}
+	}
 	s.metadata.MvccTimestamp = max(s.metadata.GetMvccTimestamp(), chunk.GetMvccTimestamp())
 	s.metadata.CostAggregation = mergeQueryCost(s.metadata.GetCostAggregation(), chunk.GetCostAggregation())
 }
@@ -496,6 +504,7 @@ func (s *OrderedReduceStream) attachMetadata(chunk *internalpb.RetrieveResults) 
 	chunk.ScannedRemoteBytes = metadata.GetScannedRemoteBytes()
 	chunk.ScannedTotalBytes = metadata.GetScannedTotalBytes()
 	chunk.FeatureBits = metadata.GetFeatureBits()
+	chunk.Explain = metadata.GetExplain()
 	chunk.MvccTimestamp = metadata.GetMvccTimestamp()
 	s.metadataEmitted = true
 	s.metadata = nil
@@ -695,6 +704,13 @@ func (s *UnOrderedReduceStream) acceptMetadata(chunk *internalpb.RetrieveResults
 	s.metadata.ScannedRemoteBytes += chunk.GetScannedRemoteBytes()
 	s.metadata.ScannedTotalBytes += chunk.GetScannedTotalBytes()
 	s.metadata.FeatureBits |= chunk.GetFeatureBits()
+	if chunk.GetExplain() != nil {
+		if s.metadata.GetExplain() == nil {
+			s.metadata.Explain = chunk.GetExplain()
+		} else {
+			s.metadata.Explain = explain.Merge(s.metadata.GetExplain(), chunk.GetExplain())
+		}
+	}
 	s.metadata.MvccTimestamp = max(s.metadata.GetMvccTimestamp(), chunk.GetMvccTimestamp())
 	s.metadata.CostAggregation = mergeQueryCost(s.metadata.GetCostAggregation(), chunk.GetCostAggregation())
 }
@@ -715,6 +731,7 @@ func (s *UnOrderedReduceStream) attachMetadata(chunk *internalpb.RetrieveResults
 	chunk.ScannedRemoteBytes = metadata.GetScannedRemoteBytes()
 	chunk.ScannedTotalBytes = metadata.GetScannedTotalBytes()
 	chunk.FeatureBits = metadata.GetFeatureBits()
+	chunk.Explain = metadata.GetExplain()
 	chunk.MvccTimestamp = metadata.GetMvccTimestamp()
 	s.metadata = nil
 }
@@ -826,6 +843,9 @@ func SplitRetrieveResult(result *internalpb.RetrieveResults, chunkBytes int) ([]
 	first.ScannedRemoteBytes = result.GetScannedRemoteBytes()
 	first.ScannedTotalBytes = result.GetScannedTotalBytes()
 	first.FeatureBits = result.GetFeatureBits()
+	if result.GetExplain() != nil {
+		first.Explain = proto.Clone(result.GetExplain()).(*internalpb.ExecutionExplain)
+	}
 	first.MvccTimestamp = result.GetMvccTimestamp()
 	return chunks, nil
 }

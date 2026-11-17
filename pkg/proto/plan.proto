@@ -344,6 +344,11 @@ message Expr {
     RoaringFilterExpr roaring_filter_expr = 23;
   };
   bool is_template = 20;
+  // Request-unique id of this expression node, assigned by the proxy before the
+  // plan is serialized. Segcore reports it in the execution explain so the proxy
+  // can aggregate the per-segment decisions back to one condition. Zero means the
+  // sender did not assign one (older proxy or a generated node).
+  int64 expr_id = 24;
 }
 
 message VectorANNS {
@@ -440,6 +445,9 @@ message PlanOption {
    // strict: a hint that names this field's indexes but cannot be used fails the
    // query instead of falling back to rule-based selection.
    bool index_hint_strict = 4;
+   // Enable ExecutionExplainRecorder creation and leaf attribution when the
+   // request asks for explain output.
+   bool enable_explain = 5;
 };
 
 message PlanNode {

@@ -44,6 +44,7 @@ BuildFilterExprSet(const expr::TypedExprPtr& filter,
                    exec::ExecContext* exec_context) {
     exec::ExecContext scorer_exec_ctx(exec_context->get_query_context());
     scorer_exec_ctx.DisableIndexHints();
+    scorer_exec_ctx.DisableExplain();
 
     std::vector<expr::TypedExprPtr> filters;
     filters.emplace_back(filter);

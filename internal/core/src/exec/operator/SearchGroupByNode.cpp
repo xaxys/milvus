@@ -28,6 +28,8 @@
 #include "common/Types.h"
 #include "common/Utils.h"
 #include "exec/QueryContext.h"
+#include "exec/ExecutionExplainRecorder.h"
+#include "exec/operator/Utils.h"
 #include "exec/operator/search-groupby/SearchGroupByOperator.h"
 #include "fmt/core.h"
 #include "monitor/Monitor.h"
@@ -132,6 +134,12 @@ PhySearchGroupByNode::GetOutput() {
                        search_result.element_indices_.size(),
                        search_result.seg_offsets_.size());
         }
+        search_result.vector_iterators_.reset();
+    }
+    if (auto* explain = query_context_->explain(); explain != nullptr) {
+        explain->AddOperatorRowsOut(
+            get_operator_id(),
+            CountValidSearchOffsets(search_result.seg_offsets_));
     }
     tracer::AddEvent(
         fmt::format("grouped_results: {}", search_result.seg_offsets_.size()));

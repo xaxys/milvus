@@ -33,6 +33,7 @@
 #include "common/protobuf_utils.h"
 #include "exec/QueryContext.h"
 #include "exec/Task.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/operator/AggregationNode.h"
 #include "exec/operator/CallbackSink.h"
 #include "exec/operator/ElementFilterBitsNode.h"
@@ -47,6 +48,7 @@
 #include "exec/operator/SearchGroupByNode.h"
 #include "exec/operator/VectorSearchNode.h"
 #include "exec/operator/QueryOrderByNode.h"
+#include "expr/ITypeExpr.h"
 #include "fmt/core.h"
 #include "folly/Executor.h"
 #include "folly/Unit.h"
@@ -57,6 +59,156 @@
 
 namespace milvus {
 namespace exec {
+
+namespace {
+
+bool
+HasExplainableLogicalLeaf(const expr::TypedExprPtr& expr,
+                          const Schema* schema) {
+    if (!expr) {
+        return false;
+    }
+    if (std::dynamic_pointer_cast<const expr::AlwaysTrueExpr>(expr)) {
+        return expr->expr_id() != 0;
+    }
+    if (std::dynamic_pointer_cast<const expr::LogicalBinaryExpr>(expr) ||
+        std::dynamic_pointer_cast<const expr::LogicalUnaryExpr>(expr) ||
+        std::dynamic_pointer_cast<const expr::MatchExpr>(expr)) {
+        for (const auto& child : expr->inputs()) {
+            if (HasExplainableLogicalLeaf(child, schema)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (expr->expr_id() == 0 && schema != nullptr) {
+        if (auto unary =
+                std::dynamic_pointer_cast<const expr::UnaryRangeFilterExpr>(
+                    expr)) {
+            if (schema->is_internal_filter_field(unary->column_.field_id_)) {
+                return false;
+            }
+        }
+        if (auto null_expr =
+                std::dynamic_pointer_cast<const expr::NullExpr>(expr)) {
+            if (schema->is_internal_filter_field(
+                    null_expr->column_.field_id_)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+const char*
+ExplainOperatorDomain(ExplainOperatorKind kind,
+                      bool element_level_search,
+                      bool has_element_filter,
+                      bool has_aggregation) noexcept {
+    switch (kind) {
+        case ExplainOperatorKind::kElementFilter:
+        case ExplainOperatorKind::kIterativeElementFilter:
+            return "element";
+        case ExplainOperatorKind::kVectorSearch:
+        case ExplainOperatorKind::kIterativeFilter:
+        case ExplainOperatorKind::kGroupBy:
+        case ExplainOperatorKind::kRescore:
+            return element_level_search ? "element" : "";
+        case ExplainOperatorKind::kProject:
+            return (element_level_search || has_element_filter) ? "element"
+                                                                : "";
+        case ExplainOperatorKind::kOrderBy:
+            return (element_level_search ||
+                    (has_element_filter && !has_aggregation))
+                       ? "element"
+                       : "";
+        default:
+            return "";
+    }
+}
+
+void
+RegisterOperatorsFromNodes(
+    const std::vector<std::shared_ptr<const plan::PlanNode>>& plannodes,
+    bool element_level_search,
+    ExecutionExplainRecorder* explain,
+    const Schema* schema) {
+    if (explain == nullptr) {
+        return;
+    }
+    bool has_element_filter = false;
+    bool has_aggregation = false;
+    bool has_mvcc = false;
+    std::vector<ExplainOperatorKind> kinds(plannodes.size(),
+                                           ExplainOperatorKind::kUnknown);
+    for (size_t i = 0; i < plannodes.size(); ++i) {
+        const auto kind = plannodes[i] ? plannodes[i]->explain_operator_kind()
+                                       : ExplainOperatorKind::kUnknown;
+        kinds[i] = kind;
+        if (kind == ExplainOperatorKind::kElementFilter) {
+            has_element_filter = true;
+        } else if (kind == ExplainOperatorKind::kAggregation) {
+            has_aggregation = true;
+        } else if (kind == ExplainOperatorKind::kMvcc) {
+            has_mvcc = true;
+        }
+    }
+    for (size_t i = 0; i < plannodes.size(); ++i) {
+        const auto kind = kinds[i];
+        if (kind == ExplainOperatorKind::kUnknown) {
+            continue;
+        }
+        bool next_is_mvcc = false;
+        for (size_t j = i + 1; j < plannodes.size(); ++j) {
+            if (kinds[j] == ExplainOperatorKind::kUnknown) {
+                continue;
+            }
+            next_is_mvcc = (kinds[j] == ExplainOperatorKind::kMvcc);
+            break;
+        }
+        bool internal_folded = false;
+        if (kind == ExplainOperatorKind::kFilter && has_mvcc && next_is_mvcc) {
+            const auto* fb =
+                static_cast<const plan::FilterBitsNode*>(plannodes[i].get());
+            internal_folded = !HasExplainableLogicalLeaf(fb->filter(), schema);
+        }
+        explain->RegisterOperator(static_cast<int32_t>(i),
+                                  kind,
+                                  ExplainOperatorDomain(kind,
+                                                        element_level_search,
+                                                        has_element_filter,
+                                                        has_aggregation),
+                                  internal_folded);
+    }
+}
+
+void
+LinearizePlanNodes(const std::shared_ptr<const plan::PlanNode>& node,
+                   std::vector<std::shared_ptr<const plan::PlanNode>>& out) {
+    if (!node) {
+        return;
+    }
+    const auto& sources = node->sources();
+    if (!sources.empty()) {
+        LinearizePlanNodes(sources[0], out);
+    }
+    out.push_back(node);
+}
+
+}  // namespace
+
+void
+RegisterPlanOperators(const std::shared_ptr<const plan::PlanNode>& root,
+                      bool element_level_search,
+                      ExecutionExplainRecorder* explain,
+                      const Schema* schema) {
+    if (explain == nullptr || !root) {
+        return;
+    }
+    std::vector<std::shared_ptr<const plan::PlanNode>> nodes;
+    LinearizePlanNodes(root, nodes);
+    RegisterOperatorsFromNodes(nodes, element_level_search, explain, schema);
+}
 
 std::atomic_uint64_t BlockingState::num_blocked_drivers_{0};
 
@@ -71,6 +223,15 @@ DriverFactory::CreateDriver(
     const std::function<int(int pipelineid)>& num_drivers) {
     auto driver = std::shared_ptr<Driver>(new Driver());
     ctx->driver_ = driver.get();
+    if (auto* qc = ctx->task_ ? ctx->task_->query_context().get() : nullptr;
+        qc != nullptr && qc->explain() != nullptr) {
+        const auto* pg = qc->get_placeholder_group();
+        const bool element_level_search =
+            pg != nullptr && !pg->empty() && pg->at(0).element_level_;
+        const auto schema = qc->get_optional_read_schema();
+        RegisterOperatorsFromNodes(
+            plannodes_, element_level_search, qc->explain(), schema.get());
+    }
     std::vector<std::shared_ptr<Operator>> operators;
     operators.reserve(plannodes_.size());
 
@@ -301,42 +462,44 @@ Driver::Next(std::shared_ptr<BlockingState>& blocking_state) {
 //     (the classification chosen at the throw site, e.g. ExprInvalid, must
 //     survive to the CGO boundary instead of collapsing to UnexpectedError).
 //   - any other std::exception -> legacy UnexpectedError classification.
-#define CALL_OPERATOR(call_func, operator, method_name)               \
-    try {                                                             \
-        call_func;                                                    \
-    } catch (folly::FutureCancellation & e) {                         \
-        auto err_msg = fmt::format(                                   \
-            "Operator::{} cancelled for [Operator:{}, plan node "     \
-            "id: {}] : {}",                                           \
-            method_name,                                              \
-            operator->ToString(),                                     \
-            operator->get_plannode_id(),                              \
-            e.what());                                                \
-        throw ExecOperatorException(ErrorCode::FollyCancel, err_msg); \
-    } catch (milvus::SegcoreError & e) {                              \
-        std::string stack_trace = milvus::impl::EasyStackTrace();     \
-        auto err_msg = fmt::format(                                   \
-            "Operator::{} failed for [Operator:{}, plan node id: "    \
-            "{}] : {}\nStack trace: {}",                              \
-            method_name,                                              \
-            operator->ToString(),                                     \
-            operator->get_plannode_id(),                              \
-            e.what(),                                                 \
-            stack_trace);                                             \
-        LOG_ERROR("{}", err_msg);                                     \
-        throw ExecOperatorException(e.get_error_code(), err_msg);     \
-    } catch (std::exception & e) {                                    \
-        std::string stack_trace = milvus::impl::EasyStackTrace();     \
-        auto err_msg = fmt::format(                                   \
-            "Operator::{} failed for [Operator:{}, plan node id: "    \
-            "{}] : {}\nStack trace: {}",                              \
-            method_name,                                              \
-            operator->ToString(),                                     \
-            operator->get_plannode_id(),                              \
-            e.what(),                                                 \
-            stack_trace);                                             \
-        LOG_ERROR("{}", err_msg);                                     \
-        throw ExecOperatorException(err_msg);                         \
+#define CALL_OPERATOR(call_func, operator, method_name)                \
+    try {                                                              \
+        ExecutionExplainRecorder::ScopedActiveStep _active_step_guard( \
+            explain_recorder, (operator)->get_operator_id());          \
+        call_func;                                                     \
+    } catch (folly::FutureCancellation & e) {                          \
+        auto err_msg = fmt::format(                                    \
+            "Operator::{} cancelled for [Operator:{}, plan node "      \
+            "id: {}] : {}",                                            \
+            method_name,                                               \
+            operator->ToString(),                                      \
+            operator->get_plannode_id(),                               \
+            e.what());                                                 \
+        throw ExecOperatorException(ErrorCode::FollyCancel, err_msg);  \
+    } catch (milvus::SegcoreError & e) {                               \
+        std::string stack_trace = milvus::impl::EasyStackTrace();      \
+        auto err_msg = fmt::format(                                    \
+            "Operator::{} failed for [Operator:{}, plan node id: "     \
+            "{}] : {}\nStack trace: {}",                               \
+            method_name,                                               \
+            operator->ToString(),                                      \
+            operator->get_plannode_id(),                               \
+            e.what(),                                                  \
+            stack_trace);                                              \
+        LOG_ERROR("{}", err_msg);                                      \
+        throw ExecOperatorException(e.get_error_code(), err_msg);      \
+    } catch (std::exception & e) {                                     \
+        std::string stack_trace = milvus::impl::EasyStackTrace();      \
+        auto err_msg = fmt::format(                                    \
+            "Operator::{} failed for [Operator:{}, plan node id: "     \
+            "{}] : {}\nStack trace: {}",                               \
+            method_name,                                               \
+            operator->ToString(),                                      \
+            operator->get_plannode_id(),                               \
+            e.what(),                                                  \
+            stack_trace);                                              \
+        LOG_ERROR("{}", err_msg);                                      \
+        throw ExecOperatorException(err_msg);                          \
     }
 
 StopReason
@@ -344,6 +507,10 @@ Driver::RunInternal(std::shared_ptr<Driver>& self,
                     std::shared_ptr<BlockingState>& blocking_state,
                     RowVectorPtr& result) {
     try {
+        ExecutionExplainRecorder* explain_recorder =
+            (get_task() && get_task()->query_context())
+                ? get_task()->query_context()->explain()
+                : nullptr;
         initializeOperators();
         if (ENABLE_DRIVER_PREFETCH.load(std::memory_order_relaxed)) {
             std::call_once(self->once_, [self]() { self->PrefetchAsync(); });

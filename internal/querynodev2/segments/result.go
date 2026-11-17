@@ -26,6 +26,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/featureusage"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/internal/util/segcore"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -48,13 +49,31 @@ func ReduceSearchOnQueryNode(ctx context.Context, results []*internalpb.SearchRe
 	return ReduceSearchResults(ctx, results, info)
 }
 
+func mergeSearchExplains(results []*internalpb.SearchResults) *internalpb.ExecutionExplain {
+	var explains []*internalpb.ExecutionExplain
+	for _, r := range results {
+		if r.GetExplain() != nil {
+			explains = append(explains, r.GetExplain())
+		}
+	}
+	if len(explains) == 0 {
+		return nil
+	}
+	return explain.Merge(explains...)
+}
+
 func ReduceSearchResults(ctx context.Context, results []*internalpb.SearchResults, info *reduce.ResultInfo) (*internalpb.SearchResults, error) {
+	allCount := len(results)
+	mergedExplain := mergeSearchExplains(results)
 	results = lo.Filter(results, func(result *internalpb.SearchResults, _ int) bool {
 		return result != nil && (result.GetSlicedBlob() != nil || result.GetResultData() != nil)
 	})
 
 	if len(results) == 1 {
 		mlog.Debug(ctx, "Shortcut return ReduceSearchResults", mlog.Any("result info", info))
+		if allCount > 1 && mergedExplain != nil {
+			results[0].Explain = mergedExplain
+		}
 		return results[0], nil
 	}
 
@@ -133,6 +152,7 @@ func ReduceSearchResults(ctx context.Context, results []*internalpb.SearchResult
 	searchResults.ScannedRemoteBytes = storageCost.ScannedRemoteBytes
 	searchResults.ScannedTotalBytes = storageCost.ScannedTotalBytes
 	searchResults.FeatureBits = orFeatureBits(results)
+	searchResults.Explain = mergedExplain
 	return searchResults, nil
 }
 
@@ -147,7 +167,13 @@ func ReduceAdvancedSearchResults(ctx context.Context, results []*internalpb.Sear
 		IsAdvanced: true,
 	}
 	storageCost := segcore.StorageCost{}
+	var subExplains []*internalpb.ExecutionExplain
 	for index, result := range results {
+		if result.GetExplain() != nil {
+			if wrapped := explain.WrapSubSearch(index, []*internalpb.ExecutionExplain{result.GetExplain()}); wrapped != nil {
+				subExplains = append(subExplains, wrapped)
+			}
+		}
 		if result.GetIsTopkReduce() {
 			isTopkReduce = true
 		}
@@ -188,6 +214,9 @@ func ReduceAdvancedSearchResults(ctx context.Context, results []*internalpb.Sear
 	searchResults.ScannedRemoteBytes = storageCost.ScannedRemoteBytes
 	searchResults.ScannedTotalBytes = storageCost.ScannedTotalBytes
 	searchResults.FeatureBits = orFeatureBits(results)
+	if len(subExplains) > 0 {
+		searchResults.Explain = explain.AssembleHybridExplain(subExplains...)
+	}
 	return searchResults, nil
 }
 

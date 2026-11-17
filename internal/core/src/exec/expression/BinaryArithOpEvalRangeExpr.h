@@ -747,6 +747,7 @@ class PhyBinaryArithOpEvalRangeExpr : public SegmentExpr {
         // JSON, ARRAY and VECTOR_ARRAY types cannot use index for arith ops.
         if (data_type == DataType::JSON || data_type == DataType::ARRAY ||
             data_type == DataType::VECTOR_ARRAY) {
+            decline_reason_ = DeclineReason::kCapabilityMismatch;
             exec_path_ = ExprExecPath::RawData;
             return;
         }

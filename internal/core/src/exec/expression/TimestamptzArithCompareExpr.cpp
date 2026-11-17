@@ -188,9 +188,9 @@ PhyTimestamptzArithCompareExpr::DetermineExecPath() {
 
 void
 PhyTimestamptzArithCompareExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    WaitPrefetch();
-    auto input = context.get_offset_input();
-    SetHasOffsetInput((input != nullptr));
+    auto* input = context.get_offset_input();
+    auto eval_guard =
+        PrepareLeafEval(context, /*bind_offset_before_wait=*/false);
     result = ExecCompareVisitorImpl<int64_t>(input);
 }
 

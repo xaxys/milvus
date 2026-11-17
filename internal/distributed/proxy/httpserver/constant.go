@@ -170,6 +170,7 @@ const (
 	HTTPReturnScannedRemoteBytes = "scanned_remote_bytes"
 	HTTPReturnScannedTotalBytes  = "scanned_total_bytes"
 	HTTPReturnCacheHitRatio      = "cache_hit_ratio"
+	HTTPReturnExplain            = "explain"
 
 	HTTPReturnFieldName             = "name"
 	HTTPReturnFieldID               = "id"
