@@ -13,11 +13,13 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/function/chain"
 	"github.com/milvus-io/milvus/internal/util/materialize"
 	"github.com/milvus-io/milvus/internal/util/queryutil"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
@@ -273,6 +275,7 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 			SourceID: paramtable.GetNodeID(),
 		},
 		Status:             merr.Success(),
+		Explain:            queryNodeExplain(t.ctx, results),
 		ComputedResults:    reducedResult.GetComputedResults(),
 		Ids:                reducedResult.Ids,
 		FieldsData:         reducedResult.FieldsData,
@@ -315,6 +318,29 @@ func (t *QueryTask) buildMaterializeResult(reduced *segcorepb.RetrieveResults, s
 	header.ResultSize = enc.ResultSize
 	t.materializeResult.Body = [][]byte{enc.Entry}
 	return nil
+}
+
+// queryNodeExplain wraps what the segments recorded into the querynode level of
+// the explain tree. It is nil when no segment recorded anything.
+func queryNodeExplain(ctx context.Context, results []segments.RetrieveSegmentResult) *internalpb.ExecutionExplain {
+	children := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for _, result := range results {
+		blob := result.Result.GetExplain()
+		if len(blob) == 0 {
+			continue
+		}
+		node := &internalpb.ExecutionExplain{}
+		if err := proto.Unmarshal(blob, node); err != nil {
+			mlog.Warn(ctx, "failed to decode segment execution explain", mlog.Err(err))
+			continue
+		}
+		node.Name = strconv.FormatInt(result.Segment.ID(), 10)
+		children = explain.Splice(children, node)
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	return explain.Wrap(explain.KindQueryNode, strconv.FormatInt(paramtable.GetNodeID(), 10), children)
 }
 
 func (t *QueryTask) Done(err error) {

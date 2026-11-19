@@ -46,6 +46,7 @@ PhyNullExpr::Eval(EvalCtx& context, VectorPtr& result) {
 
     auto input = context.get_offset_input();
     SetHasOffsetInput(input != nullptr);
+    EnsureExplainDecisionRecorded();
     if (expr_->column_.element_level_) {
         result = ExecElementLevelNull(input);
         return;
@@ -136,8 +137,9 @@ PhyNullExpr::Eval(EvalCtx& context, VectorPtr& result) {
 void
 PhyNullExpr::DetermineExecPath() {
     // Element validity is read from raw data; a field without null elements
-    // is not read at all.
-    if (expr_->column_.element_level_ ||
+    // is not read at all. A non-nullable column is answered directly from the
+    // schema in PreCheckNullable without touching an index or column.
+    if (!expr_->column_.nullable_ || expr_->column_.element_level_ ||
         IsVectorDataType(expr_->column_.data_type_)) {
         exec_path_ = ExprExecPath::RawData;
         return;
@@ -150,6 +152,24 @@ PhyNullExpr::DetermineExecPath() {
         ClearSelectedIndex();
         exec_path_ = ExprExecPath::RawData;
     }
+}
+
+void
+PhyNullExpr::RecordExplainDecision() {
+    if (!expr_->column_.element_level_ && !expr_->column_.nullable_) {
+        if (explain_ != nullptr) {
+            explain_->RecordDecision(field_id_,
+                                     expr_id_,
+                                     /*used_index=*/false,
+                                     /*index_id=*/0,
+                                     /*family=*/"",
+                                     /*nested=*/false,
+                                     /*path=*/"",
+                                     "schema_not_nullable");
+        }
+        return;
+    }
+    SegmentExpr::RecordExplainDecision();
 }
 
 void
@@ -232,6 +252,7 @@ PhyNullExpr::ExecVectorNull(OffsetVector* input) {
                                                offsets.data(),
                                                offsets.size(),
                                                TargetBitmapView(valid_res));
+        RecordRawScan(static_cast<int64_t>(offsets.size()));
         return BuildNullResult(std::move(valid_res));
     }
 
@@ -243,6 +264,7 @@ PhyNullExpr::ExecVectorNull(OffsetVector* input) {
                                          current_data_global_pos_,
                                          batch_size,
                                          TargetBitmapView(valid_res));
+    RecordRawScan(batch_size);
     current_data_global_pos_ += batch_size;
     return BuildNullResult(std::move(valid_res));
 }

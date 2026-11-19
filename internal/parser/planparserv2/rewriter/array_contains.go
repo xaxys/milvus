@@ -10,6 +10,7 @@ import (
 type arrayContainsGroup struct {
 	columnInfo  *planpb.ColumnInfo
 	elements    []*planpb.GenericValue
+	templates   []string
 	seen        map[arrayContainsElementKey]struct{}
 	firstIndex  int
 	sourceCount int
@@ -60,6 +61,7 @@ func combineArrayContains(parts []*planpb.Expr, targetOp planpb.JSONContainsExpr
 			group.seen[elementKey] = struct{}{}
 			group.elements = append(group.elements, element)
 		}
+		group.templates = append(group.templates, contains.GetTemplateVariableName())
 		group.sourceCount++
 		memberships[index] = group
 	}
@@ -78,10 +80,11 @@ func combineArrayContains(parts []*planpb.Expr, targetOp planpb.JSONContainsExpr
 		out = append(out, &planpb.Expr{
 			Expr: &planpb.Expr_JsonContainsExpr{
 				JsonContainsExpr: &planpb.JSONContainsExpr{
-					ColumnInfo:       group.columnInfo,
-					Elements:         group.elements,
-					Op:               targetOp,
-					ElementsSameType: arrayContainsElementsSameType(group.elements),
+					ColumnInfo:           group.columnInfo,
+					Elements:             group.elements,
+					Op:                   targetOp,
+					ElementsSameType:     arrayContainsElementsSameType(group.elements),
+					TemplateVariableName: mergeTemplateNames(group.templates...),
 				},
 			},
 		})

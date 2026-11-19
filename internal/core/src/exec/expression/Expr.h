@@ -38,6 +38,7 @@
 #include "common/OpContext.h"
 #include "common/Types.h"
 #include "exec/expression/EvalCtx.h"
+#include "exec/expression/ExecutionExplainRecorder.h"
 #include "exec/expression/IndexPathSelection.h"
 #include "exec/expression/ValueLookupSource.h"
 #include "exec/expression/ExprCacheHelper.h"
@@ -411,6 +412,18 @@ class Expr : public std::enable_shared_from_this<Expr> {
         return type_;
     }
 
+    // Request-unique id of the logical expression node this was compiled from;
+    // zero for nodes the proxy did not tag. Read by the explain recorder.
+    int64_t
+    expr_id() const {
+        return expr_id_;
+    }
+
+    void
+    SetExprId(int64_t expr_id) {
+        expr_id_ = expr_id;
+    }
+
     std::string
     name() {
         return name_;
@@ -470,6 +483,12 @@ class Expr : public std::enable_shared_from_this<Expr> {
     // mark and propagate it to their inputs; everywhere else (in particular
     // NOT, where FALSE and UNKNOWN produce different results) the default
     // no-op stops the propagation.
+    // Optional execution-explain sink, set once after construction for the leaves
+    // that can record decisions.
+    virtual void
+    SetExplainRecorder(ExecutionExplainRecorder* /*explain*/) {
+    }
+
     virtual void
     MarkNullRejecting() {
     }
@@ -543,6 +562,7 @@ class Expr : public std::enable_shared_from_this<Expr> {
     std::vector<std::shared_ptr<Expr>> inputs_;
     std::string name_;
     milvus::OpContext* op_ctx_;
+    int64_t expr_id_{0};
 
     // whether we have offset input and do expr filtering on these data
     // default is false which means we will do expr filtering on the total segment data
@@ -568,7 +588,8 @@ class SegmentExpr : public Expr {
                 int32_t consistency_level,
                 bool allow_any_json_cast_type = false,
                 bool is_json_contains = false,
-                const query::PlanOptions& plan_options = {})
+                const query::PlanOptions& plan_options = {},
+                ExecutionExplainRecorder* explain = nullptr)
         : Expr(DataType::BOOL, std::move(input), name, op_ctx),
           segment_(const_cast<segcore::SegmentInternalInterface*>(segment)),
           field_id_(field_id),
@@ -576,6 +597,7 @@ class SegmentExpr : public Expr {
           value_type_(value_type),
           allow_any_json_cast_type_(allow_any_json_cast_type),
           active_count_(active_count),
+          explain_(explain),
           batch_size_(batch_size),
           consistency_level_(consistency_level),
           is_json_contains_(is_json_contains),
@@ -1683,6 +1705,7 @@ class SegmentExpr : public Expr {
                              const TargetBitmap* candidate_mask,
                              const ValTypes&... values) {
         int64_t processed_size = 0;
+        int64_t read_rows = 0;
         const bool has_candidate_mask =
             candidate_mask != nullptr && !candidate_mask->empty();
         AssertInfo(
@@ -1780,6 +1803,10 @@ class SegmentExpr : public Expr {
                             ? ValidityView{}
                             : ValidityView::FromExpanded(valid_data.data() + i);
                     if (!skip) {
+                        if (!has_candidate_mask ||
+                            (*candidate_mask)[processed_size]) {
+                            ++read_rows;
+                        }
                         evaluate_batch.template operator()<FilterType::random>(
                             data_vec.data() + i,
                             validity,
@@ -1804,6 +1831,7 @@ class SegmentExpr : public Expr {
                     ++processed_size;
                 }
             }
+            RecordRawScan(read_rows);
             return input->size();
         };
 
@@ -1825,6 +1853,10 @@ class SegmentExpr : public Expr {
                     std::make_pair(chunk_offset, int64_t{1}));
                 const auto& [data_vec, valid_data] = pw.get();
                 if (!skip_func || !skip_func(skip_view_, chunk_id)) {
+                    if (!has_candidate_mask ||
+                        (*candidate_mask)[processed_size]) {
+                        ++read_rows;
+                    }
                     evaluate_batch.template operator()<FilterType::random>(
                         data_vec.data(),
                         valid_data,
@@ -1850,6 +1882,7 @@ class SegmentExpr : public Expr {
                 }
                 processed_size++;
             }
+            RecordRawScan(read_rows);
             return input->size();
         } else if (segment_->type() == SegmentType::Sealed) {
             if constexpr (std::is_same_v<T, std::string_view> ||
@@ -1893,6 +1926,10 @@ class SegmentExpr : public Expr {
                     chunk_base != nullptr ? chunk_base + chunk_offset : nullptr;
                 const auto validity = chunk_validity.Subview(chunk_offset);
                 if (!cached_skip) {
+                    if (!has_candidate_mask ||
+                        (*candidate_mask)[processed_size]) {
+                        ++read_rows;
+                    }
                     evaluate_batch.template operator()<FilterType::random>(
                         data,
                         validity,
@@ -1918,6 +1955,7 @@ class SegmentExpr : public Expr {
                 }
                 processed_size++;
             }
+            RecordRawScan(read_rows);
             return input->size();
         } else {
             // growing segment. Validity lives in chunked, append-only storage
@@ -1946,6 +1984,10 @@ class SegmentExpr : public Expr {
                 const T* data = chunk_base + chunk_offset;
                 const auto validity = chunk_validity.Subview(chunk_offset);
                 if (!cached_skip) {
+                    if (!has_candidate_mask ||
+                        (*candidate_mask)[processed_size]) {
+                        ++read_rows;
+                    }
                     evaluate_batch.template operator()<FilterType::random>(
                         data,
                         validity,
@@ -1971,6 +2013,7 @@ class SegmentExpr : public Expr {
                 }
                 processed_size++;
             }
+            RecordRawScan(read_rows);
             return input->size();
         }
     }
@@ -2070,6 +2113,7 @@ class SegmentExpr : public Expr {
                 res,
                 valid_res,
                 values...);
+            RecordRawScan(owned.size);
             return owned.size;
         }
 
@@ -2079,6 +2123,7 @@ class SegmentExpr : public Expr {
                    items.Size(),
                    input_view.size);
         const T invalid_value{};
+        int64_t read_rows = 0;
         for (int64_t logical_pos = 0;
              logical_pos < static_cast<int64_t>(input->size());
              ++logical_pos) {
@@ -2115,6 +2160,7 @@ class SegmentExpr : public Expr {
                     values...);
                 continue;
             }
+            ++read_rows;
             if (!valid) {
                 const auto validity = ValidityView::FromExpanded(&valid);
                 // Match the regular Scan/Chunk path: the evaluator sees an
@@ -2145,6 +2191,7 @@ class SegmentExpr : public Expr {
                 valid_res + logical_pos,
                 values...);
         }
+        RecordRawScan(read_rows);
         return input->size();
     }
 
@@ -2632,6 +2679,7 @@ class SegmentExpr : public Expr {
         // that is not the expected consecutive one simply starts a fresh
         // run), so correctness never depends on the input being sorted.
         size_t processed_size = 0;
+        int64_t read_elems = 0;
         size_t i = 0;
 
         // Reuse these buffers to avoid repeated heap allocations. The first
@@ -2738,9 +2786,11 @@ class SegmentExpr : public Expr {
                        batch_pos,
                        batch_size);
 
+            read_elems += static_cast<int64_t>(batch_pos);
             processed_size += batch_size;
         }
 
+        RecordRawScan(read_elems);
         return processed_size;
     }
 
@@ -2769,6 +2819,7 @@ class SegmentExpr : public Expr {
         const auto expected_rows = GetNextBatchSize();
         int64_t processed_rows = 0;
         int64_t processed_elems = 0;
+        int64_t read_elems = 0;
         ElementValueBuffer<ElementType> value_buffer;
         FixedVector<bool> valid_buffer;
         const bool use_skip = CanSkipElementLevelChunks(skip_func);
@@ -2838,6 +2889,7 @@ class SegmentExpr : public Expr {
                            "ARRAY element count mismatch: {} vs {}",
                            chunk_processed_elems,
                            element_count);
+                read_elems += chunk_processed_elems;
                 processed_elems += chunk_processed_elems;
             }
 
@@ -2854,6 +2906,7 @@ class SegmentExpr : public Expr {
                    processed_rows,
                    expected_rows);
         CommitLegacyDataProgress(processed_rows);
+        RecordRawScan(read_elems);
         return processed_elems;
     }
 
@@ -2867,9 +2920,11 @@ class SegmentExpr : public Expr {
                                     TargetBitmapView res,
                                     TargetBitmapView valid_res,
                                     const TargetBitmap* candidate_mask,
+                                    int64_t* evaluated_rows,
                                     const ValTypes&... values) {
         const auto expected_rows = GetNextBatchSize();
         int64_t processed_size = 0;
+        int64_t read_rows = 0;
 
         for (size_t i = current_data_chunk_; i < num_data_chunk_; i++) {
             auto data_pos =
@@ -2884,6 +2939,7 @@ class SegmentExpr : public Expr {
             auto process_chunk = [&](const T* data, ValidityView valid_data) {
                 auto skipped = skip_func && skip_func(skip_view_, i);
                 if (!skipped) {
+                    read_rows += size;
                     if constexpr (NeedSegmentOffsets) {
                         // For GIS functions: construct segment offsets array
                         std::vector<int32_t> segment_offsets_array(size);
@@ -2975,6 +3031,9 @@ class SegmentExpr : public Expr {
                    processed_size,
                    expected_rows);
         CommitLegacyDataProgress(processed_size);
+        if (evaluated_rows != nullptr) {
+            *evaluated_rows = read_rows;
+        }
         return processed_size;
     }
 
@@ -2988,12 +3047,19 @@ class SegmentExpr : public Expr {
                             TargetBitmapView res,
                             TargetBitmapView valid_res,
                             const TargetBitmap* candidate_mask,
+                            int64_t* evaluated_rows,
                             const ValTypes&... values) {
         if constexpr (!milvus::HasTargetType<T>) {
             return -1;
         } else {
             return ProcessDataChunksByScanWithTarget<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                evaluated_rows,
+                values...);
         }
     }
 
@@ -3007,6 +3073,7 @@ class SegmentExpr : public Expr {
                                       TargetBitmapView res,
                                       TargetBitmapView valid_res,
                                       const TargetBitmap* candidate_mask,
+                                      int64_t* evaluated_rows,
                                       const ValTypes&... values) {
         static_assert(milvus::HasTargetType<T>);
         const auto real_batch_size = GetNextBatchSize();
@@ -3056,6 +3123,10 @@ class SegmentExpr : public Expr {
             }
         };
 
+        // Rows this call actually read from the column; skip-index batches are
+        // advanced without data and are not part of it.
+        int64_t read_rows = 0;
+
         const auto advance_without_data = [&](int64_t row, int64_t size) {
             AssertInfo(size > 0,
                        "invalid data-free scan batch at row {} with size {}",
@@ -3102,6 +3173,7 @@ class SegmentExpr : public Expr {
                            "data scan batch [{}, {}) has no values",
                            batch.row_id_start,
                            batch.row_id_start + batch.size);
+                read_rows += batch.size;
                 evaluate_batch(batch.values.data_as<T>(),
                                batch.validity,
                                batch.row_id_start,
@@ -3111,6 +3183,9 @@ class SegmentExpr : public Expr {
         }
 
         AdvanceDataCursor(real_batch_size);
+        if (evaluated_rows != nullptr) {
+            *evaluated_rows = read_rows;
+        }
         return real_batch_size;
     }
 
@@ -3160,17 +3235,43 @@ class SegmentExpr : public Expr {
                           TargetBitmapView valid_res,
                           const TargetBitmap* candidate_mask,
                           const ValTypes&... values) {
+        int64_t read_rows = 0;
         const auto processed_size =
-            ProcessDataChunksByScan<T, NeedSegmentOffsets>(
-                func, skip_func, res, valid_res, candidate_mask, values...);
+            ProcessDataChunksByScan<T, NeedSegmentOffsets>(func,
+                                                           skip_func,
+                                                           res,
+                                                           valid_res,
+                                                           candidate_mask,
+                                                           &read_rows,
+                                                           values...);
         if (processed_size >= 0) {
+            RecordRawScan(read_rows);
             return processed_size;
         }
         AssertInfo(!segment_->is_chunked(),
                    "sealed field {} does not provide a data scan cursor",
                    field_id_.get());
-        return ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
-            func, skip_func, res, valid_res, candidate_mask, values...);
+        const auto single_chunk_size =
+            ProcessDataChunksForSingleChunk<T, NeedSegmentOffsets>(
+                func,
+                skip_func,
+                res,
+                valid_res,
+                candidate_mask,
+                &read_rows,
+                values...);
+        RecordRawScan(read_rows);
+        return single_chunk_size;
+    }
+
+    // Records rows this leaf read from the raw column, after the fact: a leaf
+    // that a conjunction skipped never reaches here, and a chunk whose data was
+    // skipped by the SkipIndex is not counted as read.
+    void
+    RecordRawScan(int64_t rows) {
+        if (explain_ != nullptr && expr_id_ != 0 && rows > 0) {
+            explain_->AddRawScan(expr_id_, rows);
+        }
     }
 
     // Specialized method for ngram post-filter: processes data in a specific range
@@ -3191,6 +3292,14 @@ class SegmentExpr : public Expr {
 
         AssertInfo(segment_->type() == SegmentType::Sealed,
                    "ProcessDataChunkForRange requires sealed segment");
+
+        // Record candidate count in res before func clears non-matching bits.
+        int64_t scanned_candidates = 0;
+        if (explain_ != nullptr && size > 0) {
+            scanned_candidates = static_cast<int64_t>(
+                res.view(0, std::min(res.size(), static_cast<size_t>(size)))
+                    .count());
+        }
 
         int64_t processed_size = 0;
         int64_t remaining = size;
@@ -3224,6 +3333,7 @@ class SegmentExpr : public Expr {
             }
         }
 
+        RecordRawScan(scanned_candidates);
         return processed_size;
     }
 
@@ -3439,7 +3549,25 @@ class SegmentExpr : public Expr {
                                                *cached_index_chunk_valid_res_,
                                                *offsets);
         }
-        return SliceCachedIndexResult(need_element_slicing);
+        auto sliced = SliceCachedIndexResult(need_element_slicing);
+        // Row-level hits are counted where the leaf's output is consumed (the
+        // filter or conjunction that owns it). A nested index sliced at element
+        // level is the exception: those hits live in the element domain and the
+        // caller folds them to rows afterwards, so they stay a separate counter.
+        if (explain_ != nullptr && need_element_slicing &&
+            selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                int64_t matched = 0;
+                if (auto col = std::dynamic_pointer_cast<ColumnVector>(sliced);
+                    col != nullptr && col->IsBitmap()) {
+                    matched = TargetBitmapView(col->GetRawData(), col->size())
+                                  .count();
+                }
+                explain_->AddElementHits(field_id_, *id, expr_id(), matched);
+            }
+        }
+        return sliced;
     }
 
     template <typename T>
@@ -3511,6 +3639,7 @@ class SegmentExpr : public Expr {
                                          offsets.data(),
                                          batch_size,
                                          TargetBitmapView(valid_result));
+            RecordRawScan(static_cast<int64_t>(batch_size));
         };
 
         if constexpr (std::is_same_v<T, VectorArray>) {
@@ -3609,6 +3738,9 @@ class SegmentExpr : public Expr {
                    "growing validity processed {} rows, expected {}",
                    processed_size,
                    expected_rows);
+        if (is_nullable_) {
+            RecordRawScan(processed_size);
+        }
         CommitLegacyDataProgress(processed_size);
         return valid_result;
     }
@@ -3663,6 +3795,7 @@ class SegmentExpr : public Expr {
                    "validity scan processed {} rows, expected {}",
                    processed_size,
                    batch_size);
+        RecordRawScan(processed_size);
         AdvanceDataCursor(processed_size);
         return valid_result;
     }
@@ -4262,6 +4395,72 @@ class SegmentExpr : public Expr {
     // whole-filter cache hit or a conjunction that runs out of rows can skip
     // the evaluation. The report counts feature use, so that only affects
     // how often, never whether.
+    // One line per leaf for the explain payload; independent of the feature-bit
+    // accounting and cheap enough to always run (the sink is null unless the
+    // caller asked for an explain).
+    void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        explain_ = explain;
+    }
+
+    // Record the leaf's explain decision once on the evaluation thread after
+    // prefetch/capability probes have settled and has_offset_input_ reflects
+    // the actual Eval() mode. Recording during background prefetch or
+    // CanUseNestedIndex()/CanExecuteAllAtOnce() probes would observe
+    // has_offset_input_ == false and misattribute offset-mode raw fallbacks to
+    // the scalar index.
+    void
+    EnsureExplainDecisionRecorded() {
+        if (explain_ == nullptr || explain_decision_recorded_) {
+            return;
+        }
+        EnsureExecPathDetermined();
+        explain_decision_recorded_ = true;
+        RecordExplainDecision();
+    }
+
+    virtual void
+    RecordExplainDecision() {
+        auto* explain = explain_;
+        if (explain == nullptr) {
+            return;
+        }
+        const bool used_index = exec_path_ == ExprExecPath::ScalarIndex ||
+                                exec_path_ == ExprExecPath::TextIndex ||
+                                exec_path_ == ExprExecPath::PkIndex;
+        int64_t index_id = 0;
+        std::string family;
+        if (exec_path_ == ExprExecPath::PkIndex) {
+            // The primary-key index has no entry in the scalar index inventory.
+            family = "pk";
+        }
+        std::string path;
+        bool nested = false;
+        if (selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                index_id = *id;
+            }
+            family = selected_index_entry_->family;
+            path = selected_index_entry_->json_path;
+            nested = selected_index_entry_->caps.nested;
+        }
+        std::string reason;
+        if (!used_index) {
+            reason = milvus::exec::ToString(
+                HasIndexForThisPath() ? DeclineReason::kIndexUnusable
+                                      : DeclineReason::kNoIndexOnField);
+        }
+        explain->RecordDecision(field_id_,
+                                expr_id_,
+                                used_index,
+                                index_id,
+                                family,
+                                nested,
+                                path,
+                                reason);
+    }
+
     void
     RecordExecPath() {
         auto* recorder = feature_recorder_;
@@ -4604,6 +4803,8 @@ class SegmentExpr : public Expr {
     // QueryContext. Null for growing segments and non-pinned paths.
     const segcore::SegmentReadSnapshot* snapshot_{nullptr};
     const FieldId field_id_;
+    ExecutionExplainRecorder* explain_{nullptr};
+    bool explain_decision_recorded_{false};
     bool is_pk_field_{false};
     // Whether the column carries a validity (null) bitmap. When false, a chunk
     // skipped by SkipIndex needs no per-row validity work, so the multi-chunk
@@ -4834,6 +5035,18 @@ IsLikeExpr(std::shared_ptr<Expr> expr);
 void
 OptimizeCompiledExprs(ExecContext* context, const std::vector<ExprPtr>& exprs);
 
+void
+AssignExplainEvalOrders(const std::vector<ExprPtr>& exprs,
+                        ExecutionExplainRecorder* explain,
+                        int32_t& next_order);
+
+void
+MarkExplainEvalEntered(const std::vector<ExprPtr>& exprs,
+                       ExecutionExplainRecorder* explain);
+
+void
+MarkExplainDomainEmpty(const ExprPtr& expr, ExecutionExplainRecorder* explain);
+
 std::vector<ExprPtr>
 CompileExpressions(const std::vector<expr::TypedExprPtr>& logical_exprs,
                    ExecContext* context,
@@ -4943,6 +5156,7 @@ class ExprSet {
  private:
     std::vector<std::shared_ptr<Expr>> exprs_;
     ExecContext* exec_ctx_;
+    bool explain_eval_marked_{false};
 };
 
 // Forward declaration for CreateTTLFieldFilterExpression

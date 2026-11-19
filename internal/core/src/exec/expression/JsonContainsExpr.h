@@ -507,6 +507,30 @@ class PhyJsonContainsFilterExpr : public SegmentExpr {
     }
 
     void
+    RecordExplainDecision() override {
+        if (has_offset_input_ &&
+            !(exec_path_ == ExprExecPath::ScalarIndex && num_data_chunk_ == 0 &&
+              !expr_->column_.element_level_)) {
+            if (explain_ != nullptr) {
+                explain_->RecordDecision(
+                    field_id_,
+                    expr_id_,
+                    /*used_index=*/false,
+                    /*index_id=*/0,
+                    /*family=*/"",
+                    /*nested=*/false,
+                    /*path=*/"",
+                    milvus::exec::ToString(
+                        (is_pk_field_ || HasIndexForThisPath())
+                            ? DeclineReason::kIndexUnusable
+                            : DeclineReason::kNoIndexOnField));
+            }
+            return;
+        }
+        SegmentExpr::RecordExplainDecision();
+    }
+
+    void
     DetermineExecPath() override {
         // JsonStats is the fallback applied by EnsureExecPathDetermined()
         // when no index below serves this expression; see SegmentExpr::

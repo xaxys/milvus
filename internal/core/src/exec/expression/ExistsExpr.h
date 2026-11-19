@@ -99,6 +99,9 @@ class PhyExistsFilterExpr : public SegmentExpr {
     void
     DetermineExecPath() override;
 
+    void
+    RecordExplainDecision() override;
+
  private:
     VectorPtr
     EvalJsonExistsForDataSegment(EvalCtx& context);

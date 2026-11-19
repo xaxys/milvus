@@ -160,6 +160,9 @@ enum class DeclineReason {
     kLiteralNotSupported,
     // The query hinted an index that ended up not selected.
     kHintedIndexNotSelected,
+    // The field has entries, but none of them could serve this leaf (coarse
+    // bucket used by the explain payload; the debug log carries the exact gate).
+    kIndexUnusable,
 };
 
 inline const char*
@@ -183,6 +186,8 @@ ToString(DeclineReason reason) {
             return "literal_not_supported";
         case DeclineReason::kHintedIndexNotSelected:
             return "hinted_index_not_selected";
+        case DeclineReason::kIndexUnusable:
+            return "index_unusable";
         case DeclineReason::kNone:
         default:
             return "none";

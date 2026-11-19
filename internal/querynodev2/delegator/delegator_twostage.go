@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/samber/lo"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/searchutil/optimizers"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -42,7 +44,7 @@ func (sd *shardDelegator) executeFilterStage(
 	req *querypb.SearchRequest,
 	sealed []SnapshotItem,
 	sealedRowCount map[int64]int64,
-) ([]int64, uint64, error) {
+) ([]int64, uint64, []*internalpb.ExecutionExplain, error) {
 	originalFilterOnly := req.FilterOnly
 	originalEnableExprCache := req.EnableExprCache
 	req.FilterOnly = true
@@ -60,7 +62,7 @@ func (sd *shardDelegator) executeFilterStage(
 	if err != nil {
 		log := sd.getLogger(ctx)
 		log.Warn(ctx, "Two-stage search: filter stage failed", mlog.Err(err))
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 
 	// NOTE: validCounts ordering is non-deterministic because filterResults
@@ -70,17 +72,21 @@ func (sd *shardDelegator) executeFilterStage(
 	// TODO: if a future consumer needs per-segment association, pair each
 	// count with its SegmentID before returning.
 	validCounts := make([]int64, 0, len(sealedRowCount))
+	explains := make([]*internalpb.ExecutionExplain, 0, len(filterResults))
 	var featureBits uint64
 	for _, result := range filterResults {
+		if node := result.GetExplain(); node != nil {
+			explains = append(explains, node)
+		}
 		featureBits |= result.GetFeatureBits()
 		for _, vc := range result.GetFilterValidCounts() {
 			if vc < 0 {
-				return nil, 0, merr.WrapErrServiceInternalMsg("filter stage returned negative valid_count %d, segment may not support filter-only search", vc)
+				return nil, 0, nil, merr.WrapErrServiceInternalMsg("filter stage returned negative valid_count %d, segment may not support filter-only search", vc)
 			}
 			validCounts = append(validCounts, vc)
 		}
 	}
-	return validCounts, featureBits, nil
+	return validCounts, featureBits, explains, nil
 }
 
 // twoStageSearch implements the two-stage search flow:
@@ -109,7 +115,7 @@ func (sd *shardDelegator) twoStageSearch(
 	collectionID := fmt.Sprint(sd.collectionID)
 
 	stage1Start := time.Now()
-	validCounts, stage1Bits, err := sd.executeFilterStage(ctx, req, sealed, sealedRowCount)
+	validCounts, stage1Bits, stage1Explains, err := sd.executeFilterStage(ctx, req, sealed, sealedRowCount)
 	stage1Dur := float64(time.Since(stage1Start).Milliseconds())
 	metrics.QueryNodeTwoStageFilterLatency.WithLabelValues(nodeID, collectionID).Observe(stage1Dur)
 	if err != nil {
@@ -162,9 +168,86 @@ func (sd *shardDelegator) twoStageSearch(
 		return nil, false, 0, err
 	}
 	orFeatureBits(results, stage1Bits)
+	mergeStage1Explain(results, stage1Explains)
 
 	log.Debug(ctx, "Two-stage search completed", mlog.Int("results", len(results)))
 	return results, false, stage1Bits, nil
+}
+
+func segmentHasEvaluatedRows(segment *internalpb.ExecutionExplain) bool {
+	if segment == nil {
+		return false
+	}
+	if segment.GetCounters()["rows_in"] > 0 {
+		return true
+	}
+	for _, ch := range segment.GetChildren() {
+		if ch.GetCounters()["rows_in"] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeStage1Explain fills the filter groups stage one recorded into the stage
+// two tree. Stage two reads the stage-one bitset from the expression cache on
+// sealed segments, so those leaves are not re-evaluated and the stage-two tree
+// carries zero evaluated rows (even if close-time prefetch recorded zero-row
+// decision stubs).
+func mergeStage1Explain(results []*internalpb.SearchResults, stage1 []*internalpb.ExecutionExplain) {
+	if len(stage1) == 0 {
+		return
+	}
+	bySegment := make(map[string]*internalpb.ExecutionExplain)
+	for _, node := range explain.Segments(stage1...) {
+		bySegment[node.GetName()] = node
+	}
+	if len(bySegment) == 0 {
+		return
+	}
+	for _, result := range results {
+		root := result.GetExplain()
+		if root == nil {
+			continue
+		}
+		// LocalWorker returns a shared Explain pointer across merged stage-two
+		// search tasks; clone before mutating so concurrent delegators neither
+		// race on segment.Children nor leak stage-one counters across requests.
+		cloned, ok := proto.Clone(root).(*internalpb.ExecutionExplain)
+		if !ok || cloned == nil {
+			continue
+		}
+		mutated := false
+		for _, segment := range explain.Segments(cloned) {
+			if segmentHasEvaluatedRows(segment) {
+				continue
+			}
+			recorded := bySegment[segment.GetName()]
+			if recorded == nil || len(recorded.GetChildren()) == 0 {
+				continue
+			}
+			if len(segment.GetChildren()) > 0 && !segmentHasEvaluatedRows(recorded) {
+				continue
+			}
+			children := make([]*internalpb.ExecutionExplain, len(recorded.GetChildren()))
+			for i, ch := range recorded.GetChildren() {
+				children[i], _ = proto.Clone(ch).(*internalpb.ExecutionExplain)
+			}
+			segment.Children = children
+			if rc := recorded.GetCounters(); len(rc) > 0 {
+				if segment.Counters == nil {
+					segment.Counters = make(map[string]int64, len(rc))
+				}
+				for k, v := range rc {
+					segment.Counters[k] = v
+				}
+			}
+			mutated = true
+		}
+		if mutated {
+			result.Explain = cloned
+		}
+	}
 }
 
 // orFeatureBits adds bits to the execution feature bits of every result.

@@ -114,6 +114,7 @@ PhyIterativeFilterNode::GetOutput() {
     knowhere::MetricType metric_type = query_context_->get_metric_type();
     bool large_is_better = PositivelyRelated(metric_type);
     TargetBitmap bitset;
+    bool any_eval_batch = !is_native_supported_;
     // get bitset of whole segment first
     if (!is_native_supported_) {
         EvalCtx eval_ctx(operator_context_->get_exec_context());
@@ -254,6 +255,7 @@ PhyIterativeFilterNode::GetOutput() {
                 }
 
                 if (is_native_supported_) {
+                    any_eval_batch = true;
                     eval_ctx.set_offset_input(eval_offsets);
                     std::vector<VectorPtr> results;
                     exprs_->Eval(0, 1, true, eval_ctx, results);
@@ -358,6 +360,12 @@ PhyIterativeFilterNode::GetOutput() {
                 }
             }
             nq_index++;
+        }
+    }
+    if (!any_eval_batch) {
+        if (auto* explain = query_context_->explain();
+            explain != nullptr && explain->HasAnyEvalEntered()) {
+            MarkExplainEvalEntered(exprs_->exprs(), explain);
         }
     }
     query_context_->set_search_result(std::move(search_result));

@@ -64,6 +64,12 @@ class PhyCallExpr : public Expr {
     Eval(EvalCtx& context, VectorPtr& result) override;
 
     void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        explain_ = explain;
+        RecordExplainDecisionIfNeeded();
+    }
+
+    void
     MoveCursor() override {
         if (!has_offset_input_) {
             for (const auto& input : inputs_) {
@@ -106,6 +112,9 @@ class PhyCallExpr : public Expr {
     }
 
  private:
+    void
+    RecordExplainDecisionIfNeeded();
+
     std::shared_ptr<const milvus::expr::CallExpr> expr_;
 
     int64_t active_count_{0};
@@ -114,6 +123,8 @@ class PhyCallExpr : public Expr {
 
     const segcore::SegmentInternalInterface* segment_;
     int64_t batch_size_;
+    ExecutionExplainRecorder* explain_{nullptr};
+    bool explain_recorded_{false};
 };
 
 }  // namespace exec

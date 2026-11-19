@@ -109,6 +109,29 @@ class PhyColumnExpr : public Expr {
         }
     }
 
+    struct ExplainInfo {
+        FieldId field_id{0};
+        bool used_index{false};
+        int64_t index_id{0};
+        std::string family;
+        bool nested{false};
+        std::string path;
+        std::string decline_reason;
+    };
+
+    bool
+    HasValueReader() const {
+        return value_lookup_.HasReader();
+    }
+
+    int64_t
+    LastRawReadRows() const {
+        return last_raw_read_rows_;
+    }
+
+    ExplainInfo
+    ResolveExplainInfo() const;
+
  private:
     int64_t
     GetCurrentRows() const {
@@ -139,11 +162,6 @@ class PhyColumnExpr : public Expr {
     template <typename T>
     VectorPtr
     DoEvalFromValueReader(OffsetVector* input);
-
-    bool
-    HasValueReader() const {
-        return value_lookup_.HasReader();
-    }
 
     template <typename T>
     bool
@@ -176,6 +194,7 @@ class PhyColumnExpr : public Expr {
     int64_t current_chunk_id_{0};
     int64_t current_chunk_pos_{0};
     int64_t value_lookup_current_row_{0};
+    int64_t last_raw_read_rows_{0};
 
     segcore::ColumnScanState column_scan_state_;
     const segcore::SegmentChunkReader segment_chunk_reader_;

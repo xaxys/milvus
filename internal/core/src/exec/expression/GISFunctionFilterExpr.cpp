@@ -285,6 +285,7 @@ PhyGISFunctionFilterExpr::DetermineExecPath() {
 void
 PhyGISFunctionFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
     WaitPrefetch();
+    EnsureExplainDecisionRecorded();
     AssertInfo(expr_->column_.data_type_ == DataType::GEOMETRY,
                "unsupported data type: {}",
                expr_->column_.data_type_);
@@ -700,6 +701,7 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment(
                 // cannot materialize WKB for a later batch or a masked row.
                 auto data_array = segment_->bulk_subscript(
                     op_ctx_, field_id_, hit_offsets.data(), hit_offsets.size());
+                RecordRawScan(static_cast<int64_t>(hit_offsets.size()));
                 const auto& geometry_array =
                     data_array->scalars().geometry_data();
                 const auto& valid_data = GetFieldDataRowValidData(*data_array);

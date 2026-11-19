@@ -48,6 +48,7 @@
 #include "plan/PlanNode.h"
 #include "plan/PlanNodeIdGenerator.h"
 #include "prometheus/histogram.h"
+#include "exec/expression/ExecutionExplainRecorder.h"
 #include "query/ExecPlanNodeVisitor.h"
 #include "query/PlanImpl.h"
 #include "query/PlanNode.h"
@@ -223,9 +224,22 @@ SegmentInternalInterface::Search(
     visitor.SetReadSchema(plan->schema_);
     visitor.SetFilterOnly(filter_only);
     visitor.SetEnableExprCache(enable_expr_cache);
+    // Explain carries the segment row count for the payload's rows_total.
+    // get_active_count only reads the timestamps of this segment; get_real_count
+    // can run a count(*) Retrieve, which would re-enter this function and
+    // recurse on growing segments that have deletes.
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain;
+    if (plan->plan_node_->plan_options_.enable_explain) {
+        explain = std::make_shared<milvus::exec::ExecutionExplainRecorder>(
+            get_active_count(timestamp));
+        visitor.SetExplainRecorder(explain.get());
+    }
     auto results = std::make_unique<SearchResult>();
     *results = visitor.get_moved_result(*plan->plan_node_);
     results->segment_ = (void*)this;
+    if (explain != nullptr) {
+        results->explain_blob_ = explain->Finish();
+    }
     return results;
 }
 
@@ -303,7 +317,19 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
         visitor.SetRetrieveCandidateBudget(limit_size,
                                            plan->max_candidate_rows_);
     }
+    // Candidate retrieval is an internal bounded fetch: it must not pay for the
+    // explain payload, and the payload would count against the byte budget
+    // checked below.
+    std::shared_ptr<milvus::exec::ExecutionExplainRecorder> explain;
+    if (!candidates && plan->plan_node_->plan_options_.enable_explain) {
+        explain = std::make_shared<milvus::exec::ExecutionExplainRecorder>(
+            get_active_count(timestamp));
+        visitor.SetExplainRecorder(explain.get());
+    }
     auto retrieve_results = visitor.get_retrieve_result(*plan->plan_node_);
+    if (explain != nullptr) {
+        results->set_explain(explain->Finish());
+    }
 
     retrieve_results.segment_ = (void*)this;
     results->set_has_more_result(retrieve_results.has_more_result);

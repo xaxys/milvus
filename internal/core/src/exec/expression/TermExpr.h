@@ -88,6 +88,9 @@ class PhyTermFilterExpr : public SegmentExpr {
     void
     DetermineExecPath() override;
 
+    void
+    RecordExplainDecision() override;
+
     bool
     SupportsRawExprCache() const override {
         return !expr_->column_.element_level_;

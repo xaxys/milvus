@@ -51,6 +51,11 @@ class PhyLikeConjunctExpr : public Expr {
         return "PhyLikeConjunctExpr";
     }
 
+    const std::vector<std::shared_ptr<PhyUnaryRangeFilterExpr>>&
+    ngram_exprs() const {
+        return ngram_exprs_;
+    }
+
  private:
     int64_t
     GetNextBatchSize();
@@ -58,6 +63,8 @@ class PhyLikeConjunctExpr : public Expr {
     std::vector<std::shared_ptr<PhyUnaryRangeFilterExpr>> ngram_exprs_;
     // Cached Phase1 result (segment-level ngram index query result)
     std::shared_ptr<TargetBitmap> cached_phase1_res_{nullptr};
+    // Per-leaf Phase1 candidate bitmaps retained only when explain is active.
+    std::vector<std::shared_ptr<TargetBitmap>> phase1_leaf_res_;
 
     int64_t active_count_{0};
     int64_t batch_size_{0};

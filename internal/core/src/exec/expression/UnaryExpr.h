@@ -902,7 +902,6 @@ class ShreddingArrayBsonExecutor {
 
 class PhyUnaryRangeFilterExpr : public SegmentExpr {
  public:
-
     bool
     IsRangeExpr() const override {
         const auto op = expr_->op_type_;
@@ -962,6 +961,9 @@ class PhyUnaryRangeFilterExpr : public SegmentExpr {
 
     void
     DetermineExecPath() override;
+
+    void
+    RecordExplainDecision() override;
 
     bool
     SupportsRawExprCache() const override {

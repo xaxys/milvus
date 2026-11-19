@@ -52,8 +52,13 @@ DecorateOne(const ExprPtr& expr,
         !ExprResCacheManager::Instance().CanCacheSegment(segment->type())) {
         return expr;
     }
-    return std::make_shared<RawExprCacheAdapter>(
+    auto adapter = std::make_shared<RawExprCacheAdapter>(
         std::move(segment_expr), op_ctx, enable_cache_write);
+    // The adapter is the node execution explain sees when it counts the rows a
+    // leaf was handed and matched; it must carry the plan node's identity, which
+    // was assigned to the wrapped expression at compile time.
+    adapter->SetExprId(adapter->wrapped_expr()->expr_id());
+    return adapter;
 }
 
 }  // namespace
@@ -347,6 +352,7 @@ RawExprCacheAdapter::Eval(EvalCtx& context, VectorPtr& result) {
     WaitPrefetch();
     EnsureLookup();
     if (TryServeCacheHit(context, result)) {
+        input_->EnsureExplainDecisionRecorded();
         return;
     }
 

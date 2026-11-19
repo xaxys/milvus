@@ -23,6 +23,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proxy/shardclient"
 	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/exprutil"
 	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/internal/util/reduce/orderby"
@@ -112,8 +113,12 @@ type QueryTask struct {
 	// rule as the search task. collectFeatures is decided once at the top of
 	// PreExecute; when it is false featureSink is nil and every hook returns
 	// on its first line.
-	features             featureusage.FeatureSet
-	collectFeatures      bool
+	features        featureusage.FeatureSet
+	collectFeatures bool
+	// explainLeaves describes the predicate leaves of this query's plan, keyed by
+	// the expr_id the plan carries.
+	explainLeaves        map[int64]explain.LeafInfo
+	explainNextExprID    int64
 	allQueryCnt          int64
 	totalRelatedDataSize int64
 	mustUsePartitionKey  bool
@@ -676,12 +681,19 @@ func (t *QueryTask) createPlanArgs(ctx context.Context, visitorArgs *planparserv
 			metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel, metrics.FailLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 			return WrapPlanCreationError(err, "failed to create query plan")
 		}
+		if err := configureExplainPlan(t.plan, t.request.GetQueryParams(), t.reQuery, schema.CollectionSchema, &t.explainNextExprID, &t.explainLeaves); err != nil {
+			return err
+		}
 		if err := applyIndexHint(ctx, t.node, t.GetCollectionID(), t.plan, t.request.GetQueryParams()); err != nil {
 			return err
 		}
 		collectExprTemplateFeatures(t.request.GetExprTemplateValues(), t.featureSink())
 		collectExecFeatureBits(t.plan, t.collectFeatures)
 		metrics.ProxyParseExpressionLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel, metrics.SuccessLabel).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
+	} else if t.reQuery {
+		if err := configureExplainPlan(t.plan, nil, true, nil, nil, nil); err != nil {
+			return err
+		}
 	}
 	// parse output fields names
 	originalOuputFields := t.request.GetOutputFields()
@@ -1303,6 +1315,22 @@ func (t *QueryTask) PostExecute(ctx context.Context) error {
 		metrics.ProxyQueryExecuteLatency.WithLabelValues(paramtable.GetStringNodeID(), t.getQueryLabel(), t.executePath).
 			Observe(float64(time.Since(t.executeStart).Microseconds()) / 1000.0)
 	}
+	// Execution explain: what the shards did, rendered for the client. The
+	// pipeline keeps no explain, so it comes from the results it consumed.
+	explains := make([]*internalpb.ExecutionExplain, 0, len(toReduceResults))
+	for _, result := range toReduceResults {
+		explains = explain.Splice(explains, result.GetExplain())
+	}
+	rendered, explainErr := renderExplain(
+		t.request.GetQueryParams(),
+		explains,
+		t.explainLeaves,
+		func(ids []int64) map[int64]string { return explainIndexNames(ctx, t.node, t.GetCollectionID(), ids) })
+	if explainErr != nil {
+		return explainErr
+	}
+	attachExplain(&t.result.Status, rendered)
+
 	log.Debug(ctx, "Query PostExecute done")
 	return nil
 }
