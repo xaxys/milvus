@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <map>
 #include <limits>
@@ -340,7 +341,15 @@ struct SearchResult {
         auto result = std::make_unique<SearchResult>();
         result->allow_filtered_vector_search_ = false;
         result->vector_search_filter_owner_ = filter;
+        const auto phase2_start = std::chrono::steady_clock::now();
         filtered_vector_search_fn_(BitsetView(*filter), topk, *result);
+        const auto phase2_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - phase2_start)
+                .count();
+        if (phase2_ns > 0) {
+            strict_group_phase2_ns_ += phase2_ns;
+        }
         AssertInfo(!result->vector_iterators_.has_value(),
                    "ordinary filtered search must not return iterators");
         for (auto off : result->seg_offsets_) {
@@ -430,6 +439,7 @@ struct SearchResult {
     bool used_interim_index_{false};
     bool strict_group_phase2_used_{false};
     int64_t strict_group_phase2_candidates_{0};
+    int64_t strict_group_phase2_ns_{0};
     std::vector<int32_t> element_indices_;
     std::optional<std::vector<std::shared_ptr<VectorIterator>>>
         element_iterators_;

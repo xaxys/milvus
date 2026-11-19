@@ -712,3 +712,59 @@ func TestDescribeExplainLeafMissingSchemaNeverEmitsFieldIdInAnyPosition(t *testi
 		assert.Contains(t, cond, "unknown")
 	}
 }
+
+func TestRenderExplainTimingFieldsInJSONAndText(t *testing.T) {
+	schema := &schemapb.CollectionSchema{
+		Fields: []*schemapb.FieldSchema{{FieldID: 101, Name: "title"}},
+	}
+	leaves := map[int64]explain.LeafInfo{
+		3: {Condition: `title contains "%降噪%"`, Type: "contains", FieldID: 101, Field: "title"},
+	}
+	seg := &internalpb.ExecutionExplain{
+		Kind:     explain.KindSegment,
+		Name:     "459123456789012346",
+		Counters: map[string]int64{"rows_total": 50000},
+		Children: []*internalpb.ExecutionExplain{
+			{
+				Kind:       explain.KindOperator,
+				Attributes: map[string]string{"name": "filter", "step": "0"},
+				Counters:   map[string]int64{"rows_in": 50000, "rows_out": 31, "time_us": 1800},
+				Children: []*internalpb.ExecutionExplain{{
+					Kind: explain.KindFilterGroup,
+					Attributes: map[string]string{
+						"expr_id": "3", "field_id": "101", "family": "ngram",
+						"index_id": "459123456789100001", "nested": "false",
+					},
+					Counters: map[string]int64{
+						"rows_in": 50000, "idx_scan": 50000, "raw_scan": 31, "rows_out": 31,
+						"eval_us": 1500, "prefetch_us": 6200,
+					},
+				}},
+			},
+			{
+				Kind:       explain.KindOperator,
+				Attributes: map[string]string{"name": "vector_search", "step": "1"},
+				Counters:   map[string]int64{"rows_in": 31, "rows_out": 10, "time_us": 4200},
+			},
+		},
+	}
+
+	textOut, err := renderExplain(enableExplainKV(), []*internalpb.ExecutionExplain{seg}, leaves, schema, nil, func([]int64) map[int64]string {
+		return map[int64]string{459123456789100001: "title_ngram"}
+	})
+	require.NoError(t, err)
+	assert.Contains(t, textOut, "[op 0] filter (segments=1, rows: 50000 -> 31, time_us=1800)")
+	assert.Contains(t, textOut, `expr: title contains "%降噪%" (segments=1, rows: 50000 -> 31, idx_scan=50000, raw_scan=31, eval_us=1500, prefetch_us=6200)`)
+	assert.Contains(t, textOut, "index title_ngram (ngram): segments=1, rows: 50000 -> 31, idx_scan=50000, raw_scan=31, eval_us=1500, prefetch_us=6200")
+	assert.NotContains(t, textOut, "459123456789012346")
+
+	jsonOut, err := renderExplain(enableJSONExplainKV(), []*internalpb.ExecutionExplain{seg}, leaves, schema, nil, func([]int64) map[int64]string {
+		return map[int64]string{459123456789100001: "title_ngram"}
+	})
+	require.NoError(t, err)
+	assert.Contains(t, jsonOut, `"time_us":{"sum_us":1800,"min_us":1800,"avg_us":1800,"max_us":1800}`)
+	assert.Contains(t, jsonOut, `"eval_time_us":{"sum_us":1500,"min_us":1500,"avg_us":1500,"max_us":1500}`)
+	assert.Contains(t, jsonOut, `"prefetch_time_us":{"sum_us":6200,"min_us":6200,"avg_us":6200,"max_us":6200}`)
+	assert.NotContains(t, jsonOut, "slowest_segment")
+	assert.NotContains(t, jsonOut, "459123456789012346")
+}

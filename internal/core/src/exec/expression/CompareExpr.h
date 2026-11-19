@@ -216,11 +216,6 @@ class PhyCompareFilterExpr : public Expr {
     Eval(EvalCtx& context, VectorPtr& result) override;
 
     void
-    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
-        explain_ = explain;
-    }
-
-    void
     SetSnapshot(const segcore::SegmentReadSnapshot* snapshot) override {
         snapshot_ = snapshot;
     }
@@ -972,7 +967,6 @@ class PhyCompareFilterExpr : public Expr {
     // Growing and remaining legacy operations alone use Chunk compatibility.
     const segcore::SegmentChunkReader segment_chunk_reader_;
     int64_t batch_size_;
-    ExecutionExplainRecorder* explain_{nullptr};
     bool explain_recorded_{false};
     OperandExplainDecision left_explain_;
     OperandExplainDecision right_explain_;

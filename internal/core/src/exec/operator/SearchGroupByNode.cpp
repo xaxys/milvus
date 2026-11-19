@@ -147,6 +147,13 @@ PhySearchGroupByNode::GetOutput() {
                 get_operator_id(),
                 search_result.strict_group_phase2_candidates_);
         }
+        if (search_result.strict_group_phase2_ns_ > 0 &&
+            get_operator_id() > 0) {
+            explain->TransferOperatorTimeNs(
+                get_operator_id() - 1,
+                get_operator_id(),
+                search_result.strict_group_phase2_ns_);
+        }
         explain->AddOperatorRowsOut(
             get_operator_id(),
             CountValidSearchOffsets(search_result.seg_offsets_));

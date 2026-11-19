@@ -12,10 +12,12 @@
 #include <folly/FBVector.h>
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -25,6 +27,8 @@
 #include "common/Schema.h"
 #include "common/Types.h"
 #include "common/protobuf_utils.h"
+#include "exec/ExecutionExplainRecorder.h"
+#include "exec/operator/Utils.h"
 #include "expr/ITypeExpr.h"
 #include "filemanager/InputStream.h"
 #include "gtest/gtest.h"
@@ -312,6 +316,14 @@ TEST(Rescorer, ExplainOperatorPipelineAndScorerFilterIsolation) {
     // internal boost-scorer filter expression is completely isolated.
     EXPECT_EQ(seg_node.children(2).children_size(), 1);
     EXPECT_EQ(seg_node.children(3).children_size(), 0);
+    for (int i = 0; i < seg_node.children_size(); ++i) {
+        const auto op_ctrs = ctrs_of(seg_node.children(i));
+        EXPECT_EQ(op_ctrs.count("time_us"), 1);
+        EXPECT_GE(op_ctrs.at("time_us"), 0);
+    }
+    const auto fg_ctrs = ctrs_of(seg_node.children(2).children(0));
+    EXPECT_EQ(fg_ctrs.count("eval_us"), 1);
+    EXPECT_GE(fg_ctrs.at("eval_us"), 0);
 
     // Empty-segment Search (active_count = 0 on an empty growing segment) still
     // registers the full operator pipeline skeleton with 0 -> 0 counters.
@@ -325,4 +337,80 @@ TEST(Rescorer, ExplainOperatorPipelineAndScorerFilterIsolation) {
     EXPECT_EQ(attrs_of(empty_node.children(0)).at("name"), "mvcc");
     EXPECT_EQ(ctrs_of(empty_node.children(1)).at("rows_in"), 0);
     EXPECT_EQ(ctrs_of(empty_node.children(1)).at("rows_out"), 0);
+    EXPECT_EQ(ctrs_of(empty_node.children(1)).at("time_us"), 0);
+}
+
+TEST(Rescorer, CountingVectorIteratorTransfersLazyTimeWithoutUnderflow) {
+    class DelayedVectorIterator final : public VectorIterator {
+     public:
+        explicit DelayedVectorIterator(int count,
+                                       std::chrono::milliseconds per_next_delay)
+            : total_(count), delay_(per_next_delay) {
+        }
+        bool
+        HasNext() override {
+            return pos_ < total_;
+        }
+        std::optional<std::pair<int64_t, float>>
+        Next() override {
+            if (pos_ >= total_) {
+                return std::nullopt;
+            }
+            std::this_thread::sleep_for(delay_);
+            const int64_t off = pos_++;
+            return std::make_pair(off, static_cast<float>(off));
+        }
+
+     private:
+        int total_;
+        int pos_{0};
+        std::chrono::milliseconds delay_;
+    };
+
+    auto explain = std::make_shared<exec::ExecutionExplainRecorder>(100);
+    explain->RegisterOperator(1, "vector_search");
+    explain->RegisterOperator(2, "iterative_filter");
+    explain->SetOperatorRows(1, 100, 0);
+
+    const auto op2_start = std::chrono::steady_clock::now();
+    {
+        auto iter = std::make_shared<exec::CountingVectorIterator>(
+            std::make_shared<DelayedVectorIterator>(
+                2, std::chrono::milliseconds(3)),
+            explain,
+            /*out_step=*/1,
+            /*in_step=*/2);
+        while (iter->HasNext()) {
+            ASSERT_TRUE(iter->Next().has_value());
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        // ~CountingVectorIterator runs here BEFORE Driver flushes op 2's wall
+        // duration, exercising the signed temporary negative accumulator.
+    }
+    const auto op2_wall_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - op2_start)
+            .count();
+    explain->AddOperatorTimeNs(2, op2_wall_ns);
+
+    proto::internal::ExecutionExplain seg_node;
+    ASSERT_TRUE(seg_node.ParseFromString(explain->Finish()));
+    ASSERT_EQ(seg_node.children_size(), 2);
+    auto ctrs_of = [](const proto::internal::ExecutionExplain& n) {
+        std::map<std::string, int64_t> out;
+        for (const auto& [k, v] : n.counters()) {
+            out[k] = v;
+        }
+        return out;
+    };
+    const auto vs_ctrs = ctrs_of(seg_node.children(0));
+    const auto if_ctrs = ctrs_of(seg_node.children(1));
+    EXPECT_EQ(vs_ctrs.at("rows_out"), 2);
+    EXPECT_EQ(if_ctrs.at("rows_in"), 2);
+    EXPECT_GE(vs_ctrs.at("time_us"), 5000);
+    EXPECT_GE(if_ctrs.at("time_us"), 2000);
+    // Neither operator double-counts the full ~9ms wall window.
+    const int64_t total_wall_us = (op2_wall_ns + 500) / 1000;
+    EXPECT_LE(vs_ctrs.at("time_us") + if_ctrs.at("time_us"),
+              total_wall_us + 200);
 }

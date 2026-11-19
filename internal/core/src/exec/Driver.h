@@ -242,6 +242,8 @@ class Driver : public std::enable_shared_from_this<Driver> {
 
     BlockingReason blocking_reason_{BlockingReason::kNotBlocked};
 
+    ExecutionExplainRecorder* explain_{nullptr};
+
     friend struct DriverFactory;
     std::once_flag once_;
 };

@@ -142,10 +142,15 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         // per-leaf Phase 1 candidate bitmaps and tracks Phase 2 filtering per
         // batch to attribute rows accurately without disabling fusion.
         if (!has_input_offset) {
+            std::vector<std::pair<std::shared_ptr<RawExprCacheAdapter>,
+                                  std::shared_ptr<PhyUnaryRangeFilterExpr>>>
+                unwrapped_adapters;
             for (size_t idx : like_indices_) {
                 auto input = inputs_[idx];
-                if (auto cached =
-                        std::dynamic_pointer_cast<RawExprCacheAdapter>(input)) {
+                input->WaitPrefetch();
+                auto cached =
+                    std::dynamic_pointer_cast<RawExprCacheAdapter>(input);
+                if (cached) {
                     input = cached->wrapped_expr();
                 }
                 auto unary_expr =
@@ -154,8 +159,17 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                     unary_expr->EnsureExecPathDetermined();
                 }
                 if (unary_expr && unary_expr->CanUseNgramIndex()) {
+                    if (cached) {
+                        unwrapped_adapters.emplace_back(std::move(cached),
+                                                        unary_expr);
+                    }
                     ngram_exprs.push_back(unary_expr);
                     batch_ngram_indices_.insert(idx);
+                }
+            }
+            if (ngram_exprs.size() >= 2) {
+                for (auto& [adapter, unary] : unwrapped_adapters) {
+                    unary->TransferPendingSyncPrepareNsFrom(*adapter);
                 }
             }
         }
@@ -278,7 +292,11 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
             } else {
                 rows_out = static_cast<int64_t>(child_view.count());
             }
-            explain->AddRows(inputs_[idx]->expr_id(), rows_in, rows_out);
+            if (auto* slot = inputs_[idx]->explain_slot(); slot != nullptr) {
+                ExecutionExplainRecorder::AddSlotRows(slot, rows_in, rows_out);
+            } else {
+                explain->AddRows(inputs_[idx]->expr_id(), rows_in, rows_out);
+            }
         }
 
         // The last evaluated expression needs neither a skip decision nor a
