@@ -13,6 +13,8 @@
 
 #include <stdint.h>
 #include <memory>
+#include <utility>
+#include <vector>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +33,10 @@ class PlanNodeVisitor;
 
 struct PlanOptions {
     bool expr_use_json_stats = true;
+    // Ordered (field_id, index_id) hints from the query. Empty means rule-based
+    // selection only.
+    std::vector<std::pair<int64_t, int64_t>> index_hints;
+    bool index_hint_strict = false;
     // Non-null only when the plan collects execution feature bits. Shared by
     // every copy of the options (query contexts, compiled expressions) so all
     // segments of the request record into one set.
