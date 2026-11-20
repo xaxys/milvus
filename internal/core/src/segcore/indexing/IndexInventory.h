@@ -44,6 +44,7 @@ class IndexInventory {
         DataType value_type;
         index::ReaderCaps caps;
         index::IndexPtr index;
+        ScalarIndexRuntimeParams params;
     };
 
     using Factory = std::function<ResolvedData(milvus::OpContext*)>;
