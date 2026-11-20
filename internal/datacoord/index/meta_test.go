@@ -20,6 +20,7 @@ package index
 import (
 	"context"
 	"fmt"
+	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"testing"
 	"time"
 
@@ -43,6 +44,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/workerpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -490,11 +492,14 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
 
-	t.Run("multiple indexes", func(t *testing.T) {
+	t.Run("multiple scalar indexes on one field", func(t *testing.T) {
 		req.IndexName = "_default_idx_2"
 		req.FieldID = fieldID
 		tmpIndexID, err := m.CanCreateIndex(req, false)
-		assert.Error(t, err)
+		// This layer is name-only: whether a second index is allowed on the field is
+		// the server policy's decision (Server.checkIndexCreationPolicy), not this
+		// meta's -- it has neither the schema nor the version manager.
+		assert.NoError(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
 
@@ -502,6 +507,96 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 		m.Indexes[collID][indexID].IsDeleted = true
 		tmpIndexID, err := m.CanCreateIndex(req, false)
 		assert.NoError(t, err)
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+}
+
+// TestMeta_CanCreateIndex_NameUniqueness pins the name-uniqueness half of the
+// policy. Since v1 a
+// field may carry several indexes, so canCreateIndex only answers "is this name
+// already used by a different index in this collection?"; the field-type policy
+// lives in Server.checkIndexCreationPolicy.
+func TestMeta_CanCreateIndex_NameUniqueness(t *testing.T) {
+	var (
+		collID  = UniqueID(1)
+		fieldID = UniqueID(100)
+		indexID = UniqueID(10)
+	)
+
+	catalog := catalogmocks.NewDataCoordCatalog(t)
+	catalog.EXPECT().CreateIndex(mock.Anything, mock.Anything).Return(nil).Maybe()
+	// NewIndexMeta loads the meta cache, which asks the catalog for its snapshot.
+	catalog.EXPECT().ListIndexes(mock.Anything).Return([]*model.Index{}, nil).Maybe()
+	catalog.EXPECT().ListChannelCheckpoint(mock.Anything).Return(map[string]*msgpb.MsgPosition{}, nil).Maybe()
+	catalog.EXPECT().ListSegmentChangeGroups(mock.Anything).Return(nil, nil).Maybe()
+
+	m, err := NewIndexMeta(context.Background(), catalog, nil)
+	require.NoError(t, err)
+	indexParams := []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "INVERTED"}}
+	stored := &model.Index{
+		CollectionID:    collID,
+		FieldID:         fieldID,
+		IndexID:         indexID,
+		IndexName:       "scalar_idx",
+		IndexParams:     indexParams,
+		UserIndexParams: indexParams,
+	}
+	require.NoError(t, m.CreateIndex(context.Background(), stored))
+
+	t.Run("another name on the same field is a new index", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       "_default_idx_2",
+			IndexParams:     indexParams,
+			UserIndexParams: indexParams,
+		}
+		tmpIndexID, err := m.CanCreateIndex(req, false)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+
+	t.Run("same name on the same field with different params conflicts", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       stored.IndexName,
+			IndexParams:     []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "STL_SORT"}},
+			UserIndexParams: []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "STL_SORT"}},
+		}
+		tmpIndexID, err := m.CanCreateIndex(req, false)
+		assert.Error(t, err)
+		assert.NotErrorIs(t, err, ErrIndexOperationIgnored)
+		assert.Equal(t, merr.Code(merr.ErrParameterInvalid), merr.Code(err))
+		assert.Contains(t, err.Error(), "index name is already used by another index in this collection")
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+
+	t.Run("same name on another field conflicts", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID + 1,
+			IndexName:       stored.IndexName,
+			IndexParams:     indexParams,
+			UserIndexParams: indexParams,
+		}
+		tmpIndexID, err := m.CanCreateIndex(req, false)
+		assert.Error(t, err)
+		assert.NotErrorIs(t, err, ErrIndexOperationIgnored)
+		assert.Contains(t, err.Error(), "index name is already used by another index in this collection")
+		assert.Equal(t, int64(0), tmpIndexID)
+	})
+
+	t.Run("same name, same field, same params is an idempotent replay", func(t *testing.T) {
+		req := &indexpb.CreateIndexRequest{
+			CollectionID:    collID,
+			FieldID:         fieldID,
+			IndexName:       stored.IndexName,
+			IndexParams:     indexParams,
+			UserIndexParams: indexParams,
+		}
+		tmpIndexID, err := m.CanCreateIndex(req, false)
+		assert.ErrorIs(t, err, ErrIndexOperationIgnored)
 		assert.Equal(t, int64(0), tmpIndexID)
 	})
 }
@@ -2463,7 +2558,7 @@ func TestCheckParams(t *testing.T) {
 				{Key: common.IndexTypeKey, Value: "HNSW"},
 			},
 		}
-		assert.True(t, checkParams(fieldIndex, req))
+		assert.True(t, CheckParams(fieldIndex, req))
 	})
 
 	t.Run("same params with warmup in request only", func(t *testing.T) {
@@ -2492,7 +2587,7 @@ func TestCheckParams(t *testing.T) {
 		}
 		// Before fix: this would return false because len(metaTypeParams) != len(reqTypeParams)
 		// After fix: this should return true because WarmupKey is filtered from both
-		assert.True(t, checkParams(fieldIndex, req))
+		assert.True(t, CheckParams(fieldIndex, req))
 	})
 
 	t.Run("same params with warmup in different order", func(t *testing.T) {
@@ -2515,7 +2610,7 @@ func TestCheckParams(t *testing.T) {
 				{Key: common.MetricTypeKey, Value: "L2"},
 			},
 		}
-		assert.True(t, checkParams(fieldIndex, req))
+		assert.True(t, CheckParams(fieldIndex, req))
 	})
 
 	t.Run("different params", func(t *testing.T) {
@@ -2537,7 +2632,7 @@ func TestCheckParams(t *testing.T) {
 				{Key: common.IndexTypeKey, Value: "HNSW"},
 			},
 		}
-		assert.False(t, checkParams(fieldIndex, req))
+		assert.False(t, CheckParams(fieldIndex, req))
 	})
 
 	t.Run("mmap enabled should be ignored", func(t *testing.T) {
@@ -2560,7 +2655,7 @@ func TestCheckParams(t *testing.T) {
 				{Key: common.IndexTypeKey, Value: "HNSW"},
 			},
 		}
-		assert.True(t, checkParams(fieldIndex, req))
+		assert.True(t, CheckParams(fieldIndex, req))
 	})
 }
 
