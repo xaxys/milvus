@@ -2178,6 +2178,13 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         expr_->op_type_ == proto::plan::OpType::RegexMatch;
     auto req = MakeIndexRequirement(is_pattern ? RequiredReader::Ngram
                                                : RequiredReader::Predicate);
+    if (is_pattern) {
+        // The literal decides whether an NGRAM index can serve this query at all, so
+        // selection gets it up front instead of discovering it after a pin.
+        req.has_pattern = true;
+        req.pattern = GetValueFromProto<std::string>(expr_->val_);
+        req.pattern_op = ToIndexPatternOp(expr_->op_type_);
+    }
     req.value_type =
         data_type == DataType::ARRAY
             ? expr_->column_.element_type_
@@ -2187,14 +2194,44 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         expr_->val_.val_case() ==
             proto::plan::GenericValue::ValCase::kInt64Val &&
         !IsInt64SafeForJsonDoubleIndex(expr_->val_.int64_val());
-    if (is_pattern && SelectAndCreateIndexReader(req) &&
-        ngram_reader_->CanHandle(GetValueFromProto<std::string>(expr_->val_),
-                                 ToIndexPatternOp(expr_->op_type_))) {
-        return;
+    // A pattern leaf makes two attempts (NGRAM first, then exact pattern readers).
+    // Strict hints are checked on the last one only: an index hinted for its exact
+    // pattern support is legitimately rejected by the NGRAM pass, and failing there
+    // would never let the second pass run.
+    const bool strict_hint = req.index_hint_strict;
+    if (is_pattern) {
+        req.index_hint_strict = false;
+    }
+    // A hint on this field may name an exact pattern index, which the NGRAM pass
+    // must not shadow. When the selected NGRAM entry is not the hinted one, the
+    // decision belongs to the second pass instead of returning here.
+    const auto hinted_id = [&req]() -> std::optional<int64_t> {
+        if (req.index_hints == nullptr) {
+            return std::nullopt;
+        }
+        for (const auto& [field_id, index_id] : *req.index_hints) {
+            if (field_id == req.field_id.get()) {
+                return index_id;
+            }
+        }
+        return std::nullopt;
+    }();
+    if (is_pattern && SelectAndCreateIndexReader(req)) {
+        const bool satisfied_by_ngram =
+            !hinted_id.has_value() ||
+            (selected_index_entry_.has_value() &&
+             selected_index_entry_->key.identity.pre_built_id() == hinted_id);
+        if (satisfied_by_ngram &&
+            ngram_reader_->CanHandle(
+                GetValueFromProto<std::string>(expr_->val_),
+                ToIndexPatternOp(expr_->op_type_))) {
+            return;
+        }
     }
     if (is_pattern) {
         ClearSelectedIndex();
         req.reader = RequiredReader::PatternMatch;
+        req.index_hint_strict = strict_hint;
     }
     SelectAndCreateIndexReader(req);
     if (exec_path_ != ExprExecPath::ScalarIndex) {
