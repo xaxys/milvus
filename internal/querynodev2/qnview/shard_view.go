@@ -81,6 +81,7 @@ func (s *qnShardView) applyOneLocked(av *handler.ApplyView) {
 			sm := NewQNQueryViewStateMachine(
 				qnView.IntoProto().Meta,
 				qnView.ViewOfQueryNode(),
+				s.segMgr.LoadedIndexes,
 			)
 			entry = &qnViewEntry{ApplyView: *av, sm: sm, dropped: make(chan struct{})}
 			s.views[key.QueryViewVersion] = entry

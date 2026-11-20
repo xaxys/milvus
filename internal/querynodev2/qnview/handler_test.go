@@ -73,6 +73,10 @@ func (m *mockSegmentManager) AcquireSealedSegmentHandles(_ context.Context, key 
 	return append([]SealedSegmentHandle(nil), m.queryHandles...), nil
 }
 
+func (m *mockSegmentManager) LoadedIndexes(segmentID int64) []int64 {
+	return nil
+}
+
 func (m *mockSegmentManager) WaitTransformVisible(_ context.Context, key qviews.QueryViewKey, timetick uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

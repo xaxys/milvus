@@ -55,6 +55,14 @@ func (m *lazyQNSegmentManager) Acquire(req qnview.AcquireSegments) {
 	manager.Acquire(req)
 }
 
+func (m *lazyQNSegmentManager) LoadedIndexes(segmentID int64) []int64 {
+	manager := m.get()
+	if manager == nil {
+		return nil
+	}
+	return manager.LoadedIndexes(segmentID)
+}
+
 func (m *lazyQNSegmentManager) Release(req qnview.ReleaseSegments) {
 	manager := m.get()
 	if manager == nil {

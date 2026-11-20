@@ -56,7 +56,7 @@ func allSegments() map[int64][]int64 {
 }
 
 func newTestSM() *QNQueryViewStateMachine {
-	return NewQNQueryViewStateMachine(buildTestMeta(), buildTestQNView())
+	return NewQNQueryViewStateMachine(buildTestMeta(), buildTestQNView(), nil)
 }
 
 // newReadySM returns a SM in Ready state with all pending drained.
@@ -148,7 +148,7 @@ func TestNew_InitialState(t *testing.T) {
 func TestNew_MetaAndViewPreserved(t *testing.T) {
 	meta := buildTestMeta()
 	qnView := buildTestQNView()
-	sm := NewQNQueryViewStateMachine(meta, qnView)
+	sm := NewQNQueryViewStateMachine(meta, qnView, nil)
 	assert.Equal(t, meta, sm.Meta())
 	assert.Equal(t, qnView, sm.QNView())
 }
@@ -399,7 +399,7 @@ func TestSegments_ZeroSegmentViewReadyImmediately(t *testing.T) {
 		NodeId:     1,
 		Partitions: []*viewpb.QueryViewOfPartition{},
 	}
-	sm := NewQNQueryViewStateMachine(meta, qnView)
+	sm := NewQNQueryViewStateMachine(meta, qnView, nil)
 
 	// totalSegments == 0 → first OnSegmentsReady with empty batch triggers Ready.
 	sm.OnSegmentsReady(map[int64][]int64{})
@@ -788,4 +788,19 @@ func TestPendingOverwrite_SegmentsThenUnrecoverable(t *testing.T) {
 
 	assertReportState(t, sm, qviews.QueryViewStateUnrecoverable)
 	assertNoReport(t, sm)
+}
+
+func TestReportCarriesLoadedIndexesPerSegment(t *testing.T) {
+	loaded := map[int64][]int64{
+		10: {3, 2, 3}, // duplicates and unsorted: the report sorts and dedupes
+		11: nil,       // loaded nothing
+	}
+	sm := NewQNQueryViewStateMachine(buildTestMeta(), buildTestQNView(), func(segmentID int64) []int64 {
+		return loaded[segmentID]
+	})
+	got := sm.loadedIndexesOf([]int64{10, 11})
+
+	require.Len(t, got, 1, "a segment that loaded no index is not reported")
+	assert.Equal(t, int64(10), got[0].GetSegmentId())
+	assert.Equal(t, []int64{2, 3}, got[0].GetIndexIds())
 }
