@@ -114,6 +114,10 @@ PhyRescoresNode::GetOutput() {
     }
 
     // skip rescore if result was empty
+    const int64_t valid_hits = static_cast<int64_t>(offsets.size());
+    if (auto* explain = query_context_->explain(); explain != nullptr) {
+        explain->SetOperatorRows(get_operator_id(), valid_hits, valid_hits);
+    }
     if (offsets.empty()) {
         query_context_->set_search_result(std::move(search_result));
         return input_;
@@ -121,7 +125,9 @@ PhyRescoresNode::GetOutput() {
 
     std::vector<std::optional<float>> boost_scores(offsets.size());
     auto function_mode = option_->function_mode();
-    rescores::ComputeFunctionScores(exec_context,
+    ExecContext scorer_exec_context(query_context_);
+    scorer_exec_context.DisableExplain();
+    rescores::ComputeFunctionScores(&scorer_exec_context,
                                     op_context,
                                     segment,
                                     scorers_,

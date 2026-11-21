@@ -175,7 +175,7 @@ func TestRewriteArrayContainsFilledTemplates(t *testing.T) {
 	require.NotNil(t, contains)
 	require.Equal(t, planpb.JSONContainsExpr_ContainsAny, contains.GetOp())
 	require.Equal(t, []int64{9, 7}, arrayContainsIntegrationIntValues(contains.GetElements()))
-	require.Empty(t, contains.GetTemplateVariableName())
+	require.Equal(t, "first,second", contains.GetTemplateVariableName())
 	require.False(t, expr.GetIsTemplate())
 }
 

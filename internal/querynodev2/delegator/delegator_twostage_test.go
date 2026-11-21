@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/cluster"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/searchutil/optimizers"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -365,7 +366,7 @@ func (s *TwoStageSearchSuite) TestExecuteFilterStage() {
 		}
 		sealedRowCount := map[int64]int64{1000: 10000}
 
-		validCounts, _, err := s.delegator.executeFilterStage(ctx, req, sealed, sealedRowCount)
+		validCounts, _, _, err := s.delegator.executeFilterStage(ctx, req, sealed, sealedRowCount)
 		s.NoError(err)
 		s.NotNil(validCounts)
 		s.Len(validCounts, 1)
@@ -413,7 +414,7 @@ func (s *TwoStageSearchSuite) TestExecuteFilterStage() {
 		}
 		sealedRowCount := map[int64]int64{1001: 10000}
 
-		validCounts, _, err := s.delegator.executeFilterStage(ctx, req, sealed, sealedRowCount)
+		validCounts, _, _, err := s.delegator.executeFilterStage(ctx, req, sealed, sealedRowCount)
 		s.Error(err)
 		s.Nil(validCounts)
 	})
@@ -1268,7 +1269,7 @@ func (s *TwoStageSearchSuite) TestExecuteFilterStageWithMultipleNodes() {
 			8002: 10000,
 		}
 
-		validCounts, _, err := s.delegator.executeFilterStage(ctx, req, sealed, sealedRowCount)
+		validCounts, _, _, err := s.delegator.executeFilterStage(ctx, req, sealed, sealedRowCount)
 		s.NoError(err)
 		s.NotNil(validCounts)
 		s.Len(validCounts, 3)
@@ -1280,6 +1281,96 @@ func (s *TwoStageSearchSuite) TestExecuteFilterStageWithMultipleNodes() {
 		}
 		s.Equal(int64(600), totalValidCount)
 	})
+}
+
+func TestMergeStage1ExplainClonesSharedStage2Tree(t *testing.T) {
+	sharedStage2 := &internalpb.ExecutionExplain{
+		Kind: explain.KindQueryNode,
+		Name: "1",
+		Children: []*internalpb.ExecutionExplain{{
+			Kind:     explain.KindSegment,
+			Name:     "9001",
+			Counters: map[string]int64{"rows_total": 100},
+		}},
+	}
+	makeStage1 := func(rowsOut int64) []*internalpb.ExecutionExplain {
+		return []*internalpb.ExecutionExplain{{
+			Kind: explain.KindQueryNode,
+			Name: "1",
+			Children: []*internalpb.ExecutionExplain{{
+				Kind: explain.KindSegment,
+				Name: "9001",
+				Children: []*internalpb.ExecutionExplain{{
+					Kind:       explain.KindFilterGroup,
+					Attributes: map[string]string{"expr_id": "1", "field_id": "101"},
+					Counters:   map[string]int64{"rows_in": 100, "rows_out": rowsOut},
+				}},
+			}},
+		}}
+	}
+
+	resA := []*internalpb.SearchResults{{Explain: sharedStage2}}
+	resB := []*internalpb.SearchResults{{Explain: sharedStage2}}
+
+	done := make(chan struct{}, 2)
+	go func() {
+		mergeStage1Explain(resA, makeStage1(10))
+		done <- struct{}{}
+	}()
+	go func() {
+		mergeStage1Explain(resB, makeStage1(25))
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+
+	if len(sharedStage2.GetChildren()[0].GetChildren()) != 0 {
+		t.Fatalf("shared stage-2 explain tree was mutated in place")
+	}
+	gotA := resA[0].GetExplain().GetChildren()[0].GetChildren()[0].GetCounters()["rows_out"]
+	gotB := resB[0].GetExplain().GetChildren()[0].GetChildren()[0].GetCounters()["rows_out"]
+	if gotA != 10 || gotB != 25 {
+		t.Fatalf("expected isolated stage-1 counters (10, 25), got (%d, %d)", gotA, gotB)
+	}
+}
+
+func TestMergeStage1ExplainReplacesZeroRowPrefetchStubs(t *testing.T) {
+	stage2WithStub := &internalpb.ExecutionExplain{
+		Kind: explain.KindQueryNode,
+		Name: "1",
+		Children: []*internalpb.ExecutionExplain{{
+			Kind:     explain.KindSegment,
+			Name:     "9001",
+			Counters: map[string]int64{"rows_total": 100, "rows_in": 0, "idx_scan": 0, "raw_scan": 0, "rows_out": 0},
+			Children: []*internalpb.ExecutionExplain{{
+				Kind:       explain.KindFilterGroup,
+				Attributes: map[string]string{"expr_id": "1", "field_id": "101", "index_id": "5001", "family": "sort"},
+				Counters:   map[string]int64{"rows_in": 0, "idx_scan": 0, "raw_scan": 0, "rows_out": 0},
+			}},
+		}},
+	}
+	stage1 := []*internalpb.ExecutionExplain{{
+		Kind: explain.KindQueryNode,
+		Name: "1",
+		Children: []*internalpb.ExecutionExplain{{
+			Kind:     explain.KindSegment,
+			Name:     "9001",
+			Counters: map[string]int64{"rows_total": 100, "rows_in": 100, "idx_scan": 100, "raw_scan": 0, "rows_out": 42},
+			Children: []*internalpb.ExecutionExplain{{
+				Kind:       explain.KindFilterGroup,
+				Attributes: map[string]string{"expr_id": "1", "field_id": "101", "index_id": "5001", "family": "sort"},
+				Counters:   map[string]int64{"rows_in": 100, "idx_scan": 100, "raw_scan": 0, "rows_out": 42},
+			}},
+		}},
+	}}
+
+	res := []*internalpb.SearchResults{{Explain: stage2WithStub}}
+	mergeStage1Explain(res, stage1)
+	seg := res[0].GetExplain().GetChildren()[0]
+	if seg.GetCounters()["idx_scan"] != 100 || seg.GetChildren()[0].GetCounters()["rows_out"] != 42 {
+		t.Fatalf("expected stage-1 counters to replace zero-row stage-2 stub, got seg=%v child=%v",
+			seg.GetCounters(), seg.GetChildren()[0].GetCounters())
+	}
 }
 
 func TestTwoStageSearchSuite(t *testing.T) {

@@ -27,6 +27,7 @@
 #include "common/Types.h"
 #include "exec/QueryContext.h"
 #include "exec/expression/EvalCtx.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/expression/ExprCache.h"
 #include "expr/ITypeExpr.h"
 #include "fmt/core.h"
@@ -208,6 +209,22 @@ PhyFilterBitsNode::GetOutput() {
             num_processed_rows_ = need_process_rows_;
         });
         if (cached_output != nullptr) {
+            whole_filter_cache_hit_ = true;
+            if (auto* explain = query_context_->explain(); explain != nullptr) {
+                auto cached_col = std::dynamic_pointer_cast<ColumnVector>(
+                    cached_output->child(0));
+                const int64_t rows_out =
+                    cached_col != nullptr
+                        ? static_cast<int64_t>(
+                              cached_col->size() -
+                              TargetBitmapView(cached_col->GetRawData(),
+                                               cached_col->size())
+                                  .count())
+                        : 0;
+                explain->SetOperatorRows(
+                    get_operator_id(), need_process_rows_, rows_out);
+                explain->MarkOperatorCached(get_operator_id());
+            }
             MarkFeature(
                 query_context_->get_plan_options().feature_recorder.get(),
                 FeatureBit::ExprCacheHit);
@@ -262,6 +279,12 @@ PhyFilterBitsNode::GetOutput() {
         TargetBitmapView valid_view(col_vec->GetValidRawData(), col_vec_size);
         ConvertPredicateToFilteredBitset(view, valid_view, col_vec_size);
         num_processed_rows_ = col_vec_size;
+        if (auto* explain = query_context_->explain(); explain != nullptr) {
+            explain->SetOperatorRows(
+                get_operator_id(),
+                need_process_rows_,
+                static_cast<int64_t>(col_vec_size - view.count()));
+        }
 
         AssertInfo(col_vec_size == need_process_rows_,
                    "bitset size: {}, need_process_rows_: {}",
@@ -327,6 +350,12 @@ PhyFilterBitsNode::GetOutput() {
     TargetBitmapView valid_bitset_view(valid_bitset);
     ConvertPredicateToFilteredBitset(
         bitset_view, valid_bitset_view, bitset.size());
+    if (auto* explain = query_context_->explain(); explain != nullptr) {
+        explain->SetOperatorRows(
+            get_operator_id(),
+            need_process_rows_,
+            static_cast<int64_t>(bitset.size() - bitset_view.count()));
+    }
 
     AssertInfo(bitset.size() == need_process_rows_,
                "bitset size: {}, need_process_rows_: {}",

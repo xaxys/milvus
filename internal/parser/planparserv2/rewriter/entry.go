@@ -248,7 +248,7 @@ func (v *visitor) visitUnaryExpr(expr *planpb.UnaryExpr) interface{} {
 					return notExpr(&planpb.Expr{Expr: &planpb.Expr_TermExpr{TermExpr: te}})
 				}
 				// Single-value NOT IN → != (avoids SIMD setup overhead for trivial case)
-				return newUnaryRangeExpr(col, planpb.OpType_NotEqual, te.GetValues()[0])
+				return newUnaryRangeExpr(col, planpb.OpType_NotEqual, te.GetValues()[0], te.GetTemplateVariableName())
 			}
 		}
 	}
@@ -287,7 +287,7 @@ func (v *visitor) visitUnaryExpr(expr *planpb.UnaryExpr) interface{} {
 					},
 				}
 			}
-			return newUnaryRangeExpr(ure.GetColumnInfo(), planpb.OpType_NotEqual, ure.GetValue())
+			return newUnaryRangeExpr(ure.GetColumnInfo(), planpb.OpType_NotEqual, ure.GetValue(), ure.GetTemplateVariableName())
 		}
 	}
 
@@ -321,14 +321,14 @@ func (v *visitor) visitTermExpr(expr *planpb.TermExpr) interface{} {
 				return newAlwaysTrueExpr()
 			}
 			if len(values) == 1 {
-				return newUnaryRangeExpr(expr.GetColumnInfo(), planpb.OpType_Equal, values[0])
+				return newUnaryRangeExpr(expr.GetColumnInfo(), planpb.OpType_Equal, values[0], expr.GetTemplateVariableName())
 			}
 		}
 	}
 
 	// Single-value IN → == (avoids SIMD setup overhead for trivial case)
 	if len(expr.GetValues()) == 1 {
-		return newUnaryRangeExpr(expr.GetColumnInfo(), planpb.OpType_Equal, expr.GetValues()[0])
+		return newUnaryRangeExpr(expr.GetColumnInfo(), planpb.OpType_Equal, expr.GetValues()[0], expr.GetTemplateVariableName())
 	}
 
 	return &planpb.Expr{Expr: &planpb.Expr_TermExpr{TermExpr: expr}}

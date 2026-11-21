@@ -11,6 +11,7 @@ func (v *visitor) combineOrTextMatchToMerged(parts []*planpb.Expr) []*planpb.Exp
 		col         *planpb.ColumnInfo
 		origIndices []int
 		literals    []string
+		templates   []string
 	}
 	others := make([]*planpb.Expr, 0, len(parts))
 	groups := make(map[string]*group)
@@ -38,6 +39,7 @@ func (v *visitor) combineOrTextMatchToMerged(parts []*planpb.Expr) []*planpb.Exp
 		}
 		literal := u.GetValue().GetStringVal()
 		g.literals = append(g.literals, literal)
+		g.templates = append(g.templates, u.GetTemplateVariableName())
 		g.origIndices = append(g.origIndices, idx)
 	}
 	out := make([]*planpb.Expr, 0, len(parts))
@@ -56,17 +58,18 @@ func (v *visitor) combineOrTextMatchToMerged(parts []*planpb.Expr) []*planpb.Exp
 			continue
 		}
 		merged := strings.Join(g.literals, " ")
-		out = append(out, newTextMatchExpr(g.col, merged))
+		out = append(out, newTextMatchExpr(g.col, merged, g.templates...))
 	}
 	return out
 }
 
-func newTextMatchExpr(col *planpb.ColumnInfo, literal string) *planpb.Expr {
+func newTextMatchExpr(col *planpb.ColumnInfo, literal string, templateNames ...string) *planpb.Expr {
 	return &planpb.Expr{
 		Expr: &planpb.Expr_UnaryRangeExpr{
 			UnaryRangeExpr: &planpb.UnaryRangeExpr{
-				ColumnInfo: col,
-				Op:         planpb.OpType_TextMatch,
+				ColumnInfo:           col,
+				Op:                   planpb.OpType_TextMatch,
+				TemplateVariableName: mergeTemplateNames(templateNames...),
 				Value: &planpb.GenericValue{
 					Val: &planpb.GenericValue_StringVal{
 						StringVal: literal,

@@ -18,10 +18,13 @@
 
 #include <cstddef>
 #include <cstring>
+#include <memory>
 #include <optional>
+#include <utility>
 #include "common/OpContext.h"
 #include "common/QueryInfo.h"
 #include "common/QueryResult.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "index/contracts/query/IVectorReader.h"
 #include "knowhere/index/index_node.h"
 #include "log/Log.h"
@@ -245,6 +248,66 @@ sort_search_result(milvus::SearchResult& result, bool large_is_better) {
     if (has_element_indices) {
         result.element_indices_ = std::move(new_element_indices);
     }
+}
+
+class CountingVectorIterator final : public VectorIterator {
+ public:
+    CountingVectorIterator(std::shared_ptr<VectorIterator> inner,
+                           std::weak_ptr<ExecutionExplainRecorder> explain,
+                           int32_t out_step,
+                           int32_t in_step = -1)
+        : inner_(std::move(inner)),
+          explain_(std::move(explain)),
+          out_step_(out_step),
+          in_step_(in_step) {
+        AssertInfo(inner_ != nullptr,
+                   "CountingVectorIterator inner iterator cannot be null");
+    }
+
+    ~CountingVectorIterator() override {
+        if (yielded_ > 0) {
+            if (auto rec = explain_.lock(); rec != nullptr) {
+                if (out_step_ >= 0) {
+                    rec->AddOperatorRowsOut(out_step_, yielded_);
+                }
+                if (in_step_ >= 0) {
+                    rec->AddOperatorRowsIn(in_step_, yielded_);
+                }
+            }
+        }
+    }
+
+    bool
+    HasNext() override {
+        return inner_->HasNext();
+    }
+
+    std::optional<std::pair<int64_t, float>>
+    Next() override {
+        auto val = inner_->Next();
+        if (val.has_value()) {
+            ++yielded_;
+        }
+        return val;
+    }
+
+ private:
+    std::shared_ptr<VectorIterator> inner_;
+    std::weak_ptr<ExecutionExplainRecorder> explain_;
+    int32_t out_step_{-1};
+    int32_t in_step_{-1};
+    int64_t yielded_{0};
+};
+
+inline int64_t
+CountValidSearchOffsets(const std::vector<int64_t>& offsets) {
+    int64_t count = 0;
+    for (auto off : offsets) {
+        if (off >= 0) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 }  // namespace exec

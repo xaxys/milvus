@@ -28,6 +28,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/agg"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/queryutil"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -889,4 +890,43 @@ func (s *queryTestStream) closeCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closeCalls
+}
+
+func TestQueryReduceStreamPropagatesAndMergesExplain(t *testing.T) {
+	w1 := newQueryTestChunk([]int64{1, 2}, []int64{10, 20})
+	w1.Explain = explain.Wrap(explain.KindQueryNode, "1", []*internalpb.ExecutionExplain{
+		explain.FoldSegmentsWithName("vch0/1/Historical", []*internalpb.ExecutionExplain{
+			{Kind: explain.KindSegment, Name: "201", Counters: map[string]int64{"rows_total": 40}},
+		}),
+	})
+	w2 := newQueryTestChunk(nil, nil)
+	w2.Explain = explain.Wrap(explain.KindQueryNode, "2", []*internalpb.ExecutionExplain{
+		explain.FoldSegmentsWithName("vch0/2/Historical", []*internalpb.ExecutionExplain{
+			{Kind: explain.KindSegment, Name: "202", Counters: map[string]int64{"rows_total": 60}},
+		}),
+	})
+
+	chunks1, err := SplitRetrieveResult(w1, queryChunkBytes(t, w1, 1))
+	require.NoError(t, err)
+	require.Len(t, chunks1, 2)
+	require.NotNil(t, chunks1[0].GetExplain())
+	require.Nil(t, chunks1[1].GetExplain())
+
+	chunks2, err := SplitRetrieveResult(w2, 64)
+	require.NoError(t, err)
+	require.Len(t, chunks2, 1)
+	require.NotNil(t, chunks2[0].GetExplain())
+
+	s1 := &queryTestStream{recv: []queryTestRecv{{chunk: chunks1[0]}, {chunk: chunks1[1]}}}
+	s2 := &queryTestStream{recv: []queryTestRecv{{chunk: chunks2[0]}}}
+	stream, err := NewShardReduceStream(&internalpb.RetrieveRequest{Limit: 1}, nil, []ReduceStream{s1, s2}, queryChunkBytes(t, w1, 1))
+	require.NoError(t, err)
+	defer stream.Close()
+
+	firstOut, err := stream.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, firstOut.GetExplain())
+	summary := explain.SummarizeWithSubSearches(explain.TaggedSegments(firstOut.GetExplain()), nil, nil)
+	require.Equal(t, 2, summary.Segments)
+	require.Equal(t, int64(100), summary.RowsTotal)
 }

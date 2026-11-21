@@ -55,6 +55,11 @@ class PhyAlwaysTrueExpr : public Expr {
     Eval(EvalCtx& context, VectorPtr& result) override;
 
     void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        explain_ = explain;
+    }
+
+    void
     MoveCursor() override {
         if (!has_offset_input_) {
             int64_t real_batch_size =
@@ -92,10 +97,28 @@ class PhyAlwaysTrueExpr : public Expr {
     }
 
  private:
+    void
+    RecordExplainDecision() {
+        if (explain_ == nullptr || explain_recorded_ || expr_id() == 0) {
+            return;
+        }
+        explain_recorded_ = true;
+        explain_->RecordDecision(FieldId(0),
+                                 expr_id(),
+                                 /*used_index=*/false,
+                                 /*index_id=*/0,
+                                 /*family=*/"",
+                                 /*nested=*/false,
+                                 /*path=*/"",
+                                 "constant_true");
+    }
+
     std::shared_ptr<const milvus::expr::AlwaysTrueExpr> expr_;
     int64_t active_count_;
     int64_t current_pos_{0};
     int64_t batch_size_;
+    ExecutionExplainRecorder* explain_{nullptr};
+    bool explain_recorded_{false};
 };
 
 }  //namespace exec

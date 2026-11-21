@@ -343,6 +343,11 @@ struct SearchResult {
         filtered_vector_search_fn_(BitsetView(*filter), topk, *result);
         AssertInfo(!result->vector_iterators_.has_value(),
                    "ordinary filtered search must not return iterators");
+        for (auto off : result->seg_offsets_) {
+            if (off >= 0) {
+                ++strict_group_phase2_candidates_;
+            }
+        }
         return result;
     }
 
@@ -416,11 +421,15 @@ struct SearchResult {
     // record the storage usage in search
     StorageCost search_storage_cost_;
 
+    // Serialized execution explain of the run that produced this result.
+    std::string explain_blob_;
+
     bool element_level_{false};
     // Execution features seen while producing this result, moved into the
     // request's FeatureRecorder by the operator that owns the query context.
     bool used_interim_index_{false};
     bool strict_group_phase2_used_{false};
+    int64_t strict_group_phase2_candidates_{0};
     std::vector<int32_t> element_indices_;
     std::optional<std::vector<std::shared_ptr<VectorIterator>>>
         element_iterators_;

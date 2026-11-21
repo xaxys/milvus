@@ -56,6 +56,7 @@ func normalizeTermExpr(original *planpb.Expr, term *planpb.TermExpr) *planpb.Exp
 		return original
 	}
 
+	templateName := term.GetTemplateVariableName()
 	columnInfo := term.GetColumnInfo()
 	if columnInfo.GetDataType() == schemapb.DataType_Array &&
 		len(columnInfo.GetNestedPath()) == 0 && !columnInfo.GetIsElementLevel() {
@@ -65,7 +66,7 @@ func normalizeTermExpr(original *planpb.Expr, term *planpb.TermExpr) *planpb.Exp
 				return original
 			}
 			parts = append(parts, newUnaryRangeExpr(
-				columnInfo, planpb.OpType_Equal, value))
+				columnInfo, planpb.OpType_Equal, value, templateName))
 		}
 		return foldBinary(planpb.BinaryExpr_LogicalOr, parts)
 	}
@@ -98,15 +99,15 @@ func normalizeTermExpr(original *planpb.Expr, term *planpb.TermExpr) *planpb.Exp
 		if kind == "array" {
 			for _, value := range values {
 				parts = append(parts, newUnaryRangeExpr(
-					term.GetColumnInfo(), planpb.OpType_Equal, value))
+					term.GetColumnInfo(), planpb.OpType_Equal, value, templateName))
 			}
 			continue
 		}
 		if len(values) == 1 {
 			parts = append(parts, newUnaryRangeExpr(
-				term.GetColumnInfo(), planpb.OpType_Equal, values[0]))
+				term.GetColumnInfo(), planpb.OpType_Equal, values[0], templateName))
 		} else {
-			parts = append(parts, newTermExpr(term.GetColumnInfo(), values))
+			parts = append(parts, newTermExpr(term.GetColumnInfo(), values, templateName))
 		}
 	}
 
@@ -122,7 +123,7 @@ func normalizeTermExpr(original *planpb.Expr, term *planpb.TermExpr) *planpb.Exp
 			}
 		}
 		if !known && len(values) > 0 {
-			parts = append(parts, newTermExpr(term.GetColumnInfo(), values))
+			parts = append(parts, newTermExpr(term.GetColumnInfo(), values, templateName))
 		}
 	}
 

@@ -186,7 +186,7 @@ func TestCombineArrayContainsRecomputesTypeAndClearsTemplateMetadata(t *testing.
 	merged := result[0].GetJsonContainsExpr()
 	require.NotNil(t, merged)
 	require.False(t, merged.GetElementsSameType())
-	require.Empty(t, merged.GetTemplateVariableName())
+	require.Equal(t, "first,second", merged.GetTemplateVariableName())
 	require.False(t, result[0].GetIsTemplate())
 
 	require.Equal(t, "first", first.GetJsonContainsExpr().GetTemplateVariableName())

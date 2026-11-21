@@ -1536,6 +1536,29 @@ FillFieldsOrderedAsArrowRecordBatchWithInputPlan(
 }
 
 void
+GetSearchResultExplain(CSearchResult c_search_result,
+                       void** out_blob,
+                       int* out_size) {
+    *out_blob = nullptr;
+    *out_size = 0;
+    try {
+        auto* result = static_cast<SearchResult*>(c_search_result);
+        const auto& blob = result->explain_blob_;
+        if (blob.empty()) {
+            return;
+        }
+        void* buf = malloc(blob.size());
+        if (buf == nullptr) {
+            return;
+        }
+        std::memcpy(buf, blob.data(), blob.size());
+        *out_blob = buf;
+        *out_size = static_cast<int>(blob.size());
+    }
+    CGO_CATCH_AND_LOG("GetSearchResultExplain")
+}
+
+void
 GetSearchResultMetadata(CSearchResult c_search_result,
                         bool* has_group_by,
                         int64_t* group_size,

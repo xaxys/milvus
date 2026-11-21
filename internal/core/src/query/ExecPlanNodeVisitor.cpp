@@ -20,6 +20,7 @@
 #include "common/Tracer.h"
 #include "common/Utils.h"
 #include "common/protobuf_utils.h"
+#include "exec/Driver.h"
 #include "exec/Task.h"
 #include "fmt/core.h"
 #include "glog/logging.h"
@@ -264,6 +265,9 @@ ExecPlanNodeVisitor::visit(RetrievePlanNode& node) {
     retrieve_result.total_data_cnt_ = 0;
 
     auto active_count = segment->get_active_count(timestamp_);
+    if (explain_ != nullptr) {
+        explain_->SetRowsTotal(active_count);
+    }
 
     // Get plan
     auto plan = plan::PlanFragment(node.plannodes_);
@@ -282,6 +286,7 @@ ExecPlanNodeVisitor::visit(RetrievePlanNode& node) {
         std::unordered_map<std::string,
                            std::shared_ptr<milvus::exec::BaseConfig>>(),
         entity_ttl_physical_time_us_);
+    query_context->SetExplain(explain_);
 
     // Pin the sealed published snapshot exactly once for this request.
     query_context->set_read_schema(read_schema_);
@@ -430,6 +435,9 @@ ExecPlanNodeVisitor::visit(VectorPlanNode& node) {
     AssertInfo(segment, "support SegmentSmallIndex Only");
 
     auto active_count = segment->get_active_count(timestamp_);
+    if (explain_ != nullptr) {
+        explain_->SetRowsTotal(active_count);
+    }
 
     // Handle filter-only mode: execute only the filter and return valid_count
     if (filter_only_) {
@@ -442,6 +450,15 @@ ExecPlanNodeVisitor::visit(VectorPlanNode& node) {
         filter_only_result.total_data_cnt_ = 0;
 
         if (active_count == 0) {
+            if (explain_ != nullptr) {
+                auto filter_only_plan =
+                    ProtoParser::ExtractFilterOnlyPlan(node.plannodes_);
+                if (filter_only_plan != nullptr) {
+                    exec::RegisterPlanOperators(filter_only_plan,
+                                                /*element_level_search=*/false,
+                                                explain_.get());
+                }
+            }
             filter_only_result.valid_count_ = 0;
             search_result_opt_ = std::move(filter_only_result);
             return;
@@ -474,6 +491,7 @@ ExecPlanNodeVisitor::visit(VectorPlanNode& node) {
                 std::unordered_map<std::string,
                                    std::shared_ptr<milvus::exec::BaseConfig>>(),
                 entity_ttl_physical_time_us_);
+            query_context->SetExplain(explain_);
 
             // Pin the sealed published snapshot exactly once for this request.
             query_context->set_read_schema(read_schema_);
@@ -515,6 +533,10 @@ ExecPlanNodeVisitor::visit(VectorPlanNode& node) {
     // PreExecute: skip all calculation
     if (active_count == 0) {
         const auto& placeholder = placeholder_group_->at(0);
+        if (explain_ != nullptr) {
+            exec::RegisterPlanOperators(
+                node.plannodes_, placeholder.element_level_, explain_.get());
+        }
         search_result_opt_ = empty_search_result(placeholder.num_of_queries_,
                                                  placeholder.element_level_);
         return;
@@ -537,6 +559,7 @@ ExecPlanNodeVisitor::visit(VectorPlanNode& node) {
         std::unordered_map<std::string,
                            std::shared_ptr<milvus::exec::BaseConfig>>(),
         entity_ttl_physical_time_us_);
+    query_context->SetExplain(explain_);
 
     // Pin the sealed published snapshot exactly once for this request.
     query_context->set_read_schema(read_schema_);

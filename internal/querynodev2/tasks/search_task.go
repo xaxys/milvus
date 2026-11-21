@@ -18,6 +18,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/function/chain"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/internal/util/segcore"
@@ -64,6 +65,9 @@ type SearchTask struct {
 	others           []*SearchTask
 	notifier         chan error
 	serverID         int64
+	// What the segments of this task recorded, wrapped as the querynode level
+	// of the explain tree. Shared by every sub-task result this task produces.
+	explain *internalpb.ExecutionExplain
 
 	tr           *timerecord.TimeRecorder
 	scheduleSpan trace.Span
@@ -240,6 +244,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 	if err != nil {
 		return err
 	}
+	t.explain = t.buildExplain(results, searchedSegments)
 
 	// In filter-only mode, extract filter statistics and return early.
 	// This supports two-stage search: stage-1 collects per-segment valid
@@ -271,6 +276,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 				SealedSegmentIDsSearched: segmentIDs,
 				FilterValidCounts:        validCounts,
 				FeatureBits:              featureBits,
+				Explain:                  t.explain,
 				CostAggregation: &internalpb.CostAggregation{
 					ServiceTime:          tr.ElapseSpan().Milliseconds(),
 					TotalRelatedDataSize: relatedDataSize,
@@ -303,6 +309,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 			}
 			searchResults.SlicedOffset = 1
 			searchResults.SlicedNumCount = 1
+			searchResults.Explain = t.explain
 			searchResults.CostAggregation = &internalpb.CostAggregation{
 				ServiceTime: tr.ElapseSpan().Milliseconds(),
 			}
@@ -511,12 +518,13 @@ func (t *SearchTask) canMerge(other *SearchTask) bool {
 	}
 	// Plans are identical, so checking one is sufficient. Keep function-chain
 	// failures scoped to the original request instead of propagating them to
-	// every request in a merged task through Done.
+	// every request in a merged task through Done, and keep explain requests
+	// isolated so concurrent callers do not pollute each other's counters.
 	plan := &planpb.PlanNode{}
 	if err := proto.Unmarshal(t.req.GetReq().GetSerializedExprPlan(), plan); err != nil {
 		return false
 	}
-	if len(plan.GetQuerynodeFunctionChains()) > 0 {
+	if len(plan.GetQuerynodeFunctionChains()) > 0 || plan.GetPlanOptions().GetEnableExplain() {
 		return false
 	}
 
@@ -721,6 +729,68 @@ func (t *SearchTask) Done(err error) {
 
 func (t *SearchTask) Wait() error {
 	return <-t.notifier
+}
+
+// buildExplain wraps what the segments recorded into the querynode level of the
+// explain tree. On two-stage searches with a request MsgID, Stage 1 stashes its
+// per-segment filter explains locally on the worker so Stage 2 can pair them
+// per segment before pre-aggregating into a single segment_group.
+func (t *SearchTask) buildExplain(results []*segments.SearchResult, searchedSegments []segments.Segment) *internalpb.ExecutionExplain {
+	bySeg := make(map[int64]*internalpb.ExecutionExplain, len(results))
+	segIDs := make([]int64, 0, len(results))
+	rawSegments := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for i, result := range results {
+		if i >= len(searchedSegments) {
+			break
+		}
+		node, err := result.GetExplain()
+		if err != nil {
+			mlog.Warn(t.ctx, "failed to decode segment execution explain", mlog.Err(err))
+			continue
+		}
+		if node == nil {
+			continue
+		}
+		segID := searchedSegments[i].ID()
+		node.Name = strconv.FormatInt(segID, 10)
+		spliced := explain.Splice(nil, node)
+		rawSegments = append(rawSegments, spliced...)
+		if len(spliced) == 1 && spliced[0].GetKind() == explain.KindSegment {
+			bySeg[segID] = spliced[0]
+			segIDs = append(segIDs, segID)
+		}
+	}
+	if len(rawSegments) == 0 {
+		return nil
+	}
+
+	nodeIDStr := strconv.FormatInt(t.GetNodeID(), 10)
+	msgID := t.req.GetReq().GetBase().GetMsgID()
+	if t.req.GetFilterOnly() && t.req.GetEnableExprCache() {
+		if msgID != 0 {
+			defaultStage1ExplainCache.Put(msgID, bySeg)
+			return nil
+		}
+		return explain.Wrap(explain.KindQueryNode, nodeIDStr, rawSegments)
+	}
+	if t.req.GetEnableExprCache() {
+		if msgID == 0 {
+			return explain.Wrap(explain.KindQueryNode, nodeIDStr, rawSegments)
+		}
+		if stage1Segs := defaultStage1ExplainCache.PopSegments(msgID, segIDs); len(stage1Segs) > 0 {
+			wrappedStage2 := explain.Wrap(explain.KindQueryNode, nodeIDStr, rawSegments)
+			if merged, ok := explain.MergeStage1Explain(wrappedStage2, stage1Segs...); ok {
+				rawSegments = merged.GetChildren()
+			}
+		}
+	}
+
+	groupName := explainGroupName(t.req.GetDmlChannels(), t.GetNodeID(), t.req.GetScope())
+	folded := explain.FoldSegmentsWithName(groupName, rawSegments)
+	if folded == nil {
+		return nil
+	}
+	return explain.Wrap(explain.KindQueryNode, nodeIDStr, []*internalpb.ExecutionExplain{folded})
 }
 
 func (t *SearchTask) SearchResult() *internalpb.SearchResults {

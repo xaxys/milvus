@@ -65,6 +65,126 @@ DispatchCompareType(DataType type, F&& evaluate) {
     }
 }
 
+namespace {
+
+struct CompareOperandExplain {
+    FieldId field_id{0};
+    bool used_index{false};
+    int64_t index_id{0};
+    std::string family;
+    bool nested{false};
+    std::string path;
+    std::string decline_reason;
+};
+
+CompareOperandExplain
+ResolveCompareOperandExplain(FieldId field, const ValueLookupSource& lookup) {
+    CompareOperandExplain out;
+    out.field_id = field;
+    if (lookup.HasCoveredRows()) {
+        out.used_index = true;
+        if (const auto& entry = lookup.SelectedEntry(); entry.has_value()) {
+            if (auto id = entry->key.identity.pre_built_id(); id.has_value()) {
+                out.index_id = *id;
+            }
+            out.family = entry->family;
+            out.nested = entry->caps.nested;
+            out.path = entry->json_path;
+        }
+        return out;
+    }
+    const auto reason = lookup.FallbackReason() != DeclineReason::kNone
+                            ? lookup.FallbackReason()
+                            : DeclineReason::kNoIndexOnField;
+    out.decline_reason = milvus::exec::ToString(reason);
+    return out;
+}
+
+}  // namespace
+
+void
+PhyCompareFilterExpr::RecordCompareExplain(bool left_used_index,
+                                           bool right_used_index,
+                                           int64_t batch_rows) {
+    if (explain_ == nullptr || expr_id() == 0) {
+        return;
+    }
+    if (!explain_recorded_) {
+        explain_recorded_ = true;
+        auto to_member = [](CompareOperandExplain src) {
+            return OperandExplainDecision{
+                .field_id = src.field_id,
+                .used_index = src.used_index,
+                .index_id = src.index_id,
+                .family = std::move(src.family),
+                .nested = src.nested,
+                .path = std::move(src.path),
+                .decline_reason = std::move(src.decline_reason),
+            };
+        };
+        left_explain_ = to_member(
+            ResolveCompareOperandExplain(left_field_, left_value_lookup_));
+        right_explain_ = to_member(
+            ResolveCompareOperandExplain(right_field_, right_value_lookup_));
+        auto record_one = [&](const OperandExplainDecision& d) {
+            explain_->RecordDecision(d.field_id,
+                                     expr_id(),
+                                     d.used_index,
+                                     d.index_id,
+                                     d.family,
+                                     d.nested,
+                                     d.path,
+                                     d.decline_reason);
+            explain_->AddOperandScan(d.field_id,
+                                     expr_id(),
+                                     d.used_index,
+                                     d.index_id,
+                                     d.family,
+                                     d.nested,
+                                     d.path,
+                                     d.decline_reason,
+                                     0,
+                                     0);
+        };
+        record_one(left_explain_);
+        if (!right_explain_.SameGroup(left_explain_)) {
+            record_one(right_explain_);
+        }
+    }
+    if (batch_rows <= 0) {
+        return;
+    }
+    const int64_t left_idx = left_used_index ? batch_rows : 0;
+    const int64_t left_raw = left_used_index ? 0 : batch_rows;
+    const int64_t right_idx = right_used_index ? batch_rows : 0;
+    const int64_t right_raw = right_used_index ? 0 : batch_rows;
+    explain_->AddOperandScan(left_explain_.field_id,
+                             expr_id(),
+                             left_explain_.used_index,
+                             left_explain_.index_id,
+                             left_explain_.family,
+                             left_explain_.nested,
+                             left_explain_.path,
+                             left_explain_.decline_reason,
+                             left_idx,
+                             left_raw);
+    if (!right_explain_.SameGroup(left_explain_)) {
+        explain_->AddOperandScan(right_explain_.field_id,
+                                 expr_id(),
+                                 right_explain_.used_index,
+                                 right_explain_.index_id,
+                                 right_explain_.family,
+                                 right_explain_.nested,
+                                 right_explain_.path,
+                                 right_explain_.decline_reason,
+                                 right_idx,
+                                 right_raw);
+    }
+    if (left_raw > 0 || right_raw > 0) {
+        explain_->AddRawScan(expr_id(), batch_rows);
+    }
+}
+
 ColumnVectorPtr
 PhyCompareFilterExpr::GatherValues(const ValueLookupSource& source,
                                    DataType data_type,
@@ -455,6 +575,12 @@ PhyCompareFilterExpr::ExecCompareWithValueLookup(OpType, EvalCtx& context) {
             }
         });
     });
+    const auto bitmap_input = context.get_bitmap_input();
+    const int64_t active_rows = !bitmap_input.empty()
+                                    ? static_cast<int64_t>(bitmap_input.count())
+                                    : real_batch_size;
+    RecordCompareExplain(
+        left_values != nullptr, right_values != nullptr, active_rows);
     // The sequential cursor (current_data_global_pos_) is advanced once per
     // Eval by the caller, so this path must not move it again.
     return result;
@@ -478,11 +604,28 @@ PhyCompareFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
     // without a deep call stack in between.
     if (!is_left_indexed_ && !is_right_indexed_ && CanUseBothDataCompare()) {
         result = ExecCompareExprDispatcherForBothDataSegment(context);
-        current_data_global_pos_ += sequential_batch_size;
-        return;
+    } else {
+        result = ExecCompareExprDispatcherForHybridSegment(context);
     }
-    result = ExecCompareExprDispatcherForHybridSegment(context);
     current_data_global_pos_ += sequential_batch_size;
+
+    if (explain_ != nullptr && expr_id() != 0) {
+        if (!is_left_indexed_ && !is_right_indexed_) {
+            int64_t rows = 0;
+            if (auto col = std::dynamic_pointer_cast<ColumnVector>(result);
+                col != nullptr) {
+                const auto& bitmap_input = context.get_bitmap_input();
+                rows = !bitmap_input.empty()
+                           ? static_cast<int64_t>(bitmap_input.count())
+                           : static_cast<int64_t>(col->size());
+            }
+            if (rows > 0 || !explain_recorded_) {
+                RecordCompareExplain(false, false, rows);
+            }
+        } else if (result == nullptr && !explain_recorded_) {
+            RecordCompareExplain(is_left_indexed_, is_right_indexed_, 0);
+        }
+    }
 }
 
 VectorPtr

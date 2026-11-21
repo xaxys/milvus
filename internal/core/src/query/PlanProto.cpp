@@ -106,6 +106,7 @@ ProtoParser::PlanOptionsFromProto(
     PlanOptions& plan_options) {
     plan_options.expr_use_json_stats = plan_option_proto.expr_use_json_stats();
     plan_options.index_hint_strict = plan_option_proto.index_hint_strict();
+    plan_options.enable_explain = plan_option_proto.enable_explain();
     plan_options.index_hints.reserve(plan_option_proto.index_hints_size());
     for (const auto& hint : plan_option_proto.index_hints()) {
         plan_options.index_hints.emplace_back(hint.field_id(), hint.index_id());
@@ -1833,6 +1834,12 @@ ProtoParser::ParseExprs(const proto::plan::Expr& expr_pb,
         }
     }
     if (type_check(result->type())) {
+        // Carry the proxy-assigned node id into the typed tree. ParseExprs runs
+        // for every node, children included, so each leaf keeps its own id.
+        if (expr_pb.expr_id() != 0) {
+            std::const_pointer_cast<expr::ITypeExpr>(result)->SetExprId(
+                expr_pb.expr_id());
+        }
         return result;
     }
     ThrowInfo(UnexpectedError,

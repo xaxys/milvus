@@ -129,6 +129,7 @@ PhyVectorSearchNode::GetOutput() {
     // Normal path: build BitsetView from the bitmap produced upstream.
     milvus::BitsetView search_view;
     int64_t data_cnt = active_count_;
+    int64_t candidate_rows = active_count_;
 
     if (!ph.element_level_ && query_context_->bitset_is_element_level()) {
         ThrowInfo(ExprInvalid,
@@ -160,6 +161,10 @@ PhyVectorSearchNode::GetOutput() {
 
             query_context_->set_active_element_count(element_bitset.size());
             if (element_bitset.empty()) {
+                if (auto* explain = query_context_->explain();
+                    explain != nullptr) {
+                    explain->SetOperatorRows(get_operator_id(), 0, 0);
+                }
                 query_context_->set_search_result(
                     empty_search_result(num_queries, ph.element_level_));
                 return input_;
@@ -174,8 +179,12 @@ PhyVectorSearchNode::GetOutput() {
 
         auto col_input = GetColumnVector(input_);
         TargetBitmapView view(col_input->GetRawData(), col_input->size());
+        candidate_rows = static_cast<int64_t>(view.size() - view.count());
 
         if (view.all()) {
+            if (auto* explain = query_context_->explain(); explain != nullptr) {
+                explain->SetOperatorRows(get_operator_id(), 0, 0);
+            }
             auto search_result = empty_search_result(num_queries);
             search_result.total_data_cnt_ = data_cnt;
             search_result.element_level_ = ph.element_level_;
@@ -207,6 +216,28 @@ PhyVectorSearchNode::GetOutput() {
     if (search_result.used_interim_index_) {
         MarkFeature(query_context_->get_plan_options().feature_recorder.get(),
                     FeatureBit::InterimIndexSearch);
+    }
+
+    if (auto explain_shared = query_context_->explain_shared();
+        explain_shared != nullptr) {
+        if (search_result.vector_iterators_.has_value()) {
+            explain_shared->SetOperatorRows(
+                get_operator_id(), candidate_rows, 0);
+            for (auto& it : search_result.vector_iterators_.value()) {
+                if (it != nullptr) {
+                    it = std::make_shared<CountingVectorIterator>(
+                        std::move(it),
+                        explain_shared,
+                        get_operator_id(),
+                        get_operator_id() + 1);
+                }
+            }
+        } else {
+            explain_shared->SetOperatorRows(
+                get_operator_id(),
+                candidate_rows,
+                CountValidSearchOffsets(search_result.seg_offsets_));
+        }
     }
 
     search_result.total_data_cnt_ = data_cnt;

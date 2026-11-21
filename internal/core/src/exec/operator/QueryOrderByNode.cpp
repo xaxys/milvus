@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "common/EasyAssert.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "log/Log.h"
 
 namespace milvus {
@@ -140,6 +141,12 @@ PhyQueryOrderByNode::NoMoreInput() {
 
     // Trigger sorting
     sort_buffer_->NoMoreInput();
+    if (auto* explain = operator_context_->get_exec_context()->explain();
+        explain != nullptr) {
+        explain->SetOperatorRows(get_operator_id(),
+                                 sort_buffer_->NumInputRows(),
+                                 sort_buffer_->NumOutputRows());
+    }
 
     LOG_DEBUG("QueryOrderByNode: NoMoreInput called, {} rows sorted",
               sort_buffer_->NumInputRows());
@@ -166,6 +173,12 @@ PhyQueryOrderByNode::GetOutput() {
 
     // Wrap columns in RowVector
     auto row_vector = std::make_shared<RowVector>(std::move(output_columns));
+    if (auto* explain = operator_context_->get_exec_context()->explain();
+        explain != nullptr) {
+        explain->SetOperatorRows(get_operator_id(),
+                                 sort_buffer_->NumInputRows(),
+                                 sort_buffer_->NumOutputRows());
+    }
 
     LOG_DEBUG("QueryOrderByNode: GetOutput returned {} rows, total output={}",
               row_vector->size(),

@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/featureusage"
 	"github.com/milvus-io/milvus/internal/mocks"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	searchreducestream "github.com/milvus-io/milvus/internal/util/searchutil/reduce_stream"
 	"github.com/milvus-io/milvus/internal/views/queryclient"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -374,4 +375,99 @@ func TestStreamingResultsPreservePlanExecutionSummary(t *testing.T) {
 		return true
 	})
 	require.Equal(t, bit, featureBits&bit)
+}
+
+func TestStreamingResultsPreserveExecutionExplain(t *testing.T) {
+	cfg := &paramtable.Get().ProxyCfg.EnableReduceStream
+	old := cfg.GetValue()
+	t.Cleanup(func() { require.NoError(t, paramtable.Get().Save(cfg.Key, old)) })
+	require.NoError(t, paramtable.Get().Save(cfg.Key, "true"))
+
+	makeGroup := func(name string, rows int64) *internalpb.ExecutionExplain {
+		return explain.Wrap(explain.KindQueryNode, "1", []*internalpb.ExecutionExplain{
+			explain.FoldSegmentsWithName(name, []*internalpb.ExecutionExplain{{
+				Kind:     explain.KindSegment,
+				Name:     name,
+				Counters: map[string]int64{"rows_total": rows},
+				Children: []*internalpb.ExecutionExplain{{
+					Kind:       explain.KindOperator,
+					Attributes: map[string]string{"name": "vector_search", "step": "0"},
+					Counters:   map[string]int64{"rows_in": rows, "rows_out": 1},
+				}},
+			}}),
+		})
+	}
+
+	// Plain Search over ReduceStream
+	sChunk := newFinalSearchChunk([]int64{1}, []float32{.9}, "channel")
+	sChunk.Explain = makeGroup("vch0/1/Historical", 100)
+	legacy := &fakeLegacyQueryClient{
+		searchResult: &queryclient.LegacySearchResult{
+			Stream: &fakeLegacySearchStream{recv: []fakeLegacySearchRecv{{chunk: sChunk}}},
+		},
+		queryResult: &queryclient.LegacyQueryResult{},
+	}
+	search := newQueryViewSearchTask(t, legacy, 1)
+	search.request.SearchParams = []*commonpb.KeyValuePair{{Key: "explain", Value: "summary"}}
+	require.NoError(t, search.Execute(t.Context()))
+	require.True(t, legacy.lastSearchRequest.AllowStreaming)
+	require.Len(t, search.reducedExplains, 1)
+	renderedSearch, err := renderExplain(search.request.GetSearchParams(), search.reducedExplains, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.Contains(t, renderedSearch, "segments=1, rows_total=100")
+
+	// Hybrid Search over SubStreams
+	sub0Chunk := newFinalSearchChunk([]int64{1}, []float32{.9}, "channel")
+	sub0Chunk.Explain = makeGroup("vch0/1/Historical", 100)
+	sub1Chunk := newFinalSearchChunk([]int64{2}, []float32{.8}, "channel")
+	sub1Chunk.Explain = makeGroup("vch0/1/Historical", 100)
+	legacyHybrid := &fakeLegacyQueryClient{
+		searchResult: &queryclient.LegacySearchResult{
+			SubStreams: []searchreducestream.ReduceStream{
+				&fakeLegacySearchStream{recv: []fakeLegacySearchRecv{{chunk: sub0Chunk}}},
+				&fakeLegacySearchStream{recv: []fakeLegacySearchRecv{{chunk: sub1Chunk}}},
+			},
+		},
+	}
+	hybrid := newQueryViewSearchTask(t, legacyHybrid, 1)
+	hybrid.IsIterator, hybrid.IsAdvanced = false, true
+	hybrid.rerankMeta = &legacyRerankMeta{}
+	hybrid.SubReqs = []*internalpb.SubSearchRequest{
+		{Nq: 1, Topk: 1, MetricType: "IP", SearchType: internalpb.SearchType_PURE_ANN_SEARCH_NO_FILTER},
+		{Nq: 1, Topk: 1, MetricType: "IP", SearchType: internalpb.SearchType_PURE_ANN_SEARCH_NO_FILTER},
+	}
+	hybrid.request.SearchParams = []*commonpb.KeyValuePair{{Key: "explain", Value: "summary"}}
+	hybrid.explainSubSearches = []explain.SubSearchMeta{
+		{SubReqIndex: 0, AnnsField: "vec_a"},
+		{SubReqIndex: 1, AnnsField: "vec_b"},
+	}
+	require.NoError(t, hybrid.Execute(t.Context()))
+	require.True(t, legacyHybrid.lastSearchRequest.AllowStreaming)
+	require.Len(t, hybrid.reducedExplains, 2)
+	renderedHybrid, err := renderExplain(hybrid.request.GetSearchParams(), hybrid.reducedExplains, nil, nil, hybrid.explainSubSearches, nil)
+	require.NoError(t, err)
+	require.Contains(t, renderedHybrid, "query (segments=1, rows_total=100)")
+	require.Contains(t, renderedHybrid, "[sub 0] sub_search vec_a (segments=1, rows_total=100)")
+	require.Contains(t, renderedHybrid, "[sub 1] sub_search vec_b (segments=1, rows_total=100)")
+
+	// Query over ReduceStream
+	qChunk := newFinalQueryChunk([]int64{1}, 10)
+	qChunk.Explain = makeGroup("vch0/1/Historical", 80)
+	legacyQuery := &fakeLegacyQueryClient{
+		queryResult: &queryclient.LegacyQueryResult{
+			Stream: &fakeLegacyQueryStream{recv: []fakeLegacyQueryRecv{{chunk: qChunk}}},
+		},
+	}
+	query := newQueryViewQueryTask(t, legacyQuery, 1)
+	query.request.QueryParams = []*commonpb.KeyValuePair{{Key: "explain", Value: "summary"}}
+	require.NoError(t, query.Execute(t.Context()))
+	require.True(t, legacyQuery.lastQueryRequest.AllowStreaming)
+	var queryExplains []*internalpb.ExecutionExplain
+	query.resultBuf.Range(func(res *internalpb.RetrieveResults) bool {
+		queryExplains = explain.Splice(queryExplains, res.GetExplain())
+		return true
+	})
+	renderedQuery, err := renderExplain(query.request.GetQueryParams(), queryExplains, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.Contains(t, renderedQuery, "segments=1, rows_total=80")
 }

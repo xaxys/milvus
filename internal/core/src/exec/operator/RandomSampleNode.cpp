@@ -34,6 +34,7 @@
 #include "common/Tracer.h"
 #include "common/Types.h"
 #include "exec/QueryContext.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/expression/Utils.h"
 #include "fmt/core.h"
 #include "monitor/Monitor.h"
@@ -137,11 +138,13 @@ PhyRandomSampleNode::GetOutput() {
         std::chrono::high_resolution_clock::now();
 
     RowVectorPtr result = nullptr;
+    int64_t rows_in = active_count_;
     if (!is_source_node_) {
         auto input_col = GetColumnVector(input_);
         TargetBitmapView input_data(input_col->GetRawData(), input_col->size());
         // note: false means the elemnt is hit
         size_t input_false_count = input_data.size() - input_data.count();
+        rows_in = static_cast<int64_t>(input_false_count);
 
         if (input_false_count > 0) {
             FixedVector<uint32_t> pos{};
@@ -204,6 +207,11 @@ PhyRandomSampleNode::GetOutput() {
         TargetBitmapView result_data(result_col->GetRawData(),
                                      result_col->size());
         auto sampled_count = result_col->size() - result_data.count();
+        if (auto* explain = query_context->explain(); explain != nullptr) {
+            explain->SetOperatorRows(get_operator_id(),
+                                     rows_in,
+                                     static_cast<int64_t>(sampled_count));
+        }
         tracer::AddEvent(fmt::format("sampled_count: {}, total_count: {}",
                                      sampled_count,
                                      active_count_));

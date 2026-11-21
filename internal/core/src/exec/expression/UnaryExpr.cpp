@@ -166,14 +166,7 @@ PhyUnaryRangeFilterExpr::ExecRangeVisitorImplArrayForIndex<proto::plan::Array>(
 
 void
 PhyUnaryRangeFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    auto input = context.get_offset_input();
-    // Lazy offset readers must bind their mode before selecting an index.
-    // A prefetch worker may read this plain bool, so join it before writing.
-    if (input != nullptr && !prefetch_future_.has_value()) {
-        SetHasOffsetInput(true);
-    }
-    WaitPrefetch();
-    SetHasOffsetInput(input != nullptr);
+    auto eval_guard = PrepareLeafEval(context);
     tracer::AutoSpan span(
         "PhyUnaryRangeFilterExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("data_type", static_cast<int>(expr_->column_.data_type_));
@@ -782,6 +775,7 @@ PhyUnaryRangeFilterExpr::ExecArrayEqualForIndex(EvalCtx& context,
             if (candidate_rows.count() == 0) {
                 return res;
             }
+            RecordRawScan(static_cast<int64_t>(candidate_rows.count()));
             if (segment_->is_chunked()) {
                 // Candidate order is immaterial to the result bitmap. Visiting
                 // rows in order lets Raw Take reuse one pin per touched Cell.
@@ -1239,6 +1233,8 @@ PhyUnaryRangeFilterExpr::ExecRangeVisitorImplJsonByStats() {
         TargetBitmapView valid_res_view(*cached_index_chunk_valid_res_);
 
         // process shredding data
+        int64_t shredded_scanned = 0;
+        int64_t shared_scanned = 0;
         const auto& numeric_bound = expr_->val_;
         auto try_execute = [&](milvus::index::JSONType json_type,
                                auto GetType,
@@ -1275,22 +1271,27 @@ PhyUnaryRangeFilterExpr::ExecRangeVisitorImplJsonByStats() {
                                      JsonNumberMatchesOp(*comparison, op_type);
                         }
                     };
-                    index->ExecutorForShreddingData<ColType>(op_ctx_,
-                                                             target_field,
-                                                             executor,
-                                                             nullptr,
-                                                             target_res_view,
-                                                             target_valid_view);
+                    const auto scanned =
+                        index->ExecutorForShreddingData<ColType>(
+                            op_ctx_,
+                            target_field,
+                            executor,
+                            nullptr,
+                            target_res_view,
+                            target_valid_view);
+                    shredded_scanned = std::max(shredded_scanned, scanned);
                 } else {
                     ShreddingExecutor<ColType, ValType> executor(
                         op_type, pointer, val);
-                    index->ExecutorForShreddingData<ColType>(
-                        op_ctx_,
-                        target_field,
-                        std::move(executor),
-                        nullptr,
-                        target_res_view,
-                        target_valid_view);
+                    const auto scanned =
+                        index->ExecutorForShreddingData<ColType>(
+                            op_ctx_,
+                            target_field,
+                            std::move(executor),
+                            nullptr,
+                            target_res_view,
+                            target_valid_view);
+                    shredded_scanned = std::max(shredded_scanned, scanned);
                 }
                 res_view.inplace_or_with_count(target_res_view, active_count_);
                 valid_res_view.inplace_or_with_count(target_valid_view,
@@ -1340,13 +1341,15 @@ PhyUnaryRangeFilterExpr::ExecRangeVisitorImplJsonByStats() {
                     TargetBitmap target_valid(active_count_, true);
                     TargetBitmapView target_valid_view(target_valid);
                     ShreddingArrayBsonExecutor executor(op_type, pointer, val);
-                    index->ExecutorForShreddingData<std::string_view>(
-                        op_ctx_,
-                        target_field,
-                        executor,
-                        nullptr,
-                        target_res_view,
-                        target_valid_view);
+                    const auto scanned =
+                        index->ExecutorForShreddingData<std::string_view>(
+                            op_ctx_,
+                            target_field,
+                            executor,
+                            nullptr,
+                            target_res_view,
+                            target_valid_view);
+                    shredded_scanned = std::max(shredded_scanned, scanned);
                     res_view.inplace_or_with_count(target_res_view,
                                                    active_count_);
                     valid_res_view.inplace_or_with_count(target_valid_view,
@@ -1504,8 +1507,16 @@ PhyUnaryRangeFilterExpr::ExecRangeVisitorImplJsonByStats() {
                 "unary_json_stats_shared_data",
                 [this](double us) { json_stats_shared_latency_us_ += us; });
 
-            index->ExecuteForSharedData(
-                op_ctx_, bson_index_, pointer, shared_executor);
+            index->ExecuteForSharedData(op_ctx_,
+                                        bson_index_,
+                                        pointer,
+                                        [&](milvus::BsonView bson,
+                                            uint32_t row_id,
+                                            uint32_t value_offset) {
+                                            ++shared_scanned;
+                                            shared_executor(
+                                                bson, row_id, value_offset);
+                                        });
         }
 
         // for NotEqual: flip the result
@@ -1513,6 +1524,8 @@ PhyUnaryRangeFilterExpr::ExecRangeVisitorImplJsonByStats() {
             cached_index_chunk_res_->flip();
         }
         res_view.inplace_and(valid_res_view, active_count_);
+        RecordRawScan(std::min<int64_t>(active_count_,
+                                        shredded_scanned + shared_scanned));
         cached_index_chunk_id_ = 0;
         CachePut(CacheElapsedUs(cache_compute_start));
     }
@@ -1727,6 +1740,12 @@ PhyUnaryRangeFilterExpr::PreCheckOverflow(int64_t batch_size,
         if (milvus::query::out_of_range<T>(val)) {
             auto make_overflow_result =
                 [this, input, batch_size](bool match_value) -> ColumnVectorPtr {
+                const bool col_nullable = expr_->column_.element_level_
+                                              ? is_element_nullable_
+                                              : is_nullable_;
+                if (!col_nullable) {
+                    SetConstantOutcome(match_value);
+                }
                 TargetBitmap valid;
                 if (expr_->column_.element_level_) {
                     // A null row has no elements; a null element stays
@@ -2160,6 +2179,7 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
                                });
         };
         const auto can_use_array_index =
+            !is_native_list_array_ &&
             val_case == proto::plan::GenericValue::ValCase::kArrayVal &&
             array.array_size() > 0 && literal_matches_index_type() &&
             (expr_->op_type_ == proto::plan::OpType::Equal ||
@@ -2202,31 +2222,33 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
     if (is_pattern) {
         req.index_hint_strict = false;
     }
-    // A hint on this field may name an exact pattern index, which the NGRAM pass
-    // must not shadow. When the selected NGRAM entry is not the hinted one, the
-    // decision belongs to the second pass instead of returning here.
-    const auto hinted_id = [&req]() -> std::optional<int64_t> {
+    // A hint may name an exact pattern index, which the NGRAM pass must not
+    // shadow. It governs this leaf only when the hinted index can serve this
+    // leaf's path: a hint on j/a must not steer the j/b leaf. HasHintForField
+    // applies the same path check as the selector, so both agree on scope.
+    const bool leaf_hinted = [&]() {
         if (req.index_hints == nullptr) {
-            return std::nullopt;
+            return false;
         }
-        for (const auto& [field_id, index_id] : *req.index_hints) {
-            if (field_id == req.field_id.get()) {
-                return index_id;
-            }
-        }
-        return std::nullopt;
+        return index_path_detail::HasHintForField(
+            req, segment_->ResolveIndexCapability(op_ctx_, field_id_));
     }();
+    DeclineReason ngram_decline = DeclineReason::kNone;
     if (is_pattern && SelectAndCreateIndexReader(req)) {
         const bool satisfied_by_ngram =
-            !hinted_id.has_value() ||
+            !leaf_hinted ||
             (selected_index_entry_.has_value() &&
-             selected_index_entry_->key.identity.pre_built_id() == hinted_id);
-        if (satisfied_by_ngram &&
-            ngram_reader_->CanHandle(
-                GetValueFromProto<std::string>(expr_->val_),
-                ToIndexPatternOp(expr_->op_type_))) {
+             index_path_detail::HintRank(req, *selected_index_entry_) >= 0);
+        const bool can_handle = ngram_reader_->CanHandle(
+            GetValueFromProto<std::string>(expr_->val_),
+            ToIndexPatternOp(expr_->op_type_));
+        if (satisfied_by_ngram && can_handle) {
             return;
         }
+        ngram_decline = !can_handle ? DeclineReason::kLiteralNotSupported
+                                    : DeclineReason::kHintedIndexNotSelected;
+    } else if (is_pattern) {
+        ngram_decline = decline_reason_;
     }
     if (is_pattern) {
         ClearSelectedIndex();
@@ -2235,6 +2257,12 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
     }
     SelectAndCreateIndexReader(req);
     if (exec_path_ != ExprExecPath::ScalarIndex) {
+        if (is_pattern && ngram_decline != DeclineReason::kNone &&
+            ngram_decline != DeclineReason::kNoIndexOnField &&
+            ngram_decline != DeclineReason::kCapabilityMismatch &&
+            decline_reason_ == DeclineReason::kCapabilityMismatch) {
+            decline_reason_ = ngram_decline;
+        }
         return;
     }
 
@@ -2242,6 +2270,7 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
     // May downgrade from ScalarIndex to RawData.
 
     bool can_use = false;
+    DeclineReason post_check_decline = DeclineReason::kCapabilityMismatch;
     switch (data_type) {
         case DataType::BOOL:
             can_use = SegmentExpr::CanUseIndexForOp<bool>(expr_->op_type_);
@@ -2268,7 +2297,14 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         case DataType::VARCHAR:
         case DataType::TEXT: {
             can_use = SegmentExpr::CanUseIndexForOp<std::string>(
-                expr_->op_type_, StringLiteralForCostGuard());
+                          expr_->op_type_, StringLiteralForCostGuard()) &&
+                      (!PatternMatchIsCandidatesOnly() ||
+                       CanUseFMPatternCandidates());
+            if (!can_use && !IsCompareOp(expr_->op_type_) &&
+                selected_index_entry_.has_value() &&
+                selected_index_entry_->family == "fmindex") {
+                post_check_decline = DeclineReason::kLiteralNotSupported;
+            }
             break;
         }
         case DataType::JSON: {
@@ -2282,6 +2318,11 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
                     // here (other JSON string indexes judge on the op alone).
                     can_use = SegmentExpr::CanUseIndexForOp<std::string>(
                         expr_->op_type_);
+                    if (!can_use && !IsCompareOp(expr_->op_type_) &&
+                        pattern_reader_ != nullptr) {
+                        post_check_decline =
+                            DeclineReason::kLiteralNotSupported;
+                    }
                     break;
                 default:
                     can_use = true;
@@ -2297,9 +2338,17 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
                         (expr_->op_type_ == proto::plan::OpType::Equal ||
                          expr_->op_type_ == proto::plan::OpType::NotEqual) &&
                         CanUseIndexForArray<milvus::Array>();
+                    if (!can_use &&
+                        (expr_->op_type_ == proto::plan::OpType::Equal ||
+                         expr_->op_type_ == proto::plan::OpType::NotEqual) &&
+                        expr_->val_.array_val().array_size() == 0) {
+                        post_check_decline =
+                            DeclineReason::kLiteralNotSupported;
+                    }
                     break;
                 default:
                     can_use = false;
+                    post_check_decline = DeclineReason::kValueTypeMismatch;
             }
             break;
         }
@@ -2307,7 +2356,14 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
             can_use = false;
     }
     if (!can_use) {
-        ClearSelectedIndex();
+        if (is_pattern &&
+            post_check_decline == DeclineReason::kCapabilityMismatch &&
+            ngram_decline != DeclineReason::kNone &&
+            ngram_decline != DeclineReason::kNoIndexOnField &&
+            ngram_decline != DeclineReason::kCapabilityMismatch) {
+            post_check_decline = ngram_decline;
+        }
+        ClearSelectedIndex(post_check_decline);
         exec_path_ = ExprExecPath::RawData;
     }
 }

@@ -125,14 +125,13 @@ class ContainsAllMatcher {
 
 void
 PhyJsonContainsFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    WaitPrefetch();
+    auto input = context.get_offset_input();
+    auto eval_guard = PrepareLeafEval(context);
     tracer::AutoSpan span(
         "PhyJsonContainsFilterExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("data_type", static_cast<int>(expr_->column_.data_type_));
     span.SetAttribute("json_filter_expr_type", "json_contains");
 
-    auto input = context.get_offset_input();
-    SetHasOffsetInput((input != nullptr));
     const bool is_element_level_array =
         expr_->column_.data_type_ == DataType::ARRAY &&
         expr_->column_.element_level_;
@@ -673,6 +672,8 @@ PhyJsonContainsFilterExpr::ExecJsonContainsByStats() {
             std::make_shared<TargetBitmap>(active_count_);
         TargetBitmapView res_view(*cached_index_chunk_res_);
         TargetBitmapView valid_res_view(*cached_index_chunk_valid_res_);
+        int64_t shredded_scanned = 0;
+        int64_t shared_scanned = 0;
         // process shredding data for ARRAY type (non-shared)
         {
             milvus::ScopedTimer timer(
@@ -688,13 +689,14 @@ PhyJsonContainsFilterExpr::ExecJsonContainsByStats() {
                 ShreddingArrayBsonContainsAnyExecutor<GetType> executor(
                     arg_set_);
 
-                index->ExecutorForShreddingData<std::string_view>(
-                    op_ctx_,
-                    target_field,
-                    executor,
-                    nullptr,
-                    target_res_view,
-                    target_valid_view);
+                shredded_scanned =
+                    index->ExecutorForShreddingData<std::string_view>(
+                        op_ctx_,
+                        target_field,
+                        executor,
+                        nullptr,
+                        target_res_view,
+                        target_valid_view);
                 res_view.inplace_or_with_count(target_res_view, active_count_);
                 valid_res_view.inplace_or_with_count(target_valid_view,
                                                      active_count_);
@@ -738,9 +740,19 @@ PhyJsonContainsFilterExpr::ExecJsonContainsByStats() {
             milvus::ScopedTimer timer(
                 "json_contains_stats_shared_data",
                 [this](double us) { json_stats_shared_latency_us_ += us; });
-            index->ExecuteForSharedData(
-                op_ctx_, bson_index_, pointer, shared_executor);
+            index->ExecuteForSharedData(op_ctx_,
+                                        bson_index_,
+                                        pointer,
+                                        [&](milvus::BsonView bson,
+                                            uint32_t row_offset,
+                                            uint32_t value_offset) {
+                                            ++shared_scanned;
+                                            shared_executor(
+                                                bson, row_offset, value_offset);
+                                        });
         }
+        RecordRawScan(std::min<int64_t>(active_count_,
+                                        shredded_scanned + shared_scanned));
         cached_index_chunk_id_ = 0;
         CachePut(CacheElapsedUs(cache_compute_start));
     }
@@ -921,6 +933,8 @@ PhyJsonContainsFilterExpr::ExecJsonContainsArrayByStats() {
         TargetBitmapView res_view(*cached_index_chunk_res_);
         TargetBitmapView valid_res_view(*cached_index_chunk_valid_res_);
 
+        int64_t shredded_scanned = 0;
+        int64_t shared_scanned = 0;
         // process shredding data for ARRAY type (non-shared)
         {
             milvus::ScopedTimer timer(
@@ -934,13 +948,14 @@ PhyJsonContainsFilterExpr::ExecJsonContainsArrayByStats() {
                 TargetBitmap target_valid(active_count_, true);
                 TargetBitmapView target_valid_view(target_valid);
                 ShreddingArrayBsonContainsArrayExecutor executor(elements);
-                index->ExecutorForShreddingData<std::string_view>(
-                    op_ctx_,
-                    target_field,
-                    executor,
-                    nullptr,
-                    target_res_view,
-                    target_valid_view);
+                shredded_scanned =
+                    index->ExecutorForShreddingData<std::string_view>(
+                        op_ctx_,
+                        target_field,
+                        executor,
+                        nullptr,
+                        target_res_view,
+                        target_valid_view);
                 res_view.inplace_or_with_count(target_res_view, active_count_);
                 valid_res_view.inplace_or_with_count(target_valid_view,
                                                      active_count_);
@@ -979,9 +994,19 @@ PhyJsonContainsFilterExpr::ExecJsonContainsArrayByStats() {
             milvus::ScopedTimer timer(
                 "json_contains_array_stats_shared_data",
                 [this](double us) { json_stats_shared_latency_us_ += us; });
-            index->ExecuteForSharedData(
-                op_ctx_, bson_index_, pointer, shared_executor);
+            index->ExecuteForSharedData(op_ctx_,
+                                        bson_index_,
+                                        pointer,
+                                        [&](milvus::BsonView bson,
+                                            uint32_t row_offset,
+                                            uint32_t value_offset) {
+                                            ++shared_scanned;
+                                            shared_executor(
+                                                bson, row_offset, value_offset);
+                                        });
         }
+        RecordRawScan(std::min<int64_t>(active_count_,
+                                        shredded_scanned + shared_scanned));
         cached_index_chunk_id_ = 0;
         CachePut(CacheElapsedUs(cache_compute_start));
     }
@@ -1404,6 +1429,8 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllByStats() {
             std::make_shared<TargetBitmap>(active_count_);
         TargetBitmapView res_view(*cached_index_chunk_res_);
         TargetBitmapView valid_res_view(*cached_index_chunk_valid_res_);
+        int64_t shredded_scanned = 0;
+        int64_t shared_scanned = 0;
         // process shredding data for ARRAY type (non-shared)
         {
             milvus::ScopedTimer timer(
@@ -1419,13 +1446,14 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllByStats() {
                 ShreddingArrayBsonContainsAllExecutor<GetType> executor(
                     *elements);
 
-                index->ExecutorForShreddingData<std::string_view>(
-                    op_ctx_,
-                    target_field,
-                    executor,
-                    nullptr,
-                    target_res_view,
-                    target_valid_view);
+                shredded_scanned =
+                    index->ExecutorForShreddingData<std::string_view>(
+                        op_ctx_,
+                        target_field,
+                        executor,
+                        nullptr,
+                        target_res_view,
+                        target_valid_view);
                 res_view.inplace_or_with_count(target_res_view, active_count_);
                 valid_res_view.inplace_or_with_count(target_valid_view,
                                                      active_count_);
@@ -1506,9 +1534,19 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllByStats() {
             milvus::ScopedTimer timer(
                 "json_contains_all_stats_shared_data",
                 [this](double us) { json_stats_shared_latency_us_ += us; });
-            index->ExecuteForSharedData(
-                op_ctx_, bson_index_, pointer, shared_executor);
+            index->ExecuteForSharedData(op_ctx_,
+                                        bson_index_,
+                                        pointer,
+                                        [&](milvus::BsonView bson,
+                                            uint32_t row_offset,
+                                            uint32_t value_offset) {
+                                            ++shared_scanned;
+                                            shared_executor(
+                                                bson, row_offset, value_offset);
+                                        });
         }
+        RecordRawScan(std::min<int64_t>(active_count_,
+                                        shredded_scanned + shared_scanned));
         cached_index_chunk_id_ = 0;
         CachePut(CacheElapsedUs(cache_compute_start));
     }
@@ -1744,6 +1782,8 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllWithDiffTypeByStats() {
         TargetBitmapView res_view(*cached_index_chunk_res_);
         TargetBitmapView valid_res_view(*cached_index_chunk_valid_res_);
 
+        int64_t shredded_scanned = 0;
+        int64_t shared_scanned = 0;
         // process shredding data for ARRAY type (non-shared)
         {
             milvus::ScopedTimer timer(
@@ -1758,13 +1798,14 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllWithDiffTypeByStats() {
                 TargetBitmapView target_valid_view(target_valid);
                 ShreddingArrayBsonContainsAllWithDiffTypeExecutor executor(
                     elements, elements_index);
-                index->ExecutorForShreddingData<std::string_view>(
-                    op_ctx_,
-                    target_field,
-                    executor,
-                    nullptr,
-                    target_res_view,
-                    target_valid_view);
+                shredded_scanned =
+                    index->ExecutorForShreddingData<std::string_view>(
+                        op_ctx_,
+                        target_field,
+                        executor,
+                        nullptr,
+                        target_res_view,
+                        target_valid_view);
                 res_view.inplace_or_with_count(target_res_view, active_count_);
                 valid_res_view.inplace_or_with_count(target_valid_view,
                                                      active_count_);
@@ -1863,9 +1904,19 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllWithDiffTypeByStats() {
             milvus::ScopedTimer timer(
                 "json_contains_all_difftype_stats_shared_data",
                 [this](double us) { json_stats_shared_latency_us_ += us; });
-            index->ExecuteForSharedData(
-                op_ctx_, bson_index_, pointer, shared_executor);
+            index->ExecuteForSharedData(op_ctx_,
+                                        bson_index_,
+                                        pointer,
+                                        [&](milvus::BsonView bson,
+                                            uint32_t row_offset,
+                                            uint32_t value_offset) {
+                                            ++shared_scanned;
+                                            shared_executor(
+                                                bson, row_offset, value_offset);
+                                        });
         }
+        RecordRawScan(std::min<int64_t>(active_count_,
+                                        shredded_scanned + shared_scanned));
         cached_index_chunk_id_ = 0;
         CachePut(CacheElapsedUs(cache_compute_start));
     }
@@ -2047,6 +2098,8 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllArrayByStats() {
         TargetBitmapView res_view(*cached_index_chunk_res_);
         TargetBitmapView valid_res_view(*cached_index_chunk_valid_res_);
 
+        int64_t shredded_scanned = 0;
+        int64_t shared_scanned = 0;
         // process shredding data for ARRAY type (non-shared)
         {
             milvus::ScopedTimer timer(
@@ -2060,13 +2113,14 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllArrayByStats() {
                 TargetBitmap target_valid(active_count_, true);
                 TargetBitmapView target_valid_view(target_valid);
                 ShreddingArrayBsonContainsAllArrayExecutor executor(elements);
-                index->ExecutorForShreddingData<std::string_view>(
-                    op_ctx_,
-                    target_field,
-                    executor,
-                    nullptr,
-                    target_res_view,
-                    target_valid_view);
+                shredded_scanned =
+                    index->ExecutorForShreddingData<std::string_view>(
+                        op_ctx_,
+                        target_field,
+                        executor,
+                        nullptr,
+                        target_res_view,
+                        target_valid_view);
                 res_view.inplace_or_with_count(target_res_view, active_count_);
                 valid_res_view.inplace_or_with_count(target_valid_view,
                                                      active_count_);
@@ -2110,9 +2164,19 @@ PhyJsonContainsFilterExpr::ExecJsonContainsAllArrayByStats() {
             milvus::ScopedTimer timer(
                 "json_contains_all_array_stats_shared_data",
                 [this](double us) { json_stats_shared_latency_us_ += us; });
-            index->ExecuteForSharedData(
-                op_ctx_, bson_index_, pointer, shared_executor);
+            index->ExecuteForSharedData(op_ctx_,
+                                        bson_index_,
+                                        pointer,
+                                        [&](milvus::BsonView bson,
+                                            uint32_t row_offset,
+                                            uint32_t value_offset) {
+                                            ++shared_scanned;
+                                            shared_executor(
+                                                bson, row_offset, value_offset);
+                                        });
         }
+        RecordRawScan(std::min<int64_t>(active_count_,
+                                        shredded_scanned + shared_scanned));
         cached_index_chunk_id_ = 0;
         CachePut(CacheElapsedUs(cache_compute_start));
     }
@@ -2330,6 +2394,8 @@ PhyJsonContainsFilterExpr::ExecJsonContainsWithDiffTypeByStats() {
         TargetBitmapView res_view(*cached_index_chunk_res_);
         TargetBitmapView valid_res_view(*cached_index_chunk_valid_res_);
 
+        int64_t shredded_scanned = 0;
+        int64_t shared_scanned = 0;
         // process shredding data for ARRAY type (non-shared)
         {
             milvus::ScopedTimer timer(
@@ -2344,13 +2410,14 @@ PhyJsonContainsFilterExpr::ExecJsonContainsWithDiffTypeByStats() {
                 TargetBitmapView target_valid_view(target_valid);
                 ShreddingArrayBsonContainsAnyWithDiffTypeExecutor executor(
                     elements);
-                index->ExecutorForShreddingData<std::string_view>(
-                    op_ctx_,
-                    target_field,
-                    executor,
-                    nullptr,
-                    target_res_view,
-                    target_valid_view);
+                shredded_scanned =
+                    index->ExecutorForShreddingData<std::string_view>(
+                        op_ctx_,
+                        target_field,
+                        executor,
+                        nullptr,
+                        target_res_view,
+                        target_valid_view);
                 res_view.inplace_or_with_count(target_res_view, active_count_);
                 valid_res_view.inplace_or_with_count(target_valid_view,
                                                      active_count_);
@@ -2440,9 +2507,19 @@ PhyJsonContainsFilterExpr::ExecJsonContainsWithDiffTypeByStats() {
             milvus::ScopedTimer timer(
                 "json_contains_difftype_stats_shared_data",
                 [this](double us) { json_stats_shared_latency_us_ += us; });
-            index->ExecuteForSharedData(
-                op_ctx_, bson_index_, pointer, shared_executor);
+            index->ExecuteForSharedData(op_ctx_,
+                                        bson_index_,
+                                        pointer,
+                                        [&](milvus::BsonView bson,
+                                            uint32_t row_offset,
+                                            uint32_t value_offset) {
+                                            ++shared_scanned;
+                                            shared_executor(
+                                                bson, row_offset, value_offset);
+                                        });
         }
+        RecordRawScan(std::min<int64_t>(active_count_,
+                                        shredded_scanned + shared_scanned));
         cached_index_chunk_id_ = 0;
         CachePut(CacheElapsedUs(cache_compute_start));
     }

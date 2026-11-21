@@ -14,6 +14,7 @@ type bound struct {
 	inclusive bool
 	isLower   bool
 	exprIndex int
+	template  string
 }
 
 func isSupportedScalarForRange(dt schemapb.DataType) bool {
@@ -190,6 +191,7 @@ func (v *visitor) combineAndRangePredicates(parts []*planpb.Expr) []*planpb.Expr
 			inclusive: u.GetOp() == planpb.OpType_GreaterEqual || u.GetOp() == planpb.OpType_LessEqual,
 			isLower:   u.GetOp() == planpb.OpType_GreaterThan || u.GetOp() == planpb.OpType_GreaterEqual,
 			exprIndex: idx,
+			template:  u.GetTemplateVariableName(),
 		}
 		if b.isLower {
 			g.lowers = append(g.lowers, b)
@@ -209,20 +211,70 @@ func (v *visitor) combineAndRangePredicates(parts []*planpb.Expr) []*planpb.Expr
 		}
 		// Use the effective type stored in the group
 		var bestLower *bound
+		var lowerTpls []string
 		for i := range g.lowers {
-			if bestLower == nil || cmpGeneric(g.effDt, g.lowers[i].value, bestLower.value) > 0 ||
-				(cmpGeneric(g.effDt, g.lowers[i].value, bestLower.value) == 0 && !g.lowers[i].inclusive && bestLower.inclusive) {
+			if bestLower == nil {
 				b := g.lowers[i]
 				bestLower = &b
+				if b.template != "" {
+					lowerTpls = []string{b.template}
+				}
+				continue
+			}
+			c := cmpGeneric(g.effDt, g.lowers[i].value, bestLower.value)
+			if c > 0 {
+				b := g.lowers[i]
+				bestLower = &b
+				if b.template != "" {
+					lowerTpls = []string{b.template}
+				} else {
+					lowerTpls = nil
+				}
+			} else if c == 0 {
+				if g.lowers[i].template != "" {
+					lowerTpls = append(lowerTpls, g.lowers[i].template)
+				}
+				if !g.lowers[i].inclusive && bestLower.inclusive {
+					b := g.lowers[i]
+					bestLower = &b
+				}
 			}
 		}
+		if bestLower != nil {
+			bestLower.template = mergeTemplateNames(lowerTpls...)
+		}
 		var bestUpper *bound
+		var upperTpls []string
 		for i := range g.uppers {
-			if bestUpper == nil || cmpGeneric(g.effDt, g.uppers[i].value, bestUpper.value) < 0 ||
-				(cmpGeneric(g.effDt, g.uppers[i].value, bestUpper.value) == 0 && !g.uppers[i].inclusive && bestUpper.inclusive) {
+			if bestUpper == nil {
 				b := g.uppers[i]
 				bestUpper = &b
+				if b.template != "" {
+					upperTpls = []string{b.template}
+				}
+				continue
 			}
+			c := cmpGeneric(g.effDt, g.uppers[i].value, bestUpper.value)
+			if c < 0 {
+				b := g.uppers[i]
+				bestUpper = &b
+				if b.template != "" {
+					upperTpls = []string{b.template}
+				} else {
+					upperTpls = nil
+				}
+			} else if c == 0 {
+				if g.uppers[i].template != "" {
+					upperTpls = append(upperTpls, g.uppers[i].template)
+				}
+				if !g.uppers[i].inclusive && bestUpper.inclusive {
+					b := g.uppers[i]
+					bestUpper = &b
+				}
+			}
+		}
+		if bestUpper != nil {
+			bestUpper.template = mergeTemplateNames(upperTpls...)
 		}
 		if bestLower != nil && bestUpper != nil {
 			// Check if the interval is valid (non-empty)
@@ -253,7 +305,7 @@ func (v *visitor) combineAndRangePredicates(parts []*planpb.Expr) []*planpb.Expr
 				// Empty interval → constant false
 				out = append(out, newAlwaysFalseExpr())
 			} else {
-				out = append(out, newBinaryRangeExpr(g.col, bestLower.inclusive, bestUpper.inclusive, bestLower.value, bestUpper.value))
+				out = append(out, newBinaryRangeExpr(g.col, bestLower.inclusive, bestUpper.inclusive, bestLower.value, bestUpper.value, bestLower.template, bestUpper.template))
 			}
 		} else if bestLower != nil {
 			for _, b := range g.lowers {
@@ -263,7 +315,7 @@ func (v *visitor) combineAndRangePredicates(parts []*planpb.Expr) []*planpb.Expr
 			if bestLower.inclusive {
 				op = planpb.OpType_GreaterEqual
 			}
-			out = append(out, newUnaryRangeExpr(g.col, op, bestLower.value))
+			out = append(out, newUnaryRangeExpr(g.col, op, bestLower.value, bestLower.template))
 		} else if bestUpper != nil {
 			for _, b := range g.uppers {
 				used[b.exprIndex] = true
@@ -272,7 +324,7 @@ func (v *visitor) combineAndRangePredicates(parts []*planpb.Expr) []*planpb.Expr
 			if bestUpper.inclusive {
 				op = planpb.OpType_LessEqual
 			}
-			out = append(out, newUnaryRangeExpr(g.col, op, bestUpper.value))
+			out = append(out, newUnaryRangeExpr(g.col, op, bestUpper.value, bestUpper.template))
 		}
 	}
 	for i := range parts {
@@ -338,6 +390,7 @@ func (v *visitor) combineOrRangePredicates(parts []*planpb.Expr) []*planpb.Expr 
 			inclusive: u.GetOp() == planpb.OpType_GreaterEqual || u.GetOp() == planpb.OpType_LessEqual,
 			isLower:   isLower,
 			exprIndex: idx,
+			template:  u.GetTemplateVariableName(),
 		})
 	}
 	used := make([]bool, len(parts))
@@ -352,12 +405,34 @@ func (v *visitor) combineOrRangePredicates(parts []*planpb.Expr) []*planpb.Expr 
 		}
 		if g.dirLower {
 			var best *bound
+			var bestTpls []string
 			for i := range g.bounds {
-				// Use the effective type stored in the group
-				if best == nil || cmpGeneric(g.effDt, g.bounds[i].value, best.value) < 0 ||
-					(cmpGeneric(g.effDt, g.bounds[i].value, best.value) == 0 && g.bounds[i].inclusive && !best.inclusive) {
+				if best == nil {
 					b := g.bounds[i]
 					best = &b
+					if b.template != "" {
+						bestTpls = []string{b.template}
+					}
+					continue
+				}
+				// Use the effective type stored in the group
+				c := cmpGeneric(g.effDt, g.bounds[i].value, best.value)
+				if c < 0 {
+					b := g.bounds[i]
+					best = &b
+					if b.template != "" {
+						bestTpls = []string{b.template}
+					} else {
+						bestTpls = nil
+					}
+				} else if c == 0 {
+					if g.bounds[i].template != "" {
+						bestTpls = append(bestTpls, g.bounds[i].template)
+					}
+					if g.bounds[i].inclusive && !best.inclusive {
+						b := g.bounds[i]
+						best = &b
+					}
 				}
 			}
 			for _, b := range g.bounds {
@@ -367,15 +442,37 @@ func (v *visitor) combineOrRangePredicates(parts []*planpb.Expr) []*planpb.Expr 
 			if best.inclusive {
 				op = planpb.OpType_GreaterEqual
 			}
-			out = append(out, newUnaryRangeExpr(g.col, op, best.value))
+			out = append(out, newUnaryRangeExpr(g.col, op, best.value, bestTpls...))
 		} else {
 			var best *bound
+			var bestTpls []string
 			for i := range g.bounds {
-				// Use the effective type stored in the group
-				if best == nil || cmpGeneric(g.effDt, g.bounds[i].value, best.value) > 0 ||
-					(cmpGeneric(g.effDt, g.bounds[i].value, best.value) == 0 && g.bounds[i].inclusive && !best.inclusive) {
+				if best == nil {
 					b := g.bounds[i]
 					best = &b
+					if b.template != "" {
+						bestTpls = []string{b.template}
+					}
+					continue
+				}
+				// Use the effective type stored in the group
+				c := cmpGeneric(g.effDt, g.bounds[i].value, best.value)
+				if c > 0 {
+					b := g.bounds[i]
+					best = &b
+					if b.template != "" {
+						bestTpls = []string{b.template}
+					} else {
+						bestTpls = nil
+					}
+				} else if c == 0 {
+					if g.bounds[i].template != "" {
+						bestTpls = append(bestTpls, g.bounds[i].template)
+					}
+					if g.bounds[i].inclusive && !best.inclusive {
+						b := g.bounds[i]
+						best = &b
+					}
 				}
 			}
 			for _, b := range g.bounds {
@@ -385,7 +482,7 @@ func (v *visitor) combineOrRangePredicates(parts []*planpb.Expr) []*planpb.Expr 
 			if best.inclusive {
 				op = planpb.OpType_LessEqual
 			}
-			out = append(out, newUnaryRangeExpr(g.col, op, best.value))
+			out = append(out, newUnaryRangeExpr(g.col, op, best.value, bestTpls...))
 		}
 	}
 	for i := range parts {
@@ -419,15 +516,24 @@ func integerRangesAdjacent(dt schemapb.DataType, upper *planpb.GenericValue, upp
 	return u != math.MaxInt64 && u+1 == lower.GetInt64Val()
 }
 
-func newBinaryRangeExpr(col *planpb.ColumnInfo, lowerInclusive bool, upperInclusive bool, lower *planpb.GenericValue, upper *planpb.GenericValue) *planpb.Expr {
+func newBinaryRangeExpr(col *planpb.ColumnInfo, lowerInclusive bool, upperInclusive bool, lower *planpb.GenericValue, upper *planpb.GenericValue, templates ...string) *planpb.Expr {
+	var lowerTpl, upperTpl string
+	if len(templates) > 0 {
+		lowerTpl = templates[0]
+	}
+	if len(templates) > 1 {
+		upperTpl = templates[1]
+	}
 	return &planpb.Expr{
 		Expr: &planpb.Expr_BinaryRangeExpr{
 			BinaryRangeExpr: &planpb.BinaryRangeExpr{
-				ColumnInfo:     col,
-				LowerInclusive: lowerInclusive,
-				UpperInclusive: upperInclusive,
-				LowerValue:     lower,
-				UpperValue:     upper,
+				ColumnInfo:                col,
+				LowerInclusive:            lowerInclusive,
+				UpperInclusive:            upperInclusive,
+				LowerValue:                lower,
+				UpperValue:                upper,
+				LowerTemplateVariableName: lowerTpl,
+				UpperTemplateVariableName: upperTpl,
 			},
 		},
 	}
@@ -548,8 +654,10 @@ func (v *visitor) combineAndBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 	type interval struct {
 		lower         *planpb.GenericValue
 		lowerInc      bool
+		lowerTemplate string
 		upper         *planpb.GenericValue
 		upperInc      bool
+		upperTemplate string
 		exprIndex     int
 		isBinaryRange bool
 	}
@@ -583,8 +691,10 @@ func (v *visitor) combineAndBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 			g.intervals = append(g.intervals, interval{
 				lower:         bre.GetLowerValue(),
 				lowerInc:      bre.GetLowerInclusive(),
+				lowerTemplate: bre.GetLowerTemplateVariableName(),
 				upper:         bre.GetUpperValue(),
 				upperInc:      bre.GetUpperInclusive(),
+				upperTemplate: bre.GetUpperTemplateVariableName(),
 				exprIndex:     idx,
 				isBinaryRange: true,
 			})
@@ -626,6 +736,7 @@ func (v *visitor) combineAndBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 					g.intervals = append(g.intervals, interval{
 						lower:         ure.GetValue(),
 						lowerInc:      inc,
+						lowerTemplate: ure.GetTemplateVariableName(),
 						upper:         nil,
 						upperInc:      false,
 						exprIndex:     idx,
@@ -637,6 +748,7 @@ func (v *visitor) combineAndBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 						lowerInc:      false,
 						upper:         ure.GetValue(),
 						upperInc:      inc,
+						upperTemplate: ure.GetTemplateVariableName(),
 						exprIndex:     idx,
 						isBinaryRange: false,
 					})
@@ -668,19 +780,37 @@ func (v *visitor) combineAndBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 		// Compute intersection: max lower, min upper
 		var finalLower *planpb.GenericValue
 		var finalLowerInc bool
+		var finalLowerTpls []string
 		var finalUpper *planpb.GenericValue
 		var finalUpperInc bool
+		var finalUpperTpls []string
 
 		for _, iv := range g.intervals {
 			if iv.lower != nil {
 				if finalLower == nil {
 					finalLower = iv.lower
 					finalLowerInc = iv.lowerInc
+					if iv.lowerTemplate != "" {
+						finalLowerTpls = []string{iv.lowerTemplate}
+					}
 				} else {
 					c := cmpGeneric(g.effDt, iv.lower, finalLower)
-					if c > 0 || (c == 0 && !iv.lowerInc) {
+					if c > 0 {
 						finalLower = iv.lower
 						finalLowerInc = iv.lowerInc
+						if iv.lowerTemplate != "" {
+							finalLowerTpls = []string{iv.lowerTemplate}
+						} else {
+							finalLowerTpls = nil
+						}
+					} else if c == 0 {
+						if iv.lowerTemplate != "" {
+							finalLowerTpls = append(finalLowerTpls, iv.lowerTemplate)
+						}
+						if !iv.lowerInc {
+							finalLower = iv.lower
+							finalLowerInc = iv.lowerInc
+						}
 					}
 				}
 			}
@@ -688,15 +818,33 @@ func (v *visitor) combineAndBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 				if finalUpper == nil {
 					finalUpper = iv.upper
 					finalUpperInc = iv.upperInc
+					if iv.upperTemplate != "" {
+						finalUpperTpls = []string{iv.upperTemplate}
+					}
 				} else {
 					c := cmpGeneric(g.effDt, iv.upper, finalUpper)
-					if c < 0 || (c == 0 && !iv.upperInc) {
+					if c < 0 {
 						finalUpper = iv.upper
 						finalUpperInc = iv.upperInc
+						if iv.upperTemplate != "" {
+							finalUpperTpls = []string{iv.upperTemplate}
+						} else {
+							finalUpperTpls = nil
+						}
+					} else if c == 0 {
+						if iv.upperTemplate != "" {
+							finalUpperTpls = append(finalUpperTpls, iv.upperTemplate)
+						}
+						if !iv.upperInc {
+							finalUpper = iv.upper
+							finalUpperInc = iv.upperInc
+						}
 					}
 				}
 			}
 		}
+		finalLowerTpl := mergeTemplateNames(finalLowerTpls...)
+		finalUpperTpl := mergeTemplateNames(finalUpperTpls...)
 
 		// Check if intersection is empty
 		if finalLower != nil && finalUpper != nil {
@@ -730,19 +878,19 @@ func (v *visitor) combineAndBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 
 		// Emit the merged interval
 		if finalLower != nil && finalUpper != nil {
-			out = append(out, newBinaryRangeExpr(g.col, finalLowerInc, finalUpperInc, finalLower, finalUpper))
+			out = append(out, newBinaryRangeExpr(g.col, finalLowerInc, finalUpperInc, finalLower, finalUpper, finalLowerTpl, finalUpperTpl))
 		} else if finalLower != nil {
 			op := planpb.OpType_GreaterThan
 			if finalLowerInc {
 				op = planpb.OpType_GreaterEqual
 			}
-			out = append(out, newUnaryRangeExpr(g.col, op, finalLower))
+			out = append(out, newUnaryRangeExpr(g.col, op, finalLower, finalLowerTpl))
 		} else if finalUpper != nil {
 			op := planpb.OpType_LessThan
 			if finalUpperInc {
 				op = planpb.OpType_LessEqual
 			}
-			out = append(out, newUnaryRangeExpr(g.col, op, finalUpper))
+			out = append(out, newUnaryRangeExpr(g.col, op, finalUpper, finalUpperTpl))
 		}
 	}
 
@@ -763,8 +911,10 @@ func (v *visitor) combineOrBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 	type interval struct {
 		lower         *planpb.GenericValue
 		lowerInc      bool
+		lowerTemplate string
 		upper         *planpb.GenericValue
 		upperInc      bool
+		upperTemplate string
 		exprIndex     int
 		isBinaryRange bool
 	}
@@ -798,8 +948,10 @@ func (v *visitor) combineOrBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 			g.intervals = append(g.intervals, interval{
 				lower:         bre.GetLowerValue(),
 				lowerInc:      bre.GetLowerInclusive(),
+				lowerTemplate: bre.GetLowerTemplateVariableName(),
 				upper:         bre.GetUpperValue(),
 				upperInc:      bre.GetUpperInclusive(),
+				upperTemplate: bre.GetUpperTemplateVariableName(),
 				exprIndex:     idx,
 				isBinaryRange: true,
 			})
@@ -841,6 +993,7 @@ func (v *visitor) combineOrBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 					g.intervals = append(g.intervals, interval{
 						lower:         ure.GetValue(),
 						lowerInc:      inc,
+						lowerTemplate: ure.GetTemplateVariableName(),
 						upper:         nil,
 						upperInc:      false,
 						exprIndex:     idx,
@@ -852,6 +1005,7 @@ func (v *visitor) combineOrBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 						lowerInc:      false,
 						upper:         ure.GetValue(),
 						upperInc:      inc,
+						upperTemplate: ure.GetTemplateVariableName(),
 						exprIndex:     idx,
 						isBinaryRange: false,
 					})
@@ -912,28 +1066,47 @@ func (v *visitor) combineOrBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 			c := cmpGeneric(g.effDt, g.intervals[i].lower, g.intervals[j].lower)
 			return c < 0 || (c == 0 && g.intervals[i].lowerInc && !g.intervals[j].lowerInc)
 		})
-		merged := make([]interval, 0, len(g.intervals))
+		type mergedInterval struct {
+			interval
+			lowerTpls []string
+			upperTpls []string
+		}
+		merged := make([]mergedInterval, 0, len(g.intervals))
 		for _, iv := range g.intervals {
+			var lt, ut []string
+			if iv.lowerTemplate != "" {
+				lt = []string{iv.lowerTemplate}
+			}
+			if iv.upperTemplate != "" {
+				ut = []string{iv.upperTemplate}
+			}
 			if len(merged) == 0 {
-				merged = append(merged, iv)
+				merged = append(merged, mergedInterval{interval: iv, lowerTpls: lt, upperTpls: ut})
 				continue
 			}
 			last := &merged[len(merged)-1]
 			c := cmpGeneric(g.effDt, last.upper, iv.lower)
 			if (c < 0 && !integerRangesAdjacent(g.effDt, last.upper, last.upperInc, iv.lower, iv.lowerInc)) ||
 				(c == 0 && !last.upperInc && !iv.lowerInc) {
-				merged = append(merged, iv)
+				merged = append(merged, mergedInterval{interval: iv, lowerTpls: lt, upperTpls: ut})
 				continue
 			}
 			if cmpGeneric(g.effDt, last.lower, iv.lower) == 0 {
 				last.lowerInc = last.lowerInc || iv.lowerInc
+				if iv.lowerTemplate != "" {
+					last.lowerTpls = append(last.lowerTpls, iv.lowerTemplate)
+				}
 			}
 			c = cmpGeneric(g.effDt, last.upper, iv.upper)
 			if c < 0 {
 				last.upper = iv.upper
 				last.upperInc = iv.upperInc
+				last.upperTpls = ut
 			} else if c == 0 {
 				last.upperInc = last.upperInc || iv.upperInc
+				if iv.upperTemplate != "" {
+					last.upperTpls = append(last.upperTpls, iv.upperTemplate)
+				}
 			}
 			last.exprIndex = -1 // This cluster needs a new merged predicate.
 		}
@@ -947,7 +1120,15 @@ func (v *visitor) combineOrBinaryRanges(parts []*planpb.Expr) []*planpb.Expr {
 			if iv.exprIndex >= 0 {
 				out = append(out, parts[iv.exprIndex])
 			} else {
-				out = append(out, newBinaryRangeExpr(g.col, iv.lowerInc, iv.upperInc, iv.lower, iv.upper))
+				out = append(out, newBinaryRangeExpr(
+					g.col,
+					iv.lowerInc,
+					iv.upperInc,
+					iv.lower,
+					iv.upper,
+					mergeTemplateNames(iv.lowerTpls...),
+					mergeTemplateNames(iv.upperTpls...),
+				))
 			}
 		}
 	}

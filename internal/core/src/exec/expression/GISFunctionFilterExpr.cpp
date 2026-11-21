@@ -274,6 +274,7 @@ namespace exec {
 void
 PhyGISFunctionFilterExpr::DetermineExecPath() {
     if (expr_->op_ == proto::plan::GISFunctionFilterExpr_GISOp_STIsValid) {
+        decline_reason_ = DeclineReason::kCapabilityMismatch;
         exec_path_ = ExprExecPath::RawData;
         return;
     }
@@ -284,7 +285,8 @@ PhyGISFunctionFilterExpr::DetermineExecPath() {
 
 void
 PhyGISFunctionFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    WaitPrefetch();
+    auto eval_guard =
+        PrepareLeafEval(context, /*bind_offset_before_wait=*/false);
     AssertInfo(expr_->column_.data_type_ == DataType::GEOMETRY,
                "unsupported data type: {}",
                expr_->column_.data_type_);
@@ -605,6 +607,7 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment(
         const bool index_is_short =
             PromoteShortGISCoarseBitmap(coarse_global_, covered);
         if (index_is_short) {
+            short_index_degraded_ = true;
             static std::atomic<int64_t> last_short_index_log_us{0};
             if (ShouldLogGeometryThrottled(last_short_index_log_us)) {
                 LOG_WARN(
@@ -701,6 +704,7 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment(
                 // cannot materialize WKB for a later batch or a masked row.
                 auto data_array = segment_->bulk_subscript(
                     op_ctx_, field_id_, hit_offsets.data(), hit_offsets.size());
+                RecordRawScan(static_cast<int64_t>(hit_offsets.size()));
                 const auto& geometry_array =
                     data_array->scalars().geometry_data();
                 const auto& valid_data = GetFieldDataRowValidData(*data_array);

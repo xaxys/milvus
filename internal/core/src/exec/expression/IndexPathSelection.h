@@ -160,6 +160,11 @@ enum class DeclineReason {
     kLiteralNotSupported,
     // The query hinted an index that ended up not selected.
     kHintedIndexNotSelected,
+    // The field has entries, but none of them could serve this leaf (coarse
+    // bucket used by the explain payload; the debug log carries the exact gate).
+    kIndexUnusable,
+    // Answered from an in-memory expression/geometry cache with zero storage scan.
+    kCached,
 };
 
 inline const char*
@@ -183,6 +188,10 @@ ToString(DeclineReason reason) {
             return "literal_not_supported";
         case DeclineReason::kHintedIndexNotSelected:
             return "hinted_index_not_selected";
+        case DeclineReason::kIndexUnusable:
+            return "index_unusable";
+        case DeclineReason::kCached:
+            return "cached";
         case DeclineReason::kNone:
         default:
             return "none";
@@ -461,23 +470,32 @@ FamilyPriority(RequiredReader reader,
         case RequiredReader::Predicate:
             if (is_range) {
                 // ordered comparison: sort > hybrid > inverted > bitmap
-                if (is_sort) return 3;
-                if (is_hybrid) return 2;
-                if (is_inverted) return 1;
+                if (is_sort)
+                    return 3;
+                if (is_hybrid)
+                    return 2;
+                if (is_inverted)
+                    return 1;
                 return 0;
             }
             // equality / IN / NotIn: bitmap > inverted > hybrid > sort / marisa
-            if (is_bitmap) return 3;
-            if (is_inverted) return 2;
-            if (is_hybrid) return 1;
+            if (is_bitmap)
+                return 3;
+            if (is_inverted)
+                return 2;
+            if (is_hybrid)
+                return 1;
             return 0;
         case RequiredReader::ValueLookup:
             // reverse lookup (retrieve / output_fields / group-by): the cheapest
             // reader wins; cheap_value_lookup already contributes a point, so only
             // prefer a stable order here.
-            if (is_sort) return 3;
-            if (is_hybrid) return 2;
-            if (is_inverted) return 1;
+            if (is_sort)
+                return 3;
+            if (is_hybrid)
+                return 2;
+            if (is_inverted)
+                return 1;
             return 0;
         case RequiredReader::PatternMatch:
             // Deliberately neutral. The design doc ranks prefix matches differently
@@ -489,8 +507,10 @@ FamilyPriority(RequiredReader reader,
             return 0;
         case RequiredReader::Ngram:
             // the candidate family was asked for explicitly: prefer ngram, then fmindex
-            if (is_ngram) return 3;
-            if (is_fmindex) return 2;
+            if (is_ngram)
+                return 3;
+            if (is_fmindex)
+                return 2;
             return 0;
         case RequiredReader::TextMatch:
             return family == "text" ? 3 : 0;
@@ -512,24 +532,60 @@ DetermineExecPath(const ExprIndexRequirement& req,
 
     const segcore::IndexCapabilityEntry* selected = nullptr;
     int selected_score = -1;
-    // First gate that rejected a candidate, kept for the fallback reason below.
-    DeclineReason first_reject = DeclineReason::kNone;
+    auto decline_specificity = [](DeclineReason r) -> int {
+        switch (r) {
+            case DeclineReason::kNone:
+                return 0;
+            case DeclineReason::kJsonPathNotCovered:
+                return 1;
+            case DeclineReason::kCapabilityMismatch:
+                return 2;
+            case DeclineReason::kValueTypeMismatch:
+                return 3;
+            case DeclineReason::kFlatJsonRequired:
+            case DeclineReason::kCandidatesNeedRefine:
+            case DeclineReason::kOffsetInputWithNgram:
+                return 4;
+            case DeclineReason::kLiteralNotSupported:
+                return 5;
+            case DeclineReason::kHintedIndexNotSelected:
+                return 6;
+            default:
+                return 1;
+        }
+    };
+    // Most specific gate reached across candidates on this field, plus the
+    // most specific gate reached among hinted candidates for strict-hint errors.
+    DeclineReason best_reject = DeclineReason::kNone;
+    DeclineReason hint_reject = DeclineReason::kNone;
     bool saw_field_entry = false;
     size_t selected_root_length = 0;
     int selected_family_rank = -1;
     int selected_hint_rank = -1;
     for (const auto& entry : capabilities.entries()) {
-        const bool needs_refine =
-            index_path_detail::NeedsCandidateRefine(req.reader, entry.caps);
-        const auto reject = [&](DeclineReason reason) {
-            if (first_reject == DeclineReason::kNone) {
-                first_reject = reason;
-            }
-        };
         if (entry.key.field_id != req.field_id) {
             continue;
         }
         saw_field_entry = true;
+        const int hint_rank = index_path_detail::HintRank(req, entry);
+        const bool needs_refine =
+            index_path_detail::NeedsCandidateRefine(req.reader, entry.caps);
+        const auto reject = [&](DeclineReason reason) {
+            if (decline_specificity(reason) >
+                decline_specificity(best_reject)) {
+                best_reject = reason;
+            }
+            if (hint_rank >= 0 && decline_specificity(reason) >
+                                      decline_specificity(hint_reject)) {
+                hint_reject = reason;
+            }
+        };
+        const auto [path_score, root_length] =
+            index_path_detail::PathMatchScore(req, entry);
+        if (path_score < 0) {
+            reject(DeclineReason::kJsonPathNotCovered);
+            continue;
+        }
         if (req.requires_flat_json_index &&
             !index_path_detail::IsFlatJsonIndex(entry)) {
             reject(DeclineReason::kFlatJsonRequired);
@@ -555,12 +611,6 @@ DetermineExecPath(const ExprIndexRequirement& req,
             reject(DeclineReason::kLiteralNotSupported);
             continue;
         }
-        const auto [path_score, root_length] =
-            index_path_detail::PathMatchScore(req, entry);
-        if (path_score < 0) {
-            reject(DeclineReason::kJsonPathNotCovered);
-            continue;
-        }
         // Family preference is the last tie-break: path specificity, exactness and
         // lookup cost keep their weights above it, so it only decides between two
         // indexes that can both serve this operator equally well.
@@ -576,11 +626,9 @@ DetermineExecPath(const ExprIndexRequirement& req,
         // A hint outranks the score: the query asked for this index by name, so it is
         // used as long as it is eligible at all. Among hinted candidates the earliest
         // wins, and the score only orders the non-hinted ones.
-        const int hint_rank = index_path_detail::HintRank(req, entry);
-        const bool better_tie_break =
-            root_length > selected_root_length ||
-            (root_length == selected_root_length &&
-             family_rank > selected_family_rank);
+        const bool better_tie_break = root_length > selected_root_length ||
+                                      (root_length == selected_root_length &&
+                                       family_rank > selected_family_rank);
         const bool hinted_now = hint_rank >= 0;
         const bool hinted_prev = selected_hint_rank >= 0;
         const bool take = [&]() {
@@ -616,23 +664,25 @@ DetermineExecPath(const ExprIndexRequirement& req,
         (selected == nullptr ? saw_field_entry : selected_hint_rank < 0);
     if (selected == nullptr || strict_violated) {
         const DeclineReason reason =
-            saw_field_entry ? first_reject : DeclineReason::kNoIndexOnField;
+            !saw_field_entry
+                ? DeclineReason::kNoIndexOnField
+                : (strict_violated && hint_reject != DeclineReason::kNone
+                       ? hint_reject
+                       : best_reject);
         if (strict_violated) {
             // The query named an index of this field and asked for strict hints: say
             // so instead of silently selecting something else.
             ThrowInfo(ErrorCode::InvalidParameter,
-                      fmt::format(
-                          "index hint cannot be used for field {}: {}",
-                          req.field_id.get(),
-                          ToString(reason)));
+                      fmt::format("index hint cannot be used for field {}: {}",
+                                  req.field_id.get(),
+                                  ToString(reason)));
         }
         // One line per expression node per segment, at DEBUG: the FeatureBit
         // accounting already counts the fallback, this only explains it.
-        LOG_DEBUG(
-            "scalar index fallback, fieldID:{}, reader:{}, reason:{}",
-            req.field_id.get(),
-            static_cast<int>(req.reader),
-            ToString(reason));
+        LOG_DEBUG("scalar index fallback, fieldID:{}, reader:{}, reason:{}",
+                  req.field_id.get(),
+                  static_cast<int>(req.reader),
+                  ToString(reason));
         return {.path = ExprExecPath::RawData, .fallback_reason = reason};
     }
 

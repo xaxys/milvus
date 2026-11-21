@@ -143,24 +143,52 @@ func sortGenericValues(values []*planpb.GenericValue) []*planpb.GenericValue {
 	return values
 }
 
-func newTermExpr(col *planpb.ColumnInfo, values []*planpb.GenericValue) *planpb.Expr {
+// mergeTemplateNames combines template variable names from rewritten predicates
+// so server-side log redaction (RedactPlanForLog) preserves template markers.
+func mergeTemplateNames(names ...string) string {
+	var merged []string
+	var seen map[string]struct{}
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		for _, part := range strings.Split(name, ",") {
+			if part == "" {
+				continue
+			}
+			if seen == nil {
+				seen = make(map[string]struct{}, len(names))
+			}
+			if _, ok := seen[part]; ok {
+				continue
+			}
+			seen[part] = struct{}{}
+			merged = append(merged, part)
+		}
+	}
+	return strings.Join(merged, ",")
+}
+
+func newTermExpr(col *planpb.ColumnInfo, values []*planpb.GenericValue, templateNames ...string) *planpb.Expr {
 	return &planpb.Expr{
 		Expr: &planpb.Expr_TermExpr{
 			TermExpr: &planpb.TermExpr{
-				ColumnInfo: col,
-				Values:     values,
+				ColumnInfo:           col,
+				Values:               values,
+				TemplateVariableName: mergeTemplateNames(templateNames...),
 			},
 		},
 	}
 }
 
-func newUnaryRangeExpr(col *planpb.ColumnInfo, op planpb.OpType, val *planpb.GenericValue) *planpb.Expr {
+func newUnaryRangeExpr(col *planpb.ColumnInfo, op planpb.OpType, val *planpb.GenericValue, templateNames ...string) *planpb.Expr {
 	return &planpb.Expr{
 		Expr: &planpb.Expr_UnaryRangeExpr{
 			UnaryRangeExpr: &planpb.UnaryRangeExpr{
-				ColumnInfo: col,
-				Op:         op,
-				Value:      val,
+				ColumnInfo:           col,
+				Op:                   op,
+				Value:                val,
+				TemplateVariableName: mergeTemplateNames(templateNames...),
 			},
 		},
 	}

@@ -218,7 +218,7 @@ class PhyMembershipFilterExpr : public SegmentExpr {
         if (SelectAndCreateIndexReader(req) && IndexSupportsReverseLookup()) {
             return;
         }
-        ClearSelectedIndex();
+        ClearSelectedIndex(DeclineReason::kCapabilityMismatch);
         // No raw data and no usable index: keep RawData. ExecVisitorImpl
         // detects this (num_data_chunk_ == 0, not UseIndexCursor()) and throws
         // a clear SegcoreError instead of asserting.

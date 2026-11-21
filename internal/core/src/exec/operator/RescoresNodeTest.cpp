@@ -25,13 +25,18 @@
 #include "common/Schema.h"
 #include "common/Types.h"
 #include "common/protobuf_utils.h"
+#include "expr/ITypeExpr.h"
 #include "filemanager/InputStream.h"
 #include "gtest/gtest.h"
 #include "knowhere/comp/index_param.h"
 #include "pb/common.pb.h"
+#include "pb/internal.pb.h"
 #include "pb/plan.pb.h"
+#include "plan/PlanNode.h"
 #include "query/Plan.h"
 #include "query/PlanNode.h"
+#include "rescores/Scorer.h"
+#include "segcore/SegmentGrowing.h"
 #include "segcore/SegmentSealed.h"
 #include "segcore/Types.h"
 #include "segcore/storagev1translator/ChunkTranslator.h"
@@ -198,4 +203,126 @@ TEST(Rescorer, Normal) {
                        search_result_same_seed->distances_[i]);
         }
     }
+}
+
+TEST(Rescorer, ExplainOperatorPipelineAndScorerFilterIsolation) {
+    int dim = 16;
+    auto schema = std::make_shared<Schema>();
+    auto vec_fid = schema->AddDebugField(
+        "fakevec", DataType::VECTOR_FLOAT, dim, knowhere::metric::L2);
+    schema->AddDebugField("int64", DataType::INT64);
+    auto str_fid = schema->AddDebugField("string", DataType::VARCHAR);
+    schema->set_primary_field_id(str_fid);
+    size_t N = 40;
+
+    auto raw_data = DataGen(schema, N, 42, 0, 8, 10, false, false);
+    auto segment = CreateSealedWithFieldDataLoaded(schema, raw_data);
+
+    auto vector_data = raw_data.get_col<float>(vec_fid);
+    auto load_index_info = milvus::test::consumer::MakeLoadIndexInfo(
+        milvus::test::consumer::BuildVectorReader<float>(
+            DataType::VECTOR_FLOAT,
+            knowhere::IndexEnum::INDEX_HNSW,
+            knowhere::metric::L2,
+            dim,
+            N,
+            vector_data.data()),
+        DataType::VECTOR_FLOAT,
+        vec_fid.get());
+    segment->LoadIndex(load_index_info);
+
+    auto attrs_of = [](const proto::internal::ExecutionExplain& n) {
+        std::map<std::string, std::string> out;
+        for (const auto& [k, v] : n.attributes()) {
+            out[k] = v;
+        }
+        return out;
+    };
+    auto ctrs_of = [](const proto::internal::ExecutionExplain& n) {
+        std::map<std::string, int64_t> out;
+        for (const auto& [k, v] : n.counters()) {
+            out[k] = v;
+        }
+        return out;
+    };
+
+    ScopedSchemaHandle handle(*schema);
+    // Build an iterative-filter search plan with a boost filter scorer.
+    auto plan_bytes = handle.ParseSearch("int64 >= 0",
+                                         "fakevec",
+                                         5,
+                                         "L2",
+                                         R"({"ef": 32})",
+                                         /*round_decimal=*/-1,
+                                         /*hints=*/"iterative_filter");
+    proto::plan::PlanNode plan_proto;
+    ParsePlanNodeProto(plan_proto, plan_bytes.data(), plan_bytes.size());
+    plan_proto.mutable_plan_options()->set_enable_explain(true);
+    plan_proto.mutable_vector_anns()->mutable_predicates()->set_expr_id(88001);
+
+    auto plan = CreateSearchPlanFromPlanNode(schema, plan_proto);
+    auto int64_fid = schema->get_field_id(FieldName("int64"));
+    proto::plan::GenericValue boost_threshold;
+    boost_threshold.set_int64_val(10);
+    auto scorer_filter = std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(int64_fid, DataType::INT64),
+        proto::plan::OpType::GreaterEqual,
+        boost_threshold,
+        std::vector<proto::plan::GenericValue>());
+    scorer_filter->SetExprId(88002);
+    proto::plan::ScoreOption score_opt;
+    score_opt.set_boost_mode(proto::plan::BoostModeMultiply);
+    score_opt.set_function_mode(proto::plan::FunctionModeSum);
+    std::vector<std::shared_ptr<rescores::Scorer>> scorers{
+        std::make_shared<rescores::WeightScorer>(scorer_filter, 2.0f),
+    };
+    plan->plan_node_->plannodes_ = std::make_shared<plan::RescoresNode>(
+        "rescore",
+        scorers,
+        score_opt,
+        std::vector<plan::PlanNodePtr>{plan->plan_node_->plannodes_});
+
+    auto ph_raw = CreatePlaceholderGroup(1, dim, 1024);
+    auto ph = ParsePlaceholderGroup(plan.get(), ph_raw.SerializeAsString());
+
+    auto res = segment->Search(plan.get(), ph.get(), MAX_TIMESTAMP);
+    ASSERT_NE(res, nullptr);
+    ASSERT_FALSE(res->explain_blob_.empty());
+
+    proto::internal::ExecutionExplain seg_node;
+    ASSERT_TRUE(seg_node.ParseFromString(res->explain_blob_));
+    // Expected pipeline: mvcc -> vector_search -> iterative_filter -> rescore
+    ASSERT_EQ(seg_node.children_size(), 4);
+    EXPECT_EQ(attrs_of(seg_node.children(0)).at("name"), "mvcc");
+    EXPECT_EQ(attrs_of(seg_node.children(1)).at("name"), "vector_search");
+    EXPECT_EQ(attrs_of(seg_node.children(2)).at("name"), "iterative_filter");
+    EXPECT_EQ(attrs_of(seg_node.children(3)).at("name"), "rescore");
+
+    const auto vs_ctrs = ctrs_of(seg_node.children(1));
+    const auto if_ctrs = ctrs_of(seg_node.children(2));
+    const auto rs_ctrs = ctrs_of(seg_node.children(3));
+    EXPECT_EQ(vs_ctrs.at("rows_in"), static_cast<int64_t>(N));
+    EXPECT_GT(vs_ctrs.at("rows_out"), 0);
+    // CountingVectorIterator transfers exact yielded candidates to iterative_filter.
+    EXPECT_EQ(if_ctrs.at("rows_in"), vs_ctrs.at("rows_out"));
+    EXPECT_EQ(if_ctrs.at("rows_out"), 5);
+    EXPECT_EQ(rs_ctrs.at("rows_in"), 5);
+    EXPECT_EQ(rs_ctrs.at("rows_out"), 5);
+    // Only iterative_filter's user predicate appears as a filter_group; the
+    // internal boost-scorer filter expression is completely isolated.
+    EXPECT_EQ(seg_node.children(2).children_size(), 1);
+    EXPECT_EQ(seg_node.children(3).children_size(), 0);
+
+    // Empty-segment Search (active_count = 0 on an empty growing segment) still
+    // registers the full operator pipeline skeleton with 0 -> 0 counters.
+    auto empty_segment = CreateGrowingSegment(schema, empty_index_meta);
+    auto empty_res = empty_segment->Search(plan.get(), ph.get(), MAX_TIMESTAMP);
+    ASSERT_NE(empty_res, nullptr);
+    proto::internal::ExecutionExplain empty_node;
+    ASSERT_TRUE(empty_node.ParseFromString(empty_res->explain_blob_));
+    EXPECT_EQ(ctrs_of(empty_node).at("rows_total"), 0);
+    ASSERT_EQ(empty_node.children_size(), 4);
+    EXPECT_EQ(attrs_of(empty_node.children(0)).at("name"), "mvcc");
+    EXPECT_EQ(ctrs_of(empty_node.children(1)).at("rows_in"), 0);
+    EXPECT_EQ(ctrs_of(empty_node.children(1)).at("rows_out"), 0);
 }

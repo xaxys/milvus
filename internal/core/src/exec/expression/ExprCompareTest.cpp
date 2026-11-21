@@ -42,11 +42,13 @@
 #include "common/Vector.h"
 #include "common/protobuf_utils.h"
 #include "exec/expression/EvalCtx.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/expression/function/FunctionFactory.h"
 #include "expr/ITypeExpr.h"
 #include "gtest/gtest.h"
 #include "index/Meta.h"
 #include "knowhere/comp/index_param.h"
+#include "pb/internal.pb.h"
 #include "pb/plan.pb.h"
 #include "plan/PlanNode.h"
 #include "query/ExecPlanNodeVisitor.h"
@@ -1580,5 +1582,375 @@ TEST_P(ExprTest, TestCompareNullableLeftWithOffsetInputSealed) {
         auto ref = valid_data_col[i] && nullable_col[i] >= pk_col[i];
         ASSERT_EQ(view[i], ref) << "@" << i;
         ASSERT_EQ(valid_view[i], valid_data_col[i]) << "@" << i;
+    }
+}
+
+TEST(CompareExplainTest, ExplainRecordsValueReaderAndRawScanCounts) {
+    auto schema = std::make_shared<Schema>();
+    auto i32_fid = schema->AddDebugField("age32", DataType::INT32);
+    auto i64_fid = schema->AddDebugField("age64", DataType::INT64);
+    schema->set_primary_field_id(i64_fid);
+
+    constexpr int N = 64;
+    auto raw_data = DataGen(schema, N);
+    auto age32_col = raw_data.get_col<int32_t>(i32_fid);
+    auto age64_col = raw_data.get_col<int64_t>(i64_fid);
+    int64_t expected_matches = 0;
+    for (int i = 0; i < N; ++i) {
+        age32_col[i] = (i % 4 == 0) ? 10 : 100;
+        age64_col[i] = 50;
+        if (age32_col[i] < age64_col[i]) {
+            ++expected_matches;
+        }
+    }
+
+    auto cmp_expr = std::make_shared<expr::CompareExpr>(
+        i32_fid, i64_fid, DataType::INT32, DataType::INT64, OpType::LessThan);
+    cmp_expr->SetExprId(99001);
+    auto plan =
+        std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID, cmp_expr);
+
+    auto attrs_of = [](const proto::internal::ExecutionExplain& n) {
+        std::map<std::string, std::string> out;
+        for (const auto& [k, v] : n.attributes()) {
+            out[k] = v;
+        }
+        return out;
+    };
+    auto counters_of = [](const proto::internal::ExecutionExplain& n) {
+        std::map<std::string, int64_t> out;
+        for (const auto& [k, v] : n.counters()) {
+            out[k] = v;
+        }
+        return out;
+    };
+
+    // 1. Both columns served by STL_SORT value readers: both operand groups
+    // recorded, idx_scan=N, raw_scan=0, segment counters count rows once.
+    {
+        auto seg = CreateSealedSegment(schema);
+        test::expr_index::InstallIndex(
+            *seg,
+            i32_fid,
+            DataType::INT32,
+            test::consumer::BuildScalarReader<int32_t>(i32_fid,
+                                                       DataType::INT32,
+                                                       index::ASCENDING_SORT,
+                                                       N,
+                                                       age32_col.data()));
+        test::expr_index::InstallIndex(
+            *seg,
+            i64_fid,
+            DataType::INT64,
+            test::consumer::BuildScalarReader<int64_t>(i64_fid,
+                                                       DataType::INT64,
+                                                       index::ASCENDING_SORT,
+                                                       N,
+                                                       age64_col.data()));
+
+        auto explain = std::make_shared<exec::ExecutionExplainRecorder>(N);
+        auto res = milvus::test::gen_filter_res(
+            plan.get(), seg.get(), N, MAX_TIMESTAMP, nullptr, explain);
+        ASSERT_NE(res, nullptr);
+
+        proto::internal::ExecutionExplain node;
+        ASSERT_TRUE(node.ParseFromString(explain->Finish()));
+        ASSERT_EQ(node.children_size(), 2);
+        const auto seg_ctrs = counters_of(node);
+        EXPECT_EQ(seg_ctrs.at("rows_in"), N);
+        EXPECT_EQ(seg_ctrs.at("idx_scan"), N);
+        EXPECT_EQ(seg_ctrs.at("raw_scan"), 0);
+        EXPECT_EQ(seg_ctrs.at("rows_out"), expected_matches);
+
+        std::map<std::string, int> by_field;
+        int secondary_count = 0;
+        for (int i = 0; i < node.children_size(); ++i) {
+            const auto attrs = attrs_of(node.children(i));
+            const auto ctrs = counters_of(node.children(i));
+            by_field[attrs.at("field_id")] = i;
+            if (attrs.count("secondary_operand") > 0 &&
+                attrs.at("secondary_operand") == "true") {
+                ++secondary_count;
+            }
+            EXPECT_EQ(attrs.at("expr_id"), "99001");
+            EXPECT_EQ(attrs.count("index_id"), 1u);
+            EXPECT_EQ(attrs.at("family"), index::families::kSort);
+            EXPECT_EQ(ctrs.at("rows_in"), N);
+            EXPECT_EQ(ctrs.at("idx_scan"), N);
+            EXPECT_EQ(ctrs.at("raw_scan"), 0);
+            EXPECT_EQ(ctrs.at("rows_out"), expected_matches);
+        }
+        EXPECT_EQ(by_field.count(std::to_string(i32_fid.get())), 1u);
+        EXPECT_EQ(by_field.count(std::to_string(i64_fid.get())), 1u);
+        EXPECT_EQ(secondary_count, 1);
+    }
+
+    // 2. Both columns raw with no index: both operand groups report
+    // decline_reason=no_index_on_field without double-counting segment rows.
+    {
+        test::expr_index::RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        auto i32_field =
+            std::make_shared<FieldData<int32_t>>(DataType::INT32, false);
+        i32_field->FillFieldData(age32_col.data(), N);
+        auto i64_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        i64_field->FillFieldData(age64_col.data(), N);
+        seg->LoadFieldData(files.Prepare(i32_fid, {i32_field}));
+        seg->LoadFieldData(files.Prepare(i64_fid, {i64_field}));
+
+        auto explain = std::make_shared<exec::ExecutionExplainRecorder>(N);
+        auto res = milvus::test::gen_filter_res(
+            plan.get(), seg.get(), N, MAX_TIMESTAMP, nullptr, explain);
+        ASSERT_NE(res, nullptr);
+
+        proto::internal::ExecutionExplain node;
+        ASSERT_TRUE(node.ParseFromString(explain->Finish()));
+        ASSERT_EQ(node.children_size(), 2);
+        const auto seg_ctrs = counters_of(node);
+        EXPECT_EQ(seg_ctrs.at("rows_in"), N);
+        EXPECT_EQ(seg_ctrs.at("idx_scan"), 0);
+        EXPECT_EQ(seg_ctrs.at("raw_scan"), N);
+        EXPECT_EQ(seg_ctrs.at("rows_out"), expected_matches);
+
+        for (int i = 0; i < node.children_size(); ++i) {
+            const auto attrs = attrs_of(node.children(i));
+            const auto ctrs = counters_of(node.children(i));
+            EXPECT_EQ(attrs.at("expr_id"), "99001");
+            EXPECT_EQ(attrs.count("index_id"), 0u);
+            EXPECT_EQ(attrs.at("decline_reason"), "no_index_on_field");
+            EXPECT_EQ(ctrs.at("rows_in"), N);
+            EXPECT_EQ(ctrs.at("idx_scan"), 0);
+            EXPECT_EQ(ctrs.at("raw_scan"), N);
+            EXPECT_EQ(ctrs.at("rows_out"), expected_matches);
+        }
+    }
+
+    // 3. Inverted index (no IScalarValueReader) on s1 + no index on s2:
+    // s1 reports capability_mismatch and s2 reports no_index_on_field.
+    {
+        auto str_schema = std::make_shared<Schema>();
+        auto s1_fid = str_schema->AddDebugField("s1", DataType::VARCHAR);
+        auto s2_fid = str_schema->AddDebugField("s2", DataType::VARCHAR);
+        const std::vector<std::string> s1_vals{"a", "z", "b", "y"};
+        const std::vector<std::string> s2_vals{"m", "m", "m", "m"};
+        auto s1_field = test::expr_index::StringField(s1_vals);
+        auto s2_field = test::expr_index::StringField(s2_vals);
+
+        test::expr_index::RawFieldFiles files;
+        auto seg = CreateSealedSegment(str_schema);
+        seg->LoadFieldData(files.Prepare(s1_fid, {s1_field}));
+        seg->LoadFieldData(files.Prepare(s2_fid, {s2_field}));
+        test::expr_index::InstallIndex(
+            *seg,
+            s1_fid,
+            DataType::VARCHAR,
+            test::expr_index::BuildIndex(s1_fid,
+                                         DataType::VARCHAR,
+                                         index::INVERTED_INDEX_TYPE,
+                                         {s1_field}));
+
+        auto str_cmp = std::make_shared<expr::CompareExpr>(s1_fid,
+                                                           s2_fid,
+                                                           DataType::VARCHAR,
+                                                           DataType::VARCHAR,
+                                                           OpType::LessThan);
+        str_cmp->SetExprId(99002);
+        auto str_plan = std::make_shared<plan::FilterBitsNode>(
+            DEFAULT_PLANNODE_ID, str_cmp);
+
+        auto explain_unusable =
+            std::make_shared<exec::ExecutionExplainRecorder>(4);
+        auto res = milvus::test::gen_filter_res(str_plan.get(),
+                                                seg.get(),
+                                                4,
+                                                MAX_TIMESTAMP,
+                                                nullptr,
+                                                explain_unusable);
+        ASSERT_NE(res, nullptr);
+
+        proto::internal::ExecutionExplain unusable_node;
+        ASSERT_TRUE(unusable_node.ParseFromString(explain_unusable->Finish()));
+        ASSERT_EQ(unusable_node.children_size(), 2);
+        const auto seg_ctrs = counters_of(unusable_node);
+        EXPECT_EQ(seg_ctrs.at("rows_in"), 4);
+        EXPECT_EQ(seg_ctrs.at("idx_scan"), 0);
+        EXPECT_EQ(seg_ctrs.at("raw_scan"), 4);
+        EXPECT_EQ(seg_ctrs.at("rows_out"), 2);
+
+        std::map<std::string, std::map<std::string, std::string>> by_field;
+        for (int i = 0; i < unusable_node.children_size(); ++i) {
+            auto u_attrs = attrs_of(unusable_node.children(i));
+            const auto u_ctrs = counters_of(unusable_node.children(i));
+            EXPECT_EQ(u_attrs.at("expr_id"), "99002");
+            EXPECT_EQ(u_attrs.count("index_id"), 0u);
+            EXPECT_EQ(u_ctrs.at("rows_in"), 4);
+            EXPECT_EQ(u_ctrs.at("idx_scan"), 0);
+            EXPECT_EQ(u_ctrs.at("raw_scan"), 4);
+            EXPECT_EQ(u_ctrs.at("rows_out"), 2);
+            by_field[u_attrs.at("field_id")] = std::move(u_attrs);
+        }
+        EXPECT_EQ(
+            by_field.at(std::to_string(s1_fid.get())).at("decline_reason"),
+            "capability_mismatch");
+        EXPECT_EQ(
+            by_field.at(std::to_string(s2_fid.get())).at("decline_reason"),
+            "no_index_on_field");
+    }
+
+    // 4. One STL_SORT value reader (raw_scan=0) + one raw column (raw_scan=N).
+    {
+        test::expr_index::RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        test::expr_index::InstallIndex(
+            *seg,
+            i32_fid,
+            DataType::INT32,
+            test::consumer::BuildScalarReader<int32_t>(i32_fid,
+                                                       DataType::INT32,
+                                                       index::ASCENDING_SORT,
+                                                       N,
+                                                       age32_col.data()));
+        auto i64_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        i64_field->FillFieldData(age64_col.data(), N);
+        seg->LoadFieldData(files.Prepare(i64_fid, {i64_field}));
+
+        auto explain = std::make_shared<exec::ExecutionExplainRecorder>(N);
+        auto res = milvus::test::gen_filter_res(
+            plan.get(), seg.get(), N, MAX_TIMESTAMP, nullptr, explain);
+        ASSERT_NE(res, nullptr);
+
+        proto::internal::ExecutionExplain node;
+        ASSERT_TRUE(node.ParseFromString(explain->Finish()));
+        ASSERT_EQ(node.children_size(), 2);
+        const auto seg_ctrs = counters_of(node);
+        EXPECT_EQ(seg_ctrs.at("rows_in"), N);
+        EXPECT_EQ(seg_ctrs.at("idx_scan"), N);
+        EXPECT_EQ(seg_ctrs.at("raw_scan"), N);
+        EXPECT_EQ(seg_ctrs.at("rows_out"), expected_matches);
+
+        for (int i = 0; i < node.children_size(); ++i) {
+            const auto attrs = attrs_of(node.children(i));
+            const auto ctrs = counters_of(node.children(i));
+            if (attrs.at("field_id") == std::to_string(i32_fid.get())) {
+                EXPECT_EQ(attrs.count("index_id"), 1u);
+                EXPECT_EQ(attrs.at("family"), index::families::kSort);
+                EXPECT_EQ(ctrs.at("idx_scan"), N);
+                EXPECT_EQ(ctrs.at("raw_scan"), 0);
+            } else {
+                EXPECT_EQ(attrs.at("field_id"), std::to_string(i64_fid.get()));
+                EXPECT_EQ(attrs.count("index_id"), 0u);
+                EXPECT_EQ(attrs.at("decline_reason"), "no_index_on_field");
+                EXPECT_EQ(ctrs.at("idx_scan"), 0);
+                EXPECT_EQ(ctrs.at("raw_scan"), N);
+            }
+            EXPECT_EQ(ctrs.at("rows_in"), N);
+            EXPECT_EQ(ctrs.at("rows_out"), expected_matches);
+        }
+    }
+
+    // 5. Same-column compare (i32 == i32) emits a single group with raw_scan=N.
+    {
+        test::expr_index::RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        auto i32_field =
+            std::make_shared<FieldData<int32_t>>(DataType::INT32, false);
+        i32_field->FillFieldData(age32_col.data(), N);
+        seg->LoadFieldData(files.Prepare(i32_fid, {i32_field}));
+
+        auto self_cmp = std::make_shared<expr::CompareExpr>(
+            i32_fid, i32_fid, DataType::INT32, DataType::INT32, OpType::Equal);
+        self_cmp->SetExprId(99003);
+        auto self_plan = std::make_shared<plan::FilterBitsNode>(
+            DEFAULT_PLANNODE_ID, self_cmp);
+
+        auto explain = std::make_shared<exec::ExecutionExplainRecorder>(N);
+        auto res = milvus::test::gen_filter_res(
+            self_plan.get(), seg.get(), N, MAX_TIMESTAMP, nullptr, explain);
+        ASSERT_NE(res, nullptr);
+
+        proto::internal::ExecutionExplain node;
+        ASSERT_TRUE(node.ParseFromString(explain->Finish()));
+        ASSERT_EQ(node.children_size(), 1);
+        const auto ctrs = counters_of(node.children(0));
+        EXPECT_EQ(ctrs.at("rows_in"), N);
+        EXPECT_EQ(ctrs.at("raw_scan"), N);
+        EXPECT_EQ(ctrs.at("rows_out"), N);
+    }
+
+    // 6. CompareExpr under upstream AND mask reports active rows_in == raw_scan,
+    // and partial-coverage operand scan preserves effective_used_index=true
+    // whenever operand_idx > 0 even if un-indexed tail rows exceed idx_scan.
+    {
+        test::expr_index::RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        auto i32_field =
+            std::make_shared<FieldData<int32_t>>(DataType::INT32, false);
+        i32_field->FillFieldData(age32_col.data(), N);
+        auto i64_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        i64_field->FillFieldData(age64_col.data(), N);
+        seg->LoadFieldData(files.Prepare(i32_fid, {i32_field}));
+        seg->LoadFieldData(files.Prepare(i64_fid, {i64_field}));
+
+        proto::plan::GenericValue val10;
+        val10.set_int64_val(10);
+        auto pre_eq = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(i32_fid, DataType::INT32),
+            OpType::Equal,
+            val10,
+            std::vector<proto::plan::GenericValue>());
+        pre_eq->SetExprId(99004);
+        auto masked_cmp = std::make_shared<expr::CompareExpr>(i32_fid,
+                                                              i64_fid,
+                                                              DataType::INT32,
+                                                              DataType::INT64,
+                                                              OpType::LessThan);
+        masked_cmp->SetExprId(99005);
+        auto and_expr = std::make_shared<expr::LogicalBinaryExpr>(
+            expr::LogicalBinaryExpr::OpType::And, pre_eq, masked_cmp);
+        auto and_plan = std::make_shared<plan::FilterBitsNode>(
+            DEFAULT_PLANNODE_ID, and_expr);
+
+        auto explain = std::make_shared<exec::ExecutionExplainRecorder>(N);
+        auto res = milvus::test::gen_filter_res(
+            and_plan.get(), seg.get(), N, MAX_TIMESTAMP, nullptr, explain);
+        ASSERT_NE(res, nullptr);
+
+        proto::internal::ExecutionExplain node;
+        ASSERT_TRUE(node.ParseFromString(explain->Finish()));
+        int cmp_groups = 0;
+        for (int i = 0; i < node.children_size(); ++i) {
+            const auto attrs = attrs_of(node.children(i));
+            if (attrs.at("expr_id") != "99005") {
+                continue;
+            }
+            ++cmp_groups;
+            const auto ctrs = counters_of(node.children(i));
+            EXPECT_EQ(ctrs.at("rows_in"), expected_matches);
+            EXPECT_EQ(ctrs.at("raw_scan"), expected_matches);
+            EXPECT_EQ(ctrs.at("idx_scan"), 0);
+            EXPECT_EQ(ctrs.at("rows_out"), expected_matches);
+        }
+        EXPECT_EQ(cmp_groups, 2);
+
+        exec::ExecutionExplainRecorder partial_rec(200);
+        partial_rec.RecordDecision(
+            i32_fid, 99006, true, 7001, "sort", false, "", "");
+        partial_rec.AddRows(99006, 60, 15);
+        partial_rec.AddOperandScan(
+            i32_fid, 99006, true, 7001, "sort", false, "", "", 10, 50);
+        partial_rec.AddRawScan(99006, 50);
+        proto::internal::ExecutionExplain partial_node;
+        ASSERT_TRUE(partial_node.ParseFromString(partial_rec.Finish()));
+        ASSERT_EQ(partial_node.children_size(), 1);
+        const auto p_attrs = attrs_of(partial_node.children(0));
+        const auto p_ctrs = counters_of(partial_node.children(0));
+        EXPECT_EQ(p_attrs.at("index_id"), "7001");
+        EXPECT_EQ(p_attrs.count("decline_reason"), 0u);
+        EXPECT_EQ(p_ctrs.at("rows_in"), 60);
+        EXPECT_EQ(p_ctrs.at("idx_scan"), 10);
+        EXPECT_EQ(p_ctrs.at("raw_scan"), 50);
     }
 }

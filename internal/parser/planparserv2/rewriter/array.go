@@ -69,9 +69,10 @@ func normalizeEmptyArrayUnaryRange(original *planpb.Expr, unaryRange *planpb.Una
 	return &planpb.Expr{
 		Expr: &planpb.Expr_BinaryArithOpEvalRangeExpr{
 			BinaryArithOpEvalRangeExpr: &planpb.BinaryArithOpEvalRangeExpr{
-				ColumnInfo: columnInfo,
-				ArithOp:    planpb.ArithOpType_ArrayLength,
-				Op:         unaryRange.GetOp(),
+				ColumnInfo:                columnInfo,
+				ArithOp:                   planpb.ArithOpType_ArrayLength,
+				Op:                        unaryRange.GetOp(),
+				ValueTemplateVariableName: unaryRange.GetTemplateVariableName(),
 				Value: &planpb.GenericValue{
 					Val: &planpb.GenericValue_Int64Val{Int64Val: 0},
 				},

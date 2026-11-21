@@ -258,5 +258,10 @@ class LocalPlanner {
          uint32_t max_drivers);
 };
 
+void
+RegisterPlanOperators(const std::shared_ptr<const plan::PlanNode>& root,
+                      bool element_level_search,
+                      ExecutionExplainRecorder* explain);
+
 }  // namespace exec
 }  // namespace milvus
