@@ -589,6 +589,19 @@ func TestFinalizeSummarySanitizesFieldPlaceholdersAndUnknownDeclineReason(t *tes
 	assert.Contains(t, encoded, `"reason":"unknown"`)
 }
 
+func withOpTimeUs(node *internalpb.ExecutionExplain, timeUs int64) *internalpb.ExecutionExplain {
+	node.Counters["time_us"] = timeUs
+	return node
+}
+
+func withLeafTimings(node *internalpb.ExecutionExplain, evalUs, prefetchUs int64) *internalpb.ExecutionExplain {
+	node.Counters["eval_us"] = evalUs
+	if prefetchUs > 0 {
+		node.Counters["prefetch_us"] = prefetchUs
+	}
+	return node
+}
+
 func TestCachedReasonExcludesRawScanSegments(t *testing.T) {
 	leaves := map[int64]LeafInfo{
 		1: {Condition: "price > 10", Type: "range", FieldID: 103, Field: "price"},
@@ -615,25 +628,26 @@ func TestSkippedConditionAcrossShortCircuitedAndEmptySegmentHasNoSubBuckets(t *t
 		2: {Condition: "b == 2", Type: "equal", FieldID: 102, Field: "b"},
 	}
 	summary := Summarize([]*internalpb.ExecutionExplain{
-		segmentNode("s1", 100, operatorNode(0, "filter", "", false, 100, 0,
-			rawGroup(101, 1, "no_index_on_field", rawCounters(100, 0)),
+		segmentNode("s1", 100, withOpTimeUs(operatorNode(0, "filter", "", false, 100, 0,
+			withLeafTimings(rawGroup(101, 1, "no_index_on_field", rawCounters(100, 0)), 300, 0),
 			withSkipped(rawGroup(102, 2, "no_index_on_field", map[string]int64{
 				"rows_in": 0, "idx_scan": 0, "raw_scan": 0, "rows_out": 0,
 			})),
-		)),
-		segmentNode("s2", 0, operatorNode(0, "filter", "", false, 0, 0,
-			rawGroup(101, 1, "no_index_on_field", map[string]int64{
+		), 350)),
+		segmentNode("s2", 0, withOpTimeUs(operatorNode(0, "filter", "", false, 0, 0,
+			withLeafTimings(rawGroup(101, 1, "no_index_on_field", map[string]int64{
 				"rows_in": 0, "idx_scan": 0, "raw_scan": 0, "rows_out": 0,
-			}),
-			rawGroup(102, 2, "no_index_on_field", map[string]int64{
+			}), 0, 0),
+			withLeafTimings(rawGroup(102, 2, "no_index_on_field", map[string]int64{
 				"rows_in": 0, "idx_scan": 0, "raw_scan": 0, "rows_out": 0,
-			}),
-		)),
+			}), 0, 0),
+		), 0)),
 	}, leaves)
 
 	require.Len(t, summary.Operators[0].Conditions, 2)
 	cond2 := summary.Operators[0].Conditions[1]
 	assert.True(t, cond2.Skipped)
+	assert.Nil(t, cond2.EvalTimeUs)
 	assert.Empty(t, cond2.Used)
 	assert.Empty(t, cond2.Reasons)
 	assert.Equal(t, 0, cond2.RawScanSegments)
@@ -646,32 +660,51 @@ func TestFoldInternalEmptyFilterPreservesCachedAndUnfoldsOnBackfill(t *testing.T
 	// Whole-filter cache hit: CachedSegments=1 must not be folded into mvcc.
 	cachedSummary := Summarize([]*internalpb.ExecutionExplain{
 		segmentNode("s1", 100,
-			operatorNode(0, "filter", "", true, 100, 30),
-			operatorNode(1, "mvcc", "", false, 30, 30),
+			withOpTimeUs(operatorNode(0, "filter", "", true, 100, 30), 20),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 30, 30), 15),
 		),
 	}, nil)
 	require.Len(t, cachedSummary.Operators, 2)
 	assert.Equal(t, "filter", cachedSummary.Operators[0].Operator)
 	assert.Equal(t, 1, cachedSummary.Operators[0].CachedSegments)
+	assert.Equal(t, &TimeStats{SumUs: 20, MinUs: 20, AvgUs: 20, MaxUs: 20}, cachedSummary.Operators[0].TimeUs)
 	BackfillConditions(cachedSummary, leaves)
 	require.Len(t, cachedSummary.Operators, 2)
 	assert.Equal(t, 1, cachedSummary.Operators[0].CachedSegments)
 	assert.Equal(t, int64(30), cachedSummary.Operators[0].RowsOut)
+	assert.Equal(t, &TimeStats{SumUs: 20, MinUs: 20, AvgUs: 20, MaxUs: 20}, cachedSummary.Operators[0].TimeUs)
 	require.Len(t, cachedSummary.Operators[0].Conditions, 1)
 
-	// Uncached empty filter folded on Summarize(segs, nil) unfolds cleanly on BackfillConditions.
+	// Uncached empty filter folded on Summarize(segs, nil) restores exact filter & mvcc TimeUs on BackfillConditions.
 	emptySegSummary := Summarize([]*internalpb.ExecutionExplain{
 		segmentNode("s1", 0,
-			operatorNode(0, "filter", "", false, 0, 0),
-			operatorNode(1, "mvcc", "", false, 0, 0),
+			withOpTimeUs(operatorNode(0, "filter", "", false, 0, 0), 12),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 0, 0), 34),
 		),
 	}, nil)
 	require.Len(t, emptySegSummary.Operators, 1)
 	assert.Equal(t, "mvcc", emptySegSummary.Operators[0].Operator)
+	assert.Equal(t, &TimeStats{SumUs: 46, MinUs: 46, AvgUs: 46, MaxUs: 46}, emptySegSummary.Operators[0].TimeUs)
 	BackfillConditions(emptySegSummary, leaves)
 	require.Len(t, emptySegSummary.Operators, 2)
 	assert.Equal(t, "filter", emptySegSummary.Operators[0].Operator)
+	assert.Equal(t, &TimeStats{SumUs: 12, MinUs: 12, AvgUs: 12, MaxUs: 12}, emptySegSummary.Operators[0].TimeUs)
 	assert.Equal(t, "mvcc", emptySegSummary.Operators[1].Operator)
+	assert.Equal(t, &TimeStats{SumUs: 34, MinUs: 34, AvgUs: 34, MaxUs: 34}, emptySegSummary.Operators[1].TimeUs)
+
+	// Missing filter timing on one segment must degrade folded mvcc TimeUs to nil rather than treating missing as 0.
+	partialTimedSummary := Summarize([]*internalpb.ExecutionExplain{
+		segmentNode("s1", 100,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 100, 100), 25),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 100, 95), 40),
+		),
+		segmentNode("s2", 100,
+			operatorNode(0, "filter", "", false, 100, 100),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 100, 95), 50),
+		),
+	}, nil)
+	require.Len(t, partialTimedSummary.Operators, 1)
+	assert.Nil(t, partialTimedSummary.Operators[0].TimeUs)
 
 	// Asymmetric segment sets between filter and mvcc must not fold and corrupt mvcc.RowsIn.
 	asymmetricSummary := Summarize([]*internalpb.ExecutionExplain{
@@ -883,4 +916,285 @@ func TestFoldSegmentsHybridAndEmptyFilterFoldParity(t *testing.T) {
 	}, nil)
 	require.Len(t, asymmetricGrouped.Operators, 2)
 	assert.Equal(t, int64(280), asymmetricGrouped.Operators[1].RowsIn)
+}
+
+func TestSummarizeTimingStatsAndTextFormatting(t *testing.T) {
+	leaves := map[int64]LeafInfo{
+		1: {Condition: `title contains "%降噪%"`, Type: "contains", FieldID: 101, Field: "title"},
+	}
+	summary := Summarize([]*internalpb.ExecutionExplain{
+		segmentNode("s1", 50000,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 50000, 1000,
+				withEvalOrder(withLeafTimings(indexGroup(101, 1, 501, "ngram", indexCounters(50000, 30, 30)), 1500, 80000), 2),
+			), 81000),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 1000, 990), 200),
+			withOpTimeUs(operatorNode(2, "vector_search", "", false, 990, 10), 28000),
+		),
+		segmentNode("s2", 50000,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 50000, 1000,
+				withEvalOrder(withLeafTimings(rawGroup(101, 1, "no_index_on_field", rawCounters(50000, 15)), 400, 0), 2),
+			), 1800),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 1000, 995), 100),
+			withOpTimeUs(operatorNode(2, "vector_search", "", false, 995, 10), 5000),
+		),
+		segmentNode("s3", 50000,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 50000, 1000,
+				withEvalOrder(withLeafTimings(rawGroup(101, 1, "no_index_on_field", rawCounters(50000, 25)), 7000, 0), 2),
+			), 2400),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 1000, 995), 300),
+			withOpTimeUs(operatorNode(2, "vector_search", "", false, 995, 10), 6000),
+		),
+	}, leaves)
+	FinalizeSummary(summary, map[int64]string{501: "title_ngram"}, nil)
+
+	require.Len(t, summary.Operators, 3)
+	assert.Equal(t, &TimeStats{SumUs: 85200, MinUs: 1800, AvgUs: 28400, MaxUs: 81000}, summary.Operators[0].TimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 600, MinUs: 100, AvgUs: 200, MaxUs: 300}, summary.Operators[1].TimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 39000, MinUs: 5000, AvgUs: 13000, MaxUs: 28000}, summary.Operators[2].TimeUs)
+
+	cond := summary.Operators[0].Conditions[0]
+	assert.Equal(t, &TimeStats{SumUs: 8900, MinUs: 400, AvgUs: 2966, MaxUs: 7000}, cond.EvalTimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 80000, MinUs: 0, AvgUs: 26666, MaxUs: 80000}, cond.PrefetchTimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 1500, MinUs: 1500, AvgUs: 1500, MaxUs: 1500}, cond.Used[0].EvalTimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 80000, MinUs: 80000, AvgUs: 80000, MaxUs: 80000}, cond.Used[0].PrefetchTimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 7400, MinUs: 400, AvgUs: 3700, MaxUs: 7000}, cond.Reasons[0].EvalTimeUs)
+	assert.Nil(t, cond.Reasons[0].PrefetchTimeUs)
+
+	expectedText := "" +
+		"query (segments=3, rows_total=150000)\n" +
+		"  [op 0] filter (segments=3, rows: 150000 -> 3000, time_us: avg=28400, max=81000, min=1800, sum=85200)\n" +
+		"    expr: title contains \"%降噪%\" (segments=3, rows: 150000 -> 70, idx_scan=50000, raw_scan=100030, eval_order=2, eval_us: avg=2966, max=7000, min=400, sum=8900, prefetch_us: avg=26666, max=80000, min=0, sum=80000)\n" +
+		"      index title_ngram (ngram): segments=1, rows: 50000 -> 30, idx_scan=50000, raw_scan=30, eval_us=1500, prefetch_us=80000\n" +
+		"      raw (no_index): segments=2, rows: 100000 -> 40, idx_scan=0, raw_scan=100000, eval_us: avg=3700, max=7000, min=400, sum=7400\n" +
+		"  [op 1] mvcc (segments=3, rows: 3000 -> 2980, time_us: avg=200, max=300, min=100, sum=600)\n" +
+		"  [op 2] vector_search (segments=3, rows: 2980 -> 30, time_us: avg=13000, max=28000, min=5000, sum=39000)\n"
+	assert.Equal(t, expectedText, RenderSummaryText(summary))
+
+	encoded, err := RenderSummaryJSON(summary)
+	require.NoError(t, err)
+	assert.NotContains(t, encoded, "slowest_segment")
+	assert.NotContains(t, encoded, "wait_prefetch")
+	assert.Contains(t, encoded, `"eval_time_us":{"sum_us":8900,"min_us":400,"avg_us":2966,"max_us":7000}`)
+	assert.Contains(t, encoded, `"prefetch_time_us":{"sum_us":80000,"min_us":0,"avg_us":26666,"max_us":80000}`)
+}
+
+func TestFoldInternalEmptyFilterIntoMvccMergesPerSegmentTimings(t *testing.T) {
+	summary := Summarize([]*internalpb.ExecutionExplain{
+		segmentNode("s1", 1000,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 1000, 900), 200),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 900, 880), 100),
+			withOpTimeUs(operatorNode(2, "vector_search", "", false, 880, 10), 4000),
+		),
+		segmentNode("s2", 1000,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 1000, 950), 50),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 950, 940), 400),
+			withOpTimeUs(operatorNode(2, "vector_search", "", false, 940, 10), 3000),
+		),
+	}, nil)
+
+	require.Len(t, summary.Operators, 2)
+	assert.Equal(t, "mvcc", summary.Operators[0].Operator)
+	// Per-segment sums are s1=300, s2=450 (not min+min=150 or max+max=600).
+	assert.Equal(t, &TimeStats{SumUs: 750, MinUs: 300, AvgUs: 375, MaxUs: 450}, summary.Operators[0].TimeUs)
+}
+
+func TestSkippedAndMultiOperandConditionTimingWithoutDistortion(t *testing.T) {
+	leaves := map[int64]LeafInfo{
+		1: {Condition: "a < b", Type: "compare", FieldID: 101, Field: "a"},
+		2: {Condition: "price > 100", Type: "range", FieldID: 103, Field: "price"},
+	}
+
+	skippedWithPrefetch := withSkipped(rawGroup(103, 2, "", map[string]int64{
+		"rows_in": 0, "idx_scan": 0, "raw_scan": 0, "rows_out": 0, "prefetch_us": 4000,
+	}))
+
+	summary := Summarize([]*internalpb.ExecutionExplain{
+		segmentNode("s1", 100, operatorNode(0, "filter", "", false, 100, 10,
+			withLeafTimings(indexGroup(101, 1, 501, "sort", indexCounters(100, 10, 0)), 900, 0),
+			withSecondaryOperand(withLeafTimings(rawGroup(102, 1, "no_index_on_field", rawCounters(100, 10)), 900, 0)),
+			withLeafTimings(rawGroup(103, 2, "no_index_on_field", rawCounters(10, 5)), 1200, 0),
+		)),
+		segmentNode("s2", 100, operatorNode(0, "filter", "", false, 100, 0,
+			withLeafTimings(indexGroup(101, 1, 501, "sort", indexCounters(100, 0, 0)), 300, 0),
+			withSecondaryOperand(withLeafTimings(rawGroup(102, 1, "no_index_on_field", rawCounters(100, 0)), 300, 0)),
+			skippedWithPrefetch,
+		)),
+	}, leaves)
+
+	require.Len(t, summary.Operators[0].Conditions, 2)
+	cmpCond := summary.Operators[0].Conditions[0]
+	// Primary + secondary operand on same segment share one LeafSlot eval_us (900 + 300 = 1200, not 2400).
+	assert.Equal(t, &TimeStats{SumUs: 1200, MinUs: 300, AvgUs: 600, MaxUs: 900}, cmpCond.EvalTimeUs)
+
+	partSkipped := summary.Operators[0].Conditions[1]
+	assert.Equal(t, 2, partSkipped.Segments)
+	assert.Equal(t, 1, partSkipped.SkippedSegments)
+	assert.False(t, partSkipped.Skipped)
+	// Denominator is Segments - SkippedSegments = 1, so s2's skip does not drag MinUs/AvgUs down.
+	assert.Equal(t, &TimeStats{SumUs: 1200, MinUs: 1200, AvgUs: 1200, MaxUs: 1200}, partSkipped.EvalTimeUs)
+	// Prefetch ran on s2 even though Eval was short-circuited; s1 had 0 prefetch -> MinUs=0, AvgUs=2000.
+	assert.Equal(t, &TimeStats{SumUs: 4000, MinUs: 0, AvgUs: 2000, MaxUs: 4000}, partSkipped.PrefetchTimeUs)
+	assert.Contains(t, RenderSummaryText(summary), "skipped_segments=1")
+}
+
+func TestRollingUpgradeMixedTimedAndUntimedSegmentsOmitsPartialTimeStats(t *testing.T) {
+	leaves := map[int64]LeafInfo{
+		1: {Condition: "price > 100", Type: "range", FieldID: 103, Field: "price"},
+	}
+	summary := Summarize([]*internalpb.ExecutionExplain{
+		segmentNode("new_qn_seg", 1000,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 1000, 50,
+				withLeafTimings(indexGroup(103, 1, 501, "sort", indexCounters(1000, 50, 0)), 1500, 8000),
+			), 1800),
+		),
+		segmentNode("old_qn_seg", 1000,
+			operatorNode(0, "filter", "", false, 1000, 40,
+				rawGroup(103, 1, "no_index_on_field", rawCounters(1000, 40)),
+			),
+		),
+	}, leaves)
+
+	require.Len(t, summary.Operators, 1)
+	assert.Equal(t, 2, summary.Operators[0].Segments)
+	assert.Nil(t, summary.Operators[0].TimeUs)
+
+	cond := summary.Operators[0].Conditions[0]
+	assert.Equal(t, 2, cond.Segments)
+	assert.Nil(t, cond.EvalTimeUs)
+	assert.Nil(t, cond.PrefetchTimeUs)
+	// Sub-bucket solely on the new QN segment retains exact timing.
+	require.Len(t, cond.Used, 1)
+	assert.Equal(t, &TimeStats{SumUs: 1500, MinUs: 1500, AvgUs: 1500, MaxUs: 1500}, cond.Used[0].EvalTimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 8000, MinUs: 8000, AvgUs: 8000, MaxUs: 8000}, cond.Used[0].PrefetchTimeUs)
+	require.Len(t, cond.Reasons, 1)
+	assert.Nil(t, cond.Reasons[0].EvalTimeUs)
+}
+
+func TestEmptyZeroRowSegmentDoesNotClearConditionSkippedFlag(t *testing.T) {
+	leaves := map[int64]LeafInfo{
+		1: {Condition: "price > 100", Type: "range", FieldID: 103, Field: "price"},
+	}
+	summary := Summarize([]*internalpb.ExecutionExplain{
+		segmentNode("empty_seg", 0,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 0, 0,
+				withLeafTimings(rawGroup(103, 1, "no_index_on_field", rawCounters(0, 0)), 0, 0),
+			), 0),
+		),
+		segmentNode("active_seg", 1000,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 1000, 0,
+				withSkipped(rawGroup(103, 1, "", rawCounters(0, 0))),
+			), 10),
+		),
+	}, leaves)
+
+	require.Len(t, summary.Operators[0].Conditions, 1)
+	cond := summary.Operators[0].Conditions[0]
+	assert.True(t, cond.Skipped)
+	assert.Nil(t, cond.EvalTimeUs)
+}
+
+func TestFoldSegmentsTimingAndRollingUpgradeParity(t *testing.T) {
+	leaves := map[int64]LeafInfo{
+		1: {Condition: "a < b", Type: "compare", FieldID: 101, Field: "a"},
+		2: {Condition: "price > 100", Type: "range", FieldID: 103, Field: "price"},
+	}
+
+	skippedWithPrefetch := withSkipped(rawGroup(103, 2, "", map[string]int64{
+		"rows_in": 0, "idx_scan": 0, "raw_scan": 0, "rows_out": 0, "prefetch_us": 4000,
+	}))
+	qn1Segs := []*internalpb.ExecutionExplain{
+		segmentNode("s1", 100,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 100, 10,
+				withLeafTimings(indexGroup(101, 1, 501, "sort", indexCounters(100, 10, 0)), 900, 0),
+				withSecondaryOperand(withLeafTimings(rawGroup(102, 1, "no_index_on_field", rawCounters(100, 10)), 900, 0)),
+				withLeafTimings(rawGroup(103, 2, "no_index_on_field", rawCounters(10, 5)), 1200, 0),
+			), 2500),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 10, 8), 100),
+			withOpTimeUs(operatorNode(2, "vector_search", "", false, 8, 5), 6000),
+		),
+	}
+	qn2Segs := []*internalpb.ExecutionExplain{
+		segmentNode("s2", 100,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 100, 0,
+				withLeafTimings(indexGroup(101, 1, 501, "sort", indexCounters(100, 0, 0)), 300, 0),
+				withSecondaryOperand(withLeafTimings(rawGroup(102, 1, "no_index_on_field", rawCounters(100, 0)), 300, 0)),
+				skippedWithPrefetch,
+			), 800),
+			withOpTimeUs(operatorNode(1, "mvcc", "", false, 0, 0), 50),
+			withOpTimeUs(operatorNode(2, "vector_search", "", false, 0, 0), 200),
+		),
+	}
+
+	want := Summarize(append(append([]*internalpb.ExecutionExplain{}, qn1Segs...), qn2Segs...), leaves)
+	FinalizeSummary(want, map[int64]string{501: "a_sort"}, nil)
+	got := Summarize([]*internalpb.ExecutionExplain{
+		FoldSegmentsWithName("vch0/1/Historical", qn1Segs),
+		FoldSegmentsWithName("vch1/2/Historical", qn2Segs),
+	}, leaves)
+	FinalizeSummary(got, map[int64]string{501: "a_sort"}, nil)
+	assert.Equal(t, want, got)
+	assert.Equal(t, RenderSummaryText(want), RenderSummaryText(got))
+
+	// Folded empty filter + mvcc across two QNs preserves exact per-segment sum min/max/avg.
+	foldedSummary := Summarize([]*internalpb.ExecutionExplain{
+		FoldSegments([]*internalpb.ExecutionExplain{
+			segmentNode("s1", 1000,
+				withOpTimeUs(operatorNode(0, "filter", "", false, 1000, 900), 200),
+				withOpTimeUs(operatorNode(1, "mvcc", "", false, 900, 880), 100),
+			),
+		}),
+		FoldSegments([]*internalpb.ExecutionExplain{
+			segmentNode("s2", 1000,
+				withOpTimeUs(operatorNode(0, "filter", "", false, 1000, 950), 50),
+				withOpTimeUs(operatorNode(1, "mvcc", "", false, 950, 940), 400),
+			),
+		}),
+	}, nil)
+	require.Len(t, foldedSummary.Operators, 1)
+	assert.Equal(t, "mvcc", foldedSummary.Operators[0].Operator)
+	assert.Equal(t, &TimeStats{SumUs: 750, MinUs: 300, AvgUs: 375, MaxUs: 450}, foldedSummary.Operators[0].TimeUs)
+
+	// Rolling upgrade: mixing a stack/06 untimed segment_group (no timing counters on wire)
+	// with a stack/07 timed segment_group degrades shared TimeStats to nil while preserving
+	// timing on buckets exclusive to the timed group.
+	legacyGroup := &internalpb.ExecutionExplain{
+		Kind:     KindSegmentGroup,
+		Name:     "vch0/old/Historical",
+		Version:  1,
+		Counters: map[string]int64{"segments": 1, "rows_total": 1000},
+		Children: []*internalpb.ExecutionExplain{{
+			Kind:       KindOperator,
+			Name:       "filter",
+			Attributes: map[string]string{"step": "0", "name": "filter"},
+			Counters:   map[string]int64{"segments": 1, "rows_in": 1000, "rows_out": 40},
+			Children: []*internalpb.ExecutionExplain{{
+				Kind:       KindCondition,
+				Attributes: map[string]string{"expr_id": "2", "first_field_id": "103"},
+				Counters:   map[string]int64{"segments": 1, "raw_scan_segments": 1, "raw_scan": 1000, "rows_in": 1000, "rows_out": 40},
+				Children: []*internalpb.ExecutionExplain{{
+					Kind:       KindFilterGroup,
+					Attributes: map[string]string{"bucket": "reason", "decline_reason": "no_index"},
+					Counters:   map[string]int64{"segments": 1, "raw_scan": 1000, "rows_in": 1000, "rows_out": 40},
+				}},
+			}},
+		}},
+	}
+	timedGroup := FoldSegmentsWithName("vch1/new/Historical", []*internalpb.ExecutionExplain{
+		segmentNode("new_seg", 1000,
+			withOpTimeUs(operatorNode(0, "filter", "", false, 1000, 50,
+				withLeafTimings(indexGroup(103, 2, 501, "sort", indexCounters(1000, 50, 0)), 1500, 8000),
+			), 1800),
+		),
+	})
+	mixed := Summarize([]*internalpb.ExecutionExplain{legacyGroup, timedGroup}, map[int64]LeafInfo{2: leaves[2]})
+	require.Len(t, mixed.Operators, 1)
+	assert.Nil(t, mixed.Operators[0].TimeUs)
+	mixedCond := mixed.Operators[0].Conditions[0]
+	assert.Nil(t, mixedCond.EvalTimeUs)
+	assert.Nil(t, mixedCond.PrefetchTimeUs)
+	require.Len(t, mixedCond.Used, 1)
+	assert.Equal(t, &TimeStats{SumUs: 1500, MinUs: 1500, AvgUs: 1500, MaxUs: 1500}, mixedCond.Used[0].EvalTimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 8000, MinUs: 8000, AvgUs: 8000, MaxUs: 8000}, mixedCond.Used[0].PrefetchTimeUs)
+	require.Len(t, mixedCond.Reasons, 1)
+	assert.Nil(t, mixedCond.Reasons[0].EvalTimeUs)
 }

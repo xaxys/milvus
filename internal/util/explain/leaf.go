@@ -66,6 +66,15 @@ type SubSearchMeta struct {
 	AnnsField   string
 }
 
+// TimeStats is the per-segment latency distribution in microseconds across
+// participating segments.
+type TimeStats struct {
+	SumUs int64 `json:"sum_us"`
+	MinUs int64 `json:"min_us"`
+	AvgUs int64 `json:"avg_us"`
+	MaxUs int64 `json:"max_us"`
+}
+
 // OperatorSummary is the cross-segment summary of one physical pipeline operator.
 type OperatorSummary struct {
 	Operator       string      `json:"operator"`
@@ -74,11 +83,14 @@ type OperatorSummary struct {
 	Segments       int         `json:"segments"`
 	RowsIn         int64       `json:"rows_in"`
 	RowsOut        int64       `json:"rows_out"`
+	TimeUs         *TimeStats  `json:"time_us,omitempty"`
 	CachedSegments int         `json:"cached_segments,omitempty"`
 	Conditions     []Condition `json:"conditions,omitempty"`
 
-	foldedFilter *OperatorSummary
-	origMvccRows int64
+	foldedFilter   *OperatorSummary `json:"-"`
+	foldedTimeUs   *TimeStats       `json:"-"`
+	origMvccRows   int64            `json:"-"`
+	origMvccTimeUs *TimeStats       `json:"-"`
 }
 
 // SubSearchSummary is the per-sub-request operator pipeline summary for HybridSearch.
@@ -143,6 +155,7 @@ type Condition struct {
 	FieldID             int64            `json:"-"`
 	Field               string           `json:"field,omitempty"`
 	Segments            int              `json:"segments"`
+	SkippedSegments     int              `json:"skipped_segments,omitempty"`
 	EvalOrder           int              `json:"eval_order,omitempty"`
 	EvalOrders          []EvalOrderCount `json:"eval_orders,omitempty"`
 	Skipped             bool             `json:"skipped,omitempty"`
@@ -151,6 +164,8 @@ type Condition struct {
 	RowsIn              int64            `json:"rows_in"`
 	RowsOut             int64            `json:"rows_out"`
 	ElementHits         int64            `json:"element_hits,omitempty"`
+	EvalTimeUs          *TimeStats       `json:"eval_time_us,omitempty"`
+	PrefetchTimeUs      *TimeStats       `json:"prefetch_time_us,omitempty"`
 	Used                []IndexUse       `json:"used"`
 	RawScanSegments     int              `json:"raw_scan_segments"`
 	Reasons             []ReasonCount    `json:"reasons"`
@@ -160,27 +175,31 @@ type Condition struct {
 // IndexUse is how many segments answered one condition with one index family.
 // Internal IndexID is resolved to IndexName before external serialization.
 type IndexUse struct {
-	Kind        string `json:"kind"`
-	IndexID     int64  `json:"-"`
-	IndexName   string `json:"index_name"`
-	Family      string `json:"family"`
-	Segments    int    `json:"segments"`
-	IdxScan     int64  `json:"idx_scan"`
-	RawScan     int64  `json:"raw_scan"`
-	RowsIn      int64  `json:"rows_in"`
-	RowsOut     int64  `json:"rows_out"`
-	ElementHits int64  `json:"element_hits,omitempty"`
+	Kind           string     `json:"kind"`
+	IndexID        int64      `json:"-"`
+	IndexName      string     `json:"index_name"`
+	Family         string     `json:"family"`
+	Segments       int        `json:"segments"`
+	IdxScan        int64      `json:"idx_scan"`
+	RawScan        int64      `json:"raw_scan"`
+	RowsIn         int64      `json:"rows_in"`
+	RowsOut        int64      `json:"rows_out"`
+	ElementHits    int64      `json:"element_hits,omitempty"`
+	EvalTimeUs     *TimeStats `json:"eval_time_us,omitempty"`
+	PrefetchTimeUs *TimeStats `json:"prefetch_time_us,omitempty"`
 }
 
 // ReasonCount is what the non-index leaves of a condition did for one fallback
 // reason.
 type ReasonCount struct {
-	Reason   string `json:"reason"`
-	Segments int    `json:"segments"`
-	IdxScan  int64  `json:"idx_scan"`
-	RawScan  int64  `json:"raw_scan"`
-	RowsIn   int64  `json:"rows_in"`
-	RowsOut  int64  `json:"rows_out"`
+	Reason         string     `json:"reason"`
+	Segments       int        `json:"segments"`
+	IdxScan        int64      `json:"idx_scan"`
+	RawScan        int64      `json:"raw_scan"`
+	RowsIn         int64      `json:"rows_in"`
+	RowsOut        int64      `json:"rows_out"`
+	EvalTimeUs     *TimeStats `json:"eval_time_us,omitempty"`
+	PrefetchTimeUs *TimeStats `json:"prefetch_time_us,omitempty"`
 }
 
 // NameIndexUses fills in human-readable index names across all operators,
@@ -398,15 +417,20 @@ type groupAgg struct {
 	fieldID                 int64
 	segments                map[string]struct{}
 	skippedSegments         map[string]struct{}
+	nonSkippedSegments      map[string]struct{}
 	unskippedActiveSegments map[string]struct{}
 	orders                  map[int]map[string]struct{}
 	segCounters             map[string]axisCounters
+	segEvalUs               map[string]int64
+	segPrefetchUs           map[string]int64
 }
 
 type usedAgg struct {
-	key      usedKey
-	segments map[string]struct{}
-	counters segCounterSet
+	key           usedKey
+	segments      map[string]struct{}
+	counters      segCounterSet
+	evalBySeg     map[string]int64
+	prefetchBySeg map[string]int64
 }
 
 type conditionAgg struct {
@@ -414,16 +438,21 @@ type conditionAgg struct {
 	firstFieldID            int64
 	segments                map[string]struct{}
 	skippedSegments         map[string]struct{}
+	nonSkippedSegments      map[string]struct{}
 	unskippedActiveSegments map[string]struct{}
 	orders                  map[int]map[string]struct{}
 	counters                segCounterSet
+	evalBySeg               map[string]int64
+	prefetchBySeg           map[string]int64
 	used                    map[usedKey]*usedAgg
 	reasons                 map[string]*reasonAgg
 }
 
 type reasonAgg struct {
-	segments map[string]struct{}
-	counters segCounterSet
+	segments      map[string]struct{}
+	counters      segCounterSet
+	evalBySeg     map[string]int64
+	prefetchBySeg map[string]int64
 }
 
 type opKey struct {
@@ -459,9 +488,12 @@ func (c *filterGroupCollector) add(segmentID string, segRowsTotal int64, filterG
 			fieldID:                 fieldID,
 			segments:                make(map[string]struct{}, 4),
 			skippedSegments:         make(map[string]struct{}, 2),
+			nonSkippedSegments:      make(map[string]struct{}, 4),
 			unskippedActiveSegments: make(map[string]struct{}, 4),
 			orders:                  make(map[int]map[string]struct{}, 1),
 			segCounters:             make(map[string]axisCounters, 4),
+			segEvalUs:               make(map[string]int64, 4),
+			segPrefetchUs:           make(map[string]int64, 2),
 		})
 	}
 	agg := c.groups[index]
@@ -471,8 +503,11 @@ func (c *filterGroupCollector) add(segmentID string, segRowsTotal int64, filterG
 	agg.segments[segmentID] = struct{}{}
 	if key.skipped {
 		agg.skippedSegments[segmentID] = struct{}{}
-	} else if segRowsTotal > 0 {
-		agg.unskippedActiveSegments[segmentID] = struct{}{}
+	} else {
+		agg.nonSkippedSegments[segmentID] = struct{}{}
+		if segRowsTotal > 0 {
+			agg.unskippedActiveSegments[segmentID] = struct{}{}
+		}
 	}
 	if order := int(int64Attribute(filterGroup.GetAttributes(), "eval_order")); order > 0 {
 		segs := agg.orders[order]
@@ -491,6 +526,15 @@ func (c *filterGroupCollector) add(segmentID string, segRowsTotal int64, filterG
 	cur := agg.segCounters[segmentID]
 	addCounters(&cur, ctrs)
 	agg.segCounters[segmentID] = cur
+	rawCtrs := filterGroup.GetCounters()
+	if !key.skipped {
+		if evalUs, ok := rawCtrs["eval_us"]; ok {
+			mergeMaxInt64(agg.segEvalUs, segmentID, evalUs)
+		}
+	}
+	if pfUs, ok := rawCtrs["prefetch_us"]; ok && pfUs > 0 {
+		mergeMaxInt64(agg.segPrefetchUs, segmentID, pfUs)
+	}
 }
 
 type operatorAgg struct {
@@ -499,6 +543,7 @@ type operatorAgg struct {
 	segments       map[string]struct{}
 	cachedSegments map[string]struct{}
 	countedSegs    map[string]struct{}
+	segTimes       map[string]int64
 	rowsIn         int64
 	rowsOut        int64
 	fg             *filterGroupCollector
@@ -710,27 +755,180 @@ func leavesForSubReq(leaves map[int64]LeafInfo, subIdx int) map[int64]LeafInfo {
 	return out
 }
 
+type timeAccum struct {
+	sum     int64
+	min     int64
+	max     int64
+	count   int64
+	untimed bool
+}
+
+func primaryTimeAccum(reported map[string]int64, denomSegs, timedSegs map[string]struct{}) timeAccum {
+	if len(denomSegs) == 0 {
+		return timeAccum{}
+	}
+	if len(reported) == 0 || !allSegmentsTimed(denomSegs, timedSegs) {
+		return timeAccum{untimed: true}
+	}
+	var sum, minVal, maxVal, count int64
+	for segID := range denomSegs {
+		val, ok := reported[segID]
+		if !ok {
+			return timeAccum{untimed: true}
+		}
+		if val < 0 {
+			val = 0
+		}
+		sum += val
+		if count == 0 || val < minVal {
+			minVal = val
+		}
+		if count == 0 || val > maxVal {
+			maxVal = val
+		}
+		count++
+	}
+	return timeAccum{sum: sum, min: minVal, max: maxVal, count: count}
+}
+
+func optionalTimeAccum(reported map[string]int64, denomSegs, timedSegs map[string]struct{}) timeAccum {
+	if len(denomSegs) == 0 {
+		return timeAccum{}
+	}
+	if !allSegmentsTimed(denomSegs, timedSegs) {
+		return timeAccum{untimed: true}
+	}
+	var sum, minVal, maxVal, count int64
+	for segID := range denomSegs {
+		val := reported[segID]
+		if val < 0 {
+			val = 0
+		}
+		sum += val
+		if count == 0 || val < minVal {
+			minVal = val
+		}
+		if count == 0 || val > maxVal {
+			maxVal = val
+		}
+		count++
+	}
+	return timeAccum{sum: sum, min: minVal, max: maxVal, count: count}
+}
+
+func mergeTimeAccum(dst *timeAccum, src timeAccum) {
+	if src.untimed {
+		dst.untimed = true
+		return
+	}
+	if dst.untimed || src.count <= 0 {
+		return
+	}
+	if dst.count == 0 {
+		*dst = src
+		return
+	}
+	dst.sum += src.sum
+	if src.min < dst.min {
+		dst.min = src.min
+	}
+	if src.max > dst.max {
+		dst.max = src.max
+	}
+	dst.count += src.count
+}
+
+func (a timeAccum) primaryStats() *TimeStats {
+	if a.untimed || a.count <= 0 {
+		return nil
+	}
+	return &TimeStats{
+		SumUs: a.sum,
+		MinUs: a.min,
+		AvgUs: a.sum / a.count,
+		MaxUs: a.max,
+	}
+}
+
+func (a timeAccum) optionalStats() *TimeStats {
+	if a.untimed || a.count <= 0 || a.sum <= 0 {
+		return nil
+	}
+	return &TimeStats{
+		SumUs: a.sum,
+		MinUs: a.min,
+		AvgUs: a.sum / a.count,
+		MaxUs: a.max,
+	}
+}
+
+func writeTimeAccum(dst map[string]int64, prefix string, a timeAccum) {
+	if a.untimed {
+		dst[prefix+"_untimed"] = 1
+		return
+	}
+	if a.count <= 0 {
+		return
+	}
+	dst[prefix+"_count_us"] = a.count
+	if a.sum != 0 {
+		dst[prefix+"_sum_us"] = a.sum
+	}
+	if a.min != 0 {
+		dst[prefix+"_min_us"] = a.min
+	}
+	if a.max != 0 {
+		dst[prefix+"_max_us"] = a.max
+	}
+}
+
+func readTimeAccum(src map[string]int64, prefix string, expectedDenom int) timeAccum {
+	if expectedDenom <= 0 {
+		return timeAccum{}
+	}
+	if src[prefix+"_untimed"] > 0 {
+		return timeAccum{untimed: true}
+	}
+	cnt := src[prefix+"_count_us"]
+	if cnt < int64(expectedDenom) {
+		return timeAccum{untimed: true}
+	}
+	return timeAccum{
+		sum:   src[prefix+"_sum_us"],
+		min:   src[prefix+"_min_us"],
+		max:   src[prefix+"_max_us"],
+		count: cnt,
+	}
+}
+
 type partialUsed struct {
-	key      usedKey
-	segments int
-	totals   axisCounters
+	key          usedKey
+	segments     int
+	totals       axisCounters
+	evalTime     timeAccum
+	prefetchTime timeAccum
 }
 
 type partialReason struct {
-	reason   string
-	segments int
-	totals   axisCounters
+	reason       string
+	segments     int
+	totals       axisCounters
+	evalTime     timeAccum
+	prefetchTime timeAccum
 }
 
 type partialCondition struct {
 	key                     conditionKey
 	firstFieldID            int64
 	segments                int
+	pureSkippedSegments     int
 	skippedSegmentsAny      int
 	unskippedActiveSegments int
 	rawScanSegments         int
 	orders                  map[int]int
 	totals                  axisCounters
+	evalTime                timeAccum
+	prefetchTime            timeAccum
 	used                    map[usedKey]*partialUsed
 	reasons                 map[string]*partialReason
 }
@@ -742,6 +940,8 @@ type partialOperator struct {
 	cachedSegments int
 	rowsIn         int64
 	rowsOut        int64
+	time           timeAccum
+	foldedTime     timeAccum
 	conds          map[conditionKey]*partialCondition
 }
 
@@ -785,6 +985,7 @@ func collectRawScope(
 	scopedLeaves map[int64]LeafInfo,
 ) *partialScope {
 	seenSegRows := make(map[string]int64, len(segments))
+	timedSegs := make(map[string]struct{}, len(segments))
 	opMap := make(map[opKey]*operatorAgg, 4)
 
 	getOrCreateOp := func(step int, name string) *operatorAgg {
@@ -796,6 +997,7 @@ func collectRawScope(
 				segments:       make(map[string]struct{}, max(1, len(segments))),
 				cachedSegments: make(map[string]struct{}),
 				countedSegs:    make(map[string]struct{}, max(1, len(segments))),
+				segTimes:       make(map[string]int64, max(1, len(segments))),
 				fg:             newFilterGroupCollector(max(1, len(segments))),
 			}
 			opMap[k] = agg
@@ -811,6 +1013,9 @@ func collectRawScope(
 		segRowsTotal := segment.GetCounters()["rows_total"]
 		if prev, seen := seenSegRows[segID]; !seen || segRowsTotal > prev {
 			seenSegRows[segID] = segRowsTotal
+		}
+		if segmentHasTimingCounters(segment) {
+			timedSegs[segID] = struct{}{}
 		}
 
 		if hasOperatorChildren(segment) {
@@ -840,6 +1045,9 @@ func collectRawScope(
 					ctrs := child.GetCounters()
 					agg.rowsIn += ctrs["rows_in"]
 					agg.rowsOut += ctrs["rows_out"]
+					if tUs, hasTime := ctrs["time_us"]; hasTime {
+						agg.segTimes[segID] = tUs
+					}
 				}
 				for _, fg := range child.GetChildren() {
 					agg.fg.add(segID, segRowsTotal, fg)
@@ -910,22 +1118,38 @@ func collectRawScope(
 		}
 	}
 
+	var foldedFilterMvccTime timeAccum
+	if !out.disallowEmptyFilterFold && op0 != nil && op1 != nil && len(op0.cachedSegments) == 0 {
+		mergedTimes := make(map[string]int64, min(len(op0.segTimes), len(op1.segTimes)))
+		for segID, t0 := range op0.segTimes {
+			if t1, ok := op1.segTimes[segID]; ok {
+				mergedTimes[segID] = t0 + t1
+			}
+		}
+		foldedFilterMvccTime = primaryTimeAccum(mergedTimes, op1.segments, timedSegs)
+	}
+
 	for k, agg := range opMap {
 		condAggs := buildConditionAggs(agg.fg.groups)
 		condMap := make(map[conditionKey]*partialCondition, len(condAggs))
 		for _, cAgg := range condAggs {
-			pc := cAgg.toPartial()
+			pc := cAgg.toPartial(timedSegs)
 			condMap[pc.key] = pc
 		}
-		out.ops[k] = &partialOperator{
+		po := &partialOperator{
 			key:            k,
 			domain:         agg.domain,
 			segments:       len(agg.segments),
 			cachedSegments: len(agg.cachedSegments),
 			rowsIn:         agg.rowsIn,
 			rowsOut:        agg.rowsOut,
+			time:           primaryTimeAccum(agg.segTimes, agg.segments, timedSegs),
 			conds:          condMap,
 		}
+		if k.step == 1 && k.name == "mvcc" && !out.disallowEmptyFilterFold && op0 != nil {
+			po.foldedTime = foldedFilterMvccTime
+		}
+		out.ops[k] = po
 	}
 	return out
 }
@@ -955,6 +1179,8 @@ func (dst *partialScope) merge(src *partialScope) {
 		dstOp.cachedSegments += srcOp.cachedSegments
 		dstOp.rowsIn += srcOp.rowsIn
 		dstOp.rowsOut += srcOp.rowsOut
+		mergeTimeAccum(&dstOp.time, srcOp.time)
+		mergeTimeAccum(&dstOp.foldedTime, srcOp.foldedTime)
 		for ck, srcCond := range srcOp.conds {
 			dstCond := dstOp.conds[ck]
 			if dstCond == nil {
@@ -969,10 +1195,13 @@ func (dst *partialScope) merge(src *partialScope) {
 				dstCond.firstFieldID = srcCond.firstFieldID
 			}
 			dstCond.segments += srcCond.segments
+			dstCond.pureSkippedSegments += srcCond.pureSkippedSegments
 			dstCond.skippedSegmentsAny += srcCond.skippedSegmentsAny
 			dstCond.unskippedActiveSegments += srcCond.unskippedActiveSegments
 			dstCond.rawScanSegments += srcCond.rawScanSegments
 			addCounters(&dstCond.totals, srcCond.totals)
+			mergeTimeAccum(&dstCond.evalTime, srcCond.evalTime)
+			mergeTimeAccum(&dstCond.prefetchTime, srcCond.prefetchTime)
 			for order, cnt := range srcCond.orders {
 				if dstCond.orders == nil {
 					dstCond.orders = make(map[int]int, len(srcCond.orders))
@@ -987,6 +1216,8 @@ func (dst *partialScope) merge(src *partialScope) {
 				}
 				dstUsed.segments += srcUsed.segments
 				addCounters(&dstUsed.totals, srcUsed.totals)
+				mergeTimeAccum(&dstUsed.evalTime, srcUsed.evalTime)
+				mergeTimeAccum(&dstUsed.prefetchTime, srcUsed.prefetchTime)
 			}
 			for reason, srcReason := range srcCond.reasons {
 				dstReason := dstCond.reasons[reason]
@@ -996,6 +1227,8 @@ func (dst *partialScope) merge(src *partialScope) {
 				}
 				dstReason.segments += srcReason.segments
 				addCounters(&dstReason.totals, srcReason.totals)
+				mergeTimeAccum(&dstReason.evalTime, srcReason.evalTime)
+				mergeTimeAccum(&dstReason.prefetchTime, srcReason.prefetchTime)
 			}
 		}
 	}
@@ -1031,8 +1264,10 @@ func (p *partialScope) finalize(scopedLeaves map[int64]LeafInfo) (int, int64, []
 			Segments:       op.segments,
 			RowsIn:         op.rowsIn,
 			RowsOut:        op.rowsOut,
+			TimeUs:         op.time.primaryStats(),
 			CachedSegments: op.cachedSegments,
 			Conditions:     outConds,
+			foldedTimeUs:   op.foldedTime.primaryStats(),
 		})
 	}
 
@@ -1149,6 +1384,8 @@ func (p *partialScope) toProto(name string) *internalpb.ExecutionExplain {
 				}
 				uCtrs := map[string]int64{"segments": int64(u.segments)}
 				axisCountersToMap(uCtrs, u.totals)
+				writeTimeAccum(uCtrs, "eval", u.evalTime)
+				writeTimeAccum(uCtrs, "prefetch", u.prefetchTime)
 				fgNodes = append(fgNodes, &internalpb.ExecutionExplain{
 					Kind:       KindFilterGroup,
 					Version:    1,
@@ -1164,6 +1401,8 @@ func (p *partialScope) toProto(name string) *internalpb.ExecutionExplain {
 				}
 				rCtrs := map[string]int64{"segments": int64(pr.segments)}
 				axisCountersToMap(rCtrs, pr.totals)
+				writeTimeAccum(rCtrs, "eval", pr.evalTime)
+				writeTimeAccum(rCtrs, "prefetch", pr.prefetchTime)
 				fgNodes = append(fgNodes, &internalpb.ExecutionExplain{
 					Kind:       KindFilterGroup,
 					Version:    1,
@@ -1187,6 +1426,9 @@ func (p *partialScope) toProto(name string) *internalpb.ExecutionExplain {
 			cCtrs := map[string]int64{
 				"segments": int64(pc.segments),
 			}
+			if pc.pureSkippedSegments > 0 {
+				cCtrs["skipped_segments"] = int64(pc.pureSkippedSegments)
+			}
 			if pc.skippedSegmentsAny > 0 {
 				cCtrs["skipped_segments_any"] = int64(pc.skippedSegmentsAny)
 			}
@@ -1197,6 +1439,8 @@ func (p *partialScope) toProto(name string) *internalpb.ExecutionExplain {
 				cCtrs["raw_scan_segments"] = int64(pc.rawScanSegments)
 			}
 			axisCountersToMap(cCtrs, pc.totals)
+			writeTimeAccum(cCtrs, "eval", pc.evalTime)
+			writeTimeAccum(cCtrs, "prefetch", pc.prefetchTime)
 
 			condNodes = append(condNodes, &internalpb.ExecutionExplain{
 				Kind:       KindCondition,
@@ -1222,6 +1466,8 @@ func (p *partialScope) toProto(name string) *internalpb.ExecutionExplain {
 		if op.cachedSegments > 0 {
 			opCtrs["cached_segments"] = int64(op.cachedSegments)
 		}
+		writeTimeAccum(opCtrs, "time", op.time)
+		writeTimeAccum(opCtrs, "folded_time", op.foldedTime)
 		opNodes = append(opNodes, &internalpb.ExecutionExplain{
 			Kind:       KindOperator,
 			Name:       k.name,
@@ -1258,6 +1504,22 @@ func partialScopeFromGroup(group *internalpb.ExecutionExplain) *partialScope {
 	out.rowsTotal = gCtrs["rows_total"]
 	out.disallowEmptyFilterFold = gCtrs["disallow_empty_filter_fold"] > 0
 
+	var hasFilterOp bool
+	for _, opNode := range group.GetChildren() {
+		if opNode == nil || opNode.GetKind() != KindOperator {
+			continue
+		}
+		attrs := opNode.GetAttributes()
+		name := attrs["name"]
+		if name == "" {
+			name = opNode.GetName()
+		}
+		if int(int64Attribute(attrs, "step")) == 0 && name == "filter" {
+			hasFilterOp = true
+			break
+		}
+	}
+
 	for _, opNode := range group.GetChildren() {
 		if opNode == nil || opNode.GetKind() != KindOperator {
 			continue
@@ -1272,6 +1534,7 @@ func partialScopeFromGroup(group *internalpb.ExecutionExplain) *partialScope {
 		}
 		k := opKey{step: int(int64Attribute(attrs, "step")), name: name}
 		opCtrs := opNode.GetCounters()
+		opSegs := int(opCtrs["segments"])
 		po := out.ops[k]
 		if po == nil {
 			po = &partialOperator{
@@ -1283,10 +1546,14 @@ func partialScopeFromGroup(group *internalpb.ExecutionExplain) *partialScope {
 		} else if po.domain == "" && attrs["domain"] != "" {
 			po.domain = attrs["domain"]
 		}
-		po.segments += int(opCtrs["segments"])
+		po.segments += opSegs
 		po.cachedSegments += int(opCtrs["cached_segments"])
 		po.rowsIn += opCtrs["rows_in"]
 		po.rowsOut += opCtrs["rows_out"]
+		mergeTimeAccum(&po.time, readTimeAccum(opCtrs, "time", opSegs))
+		if k.step == 1 && k.name == "mvcc" && !out.disallowEmptyFilterFold && hasFilterOp {
+			mergeTimeAccum(&po.foldedTime, readTimeAccum(opCtrs, "folded_time", opSegs))
+		}
 
 		for _, condNode := range opNode.GetChildren() {
 			if condNode == nil || condNode.GetKind() != KindCondition {
@@ -1298,15 +1565,21 @@ func partialScopeFromGroup(group *internalpb.ExecutionExplain) *partialScope {
 				exprID:  int64Attribute(cAttrs, "expr_id"),
 				fieldID: int64Attribute(cAttrs, "cond_field_id"),
 			}
+			condSegs := int(cCtrs["segments"])
+			pureSkipped := int(cCtrs["skipped_segments"])
+			evalDenom := max(0, condSegs-pureSkipped)
 			pc := &partialCondition{
 				key:                     ck,
 				firstFieldID:            int64Attribute(cAttrs, "first_field_id"),
-				segments:                int(cCtrs["segments"]),
+				segments:                condSegs,
+				pureSkippedSegments:     pureSkipped,
 				skippedSegmentsAny:      int(cCtrs["skipped_segments_any"]),
 				unskippedActiveSegments: int(cCtrs["unskipped_active_segments"]),
 				rawScanSegments:         int(cCtrs["raw_scan_segments"]),
 				orders:                  decodeEvalOrders(cAttrs["eval_orders"]),
 				totals:                  countersOf(condNode, false),
+				evalTime:                readTimeAccum(cCtrs, "eval", evalDenom),
+				prefetchTime:            readTimeAccum(cCtrs, "prefetch", condSegs),
 				used:                    make(map[usedKey]*partialUsed, 2),
 				reasons:                 make(map[string]*partialReason, 2),
 			}
@@ -1316,6 +1589,7 @@ func partialScopeFromGroup(group *internalpb.ExecutionExplain) *partialScope {
 				}
 				fgAttrs := fgNode.GetAttributes()
 				fgCtrs := fgNode.GetCounters()
+				fgSegs := int(fgCtrs["segments"])
 				if fgAttrs["bucket"] == "used" || (fgAttrs["bucket"] == "" && fgAttrs["index_id"] != "") {
 					uk := usedKey{
 						indexID: int64Attribute(fgAttrs, "index_id"),
@@ -1327,8 +1601,10 @@ func partialScopeFromGroup(group *internalpb.ExecutionExplain) *partialScope {
 						pu = &partialUsed{key: uk}
 						pc.used[uk] = pu
 					}
-					pu.segments += int(fgCtrs["segments"])
+					pu.segments += fgSegs
 					addCounters(&pu.totals, countersOf(fgNode, true))
+					mergeTimeAccum(&pu.evalTime, readTimeAccum(fgCtrs, "eval", fgSegs))
+					mergeTimeAccum(&pu.prefetchTime, readTimeAccum(fgCtrs, "prefetch", fgSegs))
 				} else {
 					reason := fgAttrs["decline_reason"]
 					if reason == "" {
@@ -1339,8 +1615,10 @@ func partialScopeFromGroup(group *internalpb.ExecutionExplain) *partialScope {
 						pr = &partialReason{reason: reason}
 						pc.reasons[reason] = pr
 					}
-					pr.segments += int(fgCtrs["segments"])
+					pr.segments += fgSegs
 					addCounters(&pr.totals, countersOf(fgNode, false))
+					mergeTimeAccum(&pr.evalTime, readTimeAccum(fgCtrs, "eval", fgSegs))
+					mergeTimeAccum(&pr.prefetchTime, readTimeAccum(fgCtrs, "prefetch", fgSegs))
 				}
 			}
 			if existing := po.conds[ck]; existing != nil {
@@ -1399,8 +1677,10 @@ func backfillOperatorConditions(
 		if needsDocFilter {
 			restoredFilter := *ops[0].foldedFilter
 			ops[0].RowsIn = ops[0].origMvccRows
+			ops[0].TimeUs = ops[0].origMvccTimeUs
 			ops[0].foldedFilter = nil
 			ops[0].origMvccRows = 0
+			ops[0].origMvccTimeUs = nil
 			ops = append([]OperatorSummary{restoredFilter}, ops...)
 			for i := range ops {
 				ops[i].Step = i
@@ -1514,10 +1794,12 @@ func foldInternalEmptyFilterIntoMvcc(ops []OperatorSummary, disallowFold bool) [
 	savedFilter := ops[0]
 	ops[1].foldedFilter = &savedFilter
 	ops[1].origMvccRows = ops[1].RowsIn
+	ops[1].origMvccTimeUs = ops[1].TimeUs
 	ops[1].RowsIn = ops[0].RowsIn
 	if ops[0].Segments > ops[1].Segments {
 		ops[1].Segments = ops[0].Segments
 	}
+	ops[1].TimeUs = ops[1].foldedTimeUs
 	folded := ops[1:]
 	for i := range folded {
 		folded[i].Step = i
@@ -1609,9 +1891,19 @@ func RenderSummaryJSON(s *Summary) (string, error) {
 	return string(encoded), nil
 }
 
+func formatTimeStatsText(label string, ts *TimeStats, segments int) string {
+	if ts == nil {
+		return ""
+	}
+	if segments <= 1 {
+		return fmt.Sprintf("%s=%d", label, ts.SumUs)
+	}
+	return fmt.Sprintf("%s: avg=%d, max=%d, min=%d, sum=%d", label, ts.AvgUs, ts.MaxUs, ts.MinUs, ts.SumUs)
+}
+
 func writeOperator(b *strings.Builder, depth int, op OperatorSummary) {
 	writeIndent(b, depth)
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 5)
 	parts = append(parts, fmt.Sprintf("segments=%d", op.Segments))
 	if op.CachedSegments > 0 {
 		parts = append(parts, fmt.Sprintf("cached_segments=%d", op.CachedSegments))
@@ -1620,6 +1912,9 @@ func writeOperator(b *strings.Builder, depth int, op OperatorSummary) {
 		parts = append(parts, "domain="+op.Domain)
 	}
 	parts = append(parts, fmt.Sprintf("rows: %d -> %d", op.RowsIn, op.RowsOut))
+	if timePart := formatTimeStatsText("time_us", op.TimeUs, op.Segments); timePart != "" {
+		parts = append(parts, timePart)
+	}
 	fmt.Fprintf(b, "[op %d] %s (%s)\n", op.Step, op.Operator, strings.Join(parts, ", "))
 
 	for _, condition := range sortedConditions(op.Conditions) {
@@ -1629,8 +1924,11 @@ func writeOperator(b *strings.Builder, depth int, op OperatorSummary) {
 
 func writeCondition(b *strings.Builder, depth int, condition Condition) {
 	writeIndent(b, depth)
-	parts := make([]string, 0, 6)
+	parts := make([]string, 0, 8)
 	parts = append(parts, fmt.Sprintf("segments=%d", condition.Segments))
+	if condition.SkippedSegments > 0 {
+		parts = append(parts, fmt.Sprintf("skipped_segments=%d", condition.SkippedSegments))
+	}
 	if condition.Skipped {
 		parts = append(parts, "skipped=true")
 	} else {
@@ -1643,6 +1941,13 @@ func writeCondition(b *strings.Builder, depth int, condition Condition) {
 	}
 	if orderAttr := formatEvalOrderAttr(condition); orderAttr != "" {
 		parts = append(parts, "eval_order="+orderAttr)
+	}
+	evalSegments := condition.Segments - condition.SkippedSegments
+	if evalPart := formatTimeStatsText("eval_us", condition.EvalTimeUs, evalSegments); evalPart != "" {
+		parts = append(parts, evalPart)
+	}
+	if pfPart := formatTimeStatsText("prefetch_us", condition.PrefetchTimeUs, condition.Segments); pfPart != "" {
+		parts = append(parts, pfPart)
 	}
 	fmt.Fprintf(b, "expr: %s (%s)\n", condition.Condition, strings.Join(parts, ", "))
 
@@ -1662,7 +1967,7 @@ func writeCondition(b *strings.Builder, depth int, condition Condition) {
 		if used.Family != "" {
 			header += " (" + used.Family + ")"
 		}
-		usedParts := make([]string, 0, 5)
+		usedParts := make([]string, 0, 6)
 		usedParts = append(usedParts, fmt.Sprintf("segments=%d", used.Segments))
 		usedParts = append(usedParts, fmt.Sprintf("rows: %d -> %d", used.RowsIn, used.RowsOut))
 		usedParts = append(usedParts, fmt.Sprintf("idx_scan=%d", used.IdxScan))
@@ -1670,16 +1975,27 @@ func writeCondition(b *strings.Builder, depth int, condition Condition) {
 		if used.ElementHits > 0 {
 			usedParts = append(usedParts, fmt.Sprintf("element_hits=%d", used.ElementHits))
 		}
+		if evalPart := formatTimeStatsText("eval_us", used.EvalTimeUs, used.Segments); evalPart != "" {
+			usedParts = append(usedParts, evalPart)
+		}
+		if pfPart := formatTimeStatsText("prefetch_us", used.PrefetchTimeUs, used.Segments); pfPart != "" {
+			usedParts = append(usedParts, pfPart)
+		}
 		fmt.Fprintf(b, "%s: %s\n", header, strings.Join(usedParts, ", "))
 	}
 
 	for _, reason := range sortedReasons(condition.Reasons) {
 		writeIndent(b, depth+1)
-		reasonParts := []string{
-			fmt.Sprintf("segments=%d", reason.Segments),
-			fmt.Sprintf("rows: %d -> %d", reason.RowsIn, reason.RowsOut),
-			fmt.Sprintf("idx_scan=%d", reason.IdxScan),
-			fmt.Sprintf("raw_scan=%d", reason.RawScan),
+		reasonParts := make([]string, 0, 5)
+		reasonParts = append(reasonParts, fmt.Sprintf("segments=%d", reason.Segments))
+		reasonParts = append(reasonParts, fmt.Sprintf("rows: %d -> %d", reason.RowsIn, reason.RowsOut))
+		reasonParts = append(reasonParts, fmt.Sprintf("idx_scan=%d", reason.IdxScan))
+		reasonParts = append(reasonParts, fmt.Sprintf("raw_scan=%d", reason.RawScan))
+		if evalPart := formatTimeStatsText("eval_us", reason.EvalTimeUs, reason.Segments); evalPart != "" {
+			reasonParts = append(reasonParts, evalPart)
+		}
+		if pfPart := formatTimeStatsText("prefetch_us", reason.PrefetchTimeUs, reason.Segments); pfPart != "" {
+			reasonParts = append(reasonParts, pfPart)
 		}
 		fmt.Fprintf(b, "raw (%s): %s\n", reason.Reason, strings.Join(reasonParts, ", "))
 	}
@@ -1707,9 +2023,12 @@ func buildConditionAggs(groups []*groupAgg) []*conditionAgg {
 				firstFieldID:            group.fieldID,
 				segments:                make(map[string]struct{}, 4),
 				skippedSegments:         make(map[string]struct{}, 2),
+				nonSkippedSegments:      make(map[string]struct{}, 4),
 				unskippedActiveSegments: make(map[string]struct{}, 4),
 				orders:                  make(map[int]map[string]struct{}, 1),
 				counters:                newSegCounterSet(),
+				evalBySeg:               make(map[string]int64, 4),
+				prefetchBySeg:           make(map[string]int64, 2),
 				used:                    make(map[usedKey]*usedAgg, 2),
 				reasons:                 make(map[string]*reasonAgg, 2),
 			})
@@ -1720,9 +2039,12 @@ func buildConditionAggs(groups []*groupAgg) []*conditionAgg {
 		}
 		mergeSegments(aggregate.segments, group.segments)
 		mergeSegments(aggregate.skippedSegments, group.skippedSegments)
+		mergeSegments(aggregate.nonSkippedSegments, group.nonSkippedSegments)
 		mergeSegments(aggregate.unskippedActiveSegments, group.unskippedActiveSegments)
 		mergeOrderSegments(aggregate.orders, group.orders)
 		aggregate.counters.add(group.segCounters, group.key.secondary)
+		mergeMaxMap(aggregate.evalBySeg, group.segEvalUs)
+		mergeMaxMap(aggregate.prefetchBySeg, group.segPrefetchUs)
 
 		// Boolean-short-circuited leaves (skipped=true) never executed on those
 		// segments even if asynchronous prefetch pre-determined an index or
@@ -1739,13 +2061,17 @@ func buildConditionAggs(groups []*groupAgg) []*conditionAgg {
 			entry := aggregate.reasons[reason]
 			if entry == nil {
 				entry = &reasonAgg{
-					segments: make(map[string]struct{}, 4),
-					counters: newSegCounterSet(),
+					segments:      make(map[string]struct{}, 4),
+					counters:      newSegCounterSet(),
+					evalBySeg:     make(map[string]int64, 4),
+					prefetchBySeg: make(map[string]int64, 2),
 				}
 				aggregate.reasons[reason] = entry
 			}
 			mergeSegments(entry.segments, group.segments)
 			entry.counters.add(group.segCounters, group.key.secondary)
+			mergeMaxMap(entry.evalBySeg, group.segEvalUs)
+			mergeMaxMap(entry.prefetchBySeg, group.segPrefetchUs)
 			continue
 		}
 
@@ -1753,19 +2079,23 @@ func buildConditionAggs(groups []*groupAgg) []*conditionAgg {
 		used := aggregate.used[useKey]
 		if used == nil {
 			used = &usedAgg{
-				key:      useKey,
-				segments: make(map[string]struct{}, 4),
-				counters: newSegCounterSet(),
+				key:           useKey,
+				segments:      make(map[string]struct{}, 4),
+				counters:      newSegCounterSet(),
+				evalBySeg:     make(map[string]int64, 4),
+				prefetchBySeg: make(map[string]int64, 2),
 			}
 			aggregate.used[useKey] = used
 		}
 		mergeSegments(used.segments, group.segments)
 		used.counters.add(group.segCounters, group.key.secondary)
+		mergeMaxMap(used.evalBySeg, group.segEvalUs)
+		mergeMaxMap(used.prefetchBySeg, group.segPrefetchUs)
 	}
 	return aggregates
 }
 
-func (agg *conditionAgg) toPartial() *partialCondition {
+func (agg *conditionAgg) toPartial(timedSegs map[string]struct{}) *partialCondition {
 	var orders map[int]int
 	if len(agg.orders) > 0 {
 		orders = make(map[int]int, len(agg.orders))
@@ -1776,9 +2106,11 @@ func (agg *conditionAgg) toPartial() *partialCondition {
 	used := make(map[usedKey]*partialUsed, len(agg.used))
 	for uk, entry := range agg.used {
 		used[uk] = &partialUsed{
-			key:      uk,
-			segments: len(entry.segments),
-			totals:   entry.counters.totals(),
+			key:          uk,
+			segments:     len(entry.segments),
+			totals:       entry.counters.totals(),
+			evalTime:     primaryTimeAccum(entry.evalBySeg, entry.segments, timedSegs),
+			prefetchTime: optionalTimeAccum(entry.prefetchBySeg, entry.segments, timedSegs),
 		}
 	}
 	rawSegments := make(map[string]struct{}, len(agg.reasons))
@@ -1788,20 +2120,26 @@ func (agg *conditionAgg) toPartial() *partialCondition {
 			mergeSegments(rawSegments, entry.segments)
 		}
 		reasons[reason] = &partialReason{
-			reason:   reason,
-			segments: len(entry.segments),
-			totals:   entry.counters.totals(),
+			reason:       reason,
+			segments:     len(entry.segments),
+			totals:       entry.counters.totals(),
+			evalTime:     primaryTimeAccum(entry.evalBySeg, entry.segments, timedSegs),
+			prefetchTime: optionalTimeAccum(entry.prefetchBySeg, entry.segments, timedSegs),
 		}
 	}
+	pureSkippedCount := max(0, len(agg.segments)-len(agg.nonSkippedSegments))
 	return &partialCondition{
 		key:                     agg.key,
 		firstFieldID:            agg.firstFieldID,
 		segments:                len(agg.segments),
+		pureSkippedSegments:     pureSkippedCount,
 		skippedSegmentsAny:      len(agg.skippedSegments),
 		unskippedActiveSegments: len(agg.unskippedActiveSegments),
 		rawScanSegments:         len(rawSegments),
 		orders:                  orders,
 		totals:                  agg.counters.totals(),
+		evalTime:                primaryTimeAccum(agg.evalBySeg, agg.nonSkippedSegments, timedSegs),
+		prefetchTime:            optionalTimeAccum(agg.prefetchBySeg, agg.segments, timedSegs),
 		used:                    used,
 		reasons:                 reasons,
 	}
@@ -1809,17 +2147,25 @@ func (agg *conditionAgg) toPartial() *partialCondition {
 
 func (pc *partialCondition) toCondition(leaves map[int64]LeafInfo) Condition {
 	totals := pc.totals
+	skipped := pc.skippedSegmentsAny > 0 && totals.rowsIn == 0 && pc.unskippedActiveSegments == 0
+	var condEvalTime *TimeStats
+	if !skipped {
+		condEvalTime = pc.evalTime.primaryStats()
+	}
 	condition := Condition{
-		ExprID:      pc.key.exprID,
-		Segments:    pc.segments,
-		Skipped:     pc.skippedSegmentsAny > 0 && totals.rowsIn == 0 && pc.unskippedActiveSegments == 0,
-		IdxScan:     totals.idxScan,
-		RawScan:     totals.rawScan,
-		RowsIn:      totals.rowsIn,
-		RowsOut:     totals.rowsOut,
-		ElementHits: totals.elementHits,
-		Used:        make([]IndexUse, 0, len(pc.used)),
-		Reasons:     make([]ReasonCount, 0, len(pc.reasons)),
+		ExprID:          pc.key.exprID,
+		Segments:        pc.segments,
+		SkippedSegments: pc.pureSkippedSegments,
+		Skipped:         skipped,
+		IdxScan:         totals.idxScan,
+		RawScan:         totals.rawScan,
+		RowsIn:          totals.rowsIn,
+		RowsOut:         totals.rowsOut,
+		ElementHits:     totals.elementHits,
+		EvalTimeUs:      condEvalTime,
+		PrefetchTimeUs:  pc.prefetchTime.optionalStats(),
+		Used:            make([]IndexUse, 0, len(pc.used)),
+		Reasons:         make([]ReasonCount, 0, len(pc.reasons)),
 	}
 	condition.Condition, condition.Type, condition.FieldID, condition.Field, condition.unresolvedCondition = leafOf(leaves, pc.key.exprID, pc.firstFieldID)
 
@@ -1856,28 +2202,32 @@ func (pc *partialCondition) toCondition(leaves map[int64]LeafInfo) Condition {
 			defaultName = primaryKeyName
 		}
 		condition.Used = append(condition.Used, IndexUse{
-			Kind:        scalarIndexKind,
-			IndexID:     entry.key.indexID,
-			IndexName:   defaultName,
-			Family:      entry.key.family,
-			Segments:    entry.segments,
-			IdxScan:     usedTotals.idxScan,
-			RawScan:     usedTotals.rawScan,
-			RowsIn:      usedTotals.rowsIn,
-			RowsOut:     usedTotals.rowsOut,
-			ElementHits: usedTotals.elementHits,
+			Kind:           scalarIndexKind,
+			IndexID:        entry.key.indexID,
+			IndexName:      defaultName,
+			Family:         entry.key.family,
+			Segments:       entry.segments,
+			IdxScan:        usedTotals.idxScan,
+			RawScan:        usedTotals.rawScan,
+			RowsIn:         usedTotals.rowsIn,
+			RowsOut:        usedTotals.rowsOut,
+			ElementHits:    usedTotals.elementHits,
+			EvalTimeUs:     entry.evalTime.primaryStats(),
+			PrefetchTimeUs: entry.prefetchTime.optionalStats(),
 		})
 	}
 
 	for reason, entry := range pc.reasons {
 		reasonTotals := entry.totals
 		condition.Reasons = append(condition.Reasons, ReasonCount{
-			Reason:   reason,
-			Segments: entry.segments,
-			IdxScan:  reasonTotals.idxScan,
-			RawScan:  reasonTotals.rawScan,
-			RowsIn:   reasonTotals.rowsIn,
-			RowsOut:  reasonTotals.rowsOut,
+			Reason:         reason,
+			Segments:       entry.segments,
+			IdxScan:        reasonTotals.idxScan,
+			RawScan:        reasonTotals.rawScan,
+			RowsIn:         reasonTotals.rowsIn,
+			RowsOut:        reasonTotals.rowsOut,
+			EvalTimeUs:     entry.evalTime.primaryStats(),
+			PrefetchTimeUs: entry.prefetchTime.optionalStats(),
 		})
 	}
 	condition.RawScanSegments = pc.rawScanSegments
@@ -1976,6 +2326,56 @@ func mergeSegments(dst, src map[string]struct{}) {
 	for segment := range src {
 		dst[segment] = struct{}{}
 	}
+}
+
+func mergeMaxInt64(dst map[string]int64, key string, val int64) {
+	if val < 0 {
+		val = 0
+	}
+	if cur, ok := dst[key]; !ok || val > cur {
+		dst[key] = val
+	}
+}
+
+func mergeMaxMap(dst, src map[string]int64) {
+	for k, v := range src {
+		mergeMaxInt64(dst, k, v)
+	}
+}
+
+func segmentHasTimingCounters(node *internalpb.ExecutionExplain) bool {
+	if node == nil {
+		return false
+	}
+	if ctrs := node.GetCounters(); len(ctrs) > 0 {
+		if _, ok := ctrs["time_us"]; ok {
+			return true
+		}
+		if _, ok := ctrs["eval_us"]; ok {
+			return true
+		}
+		if _, ok := ctrs["prefetch_us"]; ok {
+			return true
+		}
+	}
+	for _, ch := range node.GetChildren() {
+		if segmentHasTimingCounters(ch) {
+			return true
+		}
+	}
+	return false
+}
+
+func allSegmentsTimed(denomSegs, timedSegs map[string]struct{}) bool {
+	if len(denomSegs) == 0 {
+		return false
+	}
+	for segID := range denomSegs {
+		if _, ok := timedSegs[segID]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func mergeOrderSegments(dst, src map[int]map[string]struct{}) {

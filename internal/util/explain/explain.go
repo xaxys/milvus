@@ -154,6 +154,259 @@ func hasOperatorChildren(segment *internalpb.ExecutionExplain) bool {
 	return false
 }
 
+func stripTimingCounters(node *internalpb.ExecutionExplain) bool {
+	if node == nil {
+		return false
+	}
+	stripped := false
+	if ctrs := node.GetCounters(); len(ctrs) > 0 {
+		for _, key := range []string{"time_us", "eval_us", "prefetch_us"} {
+			if _, ok := ctrs[key]; ok {
+				delete(ctrs, key)
+				stripped = true
+			}
+		}
+	}
+	for _, ch := range node.GetChildren() {
+		if stripTimingCounters(ch) {
+			stripped = true
+		}
+	}
+	return stripped
+}
+
+func fgTimingKey(attrs map[string]string) string {
+	if exprID := attrs["expr_id"]; exprID != "" {
+		return "e:" + exprID
+	}
+	return "f:" + attrs["field_id"] + ":" + attrs["secondary_operand"]
+}
+
+func accumulateFilterGroupTimings(dst []*internalpb.ExecutionExplain, src []*internalpb.ExecutionExplain) ([]*internalpb.ExecutionExplain, bool) {
+	type fgTiming struct {
+		evalUs       int64
+		prefetchUs   int64
+		evalGroups   []*internalpb.ExecutionExplain
+		skippedGroup *internalpb.ExecutionExplain
+	}
+	s1Timings := make(map[string]*fgTiming, len(src))
+	keyOrder := make([]string, 0, len(src))
+	for _, fg := range src {
+		if fg == nil || fg.GetKind() != KindFilterGroup {
+			continue
+		}
+		attrs := fg.GetAttributes()
+		skipped := attrs["skipped"] == "true"
+		ctrs := fg.GetCounters()
+		var evalUs int64
+		if !skipped {
+			evalUs = ctrs["eval_us"]
+		}
+		prefetchUs := ctrs["prefetch_us"]
+		if skipped && prefetchUs <= 0 {
+			continue
+		}
+		k := fgTimingKey(attrs)
+		cur := s1Timings[k]
+		if cur == nil {
+			cur = &fgTiming{}
+			s1Timings[k] = cur
+			keyOrder = append(keyOrder, k)
+		}
+		if !skipped {
+			cur.evalGroups = append(cur.evalGroups, fg)
+			if evalUs > cur.evalUs {
+				cur.evalUs = evalUs
+			}
+		} else if cur.skippedGroup == nil && prefetchUs > 0 {
+			cur.skippedGroup = fg
+		}
+		if prefetchUs > cur.prefetchUs {
+			cur.prefetchUs = prefetchUs
+		}
+	}
+	if len(s1Timings) == 0 {
+		return dst, false
+	}
+	changed := false
+	out := make([]*internalpb.ExecutionExplain, 0, len(dst)+len(keyOrder))
+	replacedKeys := make(map[string]struct{}, len(s1Timings))
+	matchedKeys := make(map[string]struct{}, len(s1Timings))
+	for _, fg := range dst {
+		if fg == nil || fg.GetKind() != KindFilterGroup {
+			out = append(out, fg)
+			continue
+		}
+		attrs := fg.GetAttributes()
+		k := fgTimingKey(attrs)
+		t := s1Timings[k]
+		if t == nil {
+			out = append(out, fg)
+			continue
+		}
+		matchedKeys[k] = struct{}{}
+		if attrs["skipped"] == "true" {
+			if len(t.evalGroups) > 0 {
+				if _, done := replacedKeys[k]; !done {
+					replacedKeys[k] = struct{}{}
+					s2Prefetch := fg.GetCounters()["prefetch_us"]
+					for _, srcGroup := range t.evalGroups {
+						clonedGroup, _ := proto.Clone(srcGroup).(*internalpb.ExecutionExplain)
+						if clonedGroup != nil && s2Prefetch > 0 {
+							if clonedGroup.Counters == nil {
+								clonedGroup.Counters = make(map[string]int64, 6)
+							}
+							clonedGroup.Counters["prefetch_us"] += s2Prefetch
+						}
+						out = append(out, clonedGroup)
+					}
+					changed = true
+				}
+				continue
+			}
+			if t.prefetchUs > 0 {
+				if fg.Counters == nil {
+					fg.Counters = make(map[string]int64, 5)
+				}
+				fg.Counters["prefetch_us"] += t.prefetchUs
+				changed = true
+			}
+			out = append(out, fg)
+			continue
+		}
+		if t.evalUs > 0 || t.prefetchUs > 0 {
+			if fg.Counters == nil {
+				fg.Counters = make(map[string]int64, 6)
+			}
+			if t.evalUs > 0 {
+				fg.Counters["eval_us"] += t.evalUs
+				changed = true
+			}
+			if t.prefetchUs > 0 {
+				fg.Counters["prefetch_us"] += t.prefetchUs
+				changed = true
+			}
+		}
+		out = append(out, fg)
+	}
+	for _, k := range keyOrder {
+		if _, ok := matchedKeys[k]; ok {
+			continue
+		}
+		t := s1Timings[k]
+		if len(t.evalGroups) > 0 {
+			for _, srcGroup := range t.evalGroups {
+				if clonedGroup, _ := proto.Clone(srcGroup).(*internalpb.ExecutionExplain); clonedGroup != nil {
+					out = append(out, clonedGroup)
+					changed = true
+				}
+			}
+		} else if t.skippedGroup != nil && t.prefetchUs > 0 {
+			if clonedGroup, _ := proto.Clone(t.skippedGroup).(*internalpb.ExecutionExplain); clonedGroup != nil {
+				out = append(out, clonedGroup)
+				changed = true
+			}
+		}
+	}
+	return out, changed
+}
+
+func mergeZeroRowStage2Timings(s1Copied []*internalpb.ExecutionExplain, s2Children []*internalpb.ExecutionExplain) []*internalpb.ExecutionExplain {
+	type zeroRowTiming struct {
+		evalUs      int64
+		prefetchUs  int64
+		sampleGroup *internalpb.ExecutionExplain
+	}
+	s2Timings := make(map[string]*zeroRowTiming, len(s2Children))
+	keyOrder := make([]string, 0, len(s2Children))
+	for _, fg := range s2Children {
+		if fg == nil || fg.GetKind() != KindFilterGroup {
+			continue
+		}
+		attrs := fg.GetAttributes()
+		skipped := attrs["skipped"] == "true"
+		ctrs := fg.GetCounters()
+		var evalUs int64
+		if !skipped {
+			evalUs = ctrs["eval_us"]
+		}
+		prefetchUs := ctrs["prefetch_us"]
+		if evalUs <= 0 && prefetchUs <= 0 {
+			continue
+		}
+		k := fgTimingKey(attrs)
+		cur := s2Timings[k]
+		if cur == nil {
+			cur = &zeroRowTiming{sampleGroup: fg}
+			s2Timings[k] = cur
+			keyOrder = append(keyOrder, k)
+		}
+		if evalUs > cur.evalUs {
+			cur.evalUs = evalUs
+		}
+		if prefetchUs > cur.prefetchUs {
+			cur.prefetchUs = prefetchUs
+		}
+	}
+	if len(s2Timings) == 0 {
+		return s1Copied
+	}
+	matchedKeys := make(map[string]struct{}, len(s2Timings))
+	for _, fg := range s1Copied {
+		if fg == nil || fg.GetKind() != KindFilterGroup {
+			continue
+		}
+		attrs := fg.GetAttributes()
+		k := fgTimingKey(attrs)
+		t := s2Timings[k]
+		if t == nil {
+			continue
+		}
+		matchedKeys[k] = struct{}{}
+		if attrs["skipped"] != "true" && t.evalUs > 0 {
+			if fg.Counters == nil {
+				fg.Counters = make(map[string]int64, 6)
+			}
+			fg.Counters["eval_us"] += t.evalUs
+		}
+		if t.prefetchUs > 0 {
+			if fg.Counters == nil {
+				fg.Counters = make(map[string]int64, 6)
+			}
+			fg.Counters["prefetch_us"] += t.prefetchUs
+		}
+	}
+	for _, k := range keyOrder {
+		if _, ok := matchedKeys[k]; ok {
+			continue
+		}
+		t := s2Timings[k]
+		if t.prefetchUs <= 0 || t.sampleGroup == nil {
+			continue
+		}
+		srcAttrs := t.sampleGroup.GetAttributes()
+		newAttrs := map[string]string{"skipped": "true"}
+		for _, attrKey := range []string{"expr_id", "field_id", "eval_order", "secondary_operand"} {
+			if v := srcAttrs[attrKey]; v != "" {
+				newAttrs[attrKey] = v
+			}
+		}
+		s1Copied = append(s1Copied, &internalpb.ExecutionExplain{
+			Kind:       KindFilterGroup,
+			Version:    1,
+			Attributes: newAttrs,
+			Counters: map[string]int64{
+				"rows_in":     0,
+				"idx_scan":    0,
+				"raw_scan":    0,
+				"rows_out":    0,
+				"prefetch_us": t.prefetchUs,
+			},
+		})
+	}
+	return s1Copied
+}
+
 // MergeStage1Explain merges filter decisions recorded during Stage 1 of a
 // completed two-stage search into a cloned copy of stage2. On sealed segments
 // where Stage 2 reused Stage 1's cached filter bitmap, Stage 1's evaluated
@@ -178,7 +431,18 @@ func MergeStage1Explain(stage2 *internalpb.ExecutionExplain, stage1 ...*internal
 	mutated := false
 	for _, segment := range Segments(cloned) {
 		recorded := bySegment[segment.GetName()]
-		if recorded == nil || len(recorded.GetChildren()) == 0 {
+		if recorded == nil {
+			continue
+		}
+		s1Timed := segmentHasTimingCounters(recorded)
+		s2Timed := segmentHasTimingCounters(segment)
+		bothTimed := s1Timed && s2Timed
+		mixedTiming := s1Timed != s2Timed
+
+		if len(recorded.GetChildren()) == 0 {
+			if mixedTiming && stripTimingCounters(segment) {
+				mutated = true
+			}
 			continue
 		}
 		if hasOperatorChildren(segment) && hasOperatorChildren(recorded) {
@@ -207,17 +471,39 @@ func MergeStage1Explain(stage2 *internalpb.ExecutionExplain, stage1 ...*internal
 				if s1Op == nil {
 					continue
 				}
+				if bothTimed {
+					if s1Time, hasS1Time := s1Op.GetCounters()["time_us"]; hasS1Time {
+						if ch.Counters == nil {
+							ch.Counters = make(map[string]int64, 3)
+						}
+						if _, hasS2Time := ch.Counters["time_us"]; !hasS2Time || s1Time > 0 {
+							ch.Counters["time_us"] += s1Time
+							segMutated = true
+						}
+					}
+				}
 				if !nodeHasEvaluatedRows(ch) && len(s1Op.GetChildren()) > 0 {
 					copied := make([]*internalpb.ExecutionExplain, len(s1Op.GetChildren()))
 					for i, fg := range s1Op.GetChildren() {
 						copied[i], _ = proto.Clone(fg).(*internalpb.ExecutionExplain)
+					}
+					if bothTimed && len(ch.GetChildren()) > 0 {
+						copied = mergeZeroRowStage2Timings(copied, ch.GetChildren())
 					}
 					ch.Children = copied
 					if ch.Attributes != nil && s1Op.GetAttributes()["cached"] != "true" {
 						delete(ch.Attributes, "cached")
 					}
 					segMutated = true
+				} else if bothTimed && nodeHasEvaluatedRows(ch) && len(s1Op.GetChildren()) > 0 {
+					if mergedChildren, changed := accumulateFilterGroupTimings(ch.GetChildren(), s1Op.GetChildren()); changed {
+						ch.Children = mergedChildren
+						segMutated = true
+					}
 				}
+			}
+			if mixedTiming && stripTimingCounters(segment) {
+				segMutated = true
 			}
 			if segMutated {
 				if segment.GetCounters()["rows_in"] == 0 {
@@ -237,9 +523,15 @@ func MergeStage1Explain(stage2 *internalpb.ExecutionExplain, stage1 ...*internal
 
 		// Legacy flat segment -> filter_group fallback (rolling upgrade).
 		if segment.GetCounters()["rows_in"] > 0 || nodeHasEvaluatedRows(segment) {
+			if mixedTiming && stripTimingCounters(segment) {
+				mutated = true
+			}
 			continue
 		}
 		if len(segment.GetChildren()) > 0 && recorded.GetCounters()["rows_in"] == 0 && !nodeHasEvaluatedRows(recorded) {
+			if mixedTiming && stripTimingCounters(segment) {
+				mutated = true
+			}
 			continue
 		}
 		children := make([]*internalpb.ExecutionExplain, len(recorded.GetChildren()))
@@ -254,6 +546,9 @@ func MergeStage1Explain(stage2 *internalpb.ExecutionExplain, stage1 ...*internal
 			for k, v := range rc {
 				segment.Counters[k] = v
 			}
+		}
+		if mixedTiming {
+			stripTimingCounters(segment)
 		}
 		mutated = true
 	}

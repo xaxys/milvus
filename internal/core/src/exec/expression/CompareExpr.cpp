@@ -588,6 +588,7 @@ PhyCompareFilterExpr::ExecCompareWithValueLookup(OpType, EvalCtx& context) {
 
 void
 PhyCompareFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
+    ExecutionExplainRecorder::ScopedLeafEvalTimer eval_timer(explain_slot_);
     tracer::AutoSpan span(
         "PhyCompareFilterExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("op_type", static_cast<int>(expr_->op_type_));

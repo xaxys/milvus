@@ -3438,3 +3438,294 @@ TEST(MultiScalarIndexExprTest,
     EXPECT_EQ(warm_ctrs.at("rows_in"), n);
     EXPECT_EQ(warm_ctrs.at("rows_out"), 2);
 }
+
+TEST(MultiScalarIndexExprTest, ExplainLeafTimingAndSkippedPrefetchAttribution) {
+    // 1. Recorder-level nanosecond rounding, multi-operand eval_us sharing, and
+    // skipped-leaf prefetch_us preservation.
+    {
+        milvus::exec::ExecutionExplainRecorder explain(1000);
+        explain.RegisterOperator(0, "filter");
+        explain.SetDefaultFilterStep(0);
+        explain.SetEvalOrder(10, 1, FieldId(101));
+        explain.SetEvalOrder(20, 2, FieldId(102));
+        explain.MarkEvalEntered(10);
+        explain.MarkEvalEntered(20);
+
+        // Multi-operand leaf 10 (e.g. a < b): primary + secondary groups share
+        // one LeafSlot's eval_ns (1500 ns -> rounds to 2 us).
+        explain.RecordDecision(FieldId(101),
+                               10,
+                               /*used_index=*/true,
+                               5001,
+                               "sort",
+                               false,
+                               "",
+                               "");
+        explain.RecordDecision(FieldId(102),
+                               10,
+                               /*used_index=*/false,
+                               0,
+                               "",
+                               false,
+                               "",
+                               "no_index_on_field");
+        explain.AddRows(10, 1000, 0);
+        explain.AddLeafEvalNs(10, 1500);
+        explain.AddLeafPrefetchNs(10, 499);  // < 500 ns rounds to 0 -> omitted
+
+        // Short-circuited leaf 20: never evaluated, no RecordDecision, but
+        // background PrefetchAsync spent 8400 ns (8 us).
+        explain.AddLeafPrefetchNs(20, 8400);
+        explain.AddOperatorTimeNs(0, 12600);
+
+        proto::internal::ExecutionExplain seg_node;
+        ASSERT_TRUE(seg_node.ParseFromString(explain.Finish()));
+        ASSERT_EQ(seg_node.children_size(), 1);
+        const auto& op_node = seg_node.children(0);
+        EXPECT_EQ(CountersOf(op_node).at("time_us"), 13);
+        ASSERT_EQ(op_node.children_size(), 3);
+
+        const auto fg0_ctrs = CountersOf(op_node.children(0));
+        const auto fg1_ctrs = CountersOf(op_node.children(1));
+        EXPECT_EQ(fg0_ctrs.at("eval_us"), 2);
+        EXPECT_EQ(fg1_ctrs.at("eval_us"), 2);
+        EXPECT_EQ(fg0_ctrs.count("prefetch_us"), 0);
+
+        const auto fg2_attrs = AttributesOf(op_node.children(2));
+        const auto fg2_ctrs = CountersOf(op_node.children(2));
+        EXPECT_EQ(fg2_attrs.at("expr_id"), "20");
+        EXPECT_EQ(fg2_attrs.at("skipped"), "true");
+        EXPECT_EQ(fg2_ctrs.count("eval_us"), 0);
+        EXPECT_EQ(fg2_ctrs.at("prefetch_us"), 8);
+    }
+
+    // 2. End-to-end async prefetch + evaluation records eval_us and optional
+    // prefetch_us through ExprSet without data races.
+    {
+        auto schema = std::make_shared<Schema>();
+        auto pk_fid = schema->AddDebugField("id", DataType::INT64);
+        schema->set_primary_field_id(pk_fid);
+        auto val_fid = schema->AddDebugField("val", DataType::INT64);
+
+        const int64_t row_count = 256;
+        std::vector<int64_t> ids(row_count);
+        std::vector<int64_t> vals(row_count);
+        for (int64_t i = 0; i < row_count; ++i) {
+            ids[i] = i;
+            vals[i] = i * 10;
+        }
+        auto pk_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        pk_field->FillFieldData(ids.data(), row_count);
+        auto val_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        val_field->FillFieldData(vals.data(), row_count);
+
+        RawFieldFiles files;
+        auto segment = CreateSealedSegment(schema);
+        segment->LoadFieldData(files.Prepare(pk_fid, {pk_field}));
+        segment->LoadFieldData(files.Prepare(val_fid, {val_field}));
+
+        auto pred = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(val_fid, DataType::INT64),
+            proto::plan::OpType::LessThan,
+            Int64Literal(100),
+            std::vector<proto::plan::GenericValue>());
+        pred->SetExprId(93001);
+
+        auto explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(row_count);
+        auto qc = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, segment.get(), row_count, MAX_TIMESTAMP);
+        qc->set_read_schema(schema);
+        qc->SetExplain(explain);
+        milvus::exec::ExecContext ec(qc.get());
+
+        std::vector<expr::TypedExprPtr> filters{pred};
+        milvus::exec::ExprSet exprs(filters, &ec);
+
+        auto pool = std::make_shared<folly::CPUThreadPoolExecutor>(1);
+        exprs.PrefetchAsync(pool);
+        exprs.WaitPrefetch();
+
+        milvus::exec::EvalCtx eval_ctx(&ec);
+        auto bitmap = milvus::exec::EvalExprSetOverAllBatches(
+            exprs, eval_ctx, row_count, "ExplainLeafTimingTest");
+        EXPECT_EQ(bitmap.count(), 10);
+
+        proto::internal::ExecutionExplain seg_node;
+        ASSERT_TRUE(seg_node.ParseFromString(explain->Finish()));
+        ASSERT_EQ(seg_node.children_size(), 1);
+        const auto fg_ctrs = CountersOf(seg_node.children(0));
+        EXPECT_EQ(fg_ctrs.at("rows_in"), row_count);
+        EXPECT_EQ(fg_ctrs.at("rows_out"), 10);
+        EXPECT_EQ(fg_ctrs.count("eval_us"), 1);
+        EXPECT_GE(fg_ctrs.at("eval_us"), 0);
+    }
+
+    // 3. Direct Eval() without prior WaitPrefetch/PrefetchAsync and with
+    // explain disabled (nullptr) still runs DetermineExecPath() and selects the
+    // scalar index on index-backed sealed segments.
+    {
+        auto schema = std::make_shared<Schema>();
+        auto pk_fid = schema->AddDebugField("id", DataType::INT64);
+        schema->set_primary_field_id(pk_fid);
+        auto val_fid = schema->AddDebugField("val", DataType::INT64);
+
+        const int64_t row_count = 128;
+        std::vector<int64_t> ids(row_count);
+        std::vector<int64_t> vals(row_count);
+        for (int64_t i = 0; i < row_count; ++i) {
+            ids[i] = i;
+            vals[i] = i;
+        }
+        auto pk_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        pk_field->FillFieldData(ids.data(), row_count);
+        auto val_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        val_field->FillFieldData(vals.data(), row_count);
+
+        RawFieldFiles files;
+        auto segment = CreateSealedSegment(schema);
+        segment->LoadFieldData(files.Prepare(pk_fid, {pk_field}));
+        // Do NOT LoadFieldData for val_fid: an index-only field would fail raw
+        // evaluation if Eval() skipped DetermineExecPath().
+        InstallIndexWithId(*segment,
+                           val_fid,
+                           DataType::INT64,
+                           94001,
+                           BuildIndex(val_fid,
+                                      DataType::INT64,
+                                      milvus::index::ASCENDING_SORT,
+                                      {val_field}));
+
+        auto qc = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, segment.get(), row_count, MAX_TIMESTAMP);
+        qc->set_read_schema(schema);
+        qc->set_read_snapshot(segment->CaptureReadSnapshot());
+        milvus::exec::ExecContext ec(qc.get());
+
+        auto range_pred = std::make_shared<expr::BinaryRangeFilterExpr>(
+            expr::ColumnInfo(val_fid, DataType::INT64),
+            Int64Literal(10),
+            Int64Literal(20),
+            true,
+            false);
+        auto in_pred = std::make_shared<expr::TermFilterExpr>(
+            expr::ColumnInfo(val_fid, DataType::INT64),
+            std::vector<proto::plan::GenericValue>{Int64Literal(12),
+                                                   Int64Literal(15)});
+        for (const auto& p :
+             std::vector<expr::TypedExprPtr>{range_pred, in_pred}) {
+            std::vector<expr::TypedExprPtr> single{p};
+            milvus::exec::ExprSet exprs_no_prefetch(single, &ec);
+            milvus::exec::EvalCtx eval_ctx(&ec);
+            std::vector<VectorPtr> out;
+            // Intentionally skip WaitPrefetch() and PrefetchAsync(): Eval()
+            // must still determine the ScalarIndex path on an index-only field.
+            exprs_no_prefetch.Eval(0, 1, true, eval_ctx, out);
+            ASSERT_EQ(out.size(), 1);
+            ASSERT_NE(out[0], nullptr);
+        }
+    }
+
+    // 4. Synchronous NGRAM fusion through RawExprCacheAdapter transfers
+    // WaitPrefetch() lookup/prepare duration to the unwrapped leaf rather than
+    // dropping it when adapter->Eval() is bypassed.
+    {
+        auto schema = std::make_shared<Schema>();
+        auto pk_fid = schema->AddDebugField("id", DataType::INT64);
+        schema->set_primary_field_id(pk_fid);
+        auto v_fid = schema->AddDebugField("v", DataType::VARCHAR);
+
+        const int64_t n = static_cast<int64_t>(kVarCharValues.size());
+        std::vector<int64_t> pks(n);
+        for (int64_t i = 0; i < n; ++i) {
+            pks[i] = i;
+        }
+        auto pk_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        pk_field->FillFieldData(pks.data(), n);
+        auto v_field = milvus::test::expr_index::StringField(kVarCharValues);
+
+        RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        seg->LoadFieldData(files.Prepare(pk_fid, {pk_field}));
+        seg->LoadFieldData(files.Prepare(v_fid, {v_field}));
+        InstallIndexWithId(*seg,
+                           v_fid,
+                           DataType::VARCHAR,
+                           95001,
+                           BuildIndex(v_fid,
+                                      DataType::VARCHAR,
+                                      milvus::index::NGRAM_INDEX_TYPE,
+                                      {v_field},
+                                      {{milvus::index::MIN_GRAM, 3},
+                                       {milvus::index::MAX_GRAM, 4}}));
+
+        using milvus::exec::ExprResCacheManager;
+        auto& mgr = ExprResCacheManager::Instance();
+        const bool prev_enabled = ExprResCacheManager::IsEnabled();
+        ExprResCacheManager::SetEnabled(true);
+        mgr.Clear();
+        mgr.SetCapacityBytes(1ULL << 20);
+        auto cleanup = folly::makeGuard([&]() {
+            mgr.Clear();
+            ExprResCacheManager::SetEnabled(prev_enabled);
+        });
+
+        proto::plan::GenericValue pat1;
+        pat1.set_string_val("alpha");
+        auto like1 = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(v_fid, DataType::VARCHAR),
+            proto::plan::OpType::InnerMatch,
+            pat1,
+            std::vector<proto::plan::GenericValue>());
+        like1->SetExprId(95101);
+
+        proto::plan::GenericValue pat2;
+        pat2.set_string_val("beta");
+        auto like2 = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(v_fid, DataType::VARCHAR),
+            proto::plan::OpType::InnerMatch,
+            pat2,
+            std::vector<proto::plan::GenericValue>());
+        like2->SetExprId(95102);
+
+        auto conj = std::make_shared<expr::LogicalBinaryExpr>(
+            expr::LogicalBinaryExpr::OpType::And, like1, like2);
+
+        auto explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(n);
+        auto qc = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, seg.get(), n, MAX_TIMESTAMP);
+        qc->set_read_schema(schema);
+        qc->set_read_snapshot(seg->CaptureReadSnapshot());
+        qc->set_enable_sub_expr_cache_write(true);
+        qc->SetExplain(explain);
+        milvus::exec::ExecContext ec(qc.get());
+        ec.SetExplain(explain);
+        std::vector<expr::TypedExprPtr> filters{conj};
+        milvus::exec::ExprSet exprs_sync(filters, &ec, /*null_rejecting=*/true);
+        // Synchronous WaitPrefetch (no PrefetchAsync) populates adapter's
+        // pending_sync_prepare_ns_, which ConjunctExpr must transfer on unwrap.
+        exprs_sync.WaitPrefetch();
+        milvus::exec::EvalCtx eval_ctx(&ec);
+        auto res = milvus::exec::EvalExprSetOverAllBatches(
+            exprs_sync, eval_ctx, n, "SyncFusedNgramPrepareTiming");
+        (void)res;
+
+        proto::internal::ExecutionExplain seg_node;
+        ASSERT_TRUE(seg_node.ParseFromString(explain->Finish()));
+        ASSERT_GE(seg_node.children_size(), 1);
+        for (int i = 0; i < seg_node.children_size(); ++i) {
+            const auto attrs = AttributesOf(seg_node.children(i));
+            const auto ctrs = CountersOf(seg_node.children(i));
+            if (attrs.count("skipped") == 0) {
+                EXPECT_EQ(ctrs.count("eval_us"), 1);
+                EXPECT_GT(ctrs.at("rows_in"), 0);
+            }
+        }
+    }
+}

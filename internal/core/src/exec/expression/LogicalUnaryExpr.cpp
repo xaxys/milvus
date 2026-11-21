@@ -64,9 +64,15 @@ PhyLogicalUnaryExpr::Eval(EvalCtx& context, VectorPtr& result) {
         } else {
             rows_out = static_cast<int64_t>(child_view.count());
         }
-        explain->AddRows(inputs_[0]->expr_id(), rows_in, rows_out);
+        if (auto* slot = inputs_[0]->explain_slot(); slot != nullptr) {
+            ExecutionExplainRecorder::AddSlotRows(slot, rows_in, rows_out);
+        } else {
+            explain->AddRows(inputs_[0]->expr_id(), rows_in, rows_out);
+        }
     }
     if (expr_->op_type_ == milvus::expr::LogicalUnaryExpr::OpType::LogicalNot) {
+        ExecutionExplainRecorder::ScopedLeafEvalTimer not_timer(
+            inputs_[0] != nullptr ? inputs_[0]->explain_slot() : nullptr);
         common::ThreeValuedLogicOp::Not(GetColumnVector(result));
     }
 }

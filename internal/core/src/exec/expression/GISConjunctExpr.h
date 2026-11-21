@@ -43,6 +43,8 @@ struct GISGroupState {
         bool has_index{false};
         int64_t expr_id{0};
         bool explain_recorded{false};
+        ExecutionExplainRecorder::LeafSlot* explain_slot{nullptr};
+        int64_t pending_coarse_ns{0};
         // Per-predicate R-Tree coarse bitmap (segment-level, computed once).
         // An all-ones coarse is always CORRECT -- Refine still evaluates the
         // exact predicate -- but it prunes nothing, so the pruning gain
@@ -79,6 +81,7 @@ struct GISGroupState {
     std::string explain_path;
     bool explain_nested{false};
     std::string explain_decline_reason;
+    int64_t degraded_coarse_ns{0};
 
     void
     RecordPredDecision(ExecutionExplainRecorder* explain, Pred& p) {
@@ -95,6 +98,15 @@ struct GISGroupState {
                                 explain_nested,
                                 explain_path,
                                 explain_decline_reason);
+        if (const int64_t coarse_ns = std::exchange(p.pending_coarse_ns, 0);
+            coarse_ns > 0) {
+            if (p.explain_slot != nullptr) {
+                ExecutionExplainRecorder::AddSlotEvalNs(p.explain_slot,
+                                                        coarse_ns);
+            } else {
+                explain->AddLeafEvalNs(p.expr_id, coarse_ns);
+            }
+        }
     }
 
     // A state may be destroyed without being evaluated to completion: the
@@ -265,6 +277,47 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
     PrefetchRawData() override {
     }
 
+    void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        SegmentExpr::SetExplainRecorder(explain);
+        if (st_ != nullptr) {
+            for (auto& p : st_->preds) {
+                p.explain_slot = (explain != nullptr && p.expr_id != 0)
+                                     ? explain->EnsureLeafSlot(p.expr_id)
+                                     : nullptr;
+            }
+        }
+    }
+
+ protected:
+    void
+    AttributePrefetchNs(int64_t ns) override {
+        if (ns <= 0 || st_ == nullptr) {
+            return;
+        }
+        size_t active = 0;
+        for (const auto& p : st_->preds) {
+            if (p.explain_slot != nullptr) {
+                ++active;
+            }
+        }
+        if (active == 0) {
+            return;
+        }
+        const int64_t base = ns / static_cast<int64_t>(active);
+        const int64_t rem = ns % static_cast<int64_t>(active);
+        size_t idx = 0;
+        for (const auto& p : st_->preds) {
+            if (p.explain_slot == nullptr) {
+                continue;
+            }
+            const int64_t share =
+                base + (static_cast<int64_t>(idx) < rem ? 1 : 0);
+            ExecutionExplainRecorder::AddSlotPrefetchNs(p.explain_slot, share);
+            ++idx;
+        }
+    }
+
  private:
     int64_t
     NextBatchSize() const {
@@ -373,6 +426,47 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
     // one.
     void
     PrefetchRawData() override;
+
+    void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        SegmentExpr::SetExplainRecorder(explain);
+        if (st_ != nullptr) {
+            for (auto& p : st_->preds) {
+                p.explain_slot = (explain != nullptr && p.expr_id != 0)
+                                     ? explain->EnsureLeafSlot(p.expr_id)
+                                     : nullptr;
+            }
+        }
+    }
+
+ protected:
+    void
+    AttributePrefetchNs(int64_t ns) override {
+        if (ns <= 0 || st_ == nullptr) {
+            return;
+        }
+        size_t active = 0;
+        for (const auto& p : st_->preds) {
+            if (p.explain_slot != nullptr) {
+                ++active;
+            }
+        }
+        if (active == 0) {
+            return;
+        }
+        const int64_t base = ns / static_cast<int64_t>(active);
+        const int64_t rem = ns % static_cast<int64_t>(active);
+        size_t idx = 0;
+        for (const auto& p : st_->preds) {
+            if (p.explain_slot == nullptr) {
+                continue;
+            }
+            const int64_t share =
+                base + (static_cast<int64_t>(idx) < rem ? 1 : 0);
+            ExecutionExplainRecorder::AddSlotPrefetchNs(p.explain_slot, share);
+            ++idx;
+        }
+    }
 
     // DELIBERATELY NOT overridden. This node forces RawData, so the inherited
     // base CanExecuteAllAtOnce() returns false and the refine stage is ALWAYS

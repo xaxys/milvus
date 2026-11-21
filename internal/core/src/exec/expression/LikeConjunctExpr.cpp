@@ -105,17 +105,23 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
                 break;
             }
             if (phase1_leaf_res_[i] == nullptr) {
-                ngram_exprs_[i]->EnsureExplainDecisionRecorded();
+                ExecutionExplainRecorder::ScopedLeafEvalTimer p1_timer(
+                    ngram_exprs_[i]->explain_slot());
+                ngram_exprs_[i]->PrepareEval();
                 auto leaf_candidates =
                     std::make_shared<TargetBitmap>(active_count_, true);
                 ngram_exprs_[i]->ExecuteNgramPhase1(*leaf_candidates);
                 phase1_leaf_res_[i] = std::move(leaf_candidates);
             }
             c_before[i] = static_cast<int64_t>(running.count());
-            TargetBitmap leaf_slice;
-            leaf_slice.append(
-                *phase1_leaf_res_[i], current_pos_, real_batch_size);
-            running &= leaf_slice;
+            {
+                ExecutionExplainRecorder::ScopedLeafEvalTimer timer(
+                    ngram_exprs_[i]->explain_slot());
+                TargetBitmap leaf_slice;
+                leaf_slice.append(
+                    *phase1_leaf_res_[i], current_pos_, real_batch_size);
+                running &= leaf_slice;
+            }
             c_after[i] = static_cast<int64_t>(running.count());
             p1_ran = i + 1;
         }
@@ -125,8 +131,12 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         if (!batch_candidates.none()) {
             for (size_t i = 0; i < ngram_exprs_.size(); ++i) {
                 int64_t before = static_cast<int64_t>(batch_candidates.count());
-                ngram_exprs_[i]->ExecuteNgramPhase2(
-                    batch_candidates, current_pos_, real_batch_size);
+                {
+                    ExecutionExplainRecorder::ScopedLeafEvalTimer timer(
+                        ngram_exprs_[i]->explain_slot());
+                    ngram_exprs_[i]->ExecuteNgramPhase2(
+                        batch_candidates, current_pos_, real_batch_size);
+                }
                 int64_t after = static_cast<int64_t>(batch_candidates.count());
                 p2_rejected[i] = before - after;
                 if (batch_candidates.none()) {
@@ -138,16 +148,23 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         if (p1_ran > 0) {
             int64_t s = c_before[0];
             for (size_t i = 0; i < p1_ran; ++i) {
+                auto add_leaf_rows = [&](int64_t r_in, int64_t r_out) {
+                    if (auto* slot = ngram_exprs_[i]->explain_slot();
+                        slot != nullptr) {
+                        ExecutionExplainRecorder::AddSlotRows(
+                            slot, r_in, r_out);
+                    } else if (ngram_exprs_[i]->expr_id() != 0) {
+                        explain->AddRows(
+                            ngram_exprs_[i]->expr_id(), r_in, r_out);
+                    }
+                };
                 if (s > 0) {
                     int64_t delta = (c_before[i] - c_after[i]) + p2_rejected[i];
                     int64_t next_s = std::max<int64_t>(0, s - delta);
-                    if (ngram_exprs_[i]->expr_id() != 0) {
-                        explain->AddRows(ngram_exprs_[i]->expr_id(), s, next_s);
-                    }
+                    add_leaf_rows(s, next_s);
                     s = next_s;
-                } else if (c_before[i] > 0 && ngram_exprs_[i]->expr_id() != 0) {
-                    explain->AddRows(
-                        ngram_exprs_[i]->expr_id(), c_before[i], 0);
+                } else if (c_before[i] > 0) {
+                    add_leaf_rows(c_before[i], 0);
                 }
             }
         }
@@ -155,7 +172,7 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         if (cached_phase1_res_ == nullptr) {
             TargetBitmap candidates(active_count_, true);
             for (auto& expr : ngram_exprs_) {
-                expr->EnsureExplainDecisionRecorded();
+                expr->PrepareEval();
                 expr->ExecuteNgramPhase1(candidates);
                 if (candidates.none()) {
                     break;

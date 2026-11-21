@@ -65,11 +65,6 @@ class PhyCallExpr : public Expr {
     Eval(EvalCtx& context, VectorPtr& result) override;
 
     void
-    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
-        explain_ = explain;
-    }
-
-    void
     MoveCursor() override {
         if (!has_offset_input_) {
             for (const auto& input : inputs_) {
@@ -133,7 +128,6 @@ class PhyCallExpr : public Expr {
 
     const segcore::SegmentInternalInterface* segment_;
     int64_t batch_size_;
-    ExecutionExplainRecorder* explain_{nullptr};
     bool explain_recorded_{false};
     std::unordered_map<const Expr*, CachedOperandExplain> operand_explains_;
 };

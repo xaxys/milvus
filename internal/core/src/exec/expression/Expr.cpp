@@ -111,11 +111,15 @@ ExprSet::Eval(int32_t begin,
             if (auto col = std::dynamic_pointer_cast<ColumnVector>(results[i]);
                 col != nullptr && col->IsBitmap()) {
                 const auto size = col->size();
-                explain->AddRows(
-                    exprs_[i]->expr_id(),
-                    static_cast<int64_t>(size),
-                    static_cast<int64_t>(
-                        TargetBitmapView(col->GetRawData(), size).count()));
+                const auto rows_in = static_cast<int64_t>(size);
+                const auto rows_out = static_cast<int64_t>(
+                    TargetBitmapView(col->GetRawData(), size).count());
+                if (auto* slot = exprs_[i]->explain_slot(); slot != nullptr) {
+                    ExecutionExplainRecorder::AddSlotRows(
+                        slot, rows_in, rows_out);
+                } else {
+                    explain->AddRows(exprs_[i]->expr_id(), rows_in, rows_out);
+                }
             }
         }
     }

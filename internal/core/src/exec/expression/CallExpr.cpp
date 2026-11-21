@@ -154,6 +154,8 @@ PhyCallExpr::RecordExplainDecision() {
 
 void
 PhyCallExpr::Eval(EvalCtx& context, VectorPtr& result) {
+    WaitPrefetch();
+    ExecutionExplainRecorder::ScopedLeafEvalTimer eval_timer(explain_slot_);
     tracer::AutoSpan span("PhyCallExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("function_name", expr_->fun_name());
     RecordExplainDecision();

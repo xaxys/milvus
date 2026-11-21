@@ -424,6 +424,17 @@ class Expr : public std::enable_shared_from_this<Expr> {
     void
     SetExprId(int64_t expr_id) {
         expr_id_ = expr_id;
+        RefreshExplainSlot();
+    }
+
+    ExecutionExplainRecorder*
+    explain_recorder() const {
+        return explain_;
+    }
+
+    ExecutionExplainRecorder::LeafSlot*
+    explain_slot() const {
+        return explain_slot_;
     }
 
     std::string
@@ -504,12 +515,21 @@ class Expr : public std::enable_shared_from_this<Expr> {
     // Optional execution-explain sink, set once after construction for the leaves
     // that can record decisions.
     virtual void
-    SetExplainRecorder(ExecutionExplainRecorder* /*explain*/) {
+    SetExplainRecorder(ExecutionExplainRecorder* explain) {
+        explain_ = explain;
+        RefreshExplainSlot();
     }
 
     void
     SetOperatorExplain(std::weak_ptr<ExecutionExplainRecorder> op_explain) {
         op_explain_ = std::move(op_explain);
+        RefreshExplainSlot();
+    }
+
+    void
+    TransferPendingSyncPrepareNsFrom(Expr& other) noexcept {
+        pending_sync_prepare_ns_ +=
+            std::exchange(other.pending_sync_prepare_ns_, 0);
     }
 
     virtual void
@@ -558,8 +578,18 @@ class Expr : public std::enable_shared_from_this<Expr> {
 
     virtual void
     WaitPrefetch() {
+        std::exception_ptr first_exc;
         for (const auto& input : inputs_) {
-            input->WaitPrefetch();
+            try {
+                input->WaitPrefetch();
+            } catch (...) {
+                if (!first_exc) {
+                    first_exc = std::current_exception();
+                }
+            }
+        }
+        if (first_exc) {
+            std::rethrow_exception(first_exc);
         }
     }
 
@@ -581,12 +611,32 @@ class Expr : public std::enable_shared_from_this<Expr> {
     }
 
  protected:
+    void
+    RefreshExplainSlot() {
+        explain_slot_ = (expr_id_ != 0 && explain_ != nullptr)
+                            ? explain_->EnsureLeafSlot(expr_id_)
+                            : nullptr;
+    }
+
+    void
+    FlushPendingSyncPrepareNs() {
+        if (pending_sync_prepare_ns_ > 0 && explain_slot_ != nullptr) {
+            ExecutionExplainRecorder::AddSlotEvalNs(
+                explain_slot_, std::exchange(pending_sync_prepare_ns_, 0));
+        } else {
+            pending_sync_prepare_ns_ = 0;
+        }
+    }
+
     DataType type_;
     std::vector<std::shared_ptr<Expr>> inputs_;
     std::string name_;
     milvus::OpContext* op_ctx_;
     int64_t expr_id_{0};
+    ExecutionExplainRecorder* explain_{nullptr};
+    ExecutionExplainRecorder::LeafSlot* explain_slot_{nullptr};
     std::weak_ptr<ExecutionExplainRecorder> op_explain_;
+    int64_t pending_sync_prepare_ns_{0};
 
     // whether we have offset input and do expr filtering on these data
     // default is false which means we will do expr filtering on the total segment data
@@ -621,11 +671,13 @@ class SegmentExpr : public Expr {
           value_type_(value_type),
           allow_any_json_cast_type_(allow_any_json_cast_type),
           active_count_(active_count),
-          explain_(explain),
           batch_size_(batch_size),
           consistency_level_(consistency_level),
           is_json_contains_(is_json_contains),
           plan_options_(plan_options) {
+        if (explain != nullptr) {
+            Expr::SetExplainRecorder(explain);
+        }
         size_per_chunk_ = segment_->size_per_chunk();
         AssertInfo(
             batch_size_ > 0,
@@ -3314,7 +3366,9 @@ class SegmentExpr : public Expr {
     // skipped by the SkipIndex is not counted as read.
     void
     RecordRawScan(int64_t rows) {
-        if (explain_ != nullptr && expr_id_ != 0 && rows > 0) {
+        if (explain_slot_ != nullptr) {
+            ExecutionExplainRecorder::AddSlotRawScan(explain_slot_, rows);
+        } else if (explain_ != nullptr && expr_id_ != 0 && rows > 0) {
             explain_->AddRawScan(expr_id_, rows);
         }
     }
@@ -4457,13 +4511,6 @@ class SegmentExpr : public Expr {
     // whole-filter cache hit or a conjunction that runs out of rows can skip
     // the evaluation. The report counts feature use, so that only affects
     // how often, never whether.
-    // One line per leaf for the explain payload; independent of the feature-bit
-    // accounting and cheap enough to always run (the sink is null unless the
-    // caller asked for an explain).
-    void
-    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
-        explain_ = explain;
-    }
 
     // Record the leaf's explain decision once on the evaluation thread after
     // prefetch/capability probes have settled, has_offset_input_ reflects the
@@ -4471,6 +4518,22 @@ class SegmentExpr : public Expr {
     // completed.
     struct LeafEvalGuard {
         SegmentExpr* self{nullptr};
+        ExecutionExplainRecorder::ScopedLeafEvalTimer timer;
+
+        LeafEvalGuard(SegmentExpr* s,
+                      ExecutionExplainRecorder::LeafSlot* slot) noexcept
+            : self(s), timer(slot) {
+        }
+
+        LeafEvalGuard(LeafEvalGuard&& other) noexcept
+            : self(std::exchange(other.self, nullptr)),
+              timer(std::move(other.timer)) {
+        }
+
+        LeafEvalGuard(const LeafEvalGuard&) = delete;
+        LeafEvalGuard&
+        operator=(const LeafEvalGuard&) = delete;
+
         ~LeafEvalGuard() noexcept {
             if (self != nullptr && std::uncaught_exceptions() == 0) {
                 self->EnsureExplainDecisionRecorded();
@@ -4485,12 +4548,14 @@ class SegmentExpr : public Expr {
             !prefetch_future_.has_value()) {
             SetHasOffsetInput(true);
         }
-        WaitPrefetch();
+        JoinPrefetchFuture();
         SetHasOffsetInput(input != nullptr);
+        FlushPendingSyncPrepareNs();
+        LeafEvalGuard guard(
+            explain_ != nullptr && !explain_decision_recorded_ ? this : nullptr,
+            explain_slot_);
         EnsureExecPathDetermined();
-        return LeafEvalGuard{explain_ != nullptr && !explain_decision_recorded_
-                                 ? this
-                                 : nullptr};
+        return guard;
     }
 
     void
@@ -4540,6 +4605,13 @@ class SegmentExpr : public Expr {
         EnsureExecPathDetermined();
         explain_decision_recorded_ = true;
         RecordExplainDecision();
+    }
+
+    void
+    PrepareEval() {
+        FlushPendingSyncPrepareNs();
+        EnsureExecPathDetermined();
+        EnsureExplainDecisionRecorded();
     }
 
     virtual void
@@ -4872,9 +4944,23 @@ class SegmentExpr : public Expr {
     PrefetchAsync(const std::shared_ptr<folly::CPUThreadPoolExecutor>
                       prefetch_pool) override {
         auto self = std::static_pointer_cast<SegmentExpr>(shared_from_this());
-        prefetch_future_.emplace(folly::via(prefetch_pool.get(), [self]() {
-            self->PrefetchOnCurrentThread();
-        }));
+        prefetch_future_.emplace(
+            folly::via(prefetch_pool.get(), [self, weak_rec = op_explain_]() {
+                const auto rec = weak_rec.lock();
+                const auto start =
+                    rec != nullptr ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
+                self->PrefetchOnCurrentThread();
+                if (rec != nullptr) {
+                    const auto ns =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+                    if (ns > 0) {
+                        self->AttributePrefetchNs(ns);
+                    }
+                }
+            }));
     }
 
     // Execute the prefetch body without scheduling another task. This keeps
@@ -4994,17 +5080,38 @@ class SegmentExpr : public Expr {
     }
 
     void
-    WaitPrefetch() override {
+    JoinPrefetchFuture() {
         if (prefetch_future_.has_value()) {
             auto future = std::move(*prefetch_future_);
             prefetch_future_.reset();
             std::move(future).get();
+        }
+    }
+
+    void
+    WaitPrefetch() override {
+        if (prefetch_future_.has_value()) {
+            JoinPrefetchFuture();
             return;
         }
-        EnsureExecPathDetermined();
+        if (explain_ != nullptr) {
+            const auto start = std::chrono::steady_clock::now();
+            EnsureExecPathDetermined();
+            pending_sync_prepare_ns_ +=
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count();
+        } else {
+            EnsureExecPathDetermined();
+        }
     }
 
  protected:
+    virtual void
+    AttributePrefetchNs(int64_t ns) {
+        ExecutionExplainRecorder::AddSlotPrefetchNs(explain_slot_, ns);
+    }
+
     // Non-reentrant nested-index check for callers already inside
     // DetermineExecPath(). Do not call CanUseNestedIndex() from there because
     // it re-enters EnsureExecPathDetermined()'s std::call_once.
@@ -5025,7 +5132,6 @@ class SegmentExpr : public Expr {
     // QueryContext. Null for growing segments and non-pinned paths.
     const segcore::SegmentReadSnapshot* snapshot_{nullptr};
     const FieldId field_id_;
-    ExecutionExplainRecorder* explain_{nullptr};
     bool explain_decision_recorded_{false};
     bool served_from_cache_{false};
     bool schema_not_nullable_{false};
@@ -5393,8 +5499,18 @@ class ExprSet {
 
     void
     WaitPrefetch() {
+        std::exception_ptr first_exc;
         for (const auto& expr : exprs_) {
-            expr->WaitPrefetch();
+            try {
+                expr->WaitPrefetch();
+            } catch (...) {
+                if (!first_exc) {
+                    first_exc = std::current_exception();
+                }
+            }
+        }
+        if (first_exc) {
+            std::rethrow_exception(first_exc);
         }
     }
 

@@ -20,10 +20,14 @@
 #include <fmt/core.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "common/Types.h"
@@ -47,8 +51,107 @@ namespace milvus::exec {
 // and rows_out in the flattened struct-element domain rather than the row domain.
 class ExecutionExplainRecorder {
  public:
+    // Stable per-leaf atomic accumulator stored inside std::deque so pointers
+    // handed out at expression compile/bind time remain valid across subsequent
+    // slot insertions and allow lock-free hot-path counting and timing.
+    struct LeafSlot {
+        explicit LeafSlot(int64_t id) noexcept : expr_id(id) {
+        }
+        LeafSlot(const LeafSlot&) = delete;
+        LeafSlot&
+        operator=(const LeafSlot&) = delete;
+
+        const int64_t expr_id;
+        std::atomic<int64_t> rows_in{0};
+        std::atomic<int64_t> raw_scan{0};
+        std::atomic<int64_t> rows_out{0};
+        std::atomic<int64_t> eval_ns{0};
+        std::atomic<int64_t> prefetch_ns{0};
+        std::atomic<bool> evaluated{false};
+    };
+
+    class ScopedLeafEvalTimer {
+     public:
+        explicit ScopedLeafEvalTimer(LeafSlot* slot) noexcept
+            : slot_(slot),
+              start_(slot != nullptr
+                         ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{}) {
+        }
+
+        ScopedLeafEvalTimer(ScopedLeafEvalTimer&& other) noexcept
+            : slot_(std::exchange(other.slot_, nullptr)), start_(other.start_) {
+        }
+
+        ScopedLeafEvalTimer(const ScopedLeafEvalTimer&) = delete;
+        ScopedLeafEvalTimer&
+        operator=(const ScopedLeafEvalTimer&) = delete;
+
+        ~ScopedLeafEvalTimer() noexcept {
+            if (slot_ != nullptr) {
+                const auto ns =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - start_)
+                        .count();
+                if (ns > 0) {
+                    slot_->eval_ns.fetch_add(ns, std::memory_order_relaxed);
+                }
+            }
+        }
+
+     private:
+        LeafSlot* slot_;
+        std::chrono::steady_clock::time_point start_;
+    };
+
     explicit ExecutionExplainRecorder(int64_t rows_total)
         : rows_total_(rows_total) {
+    }
+
+    LeafSlot*
+    EnsureLeafSlot(int64_t expr_id) {
+        if (expr_id == 0) {
+            return nullptr;
+        }
+        std::lock_guard lock(mu_);
+        return EnsureLeafSlotLocked(expr_id);
+    }
+
+    static void
+    AddSlotRows(LeafSlot* slot, int64_t rows_in, int64_t rows_out) noexcept {
+        if (slot == nullptr) {
+            return;
+        }
+        if (rows_in > 0) {
+            slot->evaluated.store(true, std::memory_order_relaxed);
+        }
+        if (rows_in != 0) {
+            slot->rows_in.fetch_add(rows_in, std::memory_order_relaxed);
+        }
+        if (rows_out != 0) {
+            slot->rows_out.fetch_add(rows_out, std::memory_order_relaxed);
+        }
+    }
+
+    static void
+    AddSlotRawScan(LeafSlot* slot, int64_t rows) noexcept {
+        if (slot != nullptr && rows > 0) {
+            slot->raw_scan.fetch_add(rows, std::memory_order_relaxed);
+        }
+    }
+
+    static void
+    AddSlotEvalNs(LeafSlot* slot, int64_t ns) noexcept {
+        if (slot != nullptr && ns > 0) {
+            slot->eval_ns.fetch_add(ns, std::memory_order_relaxed);
+        }
+    }
+
+    static void
+    AddSlotPrefetchNs(LeafSlot* slot, int64_t ns) noexcept {
+        if (slot != nullptr && ns > 0) {
+            slot->prefetch_ns.fetch_add(ns, std::memory_order_relaxed);
+        }
     }
 
     int32_t
@@ -73,6 +176,7 @@ class ExecutionExplainRecorder {
             return;
         }
         std::lock_guard lock(mu_);
+        EnsureLeafSlotLocked(expr_id);
         eval_orders_[expr_id] = order;
         if (field_id.get() != 0) {
             eval_field_ids_[expr_id] = field_id.get();
@@ -85,6 +189,7 @@ class ExecutionExplainRecorder {
             return;
         }
         std::lock_guard lock(mu_);
+        EnsureLeafSlotLocked(expr_id);
         eval_entered_exprs_.insert(expr_id);
     }
 
@@ -182,6 +287,39 @@ class ExecutionExplainRecorder {
     }
 
     void
+    AddOperatorTimeNs(int32_t step, int64_t ns) {
+        if (step < 0 || ns <= 0) {
+            return;
+        }
+        std::lock_guard lock(mu_);
+        if (static_cast<size_t>(step) < operators_.size()) {
+            operators_[step].time_ns += ns;
+        }
+    }
+
+    // Transfers lazy work performed inside debit_step's GetOutput back to
+    // credit_step (e.g., CountingVectorIterator or StrictGroup Phase 2).
+    // Allows debit_step's accumulator to go temporarily negative before
+    // Driver flushes debit_step's wall duration; Finish() clamps at zero.
+    void
+    TransferOperatorTimeNs(int32_t credit_step,
+                           int32_t debit_step,
+                           int64_t ns) {
+        if (ns <= 0 || credit_step == debit_step) {
+            return;
+        }
+        std::lock_guard lock(mu_);
+        if (credit_step >= 0 &&
+            static_cast<size_t>(credit_step) < operators_.size()) {
+            operators_[credit_step].time_ns += ns;
+        }
+        if (debit_step >= 0 &&
+            static_cast<size_t>(debit_step) < operators_.size()) {
+            operators_[debit_step].time_ns -= ns;
+        }
+    }
+
+    void
     MarkOperatorCached(int32_t step) {
         if (step < 0) {
             return;
@@ -208,6 +346,7 @@ class ExecutionExplainRecorder {
             return;
         }
         std::lock_guard lock(mu_);
+        EnsureLeafSlotLocked(expr_id);
         expr_operator_steps_[expr_id] = step;
     }
 
@@ -233,6 +372,9 @@ class ExecutionExplainRecorder {
                    std::string path,
                    std::string decline_reason) {
         std::lock_guard lock(mu_);
+        if (expr_id != 0) {
+            EnsureLeafSlotLocked(expr_id);
+        }
         auto& group = groups_[Key(field_id,
                                   expr_id,
                                   used_index,
@@ -265,13 +407,7 @@ class ExecutionExplainRecorder {
         if (expr_id == 0) {
             return;
         }
-        std::lock_guard lock(mu_);
-        if (rows_in > 0) {
-            evaluated_exprs_.insert(expr_id);
-        }
-        auto& rows = pending_rows_[expr_id];
-        rows.in += rows_in;
-        rows.out += rows_out;
+        AddSlotRows(EnsureLeafSlot(expr_id), rows_in, rows_out);
     }
 
     // Rows this leaf read from the raw column.
@@ -280,8 +416,23 @@ class ExecutionExplainRecorder {
         if (expr_id == 0 || rows <= 0) {
             return;
         }
-        std::lock_guard lock(mu_);
-        pending_rows_[expr_id].raw += rows;
+        AddSlotRawScan(EnsureLeafSlot(expr_id), rows);
+    }
+
+    void
+    AddLeafEvalNs(int64_t expr_id, int64_t ns) {
+        if (expr_id == 0 || ns <= 0) {
+            return;
+        }
+        AddSlotEvalNs(EnsureLeafSlot(expr_id), ns);
+    }
+
+    void
+    AddLeafPrefetchNs(int64_t expr_id, int64_t ns) {
+        if (expr_id == 0 || ns <= 0) {
+            return;
+        }
+        AddSlotPrefetchNs(EnsureLeafSlot(expr_id), ns);
     }
 
     // Per-operand scan counts in the active-row domain for multi-column leaves
@@ -383,6 +534,7 @@ class ExecutionExplainRecorder {
                 auto& op_ctrs = *op_child->mutable_counters();
                 op_ctrs["rows_in"] = op.rows_in;
                 op_ctrs["rows_out"] = op.rows_out;
+                op_ctrs["time_us"] = NsToUs(std::max<int64_t>(0, op.time_ns));
                 op_nodes[i] = op_child;
             }
         }
@@ -409,11 +561,26 @@ class ExecutionExplainRecorder {
             }
             return &node;
         };
+        auto find_slot = [&](int64_t expr_id) -> const LeafSlot* {
+            if (expr_id == 0) {
+                return nullptr;
+            }
+            auto it = expr_slots_.find(expr_id);
+            return it != expr_slots_.end() ? it->second : nullptr;
+        };
         auto is_skipped = [&](int64_t expr_id) {
-            return expr_id != 0 && rows_total_ > 0 &&
-                   eval_entered_exprs_.count(expr_id) > 0 &&
-                   evaluated_exprs_.count(expr_id) == 0 &&
-                   empty_domain_exprs_.count(expr_id) == 0;
+            if (expr_id == 0 || rows_total_ <= 0 ||
+                eval_entered_exprs_.count(expr_id) == 0 ||
+                empty_domain_exprs_.count(expr_id) > 0) {
+                return false;
+            }
+            const auto* slot = find_slot(expr_id);
+            if (slot != nullptr &&
+                (slot->evaluated.load(std::memory_order_relaxed) ||
+                 slot->eval_ns.load(std::memory_order_relaxed) > 0)) {
+                return false;
+            }
+            return true;
         };
         struct ExprSegTotals {
             int64_t in{0};
@@ -429,6 +596,7 @@ class ExecutionExplainRecorder {
             child->set_version(1);
             auto& attrs = *child->mutable_attributes();
             attrs["field_id"] = std::to_string(group.field_id);
+            bool skipped = false;
             if (group.expr_id != 0) {
                 const bool secondary =
                     !emitted_expr_ids.insert(group.expr_id).second;
@@ -440,21 +608,27 @@ class ExecutionExplainRecorder {
                 if (secondary) {
                     attrs["secondary_operand"] = "true";
                 }
-                if (is_skipped(group.expr_id)) {
+                skipped = is_skipped(group.expr_id);
+                if (skipped) {
                     attrs["skipped"] = "true";
                 }
             }
-            Rows rows{};
-            if (group.expr_id != 0) {
-                if (auto it = pending_rows_.find(group.expr_id);
-                    it != pending_rows_.end()) {
-                    rows = it->second;
-                }
+            int64_t rows_in = 0;
+            int64_t rows_raw = 0;
+            int64_t rows_out = 0;
+            int64_t eval_ns = 0;
+            int64_t prefetch_ns = 0;
+            if (const auto* slot = find_slot(group.expr_id); slot != nullptr) {
+                rows_in = slot->rows_in.load(std::memory_order_relaxed);
+                rows_raw = slot->raw_scan.load(std::memory_order_relaxed);
+                rows_out = slot->rows_out.load(std::memory_order_relaxed);
+                eval_ns = slot->eval_ns.load(std::memory_order_relaxed);
+                prefetch_ns = slot->prefetch_ns.load(std::memory_order_relaxed);
             }
             const int64_t raw_scan =
-                group.has_operand_scan ? group.operand_raw : rows.raw;
+                group.has_operand_scan ? group.operand_raw : rows_raw;
             const bool effective_used_index =
-                group.used_index && !(group.has_operand_scan && rows.in > 0 &&
+                group.used_index && !(group.has_operand_scan && rows_in > 0 &&
                                       group.operand_idx == 0);
             if (effective_used_index) {
                 attrs["index_id"] = std::to_string(group.index_id);
@@ -477,27 +651,35 @@ class ExecutionExplainRecorder {
             // served by the value reader.
             const int64_t idx_scan =
                 effective_used_index
-                    ? (group.has_operand_scan ? group.operand_idx : rows.in)
+                    ? (group.has_operand_scan ? group.operand_idx : rows_in)
                     : 0;
             auto& counters = *child->mutable_counters();
-            counters["rows_in"] = rows.in;
+            counters["rows_in"] = rows_in;
             counters["idx_scan"] = idx_scan;
             counters["raw_scan"] = raw_scan;
-            counters["rows_out"] = rows.out;
+            counters["rows_out"] = rows_out;
+            if (group.expr_id != 0) {
+                if (!skipped) {
+                    counters["eval_us"] = NsToUs(eval_ns);
+                }
+                if (const int64_t pf_us = NsToUs(prefetch_ns); pf_us > 0) {
+                    counters["prefetch_us"] = pf_us;
+                }
+            }
             if (group.element_hits > 0) {
                 counters["element_hits"] = group.element_hits;
             }
             if (group.expr_id != 0) {
                 auto& tot = expr_totals[group.expr_id];
-                tot.in = std::max(tot.in, rows.in);
+                tot.in = std::max(tot.in, rows_in);
                 tot.idx = std::max(tot.idx, idx_scan);
                 tot.raw = std::max(tot.raw, raw_scan);
-                tot.out = std::max(tot.out, rows.out);
+                tot.out = std::max(tot.out, rows_out);
             } else {
-                total_in += rows.in;
+                total_in += rows_in;
                 total_idx += idx_scan;
                 total_raw += raw_scan;
-                total_out += rows.out;
+                total_out += rows_out;
             }
         }
         for (const auto& [expr_id, tot] : expr_totals) {
@@ -528,6 +710,13 @@ class ExecutionExplainRecorder {
             counters["idx_scan"] = 0;
             counters["raw_scan"] = 0;
             counters["rows_out"] = 0;
+            if (const auto* slot = find_slot(expr_id); slot != nullptr) {
+                if (const int64_t pf_us = NsToUs(
+                        slot->prefetch_ns.load(std::memory_order_relaxed));
+                    pf_us > 0) {
+                    counters["prefetch_us"] = pf_us;
+                }
+            }
         }
         auto& counters = *node.mutable_counters();
         counters["rows_in"] = total_in;
@@ -538,12 +727,18 @@ class ExecutionExplainRecorder {
     }
 
  private:
+    static int64_t
+    NsToUs(int64_t ns) noexcept {
+        return ns <= 0 ? 0 : (ns + 500) / 1000;
+    }
+
     struct OperatorSlot {
         int32_t step{0};
         std::string name;
         std::string domain;
         int64_t rows_in{0};
         int64_t rows_out{0};
+        int64_t time_ns{0};
         bool cached{false};
     };
 
@@ -553,11 +748,20 @@ class ExecutionExplainRecorder {
             operators_.resize(static_cast<size_t>(step) + 1);
         }
     }
-    struct Rows {
-        int64_t in{0};
-        int64_t raw{0};
-        int64_t out{0};
-    };
+
+    LeafSlot*
+    EnsureLeafSlotLocked(int64_t expr_id) const {
+        if (expr_id == 0) {
+            return nullptr;
+        }
+        if (auto it = expr_slots_.find(expr_id); it != expr_slots_.end()) {
+            return it->second;
+        }
+        leaf_slots_.emplace_back(expr_id);
+        auto* slot = &leaf_slots_.back();
+        expr_slots_.emplace(expr_id, slot);
+        return slot;
+    }
 
     struct Group {
         int64_t field_id{0};
@@ -596,13 +800,13 @@ class ExecutionExplainRecorder {
 
     int64_t rows_total_;
     mutable std::mutex mu_;
-    mutable std::map<int64_t, Rows> pending_rows_;
+    mutable std::deque<LeafSlot> leaf_slots_;
+    mutable std::unordered_map<int64_t, LeafSlot*> expr_slots_;
     mutable std::map<std::string, Group> groups_;
     mutable int32_t next_eval_order_{1};
     mutable std::map<int64_t, int32_t> eval_orders_;
     mutable std::map<int64_t, int64_t> eval_field_ids_;
     mutable std::set<int64_t> eval_entered_exprs_;
-    mutable std::set<int64_t> evaluated_exprs_;
     mutable std::set<int64_t> empty_domain_exprs_;
     mutable std::set<int64_t> non_empty_domain_exprs_;
     mutable std::vector<OperatorSlot> operators_;
