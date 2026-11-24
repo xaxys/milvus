@@ -16,6 +16,9 @@
 
 #pragma once
 
+#include <folly/ScopeGuard.h>
+
+#include <chrono>
 #include <memory>
 #include <string>
 
@@ -74,11 +77,31 @@ class PhyElementFilterBitsNode : public Operator {
     void
     PrefetchAsync(const std::shared_ptr<folly::CPUThreadPoolExecutor>
                       prefetch_pool) override {
+        prefetch_started_ = true;
         element_exprs_->PrefetchAsync(prefetch_pool);
     }
 
     void
     WaitPrefetch() override {
+        const bool measure_wait = prefetch_started_ && !prefetch_waited_ &&
+                                  query_context_ != nullptr &&
+                                  query_context_->explain() != nullptr;
+        prefetch_waited_ = true;
+        if (!measure_wait) {
+            element_exprs_->WaitPrefetch();
+            return;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        auto guard = folly::makeGuard([&]() noexcept {
+            const auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count();
+            if (ns > 0) {
+                query_context_->explain()->AddOperatorPrefetchWaitNs(
+                    get_operator_id(), ns);
+            }
+        });
         element_exprs_->WaitPrefetch();
     }
 
@@ -101,6 +124,8 @@ class PhyElementFilterBitsNode : public Operator {
     int64_t batch_size_;
     std::string struct_name_;
     bool is_finished_{false};
+    bool prefetch_started_{false};
+    bool prefetch_waited_{false};
 };
 
 }  // namespace exec

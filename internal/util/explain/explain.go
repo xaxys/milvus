@@ -94,6 +94,32 @@ type usedMergeKey struct {
 	path    string
 }
 
+func mergeTimeAccum(dst **internalpb.ExplainTimeAccum, src *internalpb.ExplainTimeAccum) {
+	if src == nil || src.GetCount() <= 0 {
+		return
+	}
+	sumUs := max(int64(0), src.GetSumUs())
+	minUs := max(int64(0), src.GetMinUs())
+	maxUs := max(int64(0), src.GetMaxUs())
+	if *dst == nil || (*dst).GetCount() <= 0 {
+		*dst = &internalpb.ExplainTimeAccum{
+			Count: src.GetCount(),
+			SumUs: sumUs,
+			MinUs: minUs,
+			MaxUs: maxUs,
+		}
+		return
+	}
+	(*dst).Count += src.GetCount()
+	(*dst).SumUs += sumUs
+	if minUs < (*dst).MinUs {
+		(*dst).MinUs = minUs
+	}
+	if maxUs > (*dst).MaxUs {
+		(*dst).MaxUs = maxUs
+	}
+}
+
 func mergeConditionStats(dst, src *internalpb.ExplainConditionStats) {
 	if dst.GetFieldId() == 0 && src.GetFieldId() != 0 {
 		dst.FieldId = src.GetFieldId()
@@ -106,6 +132,8 @@ func mergeConditionStats(dst, src *internalpb.ExplainConditionStats) {
 	dst.IdxScan += src.GetIdxScan()
 	dst.RawScan += src.GetRawScan()
 	dst.ElementHits += src.GetElementHits()
+	mergeTimeAccum(&dst.EvalTime, src.GetEvalTime())
+	mergeTimeAccum(&dst.PrefetchTime, src.GetPrefetchTime())
 
 	if len(src.GetEvalOrders()) > 0 {
 		byOrder := make(map[int32]*internalpb.ExplainEvalOrderCount, len(dst.EvalOrders)+len(src.EvalOrders))
@@ -143,6 +171,8 @@ func mergeConditionStats(dst, src *internalpb.ExplainConditionStats) {
 				existing.IdxScan += u.GetIdxScan()
 				existing.RawScan += u.GetRawScan()
 				existing.ElementHits += u.GetElementHits()
+				mergeTimeAccum(&existing.EvalTime, u.GetEvalTime())
+				mergeTimeAccum(&existing.PrefetchTime, u.GetPrefetchTime())
 			} else {
 				cloned := proto.Clone(u).(*internalpb.ExplainIndexUseStats)
 				dst.Used = append(dst.Used, cloned)
@@ -173,6 +203,8 @@ func mergeConditionStats(dst, src *internalpb.ExplainConditionStats) {
 				existing.RowsOut += r.GetRowsOut()
 				existing.IdxScan += r.GetIdxScan()
 				existing.RawScan += r.GetRawScan()
+				mergeTimeAccum(&existing.EvalTime, r.GetEvalTime())
+				mergeTimeAccum(&existing.PrefetchTime, r.GetPrefetchTime())
 			} else {
 				cloned := proto.Clone(r).(*internalpb.ExplainDeclineStats)
 				dst.Reasons = append(dst.Reasons, cloned)
@@ -193,6 +225,8 @@ func mergeOperatorStats(dst, src *internalpb.ExplainOperatorStats) {
 	dst.CachedSegments += src.GetCachedSegments()
 	dst.RowsIn += src.GetRowsIn()
 	dst.RowsOut += src.GetRowsOut()
+	mergeTimeAccum(&dst.Time, src.GetTime())
+	mergeTimeAccum(&dst.PrefetchWaitTime, src.GetPrefetchWaitTime())
 
 	if len(src.GetConditions()) == 0 {
 		return

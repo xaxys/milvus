@@ -189,7 +189,7 @@ PhyElementFilterBitsNode::EvaluateElementExpression(
     if (doc_hit_ratio < DOC_HIT_RATIO_THRESHOLD_LOW) {
         offset_mode = true;
     } else if (doc_hit_ratio < DOC_HIT_RATIO_THRESHOLD_HIGH) {
-        element_exprs_->WaitPrefetch();
+        WaitPrefetch();
         offset_mode = !std::all_of(
             element_exprs_->exprs().begin(),
             element_exprs_->exprs().end(),
@@ -222,6 +222,7 @@ PhyElementFilterBitsNode::EvaluateElementExpression(
             return std::make_pair(std::move(bitset), std::move(valid_bitset));
         }
 
+        WaitPrefetch();
         EvalCtx eval_ctx(operator_context_->get_exec_context(),
                          &element_offsets);
 
@@ -280,6 +281,7 @@ PhyElementFilterBitsNode::EvaluateElementExpression(
         tracer::AddEvent(
             fmt::format("full_mode, total_elements: {}", total_elements));
 
+        WaitPrefetch();
         EvalCtx eval_ctx(operator_context_->get_exec_context());
 
         // The input is an already-normalized row selection, not a predicate

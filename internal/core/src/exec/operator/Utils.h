@@ -16,11 +16,13 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <utility>
+#include <folly/ScopeGuard.h>
 #include "common/OpContext.h"
 #include "common/QueryInfo.h"
 #include "common/QueryResult.h"
@@ -252,6 +254,43 @@ sort_search_result(milvus::SearchResult& result, bool large_is_better) {
 
 class CountingVectorIterator final : public VectorIterator {
  public:
+    class ScopedBatchTimer {
+     public:
+        explicit ScopedBatchTimer(VectorIterator* iter) noexcept
+            : target_(ResolveTarget(iter)),
+              start_(target_ != nullptr
+                         ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{}) {
+        }
+
+        ScopedBatchTimer(const ScopedBatchTimer&) = delete;
+        ScopedBatchTimer&
+        operator=(const ScopedBatchTimer&) = delete;
+
+        ~ScopedBatchTimer() noexcept {
+            if (target_ != nullptr) {
+                const auto ns =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - start_)
+                        .count();
+                if (ns > 0) {
+                    target_->iter_ns_ += ns;
+                }
+            }
+        }
+
+     private:
+        static CountingVectorIterator*
+        ResolveTarget(VectorIterator* iter) noexcept {
+            auto* counting = dynamic_cast<CountingVectorIterator*>(iter);
+            return (counting != nullptr && counting->track_time_) ? counting
+                                                                  : nullptr;
+        }
+
+        CountingVectorIterator* target_{nullptr};
+        std::chrono::steady_clock::time_point start_;
+    };
+
     CountingVectorIterator(std::shared_ptr<VectorIterator> inner,
                            std::weak_ptr<ExecutionExplainRecorder> explain,
                            int32_t out_step,
@@ -259,19 +298,25 @@ class CountingVectorIterator final : public VectorIterator {
         : inner_(std::move(inner)),
           explain_(std::move(explain)),
           out_step_(out_step),
-          in_step_(in_step) {
+          in_step_(in_step),
+          track_time_(!explain_.expired() && out_step >= 0 && in_step >= 0) {
         AssertInfo(inner_ != nullptr,
                    "CountingVectorIterator inner iterator cannot be null");
     }
 
     ~CountingVectorIterator() override {
-        if (yielded_ > 0) {
+        if (yielded_ > 0 || iter_ns_ > 0) {
             if (auto rec = explain_.lock(); rec != nullptr) {
-                if (out_step_ >= 0) {
-                    rec->AddOperatorRowsOut(out_step_, yielded_);
+                if (yielded_ > 0) {
+                    if (out_step_ >= 0) {
+                        rec->AddOperatorRowsOut(out_step_, yielded_);
+                    }
+                    if (in_step_ >= 0) {
+                        rec->AddOperatorRowsIn(in_step_, yielded_);
+                    }
                 }
-                if (in_step_ >= 0) {
-                    rec->AddOperatorRowsIn(in_step_, yielded_);
+                if (iter_ns_ > 0 && out_step_ >= 0 && in_step_ >= 0) {
+                    rec->TransferOperatorTimeNs(out_step_, in_step_, iter_ns_);
                 }
             }
         }
@@ -296,7 +341,9 @@ class CountingVectorIterator final : public VectorIterator {
     std::weak_ptr<ExecutionExplainRecorder> explain_;
     int32_t out_step_{-1};
     int32_t in_step_{-1};
+    bool track_time_{false};
     int64_t yielded_{0};
+    int64_t iter_ns_{0};
 };
 
 inline int64_t

@@ -36,25 +36,32 @@ PhyLogicalUnaryExpr::Eval(EvalCtx& context, VectorPtr& result) {
 
     auto* exec_ctx = context.get_exec_context();
     auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
+    const bool explain_leaf = explain != nullptr && inputs_[0] != nullptr &&
+                              inputs_[0]->expr_id() != 0;
+    const bool has_active = explain_leaf && HasActiveEvalInput(context);
     TargetBitmap mask_copy;
-    if (explain != nullptr && inputs_[0] != nullptr &&
-        inputs_[0]->expr_id() != 0) {
+    if (has_active) {
         const auto& incoming_mask = context.get_bitmap_input();
         if (!incoming_mask.empty()) {
             mask_copy.append(incoming_mask, 0, incoming_mask.size());
         }
     }
 
+    ExecutionExplainRecorder::ScopedLeafEvalTimer leaf_timer(
+        has_active ? inputs_[0]->explain_slot() : nullptr);
     inputs_[0]->Eval(context, result);
     if (result == nullptr) {
+        leaf_timer.Cancel();
         return;
     }
     // The proxy tags the operand of NOT, not the NOT node; without this the
     // condition would carry a decision group but no row counts.
     auto child_bitmap = GetColumnVector(result);
-    if (explain != nullptr && child_bitmap != nullptr &&
-        inputs_[0] != nullptr && inputs_[0]->expr_id() != 0 &&
-        child_bitmap->IsBitmap()) {
+    const bool child_non_empty =
+        child_bitmap != nullptr && child_bitmap->size() > 0;
+    if (!child_non_empty) {
+        leaf_timer.Cancel();
+    } else if (has_active && child_bitmap->IsBitmap()) {
         const int64_t rows_in = mask_copy.empty()
                                     ? static_cast<int64_t>(child_bitmap->size())
                                     : static_cast<int64_t>(mask_copy.count());
@@ -64,7 +71,7 @@ PhyLogicalUnaryExpr::Eval(EvalCtx& context, VectorPtr& result) {
             inputs_[0]->explain_slot(), rows_in, rows_out);
     }
     if (expr_->op_type_ == milvus::expr::LogicalUnaryExpr::OpType::LogicalNot) {
-        common::ThreeValuedLogicOp::Not(GetColumnVector(result));
+        common::ThreeValuedLogicOp::Not(child_bitmap);
     }
 }
 

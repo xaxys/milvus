@@ -16,6 +16,7 @@
 #include "SearchGroupByOperator.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <tuple>
 #include <utility>
@@ -23,6 +24,7 @@
 
 #include "common/QueryInfo.h"
 #include "common/QueryResult.h"
+#include "exec/operator/Utils.h"
 #include "fmt/core.h"
 #include "query/Utils.h"
 
@@ -238,34 +240,52 @@ GroupIteratorResult(const std::shared_ptr<VectorIterator>& iterator,
     //query and search possibly
     std::vector<GroupedResult> res;
     CompositeGroupKey scratch_key;
-    while (iterator->HasNext() && !groupMap.IsGroupResEnough()) {
-        auto offset_dis_pair = iterator->Next();
-        AssertInfo(offset_dis_pair.has_value(),
-                   "Wrong state! iterator cannot return valid result whereas "
-                   "it still tells hasNext");
-        auto raw_offset = offset_dis_pair.value().first;
-        auto dis = offset_dis_pair.value().second;
-
-        // For element-level search, the offset is the element_id, we need to convert it to the row_id.
-        int64_t row_offset = raw_offset;
-        int32_t element_index = -1;
-        if (is_element_id) {
-            AssertInfo(search_info.struct_element_offsets_ != nullptr,
-                       "Struct element offsets not available for element-level "
-                       "search");
-            auto [doc_id, elem_idx] =
-                search_info.struct_element_offsets_->ElementIDToRowID(
-                    static_cast<int32_t>(raw_offset));
-            row_offset = doc_id;
-            element_index = elem_idx;
+    constexpr size_t kMaxPullBatch = 64;
+    std::array<std::pair<int64_t, float>, kMaxPullBatch> pulled;
+    while (!groupMap.IsGroupResEnough()) {
+        const size_t batch_limit = std::min(
+            kMaxPullBatch, std::max<size_t>(1, groupMap.MinRemainingPulls()));
+        size_t pulled_count = 0;
+        {
+            CountingVectorIterator::ScopedBatchTimer pull_timer(iterator.get());
+            while (pulled_count < batch_limit && iterator->HasNext()) {
+                auto offset_dis_pair = iterator->Next();
+                AssertInfo(
+                    offset_dis_pair.has_value(),
+                    "Wrong state! iterator cannot return valid result whereas "
+                    "it still tells hasNext");
+                pulled[pulled_count++] = *offset_dis_pair;
+            }
         }
+        if (pulled_count == 0) {
+            break;
+        }
+        for (size_t i = 0; i < pulled_count; ++i) {
+            auto raw_offset = pulled[i].first;
+            auto dis = pulled[i].second;
 
-        data_getter->GetInto(row_offset, scratch_key);
-        if (groupMap.Push(scratch_key)) {
-            // Safe to move: next iteration's GetInto() will Clear+Reserve+Add
-            // on the moved-from small_vector, which is guaranteed empty-inline.
-            res.emplace_back(GroupedResult{
-                row_offset, element_index, dis, std::move(scratch_key)});
+            // For element-level search, the offset is the element_id, we need to convert it to the row_id.
+            int64_t row_offset = raw_offset;
+            int32_t element_index = -1;
+            if (is_element_id) {
+                AssertInfo(
+                    search_info.struct_element_offsets_ != nullptr,
+                    "Struct element offsets not available for element-level "
+                    "search");
+                auto [doc_id, elem_idx] =
+                    search_info.struct_element_offsets_->ElementIDToRowID(
+                        static_cast<int32_t>(raw_offset));
+                row_offset = doc_id;
+                element_index = elem_idx;
+            }
+
+            data_getter->GetInto(row_offset, scratch_key);
+            if (groupMap.Push(scratch_key)) {
+                // Safe to move: next iteration's GetInto() will Clear+Reserve+Add
+                // on the moved-from small_vector, which is guaranteed empty-inline.
+                res.emplace_back(GroupedResult{
+                    row_offset, element_index, dis, std::move(scratch_key)});
+            }
         }
     }
 

@@ -173,27 +173,34 @@ PhyIterativeFilterNode::GetOutput() {
         for (auto& iterator : search_result.vector_iterators_.value()) {
             EvalCtx eval_ctx(operator_context_->get_exec_context());
             int64_t topk = 0;
-            while (iterator->HasNext() && topk < unity_topk) {
+            while (topk < unity_topk) {
                 offsets.clear();
                 distances.clear();
                 // remain unfilled size as iterator batch size
                 int64_t batch_size = unity_topk - topk;
                 offsets.reserve(batch_size);
                 distances.reserve(batch_size);
-                while (iterator->HasNext()) {
-                    auto offset_dis_pair = iterator->Next();
-                    AssertInfo(
-                        offset_dis_pair.has_value(),
-                        "Wrong state! iterator cannot return valid result "
-                        "whereas it still"
-                        "tells hasNext, terminate operation");
-                    auto offset = offset_dis_pair.value().first;
-                    auto dis = offset_dis_pair.value().second;
-                    offsets.emplace_back(offset);
-                    distances.emplace_back(dis);
-                    if (offsets.size() == batch_size) {
-                        break;
+                {
+                    CountingVectorIterator::ScopedBatchTimer pull_timer(
+                        iterator.get());
+                    while (iterator->HasNext()) {
+                        auto offset_dis_pair = iterator->Next();
+                        AssertInfo(
+                            offset_dis_pair.has_value(),
+                            "Wrong state! iterator cannot return valid result "
+                            "whereas it still"
+                            "tells hasNext, terminate operation");
+                        auto offset = offset_dis_pair.value().first;
+                        auto dis = offset_dis_pair.value().second;
+                        offsets.emplace_back(offset);
+                        distances.emplace_back(dis);
+                        if (offsets.size() == batch_size) {
+                            break;
+                        }
                     }
+                }
+                if (offsets.empty()) {
+                    break;
                 }
 
                 // Clear but retain capacity

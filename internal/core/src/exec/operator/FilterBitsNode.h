@@ -16,6 +16,9 @@
 
 #pragma once
 
+#include <folly/ScopeGuard.h>
+
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -95,6 +98,25 @@ class PhyFilterBitsNode : public Operator {
         if (whole_filter_cache_hit_ && !prefetch_started_) {
             return;
         }
+        const bool measure_wait = prefetch_started_ && !prefetch_waited_ &&
+                                  query_context_ != nullptr &&
+                                  query_context_->explain() != nullptr;
+        prefetch_waited_ = true;
+        if (!measure_wait) {
+            exprs_->WaitPrefetch();
+            return;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        auto guard = folly::makeGuard([&]() noexcept {
+            const auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count();
+            if (ns > 0) {
+                query_context_->explain()->AddOperatorPrefetchWaitNs(
+                    get_operator_id(), ns);
+            }
+        });
         exprs_->WaitPrefetch();
     }
 
@@ -114,7 +136,9 @@ class PhyFilterBitsNode : public Operator {
     bool enable_expr_cache_ = false;
     bool cache_lookup_done_ = false;
     bool prefetch_started_ = false;
+    bool prefetch_waited_ = false;
     bool whole_filter_cache_hit_ = false;
+    int64_t operator_cache_lookup_ns_ = 0;
     RowVectorPtr prefetched_cached_output_;
     std::string expr_cache_key_;
 };

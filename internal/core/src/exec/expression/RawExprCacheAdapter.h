@@ -77,6 +77,9 @@ class RawExprCacheAdapter final : public Expr {
     WaitPrefetch() override;
 
     void
+    JoinPrefetchFuture();
+
+    void
     SetExplainRecorder(ExecutionExplainRecorder* explain) override {
         Expr::SetExplainRecorder(explain);
         input_->SetExplainRecorder(explain);

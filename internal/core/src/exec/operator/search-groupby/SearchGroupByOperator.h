@@ -599,6 +599,16 @@ struct CompositeGroupByMap {
         return enough;
     }
 
+    size_t
+    MinRemainingPulls() const noexcept {
+        const int done = strict_group_size_
+                             ? enough_group_count_
+                             : static_cast<int>(group_map_.size());
+        return done < group_capacity_
+                   ? static_cast<size_t>(group_capacity_ - done)
+                   : 0;
+    }
+
     bool
     Push(const CompositeGroupKey& key) {
         auto [it, inserted] = group_map_.try_emplace(key, 0);

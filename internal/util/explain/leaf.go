@@ -74,16 +74,27 @@ type SubSearchMeta struct {
 	AnnsField   string
 }
 
+// TimeStats is the per-segment latency distribution in microseconds across
+// participating segments.
+type TimeStats struct {
+	SumUs int64 `json:"sum_us"`
+	MinUs int64 `json:"min_us"`
+	AvgUs int64 `json:"avg_us"`
+	MaxUs int64 `json:"max_us"`
+}
+
 // OperatorSummary is the cross-segment summary of one physical pipeline operator.
 type OperatorSummary struct {
-	Operator       string      `json:"operator"`
-	Step           int         `json:"step"`
-	Domain         string      `json:"domain,omitempty"`
-	Segments       int         `json:"segments"`
-	RowsIn         int64       `json:"rows_in"`
-	RowsOut        int64       `json:"rows_out"`
-	CachedSegments int         `json:"cached_segments,omitempty"`
-	Conditions     []Condition `json:"conditions,omitempty"`
+	Operator           string      `json:"operator"`
+	Step               int         `json:"step"`
+	Domain             string      `json:"domain,omitempty"`
+	Segments           int         `json:"segments"`
+	RowsIn             int64       `json:"rows_in"`
+	RowsOut            int64       `json:"rows_out"`
+	TimeUs             *TimeStats  `json:"time_us,omitempty"`
+	PrefetchWaitTimeUs *TimeStats  `json:"prefetch_wait_time_us,omitempty"`
+	CachedSegments     int         `json:"cached_segments,omitempty"`
+	Conditions         []Condition `json:"conditions,omitempty"`
 
 	kind internalpb.ExplainOperatorKind
 }
@@ -163,6 +174,7 @@ type Condition struct {
 	FieldID             int64            `json:"-"`
 	Field               string           `json:"field,omitempty"`
 	Segments            int              `json:"segments"`
+	SkippedSegments     int              `json:"skipped_segments,omitempty"`
 	EvalOrder           int              `json:"eval_order,omitempty"`
 	EvalOrders          []EvalOrderCount `json:"eval_orders,omitempty"`
 	Skipped             bool             `json:"skipped,omitempty"`
@@ -171,6 +183,8 @@ type Condition struct {
 	RowsIn              int64            `json:"rows_in"`
 	RowsOut             int64            `json:"rows_out"`
 	ElementHits         int64            `json:"element_hits,omitempty"`
+	EvalTimeUs          *TimeStats       `json:"eval_time_us,omitempty"`
+	PrefetchTimeUs      *TimeStats       `json:"prefetch_time_us,omitempty"`
 	Used                []IndexUse       `json:"used"`
 	RawScanSegments     int              `json:"raw_scan_segments"`
 	Reasons             []ReasonCount    `json:"reasons"`
@@ -189,6 +203,7 @@ type conditionLeafJSON struct {
 	Type            string           `json:"type"`
 	Field           string           `json:"field,omitempty"`
 	Segments        int              `json:"segments"`
+	SkippedSegments int              `json:"skipped_segments,omitempty"`
 	EvalOrder       int              `json:"eval_order,omitempty"`
 	EvalOrders      []EvalOrderCount `json:"eval_orders,omitempty"`
 	Skipped         bool             `json:"skipped,omitempty"`
@@ -197,6 +212,8 @@ type conditionLeafJSON struct {
 	RowsIn          int64            `json:"rows_in"`
 	RowsOut         int64            `json:"rows_out"`
 	ElementHits     int64            `json:"element_hits,omitempty"`
+	EvalTimeUs      *TimeStats       `json:"eval_time_us,omitempty"`
+	PrefetchTimeUs  *TimeStats       `json:"prefetch_time_us,omitempty"`
 	Used            []IndexUse       `json:"used"`
 	RawScanSegments int              `json:"raw_scan_segments"`
 	Reasons         []ReasonCount    `json:"reasons"`
@@ -235,6 +252,7 @@ func (c Condition) MarshalJSON() ([]byte, error) {
 		Type:            c.Type,
 		Field:           c.Field,
 		Segments:        c.Segments,
+		SkippedSegments: c.SkippedSegments,
 		EvalOrder:       c.EvalOrder,
 		EvalOrders:      c.EvalOrders,
 		Skipped:         c.Skipped,
@@ -243,6 +261,8 @@ func (c Condition) MarshalJSON() ([]byte, error) {
 		RowsIn:          c.RowsIn,
 		RowsOut:         c.RowsOut,
 		ElementHits:     c.ElementHits,
+		EvalTimeUs:      c.EvalTimeUs,
+		PrefetchTimeUs:  c.PrefetchTimeUs,
 		Used:            used,
 		RawScanSegments: c.RawScanSegments,
 		Reasons:         reasons,
@@ -285,6 +305,7 @@ func (c *Condition) UnmarshalJSON(data []byte) error {
 		Type:            lf.Type,
 		Field:           lf.Field,
 		Segments:        lf.Segments,
+		SkippedSegments: lf.SkippedSegments,
 		EvalOrder:       lf.EvalOrder,
 		EvalOrders:      lf.EvalOrders,
 		Skipped:         lf.Skipped,
@@ -293,6 +314,8 @@ func (c *Condition) UnmarshalJSON(data []byte) error {
 		RowsIn:          lf.RowsIn,
 		RowsOut:         lf.RowsOut,
 		ElementHits:     lf.ElementHits,
+		EvalTimeUs:      lf.EvalTimeUs,
+		PrefetchTimeUs:  lf.PrefetchTimeUs,
 		Used:            lf.Used,
 		RawScanSegments: lf.RawScanSegments,
 		Reasons:         lf.Reasons,
@@ -302,27 +325,31 @@ func (c *Condition) UnmarshalJSON(data []byte) error {
 
 // IndexUse is how many segments answered one condition with one index family.
 type IndexUse struct {
-	Kind        string `json:"kind"`
-	IndexID     int64  `json:"-"`
-	IndexName   string `json:"index_name"`
-	Family      string `json:"family"`
-	Segments    int    `json:"segments"`
-	IdxScan     int64  `json:"idx_scan"`
-	RawScan     int64  `json:"raw_scan"`
-	RowsIn      int64  `json:"rows_in"`
-	RowsOut     int64  `json:"rows_out"`
-	ElementHits int64  `json:"element_hits,omitempty"`
+	Kind           string     `json:"kind"`
+	IndexID        int64      `json:"-"`
+	IndexName      string     `json:"index_name"`
+	Family         string     `json:"family"`
+	Segments       int        `json:"segments"`
+	IdxScan        int64      `json:"idx_scan"`
+	RawScan        int64      `json:"raw_scan"`
+	RowsIn         int64      `json:"rows_in"`
+	RowsOut        int64      `json:"rows_out"`
+	ElementHits    int64      `json:"element_hits,omitempty"`
+	EvalTimeUs     *TimeStats `json:"eval_time_us,omitempty"`
+	PrefetchTimeUs *TimeStats `json:"prefetch_time_us,omitempty"`
 }
 
 // ReasonCount is what the non-index leaves of a condition did for one fallback
 // reason.
 type ReasonCount struct {
-	Reason   string `json:"reason"`
-	Segments int    `json:"segments"`
-	IdxScan  int64  `json:"idx_scan"`
-	RawScan  int64  `json:"raw_scan"`
-	RowsIn   int64  `json:"rows_in"`
-	RowsOut  int64  `json:"rows_out"`
+	Reason         string     `json:"reason"`
+	Segments       int        `json:"segments"`
+	IdxScan        int64      `json:"idx_scan"`
+	RawScan        int64      `json:"raw_scan"`
+	RowsIn         int64      `json:"rows_in"`
+	RowsOut        int64      `json:"rows_out"`
+	EvalTimeUs     *TimeStats `json:"eval_time_us,omitempty"`
+	PrefetchTimeUs *TimeStats `json:"prefetch_time_us,omitempty"`
 }
 
 func finalizeIndexUse(used *IndexUse, indexNames map[int64]string) {
@@ -507,10 +534,39 @@ func SummarizeWithSubSearches(
 	return summary
 }
 
+func primaryTimeStats(acc *internalpb.ExplainTimeAccum, expectedDenom int) *TimeStats {
+	if acc == nil || expectedDenom <= 0 || acc.GetCount() != int64(expectedDenom) {
+		return nil
+	}
+	cnt := acc.GetCount()
+	sumUs := max(int64(0), acc.GetSumUs())
+	return &TimeStats{
+		SumUs: sumUs,
+		MinUs: max(int64(0), acc.GetMinUs()),
+		AvgUs: sumUs / cnt,
+		MaxUs: max(int64(0), acc.GetMaxUs()),
+	}
+}
+
+func optionalTimeStats(acc *internalpb.ExplainTimeAccum, expectedDenom int) *TimeStats {
+	ts := primaryTimeStats(acc, expectedDenom)
+	if ts == nil || ts.SumUs <= 0 {
+		return nil
+	}
+	return ts
+}
+
 func conditionFromProto(c *internalpb.ExplainConditionStats, leaves map[int64]LeafInfo) Condition {
 	condText, typ, fieldID, fieldName, unresolved := leafOf(leaves, c.GetExprId(), c.GetFieldId())
 	segs := int(c.GetSegments())
-	skipped := segs > 0 && int(c.GetSkippedSegments()) == segs
+	pureSkipped := int(c.GetSkippedSegments())
+	skipped := segs > 0 && pureSkipped == segs
+	evalDenom := max(0, segs-pureSkipped)
+	var condEvalTime *TimeStats
+	if !skipped {
+		condEvalTime = primaryTimeStats(c.GetEvalTime(), evalDenom)
+	}
+	condPrefetchTime := optionalTimeStats(c.GetPrefetchTime(), segs)
 
 	var evalOrder int
 	var evalOrders []EvalOrderCount
@@ -533,29 +589,35 @@ func conditionFromProto(c *internalpb.ExplainConditionStats, leaves map[int64]Le
 		if u.GetIndexId() == 0 && u.GetFamily() == "pk" {
 			name = primaryKeyName
 		}
+		uSegs := int(u.GetSegments())
 		used = append(used, IndexUse{
-			Kind:        scalarIndexKind,
-			IndexID:     u.GetIndexId(),
-			IndexName:   name,
-			Family:      u.GetFamily(),
-			Segments:    int(u.GetSegments()),
-			IdxScan:     u.GetIdxScan(),
-			RawScan:     u.GetRawScan(),
-			RowsIn:      u.GetRowsIn(),
-			RowsOut:     u.GetRowsOut(),
-			ElementHits: u.GetElementHits(),
+			Kind:           scalarIndexKind,
+			IndexID:        u.GetIndexId(),
+			IndexName:      name,
+			Family:         u.GetFamily(),
+			Segments:       uSegs,
+			IdxScan:        u.GetIdxScan(),
+			RawScan:        u.GetRawScan(),
+			RowsIn:         u.GetRowsIn(),
+			RowsOut:        u.GetRowsOut(),
+			ElementHits:    u.GetElementHits(),
+			EvalTimeUs:     primaryTimeStats(u.GetEvalTime(), uSegs),
+			PrefetchTimeUs: optionalTimeStats(u.GetPrefetchTime(), uSegs),
 		})
 	}
 
 	reasons := make([]ReasonCount, 0, len(c.GetReasons()))
 	for _, r := range c.GetReasons() {
+		rSegs := int(r.GetSegments())
 		reasons = append(reasons, ReasonCount{
-			Reason:   r.GetReason(),
-			Segments: int(r.GetSegments()),
-			IdxScan:  r.GetIdxScan(),
-			RawScan:  r.GetRawScan(),
-			RowsIn:   r.GetRowsIn(),
-			RowsOut:  r.GetRowsOut(),
+			Reason:         r.GetReason(),
+			Segments:       rSegs,
+			IdxScan:        r.GetIdxScan(),
+			RawScan:        r.GetRawScan(),
+			RowsIn:         r.GetRowsIn(),
+			RowsOut:        r.GetRowsOut(),
+			EvalTimeUs:     primaryTimeStats(r.GetEvalTime(), rSegs),
+			PrefetchTimeUs: optionalTimeStats(r.GetPrefetchTime(), rSegs),
 		})
 	}
 	sort.Slice(reasons, func(i, j int) bool {
@@ -569,6 +631,7 @@ func conditionFromProto(c *internalpb.ExplainConditionStats, leaves map[int64]Le
 		FieldID:             fieldID,
 		Field:               fieldName,
 		Segments:            segs,
+		SkippedSegments:     pureSkipped,
 		EvalOrder:           evalOrder,
 		EvalOrders:          evalOrders,
 		Skipped:             skipped,
@@ -577,6 +640,8 @@ func conditionFromProto(c *internalpb.ExplainConditionStats, leaves map[int64]Le
 		RowsIn:              c.GetRowsIn(),
 		RowsOut:             c.GetRowsOut(),
 		ElementHits:         c.GetElementHits(),
+		EvalTimeUs:          condEvalTime,
+		PrefetchTimeUs:      condPrefetchTime,
 		Used:                used,
 		RawScanSegments:     int(c.GetRawScanSegments()),
 		Reasons:             reasons,
@@ -748,15 +813,18 @@ func buildOperatorsFromGroup(
 				}
 				conds = append(conds, conditionFromProto(cPb, scopedLeaves))
 			}
+			opSegs := int(opPb.GetSegments())
 			built = append(built, opRaw{
 				summary: OperatorSummary{
-					Operator:       OperatorKindName(kind),
-					Domain:         opPb.GetDomain(),
-					Segments:       int(opPb.GetSegments()),
-					RowsIn:         opPb.GetRowsIn(),
-					RowsOut:        opPb.GetRowsOut(),
-					CachedSegments: int(opPb.GetCachedSegments()),
-					kind:           kind,
+					Operator:           OperatorKindName(kind),
+					Domain:             opPb.GetDomain(),
+					Segments:           opSegs,
+					RowsIn:             opPb.GetRowsIn(),
+					RowsOut:            opPb.GetRowsOut(),
+					TimeUs:             primaryTimeStats(opPb.GetTime(), opSegs),
+					PrefetchWaitTimeUs: optionalTimeStats(opPb.GetPrefetchWaitTime(), opSegs),
+					CachedSegments:     int(opPb.GetCachedSegments()),
+					kind:               kind,
 				},
 				conds: conds,
 			})
@@ -891,9 +959,19 @@ func RenderSummaryJSON(s *Summary) (string, error) {
 	return string(encoded), nil
 }
 
+func formatTimeStatsText(label string, ts *TimeStats, segments int) string {
+	if ts == nil {
+		return ""
+	}
+	if segments <= 1 {
+		return fmt.Sprintf("%s=%d", label, ts.SumUs)
+	}
+	return fmt.Sprintf("%s: avg=%d, max=%d, min=%d, sum=%d", label, ts.AvgUs, ts.MaxUs, ts.MinUs, ts.SumUs)
+}
+
 func writeOperator(b *strings.Builder, depth int, op OperatorSummary) {
 	writeIndent(b, depth)
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 6)
 	parts = append(parts, fmt.Sprintf("segments=%d", op.Segments))
 	if op.CachedSegments > 0 {
 		parts = append(parts, fmt.Sprintf("cached_segments=%d", op.CachedSegments))
@@ -902,6 +980,12 @@ func writeOperator(b *strings.Builder, depth int, op OperatorSummary) {
 		parts = append(parts, "domain="+op.Domain)
 	}
 	parts = append(parts, fmt.Sprintf("rows: %d -> %d", op.RowsIn, op.RowsOut))
+	if timePart := formatTimeStatsText("time_us", op.TimeUs, op.Segments); timePart != "" {
+		parts = append(parts, timePart)
+	}
+	if pwPart := formatTimeStatsText("prefetch_wait_us", op.PrefetchWaitTimeUs, op.Segments); pwPart != "" {
+		parts = append(parts, pwPart)
+	}
 	fmt.Fprintf(b, "[op %d] %s (%s)\n", op.Step, op.Operator, strings.Join(parts, ", "))
 
 	for _, condition := range op.Conditions {
@@ -927,8 +1011,11 @@ func writeCondition(b *strings.Builder, depth int, condition Condition) {
 	}
 
 	writeIndent(b, depth)
-	parts := make([]string, 0, 6)
+	parts := make([]string, 0, 8)
 	parts = append(parts, fmt.Sprintf("segments=%d", condition.Segments))
+	if condition.SkippedSegments > 0 {
+		parts = append(parts, fmt.Sprintf("skipped_segments=%d", condition.SkippedSegments))
+	}
 	if condition.Skipped {
 		parts = append(parts, "skipped=true")
 	} else {
@@ -941,6 +1028,13 @@ func writeCondition(b *strings.Builder, depth int, condition Condition) {
 	}
 	if orderAttr := formatEvalOrderAttr(condition); orderAttr != "" {
 		parts = append(parts, "eval_order="+orderAttr)
+	}
+	evalSegments := condition.Segments - condition.SkippedSegments
+	if evalPart := formatTimeStatsText("eval_us", condition.EvalTimeUs, evalSegments); evalPart != "" {
+		parts = append(parts, evalPart)
+	}
+	if pfPart := formatTimeStatsText("prefetch_us", condition.PrefetchTimeUs, condition.Segments); pfPart != "" {
+		parts = append(parts, pfPart)
 	}
 	fmt.Fprintf(b, "expr: %s (%s)\n", condition.Condition, strings.Join(parts, ", "))
 
@@ -960,7 +1054,7 @@ func writeCondition(b *strings.Builder, depth int, condition Condition) {
 		if used.Family != "" {
 			header += " (" + used.Family + ")"
 		}
-		usedParts := make([]string, 0, 5)
+		usedParts := make([]string, 0, 7)
 		usedParts = append(usedParts, fmt.Sprintf("segments=%d", used.Segments))
 		if used.RowsIn > 0 || used.RowsOut > 0 || (used.IdxScan == 0 && used.RawScan == 0) {
 			usedParts = append(usedParts, fmt.Sprintf("rows: %d -> %d", used.RowsIn, used.RowsOut))
@@ -970,18 +1064,30 @@ func writeCondition(b *strings.Builder, depth int, condition Condition) {
 		if used.ElementHits > 0 {
 			usedParts = append(usedParts, fmt.Sprintf("element_hits=%d", used.ElementHits))
 		}
+		if evalPart := formatTimeStatsText("eval_us", used.EvalTimeUs, used.Segments); evalPart != "" {
+			usedParts = append(usedParts, evalPart)
+		}
+		if pfPart := formatTimeStatsText("prefetch_us", used.PrefetchTimeUs, used.Segments); pfPart != "" {
+			usedParts = append(usedParts, pfPart)
+		}
 		fmt.Fprintf(b, "%s: %s\n", header, strings.Join(usedParts, ", "))
 	}
 
 	for _, reason := range condition.Reasons {
 		writeIndent(b, depth+1)
-		reasonParts := make([]string, 0, 4)
+		reasonParts := make([]string, 0, 6)
 		reasonParts = append(reasonParts, fmt.Sprintf("segments=%d", reason.Segments))
 		if reason.RowsIn > 0 || reason.RowsOut > 0 || (reason.IdxScan == 0 && reason.RawScan == 0) {
 			reasonParts = append(reasonParts, fmt.Sprintf("rows: %d -> %d", reason.RowsIn, reason.RowsOut))
 		}
 		reasonParts = append(reasonParts, fmt.Sprintf("idx_scan=%d", reason.IdxScan))
 		reasonParts = append(reasonParts, fmt.Sprintf("raw_scan=%d", reason.RawScan))
+		if evalPart := formatTimeStatsText("eval_us", reason.EvalTimeUs, reason.Segments); evalPart != "" {
+			reasonParts = append(reasonParts, evalPart)
+		}
+		if pfPart := formatTimeStatsText("prefetch_us", reason.PrefetchTimeUs, reason.Segments); pfPart != "" {
+			reasonParts = append(reasonParts, pfPart)
+		}
 		if reason.Reason == cachedReason {
 			fmt.Fprintf(b, "%s: %s\n", cachedReason, strings.Join(reasonParts, ", "))
 		} else {

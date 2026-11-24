@@ -12,6 +12,7 @@
 #include "exec/expression/GISConjunctExpr.h"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -157,12 +158,17 @@ void
 PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
     // Self-guard like every other SegmentExpr subclass: block until the
     // prefetch-pool DetermineExecPath() has finished before RunRTreeQuery()
-    // reads spatial_reader_ on the query thread.
-    WaitPrefetch();
-    EnsureExecPathDetermined();
+    // selects and pins the exact spatial entry on the query thread. No-op once
+    // the future is drained (subsequent batches hit the cheap
+    // EnsureExecPathDetermined() branch). FilterBits already waits before the
+    // first Eval, so this only hardens direct/other callers.
+    JoinPrefetchFuture();
     auto real_batch_size = NextBatchSize();
     if (real_batch_size == 0) {
-        EnsureExplainDecisionRecorded();
+        if (active_count_ == 0) {
+            EnsureExecPathDetermined();
+            EnsureExplainDecisionRecorded();
+        }
         result = nullptr;
         return;
     }
@@ -184,12 +190,31 @@ PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
 
     // Phase 1: build B_coarse once for the whole segment.
     if (!st_->coarse_done) {
+        int64_t setup_ns = 0;
+        if (explain_ != nullptr) {
+            const auto setup_start = std::chrono::steady_clock::now();
+            EnsureExecPathDetermined();
+            setup_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - setup_start)
+                           .count();
+        } else {
+            EnsureExecPathDetermined();
+        }
         TargetBitmap cand(active_count_, st_->is_and);  // AND -> 1s / OR -> 0s
         int unusable_index = 0;  // preds whose R-Tree pin came up empty
         int short_index = 0;     // preds whose legacy R-Tree is short
         int no_index = 0;        // preds with no geometry index at all
-        for (auto& p : st_->preds) {
+        std::vector<int64_t> pred_rtree_ns;
+        if (explain_ != nullptr) {
+            pred_rtree_ns.assign(st_->preds.size(), 0);
+        }
+        for (size_t i = 0; i < st_->preds.size(); ++i) {
+            auto& p = st_->preds[i];
             if (exec_path_ == ExprExecPath::ScalarIndex) {
+                const auto rtree_start =
+                    explain_ != nullptr
+                        ? std::chrono::steady_clock::now()
+                        : std::chrono::steady_clock::time_point{};
                 switch (RunRTreeQuery(p)) {
                     case CoarseOutcome::kIndexUnusable:
                         ++unusable_index;
@@ -199,6 +224,12 @@ PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
                         break;
                     case CoarseOutcome::kPruned:
                         break;
+                }
+                if (explain_ != nullptr) {
+                    pred_rtree_ns[i] =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - rtree_start)
+                            .count();
                 }
             } else {
                 // No selected R-Tree index: coarse degenerates to the full set;
@@ -220,25 +251,59 @@ PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         }
         coarse_index_degraded_ = (unusable_index > 0 || short_index > 0);
         EnsureExplainDecisionRecorded();
-        if (explain_ != nullptr && st_->explain_used_index) {
-            st_->coarse_cum_.clear();
-            st_->coarse_cum_.reserve(st_->preds.size());
-            TargetBitmap running(active_count_, st_->is_and);
-            for (auto& p : st_->preds) {
-                if (st_->is_and) {
-                    running &= p.coarse;
-                } else {
-                    running |= p.coarse;
+        if (explain_ != nullptr) {
+            if (st_->explain_used_index) {
+                st_->coarse_cum_.clear();
+                st_->coarse_cum_.reserve(st_->preds.size());
+                TargetBitmap running(active_count_, st_->is_and);
+                size_t active = 0;
+                for (const auto& p : st_->preds) {
+                    if (p.expr_id != 0) {
+                        ++active;
+                    }
                 }
-                st_->coarse_cum_.push_back(running.clone());
-                if (p.expr_id != 0) {
+                const int64_t base_setup =
+                    (active > 0 && setup_ns > 0)
+                        ? setup_ns / static_cast<int64_t>(active)
+                        : 0;
+                const int64_t rem_setup =
+                    (active > 0 && setup_ns > 0)
+                        ? setup_ns % static_cast<int64_t>(active)
+                        : 0;
+                size_t share_idx = 0;
+                for (size_t i = 0; i < st_->preds.size(); ++i) {
+                    auto& p = st_->preds[i];
+                    if (st_->is_and) {
+                        running &= p.coarse;
+                    } else {
+                        running |= p.coarse;
+                    }
+                    st_->coarse_cum_.push_back(running.clone());
+                    if (p.expr_id == 0) {
+                        continue;
+                    }
+                    const int64_t ns =
+                        pred_rtree_ns[i] + base_setup +
+                        (static_cast<int64_t>(share_idx) < rem_setup ? 1 : 0);
+                    ++share_idx;
                     st_->RecordPredDecision(explain_, p);
                     if (p.explain_slot != nullptr) {
                         ExecutionExplainRecorder::AddSlotPhase1IdxScan(
                             p.explain_slot, active_count_);
+                        ExecutionExplainRecorder::AddSlotEvalNs(p.explain_slot,
+                                                                ns);
                     } else {
                         explain_->AddPhase1IdxScan(p.expr_id, active_count_);
+                        explain_->AddLeafEvalNs(p.expr_id, ns);
                     }
+                }
+            } else {
+                int64_t total_coarse_ns = setup_ns;
+                for (int64_t ns : pred_rtree_ns) {
+                    total_coarse_ns += ns;
+                }
+                if (total_coarse_ns > 0) {
+                    st_->pending_degraded_coarse_ns += total_coarse_ns;
                 }
             }
         }
@@ -408,7 +473,7 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
     // Self-guard like every other SegmentExpr subclass (see the Coarse node):
     // drain the prefetch future before reading the raw column so a direct
     // caller that skipped the operator-level wait still sees a warmed column.
-    WaitPrefetch();
+    JoinPrefetchFuture();
     EnsureExecPathDetermined();
     EnsureExplainDecisionRecorded();
     auto real_batch_size = NextBatchSize();
@@ -464,6 +529,10 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
             st_->pending_coarse_in = 0;
             st_->pending_outer_mask = TargetBitmap{};
         }
+        const bool track_explain = explain_ != nullptr;
+        const auto refine_start = track_explain
+                                      ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
         // Build per-thread query geometries + prepared forms ONCE per batch.
         // qgeoms is reserved so it never reallocates (prepared references it).
         GEOSContextHandle_t qctx = GetThreadLocalGEOSContext();
@@ -479,7 +548,6 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         // shared_ptr: an in-flight query keeps the published cache snapshot
         // alive across a concurrent sealed-segment reopen/drop.
         auto geometry_cache = segment_->GetGeometryCache(st_->field_id);
-        const bool track_explain = explain_ != nullptr;
         const bool raw_reads = (geometry_cache == nullptr);
         std::vector<int64_t> in_cnt;
         std::vector<int64_t> out_cnt;
@@ -596,12 +664,66 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         }
 
         if (track_explain) {
+            const auto refine_ns =
+                std::exchange(st_->pending_degraded_coarse_ns, 0) +
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - refine_start)
+                    .count();
+            size_t active_preds = 0;
             for (size_t j = 0; j < st_->preds.size(); ++j) {
-                const int64_t eid = st_->preds[j].expr_id;
-                if (eid != 0 && raw_scanned[j] > 0) {
-                    explain_->AddRawScan(eid, raw_scanned[j]);
+                if (st_->preds[j].expr_id != 0 && in_cnt[j] > 0) {
+                    ++active_preds;
                 }
             }
+            const int64_t base_ns =
+                active_preds > 0
+                    ? refine_ns / static_cast<int64_t>(active_preds)
+                    : 0;
+            const int64_t rem_ns =
+                active_preds > 0
+                    ? refine_ns % static_cast<int64_t>(active_preds)
+                    : 0;
+            size_t share_idx = 0;
+            for (size_t j = 0; j < st_->preds.size(); ++j) {
+                auto& p = st_->preds[j];
+                const int64_t eid = p.expr_id;
+                if (eid == 0) {
+                    continue;
+                }
+                if (in_cnt[j] > 0) {
+                    const int64_t share_ns =
+                        base_ns +
+                        (static_cast<int64_t>(share_idx) < rem_ns ? 1 : 0);
+                    ++share_idx;
+                    if (p.explain_slot != nullptr) {
+                        ExecutionExplainRecorder::AddSlotEvalNs(p.explain_slot,
+                                                                share_ns);
+                    } else {
+                        explain_->AddLeafEvalNs(eid, share_ns);
+                    }
+                }
+                if (raw_scanned[j] > 0) {
+                    if (p.explain_slot != nullptr) {
+                        ExecutionExplainRecorder::AddSlotRawScan(
+                            p.explain_slot, raw_scanned[j]);
+                    } else {
+                        explain_->AddRawScan(eid, raw_scanned[j]);
+                    }
+                }
+            }
+            auto add_pred_rows = [&](size_t idx, int64_t r_in, int64_t r_out) {
+                auto& p = st_->preds[idx];
+                if (p.expr_id == 0) {
+                    return;
+                }
+                st_->RecordPredDecision(explain_, p);
+                if (p.explain_slot != nullptr) {
+                    ExecutionExplainRecorder::AddSlotRows(
+                        p.explain_slot, r_in, r_out);
+                } else {
+                    explain_->AddRows(p.expr_id, r_in, r_out);
+                }
+            };
             if (st_->explain_used_index) {
                 const int64_t group_in =
                     coarse_in >= 0 ? coarse_in
@@ -612,11 +734,7 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
                         if (p_in <= 0) {
                             break;
                         }
-                        const int64_t eid = st_->preds[j].expr_id;
-                        if (eid != 0) {
-                            st_->RecordPredDecision(explain_, st_->preds[j]);
-                            explain_->AddRows(eid, p_in, out_cnt[j]);
-                        }
+                        add_pred_rows(j, p_in, out_cnt[j]);
                     }
                 } else {
                     int64_t rem = group_in;
@@ -624,20 +742,14 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
                         if (rem <= 0) {
                             break;
                         }
-                        const int64_t eid = st_->preds[j].expr_id;
-                        if (eid != 0) {
-                            st_->RecordPredDecision(explain_, st_->preds[j]);
-                            explain_->AddRows(eid, rem, out_cnt[j]);
-                        }
+                        add_pred_rows(j, rem, out_cnt[j]);
                         rem = std::max<int64_t>(0, rem - out_cnt[j]);
                     }
                 }
             } else {
                 for (size_t j = 0; j < st_->preds.size(); ++j) {
-                    const int64_t eid = st_->preds[j].expr_id;
-                    if (eid != 0 && in_cnt[j] > 0) {
-                        st_->RecordPredDecision(explain_, st_->preds[j]);
-                        explain_->AddRows(eid, in_cnt[j], out_cnt[j]);
+                    if (in_cnt[j] > 0) {
+                        add_pred_rows(j, in_cnt[j], out_cnt[j]);
                     }
                 }
             }

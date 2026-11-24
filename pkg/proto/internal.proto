@@ -212,6 +212,13 @@ message ExplainEvalOrderCount {
   int64 segments = 2;
 }
 
+message ExplainTimeAccum {
+  int64 count = 1;
+  int64 sum_us = 2;
+  int64 min_us = 3;
+  int64 max_us = 4;
+}
+
 message ExplainIndexUseStats {
   int64 index_id = 1;
   string family = 2;
@@ -222,6 +229,8 @@ message ExplainIndexUseStats {
   int64 idx_scan = 7;
   int64 raw_scan = 8;
   int64 element_hits = 9;
+  ExplainTimeAccum eval_time = 10;
+  ExplainTimeAccum prefetch_time = 11;
 }
 
 message ExplainDeclineStats {
@@ -231,6 +240,8 @@ message ExplainDeclineStats {
   int64 rows_out = 4;
   int64 idx_scan = 5;
   int64 raw_scan = 6;
+  ExplainTimeAccum eval_time = 7;
+  ExplainTimeAccum prefetch_time = 8;
 }
 
 message ExplainConditionStats {
@@ -247,6 +258,8 @@ message ExplainConditionStats {
   repeated ExplainEvalOrderCount eval_orders = 11;
   repeated ExplainIndexUseStats used = 12;
   repeated ExplainDeclineStats reasons = 13;
+  ExplainTimeAccum eval_time = 14;
+  ExplainTimeAccum prefetch_time = 15;
 }
 
 message ExplainOperatorStats {
@@ -257,6 +270,8 @@ message ExplainOperatorStats {
   int64 rows_in = 5;
   int64 rows_out = 6;
   repeated ExplainConditionStats conditions = 7;
+  ExplainTimeAccum time = 8;
+  ExplainTimeAccum prefetch_wait_time = 9;
 }
 
 // Per-segment identity carried on worker explain groups so HybridSearch can

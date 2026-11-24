@@ -156,9 +156,9 @@ PhyCallExpr::RecordExplainDecision() {
 
 void
 PhyCallExpr::Eval(EvalCtx& context, VectorPtr& result) {
+    WaitPrefetch();
     tracer::AutoSpan span("PhyCallExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("function_name", expr_->fun_name());
-    RecordExplainDecision();
 
     auto offset_input = context.get_offset_input();
     SetHasOffsetInput(offset_input != nullptr);
@@ -174,8 +174,19 @@ PhyCallExpr::Eval(EvalCtx& context, VectorPtr& result) {
     }
     RowVector row_vector(std::move(args));
     this->expr_->function_ptr()(row_vector, result);
-    if (explain_ != nullptr && expr_id() != 0 && result != nullptr &&
-        !operand_groups_.empty()) {
+    if (result == nullptr || result->size() == 0) {
+        if (explain_ != nullptr && active_count_ == 0 && !has_offset_input_) {
+            RecordExplainDecision();
+        }
+        return;
+    }
+    if (explain_ == nullptr) {
+        return;
+    }
+    if (active_count_ > 0 && HasActiveEvalInput(context)) {
+        RecordExplainDecision();
+    }
+    if (explain_ != nullptr && expr_id() != 0 && !operand_groups_.empty()) {
         const auto& bitmap_input = context.get_bitmap_input();
         const int64_t active_rows =
             !bitmap_input.empty() ? static_cast<int64_t>(bitmap_input.count())

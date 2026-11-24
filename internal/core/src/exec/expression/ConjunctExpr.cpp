@@ -144,8 +144,10 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         if (!has_input_offset) {
             for (size_t idx : like_indices_) {
                 auto input = inputs_[idx];
+                input->WaitPrefetch();
                 if (auto cached =
-                        std::dynamic_pointer_cast<RawExprCacheAdapter>(input)) {
+                        std::dynamic_pointer_cast<RawExprCacheAdapter>(input);
+                    cached) {
                     input = cached->wrapped_expr();
                 }
                 auto unary_expr =
@@ -210,8 +212,12 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         }
 
         const bool first_input = !has_result;
-        if (explain != nullptr && !first_input && inputs_[idx] != nullptr &&
-            inputs_[idx]->expr_id() != 0) {
+        const bool explain_leaf = explain != nullptr &&
+                                  inputs_[idx] != nullptr &&
+                                  inputs_[idx]->expr_id() != 0;
+        const bool has_active =
+            explain_leaf && Expr::HasActiveEvalInput(context);
+        if (has_active && !first_input) {
             const auto& input = context.get_bitmap_input();
             next_mask.clear();
             if (!input.empty()) {
@@ -219,7 +225,14 @@ PhyConjunctFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
             }
         }
         VectorPtr input_result;
-        inputs_[idx]->Eval(context, input_result);
+        {
+            ExecutionExplainRecorder::ScopedLeafEvalTimer leaf_timer(
+                has_active ? inputs_[idx]->explain_slot() : nullptr);
+            inputs_[idx]->Eval(context, input_result);
+            if (input_result == nullptr || input_result->size() == 0) {
+                leaf_timer.Cancel();
+            }
+        }
 
         ColumnVectorPtr child_bitmap;
         ColumnVectorPtr all_flat_result;

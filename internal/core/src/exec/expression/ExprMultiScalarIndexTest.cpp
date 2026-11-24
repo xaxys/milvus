@@ -5039,3 +5039,771 @@ TEST(MultiScalarIndexExprTest,
         }
     }
 }
+
+TEST(MultiScalarIndexExprTest, ExplainLeafTimingAndSkippedPrefetchAttribution) {
+    // 1. Recorder-level nanosecond rounding, multi-operand eval_time suppression
+    // on individual operand sub-items, prefetch_wait_time clamping/folding, and
+    // skipped-leaf prefetch_time.
+    {
+        milvus::exec::ExecutionExplainRecorder explain(1000);
+        explain.RegisterOperator(0, milvus::ExplainOperatorKind::kFilter);
+        explain.SetDefaultFilterStep(0);
+        explain.SetEvalOrder(10, 1, FieldId(101));
+        explain.SetEvalOrder(20, 2, FieldId(102));
+        explain.MarkEvalEntered(10);
+        explain.MarkEvalEntered(20);
+
+        explain.RecordDecision(FieldId(101),
+                               10,
+                               /*used_index=*/true,
+                               5001,
+                               "sort",
+                               false,
+                               "",
+                               "");
+        explain.RecordDecision(FieldId(102),
+                               10,
+                               /*used_index=*/false,
+                               0,
+                               "",
+                               false,
+                               "",
+                               "no_index_on_field");
+        explain.AddRows(10, 1000, 0);
+        explain.AddLeafEvalNs(10, 1500);
+        explain.AddLeafPrefetchNs(10, 499);  // < 500 ns rounds to 0
+
+        // Short-circuited leaf 20: never evaluated, no RecordDecision, but
+        // background PrefetchAsync spent 8400 ns (8 us).
+        explain.AddLeafPrefetchNs(20, 8400);
+        explain.AddOperatorTimeNs(0, 12600);
+        explain.AddOperatorPrefetchWaitNs(0, 7600);
+
+        proto::internal::ExecutionExplain seg_node;
+        ASSERT_TRUE(seg_node.ParseFromString(explain.Finish()));
+        ASSERT_EQ(seg_node.group().operators_size(), 1);
+        const auto& op_node = seg_node.group().operators(0);
+        EXPECT_EQ(op_node.time().sum_us(), 13);
+        EXPECT_EQ(op_node.prefetch_wait_time().sum_us(), 8);
+        ASSERT_EQ(op_node.conditions_size(), 2);
+
+        const auto& cond0 = op_node.conditions(0);
+        EXPECT_EQ(cond0.expr_id(), 10);
+        EXPECT_EQ(cond0.eval_time().sum_us(), 2);
+        EXPECT_EQ(cond0.prefetch_time().sum_us(), 0);
+        ASSERT_EQ(cond0.used_size(), 1);
+        ASSERT_EQ(cond0.reasons_size(), 1);
+        EXPECT_FALSE(cond0.used(0).has_eval_time());
+        EXPECT_FALSE(cond0.reasons(0).has_eval_time());
+
+        const auto& cond1 = op_node.conditions(1);
+        EXPECT_EQ(cond1.expr_id(), 20);
+        EXPECT_EQ(cond1.skipped_segments(), 1);
+        EXPECT_FALSE(cond1.has_eval_time());
+        EXPECT_EQ(cond1.prefetch_time().sum_us(), 8);
+    }
+
+    // 1b. Internal folded filter folds both time_ns and prefetch_wait_ns into
+    // mvcc, and unattributed whole-filter cache hit separates unattributed time.
+    {
+        milvus::exec::ExecutionExplainRecorder folded(500);
+        folded.RegisterOperator(
+            0, milvus::exec::ExplainOperatorKind::kFilter, "", true);
+        folded.RegisterOperator(1, milvus::exec::ExplainOperatorKind::kMvcc);
+        folded.SetOperatorRows(0, 500, 480);
+        folded.SetOperatorRows(1, 480, 470);
+        folded.AddOperatorTimeNs(0, 3000);
+        folded.AddOperatorPrefetchWaitNs(0, 2000);
+        folded.AddOperatorTimeNs(1, 5000);
+        folded.AddOperatorPrefetchWaitNs(1, 1000);
+
+        proto::internal::ExecutionExplain f_out;
+        ASSERT_TRUE(f_out.ParseFromString(folded.Finish()));
+        ASSERT_EQ(f_out.group().operators_size(), 1);
+        const auto& mvcc = f_out.group().operators(0);
+        EXPECT_EQ(mvcc.kind(), proto::internal::EXPLAIN_OP_MVCC);
+        EXPECT_EQ(mvcc.time().sum_us(), 8);
+        EXPECT_EQ(mvcc.prefetch_wait_time().sum_us(), 3);
+
+        milvus::exec::ExecutionExplainRecorder cached_op(500);
+        cached_op.RegisterOperator(0, milvus::ExplainOperatorKind::kFilter);
+        cached_op.SetOperatorRows(0, 500, 42);
+        cached_op.MarkOperatorCached(0);
+        cached_op.AddOperatorTimeNs(0, 9000);
+        cached_op.AddOperatorPrefetchWaitNs(0, 5000);  // ignored when cached
+
+        proto::internal::ExecutionExplain c_out;
+        ASSERT_TRUE(c_out.ParseFromString(cached_op.Finish()));
+        ASSERT_EQ(c_out.group().operators_size(), 1);
+        const auto& cop = c_out.group().operators(0);
+        EXPECT_TRUE(cop.has_time());
+        EXPECT_EQ(cop.time().sum_us(), 9);
+        EXPECT_EQ(cop.prefetch_wait_time().sum_us(), 0);
+    }
+
+    // 2. End-to-end Driver Retrieve with async prefetch records operator time,
+    // prefetch_wait_time, and leaf eval_time/prefetch_time without data races.
+    {
+        auto schema = std::make_shared<Schema>();
+        auto pk_fid = schema->AddDebugField("id", DataType::INT64);
+        schema->set_primary_field_id(pk_fid);
+        auto val_fid = schema->AddDebugField("val", DataType::INT64);
+
+        const int64_t row_count = 256;
+        std::vector<int64_t> ids(row_count);
+        std::vector<int64_t> vals(row_count);
+        for (int64_t i = 0; i < row_count; ++i) {
+            ids[i] = i;
+            vals[i] = i * 10;
+        }
+        std::vector<int64_t> ts(row_count, 1);
+        auto ts_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        ts_field->FillFieldData(ts.data(), row_count);
+        auto pk_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        pk_field->FillFieldData(ids.data(), row_count);
+        auto val_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        val_field->FillFieldData(vals.data(), row_count);
+
+        RawFieldFiles files;
+        auto segment = CreateSealedSegment(schema);
+        segment->LoadFieldData(files.Prepare(TimestampFieldID, {ts_field}));
+        segment->LoadFieldData(files.Prepare(pk_fid, {pk_field}));
+        segment->LoadFieldData(files.Prepare(val_fid, {val_field}));
+
+        auto pred = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(val_fid, DataType::INT64),
+            proto::plan::OpType::LessThan,
+            Int64Literal(100),
+            std::vector<proto::plan::GenericValue>());
+        pred->SetExprId(93001);
+
+        auto filter_node =
+            std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID, pred);
+        auto mvcc_node = std::make_shared<plan::MvccNode>(
+            "2", std::vector<plan::PlanNodePtr>{filter_node});
+        auto retrieve_plan = std::make_unique<query::RetrievePlan>(schema);
+        retrieve_plan->plan_node_ = std::make_unique<query::RetrievePlanNode>();
+        retrieve_plan->plan_node_->plannodes_ = mvcc_node;
+        retrieve_plan->plan_node_->limit_ = Unlimited;
+        retrieve_plan->plan_node_->plan_options_.enable_explain = true;
+        retrieve_plan->mode_ = query::RetrieveMode::Candidates;
+
+        auto ret = segment->Retrieve(nullptr,
+                                     retrieve_plan.get(),
+                                     MAX_TIMESTAMP,
+                                     /*limit_size=*/4096,
+                                     /*ignore_non_pk=*/true,
+                                     folly::CancellationToken(),
+                                     /*consistency_level=*/0,
+                                     /*collection_ttl=*/0,
+                                     /*entity_ttl_physical_time_us=*/0);
+        ASSERT_NE(ret, nullptr);
+        EXPECT_EQ(ret->offset_size(), 10);
+
+        proto::internal::ExecutionExplain seg_node;
+        ASSERT_TRUE(seg_node.ParseFromString(ret->explain()));
+        ASSERT_EQ(seg_node.group().operators_size(), 2);
+        const auto& f_op = seg_node.group().operators(0);
+        EXPECT_EQ(f_op.kind(), proto::internal::EXPLAIN_OP_FILTER);
+        ASSERT_TRUE(f_op.has_time());
+        ASSERT_TRUE(f_op.has_prefetch_wait_time());
+        EXPECT_EQ(f_op.prefetch_wait_time().count(), 1);
+        EXPECT_LE(f_op.prefetch_wait_time().sum_us(), f_op.time().sum_us());
+        ASSERT_EQ(f_op.conditions_size(), 1);
+        const auto& f_cond = f_op.conditions(0);
+        EXPECT_EQ(f_cond.rows_in(), row_count);
+        EXPECT_EQ(f_cond.rows_out(), 10);
+        ASSERT_TRUE(f_cond.has_eval_time());
+        EXPECT_EQ(f_cond.eval_time().count(), 1);
+        EXPECT_GE(f_cond.eval_time().sum_us(), 0);
+    }
+
+    // 3. Direct Eval() without prior WaitPrefetch/PrefetchAsync and with
+    // explain disabled (nullptr) still runs DetermineExecPath() and selects the
+    // scalar index on index-backed sealed segments.
+    {
+        auto schema = std::make_shared<Schema>();
+        auto pk_fid = schema->AddDebugField("id", DataType::INT64);
+        schema->set_primary_field_id(pk_fid);
+        auto val_fid = schema->AddDebugField("val", DataType::INT64);
+
+        const int64_t row_count = 128;
+        std::vector<int64_t> ids(row_count);
+        std::vector<int64_t> vals(row_count);
+        for (int64_t i = 0; i < row_count; ++i) {
+            ids[i] = i;
+            vals[i] = i;
+        }
+        auto pk_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        pk_field->FillFieldData(ids.data(), row_count);
+        auto val_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        val_field->FillFieldData(vals.data(), row_count);
+
+        RawFieldFiles files;
+        auto segment = CreateSealedSegment(schema);
+        segment->LoadFieldData(files.Prepare(pk_fid, {pk_field}));
+        InstallIndexWithId(*segment,
+                           val_fid,
+                           DataType::INT64,
+                           94001,
+                           BuildIndex(val_fid,
+                                      DataType::INT64,
+                                      milvus::index::ASCENDING_SORT,
+                                      {val_field}));
+
+        auto qc = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, segment.get(), row_count, MAX_TIMESTAMP);
+        qc->set_read_schema(schema);
+        qc->set_read_snapshot(segment->CaptureReadSnapshot());
+        milvus::exec::ExecContext ec(qc.get());
+
+        auto range_pred = std::make_shared<expr::BinaryRangeFilterExpr>(
+            expr::ColumnInfo(val_fid, DataType::INT64),
+            Int64Literal(10),
+            Int64Literal(20),
+            true,
+            false);
+        auto in_pred = std::make_shared<expr::TermFilterExpr>(
+            expr::ColumnInfo(val_fid, DataType::INT64),
+            std::vector<proto::plan::GenericValue>{Int64Literal(12),
+                                                   Int64Literal(15)});
+        for (const auto& p :
+             std::vector<expr::TypedExprPtr>{range_pred, in_pred}) {
+            std::vector<expr::TypedExprPtr> single{p};
+            milvus::exec::ExprSet exprs_no_prefetch(single, &ec);
+            milvus::exec::EvalCtx eval_ctx(&ec);
+            std::vector<VectorPtr> out;
+            exprs_no_prefetch.Eval(0, 1, true, eval_ctx, out);
+            ASSERT_EQ(out.size(), 1);
+            ASSERT_NE(out[0], nullptr);
+        }
+    }
+
+    // 4. Synchronous NGRAM fusion through RawExprCacheAdapter transfers
+    // WaitPrefetch() lookup/prepare duration to the unwrapped leaf rather than
+    // dropping it when adapter->Eval() is bypassed, and empty offset_input keeps
+    // short-circuited leaves skipped without eval_time.
+    {
+        auto schema = std::make_shared<Schema>();
+        auto pk_fid = schema->AddDebugField("id", DataType::INT64);
+        schema->set_primary_field_id(pk_fid);
+        auto v_fid = schema->AddDebugField("v", DataType::VARCHAR);
+
+        const int64_t n = static_cast<int64_t>(kVarCharValues.size());
+        std::vector<int64_t> pks(n);
+        for (int64_t i = 0; i < n; ++i) {
+            pks[i] = i;
+        }
+        auto pk_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        pk_field->FillFieldData(pks.data(), n);
+        auto v_field = milvus::test::expr_index::StringField(kVarCharValues);
+
+        RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        seg->LoadFieldData(files.Prepare(pk_fid, {pk_field}));
+        seg->LoadFieldData(files.Prepare(v_fid, {v_field}));
+        InstallIndexWithId(*seg,
+                           v_fid,
+                           DataType::VARCHAR,
+                           95001,
+                           BuildIndex(v_fid,
+                                      DataType::VARCHAR,
+                                      milvus::index::NGRAM_INDEX_TYPE,
+                                      {v_field},
+                                      {{milvus::index::MIN_GRAM, 3},
+                                       {milvus::index::MAX_GRAM, 4}}));
+
+        using milvus::exec::ExprResCacheManager;
+        auto& mgr = ExprResCacheManager::Instance();
+        const bool prev_enabled = ExprResCacheManager::IsEnabled();
+        ExprResCacheManager::SetEnabled(true);
+        mgr.Clear();
+        mgr.SetCapacityBytes(1ULL << 20);
+        auto cleanup = folly::makeGuard([&]() {
+            mgr.Clear();
+            ExprResCacheManager::SetEnabled(prev_enabled);
+        });
+
+        proto::plan::GenericValue pat1;
+        pat1.set_string_val("alpha");
+        auto like1 = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(v_fid, DataType::VARCHAR),
+            proto::plan::OpType::InnerMatch,
+            pat1,
+            std::vector<proto::plan::GenericValue>());
+        like1->SetExprId(95101);
+
+        proto::plan::GenericValue pat2;
+        pat2.set_string_val("beta");
+        auto like2 = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(v_fid, DataType::VARCHAR),
+            proto::plan::OpType::InnerMatch,
+            pat2,
+            std::vector<proto::plan::GenericValue>());
+        like2->SetExprId(95102);
+
+        auto conj = std::make_shared<expr::LogicalBinaryExpr>(
+            expr::LogicalBinaryExpr::OpType::And, like1, like2);
+
+        auto explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(n);
+        auto qc = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, seg.get(), n, MAX_TIMESTAMP);
+        qc->set_read_schema(schema);
+        qc->set_read_snapshot(seg->CaptureReadSnapshot());
+        qc->set_enable_sub_expr_cache_write(true);
+        qc->SetExplain(explain);
+        milvus::exec::ExecContext ec(qc.get());
+        ec.SetExplain(explain);
+        std::vector<expr::TypedExprPtr> filters{conj};
+        milvus::exec::ExprSet exprs_sync(filters, &ec, /*null_rejecting=*/true);
+        exprs_sync.WaitPrefetch();
+        milvus::exec::EvalCtx eval_ctx(&ec);
+        auto res = milvus::exec::EvalExprSetOverAllBatches(
+            exprs_sync, eval_ctx, n, "SyncFusedNgramPrepareTiming");
+        (void)res;
+
+        proto::internal::ExecutionExplain seg_node;
+        ASSERT_TRUE(seg_node.ParseFromString(explain->Finish()));
+        ASSERT_GE(ConditionCount(seg_node), 1);
+        for (int i = 0; i < ConditionCount(seg_node); ++i) {
+            const auto& c = ConditionAt(seg_node, i);
+            if (c.skipped_segments() == 0) {
+                EXPECT_TRUE(c.has_eval_time());
+                EXPECT_GT(c.rows_in(), 0);
+            }
+        }
+
+        auto raw_pred = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(pk_fid, DataType::INT64),
+            proto::plan::OpType::GreaterThan,
+            Int64Literal(0),
+            std::vector<proto::plan::GenericValue>());
+        raw_pred->SetExprId(95201);
+
+        {
+            auto prime_qc = std::make_shared<milvus::exec::QueryContext>(
+                DEAFULT_QUERY_ID, seg.get(), n, MAX_TIMESTAMP);
+            prime_qc->set_read_schema(schema);
+            prime_qc->set_read_snapshot(seg->CaptureReadSnapshot());
+            prime_qc->set_enable_sub_expr_cache_write(true);
+            milvus::exec::ExecContext prime_ec(prime_qc.get());
+            std::vector<expr::TypedExprPtr> single{raw_pred};
+            milvus::exec::ExprSet prime_exprs(single, &prime_ec);
+            milvus::exec::EvalCtx prime_ctx(&prime_ec);
+            (void)milvus::exec::EvalExprSetOverAllBatches(
+                prime_exprs, prime_ctx, n, "PrimeRawExprCache");
+        }
+
+        auto zero_explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(n);
+        zero_explain->SetEvalOrder(95201, 1, pk_fid);
+        auto zero_qc = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, seg.get(), n, MAX_TIMESTAMP);
+        zero_qc->set_read_schema(schema);
+        zero_qc->set_read_snapshot(seg->CaptureReadSnapshot());
+        zero_qc->set_enable_sub_expr_cache_write(true);
+        zero_qc->SetExplain(zero_explain);
+        milvus::exec::ExecContext zero_ec(zero_qc.get());
+        zero_ec.SetExplain(zero_explain);
+        std::vector<expr::TypedExprPtr> zero_filters{raw_pred};
+        milvus::exec::ExprSet zero_exprs(zero_filters, &zero_ec);
+        zero_exprs.WaitPrefetch();
+        milvus::exec::OffsetVector empty_offsets;
+        milvus::exec::EvalCtx zero_ctx(&zero_ec, &empty_offsets);
+        std::vector<VectorPtr> zero_out;
+        zero_exprs.Eval(0, 1, true, zero_ctx, zero_out);
+
+        proto::internal::ExecutionExplain zero_node;
+        ASSERT_TRUE(zero_node.ParseFromString(zero_explain->Finish()));
+        ASSERT_EQ(ConditionCount(zero_node), 1);
+        const auto& z_cond = ConditionAt(zero_node, 0);
+        EXPECT_EQ(z_cond.skipped_segments(), 1);
+        EXPECT_FALSE(z_cond.has_eval_time());
+
+        // Async PrefetchAsync attributes background lookup/DetermineExecPath
+        // solely to prefetch_ns (leaving eval_ns == 0 prior to Eval), while
+        // iterative offset_input Eval without PrefetchAsync captures
+        // DetermineExecPath inside eval_ns.
+        auto pool = std::make_shared<folly::CPUThreadPoolExecutor>(1);
+        auto pf_explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(n);
+        auto pf_qc = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, seg.get(), n, MAX_TIMESTAMP);
+        pf_qc->set_read_schema(schema);
+        pf_qc->set_read_snapshot(seg->CaptureReadSnapshot());
+        pf_qc->SetExplain(pf_explain);
+        milvus::exec::ExecContext pf_ec(pf_qc.get());
+        pf_ec.SetExplain(pf_explain);
+        auto uncached_pred = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(v_fid, DataType::VARCHAR),
+            proto::plan::OpType::Equal,
+            [] {
+                proto::plan::GenericValue gv;
+                gv.set_string_val("alpha");
+                return gv;
+            }(),
+            std::vector<proto::plan::GenericValue>());
+        uncached_pred->SetExprId(95301);
+        std::vector<expr::TypedExprPtr> pf_filters{uncached_pred};
+        milvus::exec::ExprSet pf_exprs(pf_filters, &pf_ec);
+        pf_exprs.PrefetchAsync(pool);
+        pf_exprs.WaitPrefetch();
+        auto* pf_slot = pf_explain->EnsureLeafSlot(95301);
+        EXPECT_GT(pf_slot->prefetch_ns.load(), 0);
+        EXPECT_EQ(pf_slot->eval_ns.load(), 0);
+
+        auto iter_explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(n);
+        auto iter_qc = std::make_shared<milvus::exec::QueryContext>(
+            DEAFULT_QUERY_ID, seg.get(), n, MAX_TIMESTAMP);
+        iter_qc->set_read_schema(schema);
+        iter_qc->set_read_snapshot(seg->CaptureReadSnapshot());
+        iter_qc->SetExplain(iter_explain);
+        milvus::exec::ExecContext iter_ec(iter_qc.get());
+        iter_ec.SetExplain(iter_explain);
+        milvus::exec::ExprSet iter_exprs(pf_filters, &iter_ec);
+        milvus::exec::OffsetVector iter_offsets{0, 1};
+        milvus::exec::EvalCtx iter_ctx(&iter_ec, &iter_offsets);
+        std::vector<VectorPtr> iter_out;
+        iter_exprs.Eval(0, 1, true, iter_ctx, iter_out);
+        EXPECT_GT(iter_explain->EnsureLeafSlot(95301)->eval_ns.load(), 0);
+    }
+}
+
+TEST(MultiScalarIndexExprTest, ZeroRowBatchesAndFusedShortCircuitTiming) {
+    // 1. Zero-row batches (empty offset_input or all-false bitmap_input) on a
+    // non-empty segment must not start leaf timers, flush sync-prepare time, or
+    // turn skipped leaves into evaluated ones across SegmentExpr, CompareExpr,
+    // AlwaysTrueExpr, and LogicalUnaryExpr (NOT).
+    {
+        auto schema = std::make_shared<Schema>();
+        auto a_fid = schema->AddDebugField("a", DataType::INT64);
+        auto b_fid = schema->AddDebugField("b", DataType::INT64);
+        schema->set_primary_field_id(a_fid);
+
+        const int64_t n = static_cast<int64_t>(kInt64Values.size());
+        auto a_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        a_field->FillFieldData(kInt64Values.data(), n);
+        auto b_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        b_field->FillFieldData(kInt64Values.data(), n);
+
+        RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        seg->LoadFieldData(files.Prepare(a_fid, {a_field}));
+        seg->LoadFieldData(files.Prepare(b_fid, {b_field}));
+
+        auto unary_pred = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(a_fid, DataType::INT64),
+            proto::plan::OpType::GreaterThan,
+            Int64Literal(50),
+            std::vector<proto::plan::GenericValue>());
+        unary_pred->SetExprId(96001);
+
+        auto cmp_pred = std::make_shared<expr::CompareExpr>(
+            a_fid, b_fid, DataType::INT64, DataType::INT64, OpType::Equal);
+        cmp_pred->SetExprId(96002);
+
+        auto always_true_pred = std::make_shared<expr::AlwaysTrueExpr>();
+        always_true_pred->SetExprId(96003);
+
+        auto not_inner = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(b_fid, DataType::INT64),
+            proto::plan::OpType::Equal,
+            Int64Literal(20),
+            std::vector<proto::plan::GenericValue>());
+        not_inner->SetExprId(96004);
+        auto not_pred = std::make_shared<expr::LogicalUnaryExpr>(
+            expr::LogicalUnaryExpr::OpType::LogicalNot, not_inner);
+
+        struct Case {
+            expr::TypedExprPtr expr;
+            int64_t leaf_id;
+            FieldId fid;
+        };
+        std::vector<Case> cases = {
+            {unary_pred, 96001, a_fid},
+            {cmp_pred, 96002, a_fid},
+            {always_true_pred, 96003, a_fid},
+            {not_pred, 96004, b_fid},
+        };
+
+        for (const auto& tc : cases) {
+            for (bool use_empty_offsets : {true, false}) {
+                auto explain =
+                    std::make_shared<milvus::exec::ExecutionExplainRecorder>(n);
+                explain->SetEvalOrder(tc.leaf_id, 1, tc.fid);
+                auto qc = std::make_shared<milvus::exec::QueryContext>(
+                    DEAFULT_QUERY_ID, seg.get(), n, MAX_TIMESTAMP);
+                qc->set_read_schema(schema);
+                qc->set_read_snapshot(seg->CaptureReadSnapshot());
+                qc->SetExplain(explain);
+                milvus::exec::ExecContext ec(qc.get());
+                ec.SetExplain(explain);
+                std::vector<expr::TypedExprPtr> single{tc.expr};
+                milvus::exec::ExprSet expr_set(single, &ec);
+                expr_set.WaitPrefetch();
+
+                milvus::exec::OffsetVector empty_offsets;
+                TargetBitmap empty_mask(n, false);
+                milvus::exec::EvalCtx ctx =
+                    use_empty_offsets
+                        ? milvus::exec::EvalCtx(&ec, &empty_offsets)
+                        : milvus::exec::EvalCtx(&ec);
+                if (!use_empty_offsets) {
+                    ctx.set_bitmap_input(empty_mask.view());
+                }
+                std::vector<VectorPtr> out;
+                expr_set.Eval(0, 1, true, ctx, out);
+
+                EXPECT_EQ(explain->EnsureLeafSlot(tc.leaf_id)->eval_ns.load(),
+                          0)
+                    << "leaf_id=" << tc.leaf_id
+                    << " empty_offsets=" << use_empty_offsets;
+
+                proto::internal::ExecutionExplain pb;
+                ASSERT_TRUE(pb.ParseFromString(explain->Finish()));
+                ASSERT_EQ(ConditionCount(pb), 1);
+                const auto& cond = ConditionAt(pb, 0);
+                EXPECT_EQ(cond.skipped_segments(), 1)
+                    << "leaf_id=" << tc.leaf_id
+                    << " empty_offsets=" << use_empty_offsets;
+                EXPECT_FALSE(cond.has_eval_time())
+                    << "leaf_id=" << tc.leaf_id
+                    << " empty_offsets=" << use_empty_offsets;
+            }
+        }
+    }
+
+    // 2. Fused NGRAM LIKE conjunction attributes each predicate's own Phase 1
+    // evaluation time and candidate narrowing directly to its own leaf slot,
+    // while any trailing predicate after Phase 1 empties candidates remains
+    // skipped without eval_time.
+    {
+        auto schema = std::make_shared<Schema>();
+        auto pk_fid = schema->AddDebugField("id", DataType::INT64);
+        schema->set_primary_field_id(pk_fid);
+        auto v_fid = schema->AddDebugField("v", DataType::VARCHAR);
+
+        const int64_t n = static_cast<int64_t>(kVarCharValues.size());
+        std::vector<int64_t> pks(n);
+        for (int64_t i = 0; i < n; ++i) {
+            pks[i] = i;
+        }
+        auto pk_field =
+            std::make_shared<FieldData<int64_t>>(DataType::INT64, false);
+        pk_field->FillFieldData(pks.data(), n);
+        auto v_field = milvus::test::expr_index::StringField(kVarCharValues);
+
+        RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        seg->LoadFieldData(files.Prepare(pk_fid, {pk_field}));
+        seg->LoadFieldData(files.Prepare(v_fid, {v_field}));
+        InstallIndexWithId(*seg,
+                           v_fid,
+                           DataType::VARCHAR,
+                           96100,
+                           BuildIndex(v_fid,
+                                      DataType::VARCHAR,
+                                      milvus::index::NGRAM_INDEX_TYPE,
+                                      {v_field},
+                                      {{milvus::index::MIN_GRAM, 3},
+                                       {milvus::index::MAX_GRAM, 4}}));
+
+        proto::plan::GenericValue pat1;
+        pat1.set_string_val("alpha");
+        auto like1 = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(v_fid, DataType::VARCHAR),
+            proto::plan::OpType::InnerMatch,
+            pat1,
+            std::vector<proto::plan::GenericValue>());
+        like1->SetExprId(96101);
+
+        proto::plan::GenericValue pat2;
+        pat2.set_string_val("beta");
+        auto like2 = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(v_fid, DataType::VARCHAR),
+            proto::plan::OpType::InnerMatch,
+            pat2,
+            std::vector<proto::plan::GenericValue>());
+        like2->SetExprId(96102);
+
+        proto::plan::GenericValue pat3;
+        pat3.set_string_val("gamma");
+        auto like3 = std::make_shared<expr::UnaryRangeFilterExpr>(
+            expr::ColumnInfo(v_fid, DataType::VARCHAR),
+            proto::plan::OpType::InnerMatch,
+            pat3,
+            std::vector<proto::plan::GenericValue>());
+        like3->SetExprId(96103);
+
+        auto conj12 = std::make_shared<expr::LogicalBinaryExpr>(
+            expr::LogicalBinaryExpr::OpType::And, like1, like2);
+        auto conj = std::make_shared<expr::LogicalBinaryExpr>(
+            expr::LogicalBinaryExpr::OpType::And, conj12, like3);
+
+        auto explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(n);
+        auto res = EvaluateFilter(conj, seg.get(), n, explain);
+        ExpectHitRows(res, {}, "disjoint fused NGRAM LIKE");
+
+        EXPECT_GT(explain->EnsureLeafSlot(96101)->eval_ns.load(), 0);
+        EXPECT_GT(explain->EnsureLeafSlot(96102)->eval_ns.load(), 0);
+        EXPECT_EQ(explain->EnsureLeafSlot(96103)->eval_ns.load(), 0);
+
+        proto::internal::ExecutionExplain pb;
+        ASSERT_TRUE(pb.ParseFromString(explain->Finish()));
+        ASSERT_EQ(ConditionCount(pb), 3);
+        std::map<int64_t, const proto::internal::ExplainConditionStats*> by_id;
+        for (int i = 0; i < ConditionCount(pb); ++i) {
+            const auto& c = ConditionAt(pb, i);
+            by_id[c.expr_id()] = &c;
+        }
+        ASSERT_EQ(by_id.count(96101), 1u);
+        ASSERT_EQ(by_id.count(96102), 1u);
+        ASSERT_EQ(by_id.count(96103), 1u);
+        EXPECT_EQ(by_id[96101]->skipped_segments(), 0);
+        EXPECT_TRUE(by_id[96101]->has_eval_time());
+        EXPECT_EQ(by_id[96101]->rows_in(), n);
+        EXPECT_GT(by_id[96101]->rows_out(), 0);
+        EXPECT_EQ(by_id[96101]->raw_scan(), 0);
+
+        EXPECT_EQ(by_id[96102]->skipped_segments(), 0);
+        EXPECT_TRUE(by_id[96102]->has_eval_time());
+        EXPECT_EQ(by_id[96102]->rows_in(), by_id[96101]->rows_out());
+        EXPECT_EQ(by_id[96102]->rows_out(), 0);
+        EXPECT_EQ(by_id[96102]->idx_scan(), by_id[96101]->rows_out());
+        EXPECT_EQ(by_id[96102]->raw_scan(), 0);
+
+        EXPECT_EQ(by_id[96103]->skipped_segments(), 1);
+        EXPECT_FALSE(by_id[96103]->has_eval_time());
+    }
+
+    // 3. GIS split-fusion attributes each predicate's own R-Tree coarse
+    // nanoseconds and candidate narrowing directly to its own leaf slot when an
+    // R-Tree runs, while unindexed Refine short-circuit keeps unexecuted
+    // trailing predicates skipped without eval_time.
+    {
+        const bool saved_gis =
+            SegcoreConfig::default_config().get_enable_gis_split_fusion();
+        SegcoreConfig::default_config().set_enable_gis_split_fusion(true);
+        auto restore_gis = folly::makeGuard([&]() {
+            SegcoreConfig::default_config().set_enable_gis_split_fusion(
+                saved_gis);
+        });
+
+        auto schema = std::make_shared<Schema>();
+        auto geo_fid = schema->AddDebugField("geo", DataType::GEOMETRY);
+        auto make_wkb = [](const char* wkt) {
+            return Geometry(GetThreadLocalGEOSContext(), wkt).to_wkb_string();
+        };
+        const std::vector<std::string> wkbs = {
+            make_wkb("POINT(5 5)"),
+            make_wkb("POINT(205 205)"),
+        };
+        auto geo_field =
+            storage::CreateFieldData(DataType::GEOMETRY, DataType::NONE, false);
+        geo_field->FillFieldData(wkbs.data(), wkbs.size());
+
+        RawFieldFiles files;
+        auto seg = CreateSealedSegment(schema);
+        seg->LoadFieldData(files.Prepare(geo_fid, {geo_field}));
+        InstallIndexWithId(*seg,
+                           geo_fid,
+                           DataType::GEOMETRY,
+                           96200,
+                           BuildIndex(geo_fid,
+                                      DataType::GEOMETRY,
+                                      milvus::index::RTREE_INDEX_TYPE,
+                                      {geo_field}));
+
+        auto gis1 = std::make_shared<expr::GISFunctionFilterExpr>(
+            expr::ColumnInfo(geo_fid, DataType::GEOMETRY),
+            proto::plan::GISFunctionFilterExpr_GISOp_Intersects,
+            "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))");
+        gis1->SetExprId(96201);
+
+        auto gis2 = std::make_shared<expr::GISFunctionFilterExpr>(
+            expr::ColumnInfo(geo_fid, DataType::GEOMETRY),
+            proto::plan::GISFunctionFilterExpr_GISOp_Intersects,
+            "POLYGON((100 100, 110 100, 110 110, 100 110, 100 100))");
+        gis2->SetExprId(96202);
+
+        auto conj = std::make_shared<expr::LogicalBinaryExpr>(
+            expr::LogicalBinaryExpr::OpType::And, gis1, gis2);
+
+        const int64_t n = static_cast<int64_t>(wkbs.size());
+        auto explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(n);
+        auto res = EvaluateFilter(conj, seg.get(), n, explain);
+        ExpectHitRows(res, {}, "disjoint R-Tree coarse GIS split-fusion");
+
+        EXPECT_GT(explain->EnsureLeafSlot(96201)->eval_ns.load(), 0);
+        EXPECT_GT(explain->EnsureLeafSlot(96202)->eval_ns.load(), 0);
+
+        proto::internal::ExecutionExplain pb;
+        ASSERT_TRUE(pb.ParseFromString(explain->Finish()));
+        ASSERT_EQ(ConditionCount(pb), 2);
+        std::map<int64_t, const proto::internal::ExplainConditionStats*> by_id;
+        for (int i = 0; i < ConditionCount(pb); ++i) {
+            const auto& c = ConditionAt(pb, i);
+            by_id[c.expr_id()] = &c;
+        }
+        ASSERT_EQ(by_id.count(96201), 1u);
+        ASSERT_EQ(by_id.count(96202), 1u);
+        EXPECT_EQ(by_id[96201]->skipped_segments(), 0);
+        EXPECT_TRUE(by_id[96201]->has_eval_time());
+        EXPECT_EQ(by_id[96201]->rows_in(), n);
+        EXPECT_EQ(by_id[96201]->rows_out(), 1);
+        EXPECT_EQ(by_id[96201]->idx_scan(), n);
+        EXPECT_EQ(by_id[96201]->raw_scan(), 0);
+
+        EXPECT_EQ(by_id[96202]->skipped_segments(), 0);
+        EXPECT_TRUE(by_id[96202]->has_eval_time());
+        EXPECT_EQ(by_id[96202]->rows_in(), 1);
+        EXPECT_EQ(by_id[96202]->rows_out(), 0);
+        EXPECT_EQ(by_id[96202]->idx_scan(), 1);
+        EXPECT_EQ(by_id[96202]->raw_scan(), 0);
+
+        // Unindexed segment where Refine short-circuits on gis1 (0 hits): gis2
+        // ran neither R-Tree nor Refine, so it remains skipped without eval_time.
+        const std::vector<std::string> raw_wkbs = {
+            make_wkb("POINT(205 205)"),
+        };
+        auto raw_geo_field =
+            storage::CreateFieldData(DataType::GEOMETRY, DataType::NONE, false);
+        raw_geo_field->FillFieldData(raw_wkbs.data(), raw_wkbs.size());
+        RawFieldFiles raw_files;
+        auto raw_seg = CreateSealedSegment(schema);
+        raw_seg->LoadFieldData(raw_files.Prepare(geo_fid, {raw_geo_field}));
+
+        auto raw_explain =
+            std::make_shared<milvus::exec::ExecutionExplainRecorder>(1);
+        auto raw_res = EvaluateFilter(conj, raw_seg.get(), 1, raw_explain);
+        ExpectHitRows(raw_res, {}, "unindexed GIS Refine short-circuit");
+        EXPECT_GT(raw_explain->EnsureLeafSlot(96201)->eval_ns.load(), 0);
+        EXPECT_EQ(raw_explain->EnsureLeafSlot(96202)->eval_ns.load(), 0);
+
+        proto::internal::ExecutionExplain raw_pb;
+        ASSERT_TRUE(raw_pb.ParseFromString(raw_explain->Finish()));
+        ASSERT_EQ(ConditionCount(raw_pb), 2);
+        std::map<int64_t, const proto::internal::ExplainConditionStats*>
+            raw_by_id;
+        for (int i = 0; i < ConditionCount(raw_pb); ++i) {
+            const auto& c = ConditionAt(raw_pb, i);
+            raw_by_id[c.expr_id()] = &c;
+        }
+        EXPECT_EQ(raw_by_id[96201]->skipped_segments(), 0);
+        EXPECT_TRUE(raw_by_id[96201]->has_eval_time());
+        EXPECT_EQ(raw_by_id[96202]->skipped_segments(), 1);
+        EXPECT_FALSE(raw_by_id[96202]->has_eval_time());
+    }
+}
