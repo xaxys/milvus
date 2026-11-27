@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
@@ -33,6 +34,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/commonpbutil"
@@ -102,6 +104,8 @@ type Cache interface {
 	AllocID(ctx context.Context) (int64, error)
 
 	RemovePartition(ctx context.Context, database string, collectionID typeutil.UniqueID, collectionName string, partitionName string)
+	GetCollectionIndexes(ctx context.Context, collectionID typeutil.UniqueID) (*CollectionIndexes, error)
+	InvalidateCollectionIndexes(ctx context.Context, collectionID typeutil.UniqueID)
 	Close()
 }
 
@@ -151,6 +155,13 @@ type PartitionInfo struct {
 	CreatedTimestamp    uint64
 	CreatedUtcTimestamp uint64
 	IsDefault           bool
+}
+
+// CollectionIndexes holds an immutable snapshot of ListIndexes for one collection.
+type CollectionIndexes struct {
+	Infos  []*indexpb.IndexInfo
+	ByName map[string]*indexpb.IndexInfo
+	ByID   map[int64]*indexpb.IndexInfo
 }
 
 func (info *CollectionInfo) isCollectionCached() bool {
@@ -253,6 +264,9 @@ type MetaCache struct {
 	partitionCache   map[string]*PartitionInfos
 	sfPartitionCache conc.Singleflight[*PartitionInfos]
 
+	indexCache   map[typeutil.UniqueID]*CollectionIndexes
+	sfIndexCache conc.Singleflight[*CollectionIndexes]
+
 	stopCh    chan struct{}
 	closeOnce sync.Once
 }
@@ -266,6 +280,7 @@ func NewMetaCache(mixCoord types.MixCoordClient) (*MetaCache, error) {
 		collections:    map[typeutil.UniqueID]*CollectionInfo{},
 		nameIdx:        map[string]map[string]typeutil.UniqueID{},
 		partitionCache: map[string]*PartitionInfos{},
+		indexCache:     map[typeutil.UniqueID]*CollectionIndexes{},
 		stopCh:         make(chan struct{}),
 		closeOnce:      sync.Once{},
 	}
@@ -1188,6 +1203,7 @@ func (m *MetaCache) RemoveCollectionsByID(ctx context.Context, collectionID type
 // post-drain walk: evicting a freshly re-filled entry removes it TOGETHER with
 // its hints -- one refetch, never a dangling hint).
 func (m *MetaCache) evictCollectionEntryLocked(collectionID typeutil.UniqueID) (string, bool) {
+	m.staleIndexCacheLocked(collectionID)
 	entry, ok := m.collections[collectionID]
 	if !ok {
 		return "", false
@@ -1447,6 +1463,121 @@ func (m *MetaCache) stalePartitionCacheLocked(collectionID typeutil.UniqueID) {
 	key := buildPartitionCacheKey(collectionID)
 	m.sfPartitionCache.Forget(key)
 	delete(m.partitionCache, key)
+}
+
+// FetchCollectionIndexes fetches ListIndexes from mixCoord and builds an
+// immutable CollectionIndexes snapshot. ErrIndexNotFound yields an empty snapshot.
+func FetchCollectionIndexes(
+	ctx context.Context,
+	mixCoord types.MixCoordClient,
+	collectionID typeutil.UniqueID,
+) (*CollectionIndexes, error) {
+	if mixCoord == nil {
+		return &CollectionIndexes{}, nil
+	}
+	resp, err := mixCoord.ListIndexes(ctx, &indexpb.ListIndexesRequest{
+		CollectionID: collectionID,
+	})
+	if err == nil {
+		err = merr.Error(resp.GetStatus())
+	}
+	if err != nil {
+		if errors.Is(err, merr.ErrIndexNotFound) {
+			return &CollectionIndexes{}, nil
+		}
+		return nil, err
+	}
+	infos := resp.GetIndexInfos()
+	byName := make(map[string]*indexpb.IndexInfo, len(infos))
+	byID := make(map[int64]*indexpb.IndexInfo, len(infos))
+	for _, info := range infos {
+		if info == nil {
+			continue
+		}
+		if name := info.GetIndexName(); name != "" {
+			byName[name] = info
+		}
+		if id := info.GetIndexID(); id != 0 {
+			byID[id] = info
+		}
+	}
+	return &CollectionIndexes{
+		Infos:  infos,
+		ByName: byName,
+		ByID:   byID,
+	}, nil
+}
+
+const indexCacheFillTimeout = 10 * time.Second
+
+func (m *MetaCache) GetCollectionIndexes(ctx context.Context, collectionID typeutil.UniqueID) (*CollectionIndexes, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	if cached, ok := m.indexCache[collectionID]; ok {
+		m.mu.RUnlock()
+		return cached, nil
+	}
+	m.mu.RUnlock()
+
+	type sfResult struct {
+		snapshot *CollectionIndexes
+		err      error
+	}
+	key := strconv.FormatInt(collectionID, 10)
+	resCh := make(chan sfResult, 1)
+	go func() {
+		m.fillMu.RLock()
+		defer m.fillMu.RUnlock()
+		snapshot, err, _ := m.sfIndexCache.Do(key, func() (*CollectionIndexes, error) {
+			m.mu.RLock()
+			if cached, ok := m.indexCache[collectionID]; ok {
+				m.mu.RUnlock()
+				return cached, nil
+			}
+			m.mu.RUnlock()
+
+			fillCtx, cancel := context.WithTimeout(context.Background(), indexCacheFillTimeout)
+			defer cancel()
+			fetched, err := FetchCollectionIndexes(fillCtx, m.mixCoord, collectionID)
+			if err != nil {
+				return nil, err
+			}
+			m.mu.Lock()
+			m.indexCache[collectionID] = fetched
+			m.mu.Unlock()
+			return fetched, nil
+		})
+		resCh <- sfResult{snapshot: snapshot, err: err}
+	}()
+
+	select {
+	case res := <-resCh:
+		return res.snapshot, res.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *MetaCache) InvalidateCollectionIndexes(ctx context.Context, collectionID typeutil.UniqueID) {
+	if collectionID == 0 {
+		return
+	}
+	m.fillMu.Lock()
+	defer m.fillMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.staleIndexCacheLocked(collectionID)
+	mlog.Debug(ctx, "invalidated collection index meta cache", mlog.Int64("collectionID", collectionID))
+}
+
+func (m *MetaCache) staleIndexCacheLocked(collectionID typeutil.UniqueID) {
+	if collectionID == 0 {
+		return
+	}
+	m.sfIndexCache.Forget(strconv.FormatInt(collectionID, 10))
+	delete(m.indexCache, collectionID)
 }
 
 func (m *MetaCache) Close() {

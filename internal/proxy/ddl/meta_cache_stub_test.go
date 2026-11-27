@@ -226,6 +226,19 @@ func (m *MetaCache) RemovePartition(ctx context.Context, database string, collec
 	}
 }
 
+func (m *MetaCache) GetCollectionIndexes(ctx context.Context, collectionID typeutil.UniqueID) (*metacache.CollectionIndexes, error) {
+	if m.pad(int(collectionID)) > 0 {
+		return nil, nil
+	}
+	return &metacache.CollectionIndexes{}, nil
+}
+
+func (m *MetaCache) InvalidateCollectionIndexes(ctx context.Context, collectionID typeutil.UniqueID) {
+	if m.pad(int(collectionID)) > 0 {
+		return
+	}
+}
+
 func (m *MetaCache) Close() {
 	_ = m
 }

@@ -203,25 +203,27 @@ class PhyMembershipFilterExpr : public SegmentExpr {
 
     void
     DetermineExecPath() override {
-        if (has_field_data_at_init_) {
+        auto req = MakeIndexRequirement(RequiredReader::ValueLookup);
+        req.value_type = expr_->column_.data_type_;
+        if (has_field_data_at_init_ &&
+            !index_path_detail::HasHintForField(req)) {
             exec_path_ = ExprExecPath::RawData;
             return;
         }
-        // No raw data. Try to select an index that can reverse-look-up the
-        // stored values. Selection is metadata-only, so both halves must be
-        // checked: the requirement pins one inventory entry exposing a typed
-        // value-lookup reader, and IndexSupportsReverseLookup() then confirms
-        // the reader really is typed for this column and that the entry
-        // advertises a cheap per-row lookup.
-        auto req = MakeIndexRequirement(RequiredReader::ValueLookup);
-        req.value_type = expr_->column_.data_type_;
-        if (SelectAndCreateIndexReader(req) && IndexSupportsReverseLookup()) {
+        // Try to select an index that can reverse-look-up the stored values.
+        // Selection is metadata-only, so both halves must be checked: the
+        // requirement pins one inventory entry exposing a typed value-lookup
+        // reader, and IndexSupportsReverseLookup() then confirms the reader
+        // really is typed for this column and that the entry advertises a cheap
+        // per-row lookup.
+        if (SelectAndCreateIndexReader(
+                req, [this]() { return IndexSupportsReverseLookup(); })) {
             return;
         }
         ClearSelectedIndex();
-        // No raw data and no usable index: keep RawData. ExecVisitorImpl
-        // detects this (num_data_chunk_ == 0, not UseIndexCursor()) and throws
-        // a clear SegcoreError instead of asserting.
+        // No usable index: keep RawData (either raw field data is present, or
+        // ExecVisitorImpl detects num_data_chunk_ == 0 and throws a clear
+        // SegcoreError instead of asserting).
         exec_path_ = ExprExecPath::RawData;
     }
 

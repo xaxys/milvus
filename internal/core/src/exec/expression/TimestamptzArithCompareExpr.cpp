@@ -155,18 +155,28 @@ PhyTimestamptzArithCompareExpr::ToString() const {
 
 void
 PhyTimestamptzArithCompareExpr::DetermineExecPath() {
-    // Prefer field data when it is present. TIMESTAMPTZ calendar arithmetic
-    // cannot be transformed into a scalar-index range query, and keeping the
-    // raw-data path also preserves its batch cursor when another raw predicate
-    // is evaluated alongside it.
-    if (num_data_chunk_ > 0 || active_count_ == 0) {
+    if (active_count_ == 0) {
         exec_path_ = ExprExecPath::RawData;
         return;
     }
 
     auto req = MakeIndexRequirement(RequiredReader::ValueLookup);
     req.value_type = DataType::TIMESTAMPTZ;
+    // Prefer field data when it is present unless the query explicitly hints an
+    // index on this field. TIMESTAMPTZ calendar arithmetic cannot be
+    // transformed into a scalar-index range query, and keeping the raw-data
+    // path also preserves its batch cursor when another raw predicate is
+    // evaluated alongside it.
+    if (num_data_chunk_ > 0 && !index_path_detail::HasHintForField(req)) {
+        exec_path_ = ExprExecPath::RawData;
+        return;
+    }
+
     if (SelectAndCreateIndexReader(req)) {
+        return;
+    }
+    if (num_data_chunk_ > 0) {
+        exec_path_ = ExprExecPath::RawData;
         return;
     }
 

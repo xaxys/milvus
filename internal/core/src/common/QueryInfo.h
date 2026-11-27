@@ -42,6 +42,14 @@ struct SearchIteratorV2Info {
     std::optional<float> last_bound = std::nullopt;
 };
 
+struct IndexHintOption {
+    int64_t field_id = 0;
+    int64_t index_id = 0;
+
+    bool
+    operator==(const IndexHintOption&) const = default;
+};
+
 // Brute-force index params sourced from the collection-level index metadata at
 // plan creation. Used only by brute force when a segment predates a field added
 // by add_function_field, so its per-segment metadata does not carry the field.

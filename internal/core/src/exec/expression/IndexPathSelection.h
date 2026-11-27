@@ -25,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+#include "common/EasyAssert.h"
+#include "common/QueryInfo.h"
 #include "common/Types.h"
 #include "common/Utils.h"
 #include "index/Families.h"
@@ -131,6 +133,10 @@ struct ExprIndexRequirement {
     // Keys already tried and declined by a post-pin runtime guard on this leaf.
     std::vector<segcore::IndexKey> excluded_keys;
 
+    // Ordered query-level index hints. Null or empty means rule-based selection.
+    const std::vector<IndexHintOption>* index_hints{nullptr};
+    bool index_hint_strict{false};
+
     // Short-circuit paths bypass the inventory; do not pin unrelated scalar cells.
     bool is_pk_compare{false};
 
@@ -161,6 +167,8 @@ enum class DeclineReason {
     kFlatJsonRequired,
     // The index refused this literal (for example NGRAM shorter than min_gram).
     kLiteralNotSupported,
+    // A hinted index for this field/path is not loaded on the segment.
+    kHintedIndexNotSelected,
 };
 
 inline const char*
@@ -182,6 +190,8 @@ ToString(DeclineReason reason) {
             return "flat_json_required";
         case DeclineReason::kLiteralNotSupported:
             return "literal_not_supported";
+        case DeclineReason::kHintedIndexNotSelected:
+            return "hinted_index_not_selected";
         case DeclineReason::kNone:
         default:
             return "none";
@@ -491,16 +501,76 @@ FamilyPriority(const ExprIndexRequirement& req, const std::string& family) {
     }
 }
 
+inline bool
+HasHintForField(const ExprIndexRequirement& req) {
+    if (req.reader == RequiredReader::TextMatch || req.index_hints == nullptr ||
+        req.index_hints->empty()) {
+        return false;
+    }
+    return std::any_of(req.index_hints->begin(),
+                       req.index_hints->end(),
+                       [&](const IndexHintOption& hint) {
+                           return hint.field_id == req.field_id.get();
+                       });
+}
+
+inline bool
+HintAppliesToPath(const ExprIndexRequirement& req,
+                  const segcore::IndexCapabilityEntry& entry) {
+    if (!req.is_json_field) {
+        return entry.json_path.empty();
+    }
+    if (IsFlatJsonIndex(entry)) {
+        return IsPathPrefix(entry.json_path, req.json_path);
+    }
+    return entry.json_path == req.json_path;
+}
+
+inline int
+HintRank(const ExprIndexRequirement& req,
+         const segcore::IndexCapabilityEntry& entry) {
+    if (req.index_hints == nullptr || entry.key.field_id != req.field_id ||
+        !HintAppliesToPath(req, entry)) {
+        return -1;
+    }
+    for (size_t i = 0; i < req.index_hints->size(); ++i) {
+        const auto& hint = (*req.index_hints)[i];
+        if (hint.field_id == entry.key.field_id.get() &&
+            entry.key.identity ==
+                segcore::IndexIdentity::PreBuiltIndex(hint.index_id)) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+inline bool
+HasHintedEntryOnSegment(const ExprIndexRequirement& req,
+                        const segcore::FieldIndexCapability& capabilities) {
+    if (req.index_hints == nullptr || req.index_hints->empty()) {
+        return false;
+    }
+    return std::any_of(capabilities.entries().begin(),
+                       capabilities.entries().end(),
+                       [&](const segcore::IndexCapabilityEntry& entry) {
+                           return HintRank(req, entry) >= 0;
+                       });
+}
+
 }  // namespace index_path_detail
 
 inline ExecPathDecision
 DetermineExecPath(const ExprIndexRequirement& req,
                   const segcore::FieldIndexCapability& capabilities) {
-    if (req.is_pk_compare) {
+    const bool has_field_hint = index_path_detail::HasHintForField(req);
+    if (req.is_pk_compare && !has_field_hint) {
         return {.path = ExprExecPath::PkIndex};
     }
+    const bool saw_hinted_entry =
+        has_field_hint &&
+        index_path_detail::HasHintedEntryOnSegment(req, capabilities);
 
-    using CandidateRank = std::tuple<int, int, int, int, size_t, int>;
+    using CandidateRank = std::tuple<int, int, int, int, int, int, size_t, int>;
     const segcore::IndexCapabilityEntry* selected = nullptr;
     std::optional<CandidateRank> selected_rank;
     auto decline_specificity = [](DeclineReason r) -> int {
@@ -519,6 +589,8 @@ DetermineExecPath(const ExprIndexRequirement& req,
                 return 4;
             case DeclineReason::kLiteralNotSupported:
                 return 5;
+            case DeclineReason::kHintedIndexNotSelected:
+                return 6;
             default:
                 return 1;
         }
@@ -526,18 +598,29 @@ DetermineExecPath(const ExprIndexRequirement& req,
     DeclineReason best_reject = capabilities.has_unmatched_entries()
                                     ? DeclineReason::kJsonPathNotCovered
                                     : DeclineReason::kNone;
+    DeclineReason hint_reject = DeclineReason::kNone;
     bool saw_field_entry = capabilities.has_unmatched_entries();
     for (const auto& entry : capabilities.entries()) {
         if (entry.key.field_id != req.field_id) {
             continue;
         }
         saw_field_entry = true;
+        const int hint_rank =
+            has_field_hint ? index_path_detail::HintRank(req, entry) : -1;
+        if (has_field_hint && req.index_hint_strict && saw_hinted_entry &&
+            hint_rank < 0) {
+            continue;
+        }
         const bool needs_refine =
             index_path_detail::NeedsCandidateRefine(req, entry);
         const auto reject = [&](DeclineReason reason) {
             if (decline_specificity(reason) >
                 decline_specificity(best_reject)) {
                 best_reject = reason;
+            }
+            if (hint_rank >= 0 && decline_specificity(reason) >
+                                      decline_specificity(hint_reject)) {
+                hint_reject = reason;
             }
         };
         if (std::find(req.excluded_keys.begin(),
@@ -578,14 +661,16 @@ DetermineExecPath(const ExprIndexRequirement& req,
             reject(DeclineReason::kLiteralNotSupported);
             continue;
         }
-        // Family preference is the last tie-break: path specificity, exactness,
-        // cast-function precedence, lookup cost, and JSON root prefix length
-        // precede it in lexicographic order.
+        // Hint priority precedes rule-based preference; family preference is
+        // the last tie-break after path specificity, exactness, cast-function
+        // precedence, lookup cost, and JSON root prefix length.
         const int exact_rank = (req.reader != RequiredReader::PatternMatch &&
                                 entry.caps.exact && !needs_refine)
                                    ? 1
                                    : 0;
         const CandidateRank rank{
+            hint_rank >= 0 ? 1 : 0,
+            hint_rank >= 0 ? -hint_rank : 0,
             path_score,
             exact_rank,
             !entry.json_cast_function.empty() ? 1 : 0,
@@ -602,8 +687,26 @@ DetermineExecPath(const ExprIndexRequirement& req,
         }
     }
     if (selected == nullptr) {
+        if (has_field_hint && req.index_hint_strict && saw_hinted_entry) {
+            const DeclineReason reason =
+                hint_reject != DeclineReason::kNone
+                    ? hint_reject
+                    : DeclineReason::kHintedIndexNotSelected;
+            ThrowInfo(InvalidParameter,
+                      "index_hint cannot be satisfied on field {} (strict "
+                      "mode): {}",
+                      req.field_id.get(),
+                      ToString(reason));
+        }
+        if (req.is_pk_compare) {
+            return {.path = ExprExecPath::PkIndex};
+        }
         const DeclineReason reason =
-            saw_field_entry ? best_reject : DeclineReason::kNoIndexOnField;
+            !saw_field_entry
+                ? DeclineReason::kNoIndexOnField
+                : (has_field_hint && !req.is_json_field && !saw_hinted_entry
+                       ? DeclineReason::kHintedIndexNotSelected
+                       : best_reject);
         // One line per expression node per segment, at DEBUG: the FeatureBit
         // accounting already counts the fallback, this only explains it.
         LOG_DEBUG("scalar index fallback, fieldID:{}, reader:{}, reason:{}",

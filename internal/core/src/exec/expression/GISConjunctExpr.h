@@ -273,6 +273,11 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
         exec_path_ = ExprExecPath::RawData;
     }
 
+    bool
+    ReportsExecPath() const override {
+        return false;
+    }
+
     // Refine reads only survivors -- via the geometry cache or a bulk_subscript
     // over specific offsets -- never a sequential full-column scan, so the base
     // full-column prefetch (prefetch_chunks over every chunk) is mostly wasted.

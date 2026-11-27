@@ -31,11 +31,34 @@ class PlanNodeVisitor;
 
 struct PlanOptions {
     bool expr_use_json_stats = true;
+    // Ordered (field_id, index_id) hints from the query. Empty means rule-based
+    // selection only.
+    std::vector<IndexHintOption> index_hints;
+    bool index_hint_strict = false;
     // Non-null only when the plan collects execution feature bits. Shared by
     // every copy of the options (query contexts, compiled expressions) so all
     // segments of the request record into one set.
     std::shared_ptr<FeatureRecorder> feature_recorder;
 };
+
+inline std::string
+FormatIndexHintsForCacheKey(const PlanOptions& opts) {
+    if (opts.index_hints.empty()) {
+        return {};
+    }
+    std::string out = opts.index_hint_strict ? "|index_hints:strict=1:"
+                                             : "|index_hints:strict=0:";
+    for (size_t i = 0; i < opts.index_hints.size(); ++i) {
+        if (i > 0) {
+            out.push_back(',');
+        }
+        const auto& h = opts.index_hints[i];
+        out += std::to_string(h.field_id);
+        out.push_back(':');
+        out += std::to_string(h.index_id);
+    }
+    return out;
+}
 
 // Base of all Nodes
 struct PlanNode {

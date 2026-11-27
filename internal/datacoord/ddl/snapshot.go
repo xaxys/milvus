@@ -117,9 +117,15 @@ func (c *Callbacks) RestoreSnapshotV2AckCallback(ctx context.Context, result mes
 		if err := c.SnapshotManager.(*snapshot.Manager).ApplyRestoreCollection(ctx, result); err != nil {
 			return err
 		}
+		collectionID := result.Message.Header().GetCollectionId()
 		select {
-		case c.NotifyIndexChan <- result.Message.Header().GetCollectionId():
+		case c.NotifyIndexChan <- collectionID:
 		default:
+		}
+		if len(result.Message.MustBody().GetIndexes()) > 0 {
+			if err := c.invalidateCollectionIndexMeta(ctx, collectionID, commonpb.MsgType_CreateIndex); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

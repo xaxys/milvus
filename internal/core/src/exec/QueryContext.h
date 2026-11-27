@@ -464,8 +464,29 @@ class ExecContext : public Context {
         return query_context_->query_config();
     }
 
+    void
+    DisableIndexHints() noexcept {
+        disable_index_hints_ = true;
+    }
+
+    bool
+    index_hints_disabled() const noexcept {
+        return disable_index_hints_;
+    }
+
+    query::PlanOptions
+    effective_plan_options() const {
+        auto opts = query_context_->get_plan_options();
+        if (disable_index_hints_) {
+            opts.index_hints.clear();
+            opts.index_hint_strict = false;
+        }
+        return opts;
+    }
+
  private:
     QueryContext* query_context_;
+    bool disable_index_hints_{false};
 };
 
 /// @brief Helper function to check cancellation token and throw if cancelled.

@@ -2082,8 +2082,11 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         return;
     }
 
-    // PkIndex: use primary key index for compare operations on PK fields.
-    if (is_pk_field_ && IsCompareOp(expr_->op_type_)) {
+    // PkIndex: use primary key index for compare operations on PK fields unless
+    // a query hint explicitly asks for a scalar index on this field.
+    const bool use_pk_fallback = is_pk_field_ && IsCompareOp(expr_->op_type_);
+    if (use_pk_fallback &&
+        !index_path_detail::HasHintForField(MakeIndexRequirement())) {
         exec_path_ = ExprExecPath::PkIndex;
         return;
     }
@@ -2186,6 +2189,7 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
                                  segment_->type() == SegmentType::Sealed &&
                                  num_data_chunk_ > 0;
     }
+    req.is_pk_compare = use_pk_fallback;
     req.is_whole_array =
         data_type == DataType::ARRAY &&
         expr_->val_.val_case() == proto::plan::GenericValue::ValCase::kArrayVal;
@@ -2279,12 +2283,15 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         return can_use;
     };
 
-    SelectAndCreateIndexReader(req, [&]() {
+    const bool selected = SelectAndCreateIndexReader(req, [&]() {
         if (ngram_reader_ != nullptr) {
             return ngram_reader_->CanHandle(req.pattern, req.pattern_op);
         }
         return can_use_selected_reader();
     });
+    if (!selected && use_pk_fallback) {
+        exec_path_ = ExprExecPath::PkIndex;
+    }
 }
 
 VectorPtr

@@ -668,6 +668,9 @@ func (cit *CreateIndexTask) Execute(ctx context.Context) error {
 	if err = merr.CheckRPCCall(cit.result, err); err != nil {
 		return err
 	}
+	if mc := cit.GetMetaCache(); mc != nil {
+		mc.InvalidateCollectionIndexes(ctx, cit.collectionID)
+	}
 	return nil
 }
 
@@ -818,6 +821,9 @@ func (t *AlterIndexTask) Execute(ctx context.Context) error {
 	t.result, err = t.mixCoord.AlterIndex(ctx, req)
 	if err = merr.CheckRPCCall(t.result, err); err != nil {
 		return err
+	}
+	if mc := t.GetMetaCache(); mc != nil {
+		mc.InvalidateCollectionIndexes(ctx, t.collectionID)
 	}
 	return nil
 }
@@ -1330,6 +1336,9 @@ func (dit *DropIndexTask) Execute(ctx context.Context) error {
 	if err = merr.CheckRPCCall(dit.result, err); err != nil {
 		ctxLog.Warn(ctx, "drop index failed", mlog.Err(err))
 		return err
+	}
+	if mc := dit.GetMetaCache(); mc != nil {
+		mc.InvalidateCollectionIndexes(ctx, dit.collectionID)
 	}
 	return nil
 }

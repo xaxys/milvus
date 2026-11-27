@@ -42,13 +42,16 @@ CopyScoresToBuffers(const std::vector<std::optional<float>>& scores,
 std::unique_ptr<exec::ExprSet>
 BuildFilterExprSet(const expr::TypedExprPtr& filter,
                    exec::ExecContext* exec_context) {
+    exec::ExecContext scorer_exec_ctx(exec_context->get_query_context());
+    scorer_exec_ctx.DisableIndexHints();
+
     std::vector<expr::TypedExprPtr> filters;
     filters.emplace_back(filter);
     // Boost scoring reads only the data bits of the filter output — an
     // UNKNOWN (NULL) row never receives a boost, exactly like FALSE — so
     // the consumer is null-rejecting, same as PhyIterativeFilterNode.
     return std::make_unique<exec::ExprSet>(
-        filters, exec_context, /*null_rejecting=*/true);
+        filters, &scorer_exec_ctx, /*null_rejecting=*/true);
 }
 
 bool

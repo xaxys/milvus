@@ -1251,6 +1251,14 @@ PhyTermFilterExpr::ExecVisitorImplForData(EvalCtx& context) {
 
 void
 PhyTermFilterExpr::DetermineExecPath() {
+    if ((expr_->column_.element_level_ ||
+         (expr_->column_.data_type_ == DataType::JSON &&
+          !expr_->is_in_field_)) &&
+        expr_->vals_.empty()) {
+        is_constant_folded_ = true;
+        exec_path_ = ExprExecPath::RawData;
+        return;
+    }
     // Validate before execution-path selection or asynchronous prefetch can
     // consume values using the type selected from vals_[0].
     if (expr_->column_.data_type_ == DataType::JSON &&
@@ -1269,7 +1277,8 @@ PhyTermFilterExpr::DetermineExecPath() {
     }
 
     // PkIndex
-    if (is_pk_field_) {
+    if (is_pk_field_ &&
+        !index_path_detail::HasHintForField(MakeIndexRequirement())) {
         exec_path_ = ExprExecPath::PkIndex;
         return;
     }
@@ -1296,6 +1305,7 @@ PhyTermFilterExpr::DetermineExecPath() {
 
     auto req = MakeIndexRequirement(RequiredReader::Predicate);
     req.value_type = field_type_ == DataType::JSON ? value_type_ : data_type;
+    req.is_pk_compare = is_pk_field_;
     if (data_type == DataType::JSON && !expr_->vals_.empty() &&
         expr_->vals_[0].val_case() ==
             proto::plan::GenericValue::ValCase::kInt64Val) {
@@ -1304,7 +1314,9 @@ PhyTermFilterExpr::DetermineExecPath() {
                 return !IsInt64SafeForJsonDoubleIndex(val.int64_val());
             });
     }
-    SelectAndCreateIndexReader(req);
+    if (!SelectAndCreateIndexReader(req) && is_pk_field_) {
+        exec_path_ = ExprExecPath::PkIndex;
+    }
 }
 
 void

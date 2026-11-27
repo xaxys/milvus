@@ -1193,7 +1193,10 @@ PhyBinaryRangeFilterExpr::ExecRangeVisitorImplForPk(EvalCtx& context) {
 void
 PhyBinaryRangeFilterExpr::DetermineExecPath() {
     // PkIndex (binary range only supports PK on sealed segments)
-    if (is_pk_field_ && segment_->type() == SegmentType::Sealed) {
+    const bool use_pk_fallback =
+        is_pk_field_ && segment_->type() == SegmentType::Sealed;
+    if (use_pk_fallback &&
+        !index_path_detail::HasHintForField(MakeIndexRequirement())) {
         exec_path_ = ExprExecPath::PkIndex;
         return;
     }
@@ -1234,7 +1237,11 @@ PhyBinaryRangeFilterExpr::DetermineExecPath() {
 
     auto req = MakeIndexRequirement(RequiredReader::Predicate);
     req.value_type = field_type_ == DataType::JSON ? value_type_ : data_type;
-    SelectAndCreateIndexReader(req);
+    req.is_pk_compare = use_pk_fallback;
+    if (!SelectAndCreateIndexReader(req) && use_pk_fallback) {
+        exec_path_ = ExprExecPath::PkIndex;
+        return;
+    }
     if (exec_path_ != ExprExecPath::ScalarIndex) {
         return;
     }
