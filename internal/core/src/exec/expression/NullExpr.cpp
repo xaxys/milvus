@@ -138,18 +138,17 @@ PhyNullExpr::DetermineExecPath() {
     // Element validity is read from raw data; a field without null elements
     // is not read at all.
     if (expr_->column_.element_level_ ||
-        IsVectorDataType(expr_->column_.data_type_)) {
+        IsVectorDataType(expr_->column_.data_type_) ||
+        expr_->column_.data_type_ == DataType::JSON) {
         exec_path_ = ExprExecPath::RawData;
         return;
     }
 
     auto req = MakeIndexRequirement(RequiredReader::Null);
-    req.value_type = expr_->column_.data_type_;
+    req.value_type = expr_->column_.data_type_ == DataType::ARRAY
+                         ? expr_->column_.element_type_
+                         : expr_->column_.data_type_;
     SelectAndCreateIndexReader(req);
-    if (SelectedIndexIsNested()) {
-        ClearSelectedIndex();
-        exec_path_ = ExprExecPath::RawData;
-    }
 }
 
 void

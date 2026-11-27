@@ -69,8 +69,7 @@ template <typename T>
 bool
 PhyUnaryRangeFilterExpr::CanUseIndexForArray() {
     return selected_index_entry_.has_value() &&
-           selected_index_entry_->family != "hybrid" &&
-           selected_index_entry_->family != "bitmap";
+           selected_index_entry_->family != index::families::kBitmap;
 }
 
 template <>
@@ -2142,9 +2141,7 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
                     break;
                 case DataType::FLOAT:
                 case DataType::DOUBLE:
-                    expected_case =
-                        proto::plan::GenericValue::ValCase::kFloatVal;
-                    break;
+                    return false;
                 case DataType::VARCHAR:
                 case DataType::STRING:
                     expected_case =
@@ -2160,6 +2157,7 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
                                });
         };
         const auto can_use_array_index =
+            !is_native_list_array_ &&
             val_case == proto::plan::GenericValue::ValCase::kArrayVal &&
             array.array_size() > 0 && literal_matches_index_type() &&
             (expr_->op_type_ == proto::plan::OpType::Equal ||
@@ -2176,8 +2174,21 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         expr_->op_type_ == proto::plan::OpType::PostfixMatch ||
         expr_->op_type_ == proto::plan::OpType::InnerMatch ||
         expr_->op_type_ == proto::plan::OpType::RegexMatch;
-    auto req = MakeIndexRequirement(is_pattern ? RequiredReader::Ngram
+    auto req = MakeIndexRequirement(is_pattern ? RequiredReader::PatternMatch
                                                : RequiredReader::Predicate);
+    if (is_pattern) {
+        // The literal decides whether an NGRAM index can serve this query at all, so
+        // selection gets it up front instead of discovering it after a pin.
+        req.has_pattern = true;
+        req.pattern = GetValueFromProto<std::string>(expr_->val_);
+        req.pattern_op = ToIndexPatternOp(expr_->op_type_);
+        req.accepts_candidates = !has_offset_input_ &&
+                                 segment_->type() == SegmentType::Sealed &&
+                                 num_data_chunk_ > 0;
+    }
+    req.is_whole_array =
+        data_type == DataType::ARRAY &&
+        expr_->val_.val_case() == proto::plan::GenericValue::ValCase::kArrayVal;
     req.value_type =
         data_type == DataType::ARRAY
             ? expr_->column_.element_type_
@@ -2187,92 +2198,93 @@ PhyUnaryRangeFilterExpr::DetermineExecPath() {
         expr_->val_.val_case() ==
             proto::plan::GenericValue::ValCase::kInt64Val &&
         !IsInt64SafeForJsonDoubleIndex(expr_->val_.int64_val());
-    if (is_pattern && SelectAndCreateIndexReader(req) &&
-        ngram_reader_->CanHandle(GetValueFromProto<std::string>(expr_->val_),
-                                 ToIndexPatternOp(expr_->op_type_))) {
-        return;
-    }
-    if (is_pattern) {
-        ClearSelectedIndex();
-        req.reader = RequiredReader::PatternMatch;
-    }
-    SelectAndCreateIndexReader(req);
-    if (exec_path_ != ExprExecPath::ScalarIndex) {
-        return;
-    }
 
-    // Refine: check if the index supports this specific operation/type.
-    // May downgrade from ScalarIndex to RawData.
-
-    bool can_use = false;
-    switch (data_type) {
-        case DataType::BOOL:
-            can_use = SegmentExpr::CanUseIndexForOp<bool>(expr_->op_type_);
-            break;
-        case DataType::INT8:
-            can_use = SegmentExpr::CanUseIndexForOp<int8_t>(expr_->op_type_);
-            break;
-        case DataType::INT16:
-            can_use = SegmentExpr::CanUseIndexForOp<int16_t>(expr_->op_type_);
-            break;
-        case DataType::INT32:
-            can_use = SegmentExpr::CanUseIndexForOp<int32_t>(expr_->op_type_);
-            break;
-        case DataType::INT64:
-        case DataType::TIMESTAMPTZ:
-            can_use = SegmentExpr::CanUseIndexForOp<int64_t>(expr_->op_type_);
-            break;
-        case DataType::FLOAT:
-            can_use = SegmentExpr::CanUseIndexForOp<float>(expr_->op_type_);
-            break;
-        case DataType::DOUBLE:
-            can_use = SegmentExpr::CanUseIndexForOp<double>(expr_->op_type_);
-            break;
-        case DataType::VARCHAR:
-        case DataType::TEXT: {
-            can_use = SegmentExpr::CanUseIndexForOp<std::string>(
-                expr_->op_type_, StringLiteralForCostGuard());
-            break;
-        }
-        case DataType::JSON: {
-            const auto val_case = expr_->val_.val_case();
-            auto val_type = FromValCase(val_case);
-            switch (val_type) {
-                case DataType::STRING:
-                case DataType::VARCHAR:
-                    // FMINDEX is VARCHAR-only in this release; JSON string
-                    // paths never carry it, so no cost-guard literal is needed
-                    // here (other JSON string indexes judge on the op alone).
-                    can_use = SegmentExpr::CanUseIndexForOp<std::string>(
-                        expr_->op_type_);
-                    break;
-                default:
-                    can_use = true;
-            }
-            break;
-        }
-        case DataType::ARRAY: {
-            auto val_type = expr_->val_.val_case();
-            switch (val_type) {
-                case proto::plan::GenericValue::ValCase::kArrayVal:
-                    can_use =
-                        expr_->val_.array_val().array_size() > 0 &&
-                        (expr_->op_type_ == proto::plan::OpType::Equal ||
-                         expr_->op_type_ == proto::plan::OpType::NotEqual) &&
-                        CanUseIndexForArray<milvus::Array>();
-                    break;
-                default:
+    auto can_use_selected_reader = [&]() {
+        bool can_use = false;
+        switch (data_type) {
+            case DataType::BOOL:
+                can_use = SegmentExpr::CanUseIndexForOp<bool>(expr_->op_type_);
+                break;
+            case DataType::INT8:
+                can_use =
+                    SegmentExpr::CanUseIndexForOp<int8_t>(expr_->op_type_);
+                break;
+            case DataType::INT16:
+                can_use =
+                    SegmentExpr::CanUseIndexForOp<int16_t>(expr_->op_type_);
+                break;
+            case DataType::INT32:
+                can_use =
+                    SegmentExpr::CanUseIndexForOp<int32_t>(expr_->op_type_);
+                break;
+            case DataType::INT64:
+            case DataType::TIMESTAMPTZ:
+                can_use =
+                    SegmentExpr::CanUseIndexForOp<int64_t>(expr_->op_type_);
+                break;
+            case DataType::FLOAT:
+                can_use = SegmentExpr::CanUseIndexForOp<float>(expr_->op_type_);
+                break;
+            case DataType::DOUBLE:
+                can_use =
+                    SegmentExpr::CanUseIndexForOp<double>(expr_->op_type_);
+                break;
+            case DataType::VARCHAR:
+            case DataType::TEXT: {
+                can_use = SegmentExpr::CanUseIndexForOp<std::string>(
+                    expr_->op_type_, StringLiteralForCostGuard());
+                if (can_use && SelectedIndexIsFMIndex() &&
+                    (expr_->op_type_ == proto::plan::OpType::Match ||
+                     expr_->op_type_ == proto::plan::OpType::RegexMatch) &&
+                    !CanUseFMPatternCandidates()) {
                     can_use = false;
+                }
+                break;
             }
-            break;
+            case DataType::JSON: {
+                const auto val_case = expr_->val_.val_case();
+                auto val_type = FromValCase(val_case);
+                switch (val_type) {
+                    case DataType::STRING:
+                    case DataType::VARCHAR:
+                        // FMINDEX is VARCHAR-only in this release; JSON string
+                        // paths never carry it, so no cost-guard literal is needed
+                        // here (other JSON string indexes judge on the op alone).
+                        can_use = SegmentExpr::CanUseIndexForOp<std::string>(
+                            expr_->op_type_);
+                        break;
+                    default:
+                        can_use = true;
+                }
+                break;
+            }
+            case DataType::ARRAY: {
+                auto val_type = expr_->val_.val_case();
+                switch (val_type) {
+                    case proto::plan::GenericValue::ValCase::kArrayVal:
+                        can_use =
+                            (expr_->op_type_ == proto::plan::OpType::Equal ||
+                             expr_->op_type_ ==
+                                 proto::plan::OpType::NotEqual) &&
+                            CanUseIndexForArray<milvus::Array>();
+                        break;
+                    default:
+                        can_use = false;
+                }
+                break;
+            }
+            default:
+                can_use = false;
         }
-        default:
-            can_use = false;
-    }
-    if (!can_use) {
-        ClearSelectedIndex();
-        exec_path_ = ExprExecPath::RawData;
-    }
+        return can_use;
+    };
+
+    SelectAndCreateIndexReader(req, [&]() {
+        if (ngram_reader_ != nullptr) {
+            return ngram_reader_->CanHandle(req.pattern, req.pattern_op);
+        }
+        return can_use_selected_reader();
+    });
 }
 
 VectorPtr

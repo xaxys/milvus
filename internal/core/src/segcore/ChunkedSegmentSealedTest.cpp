@@ -3735,7 +3735,7 @@ TEST(MultiScalarIndexOnSameField, JsonPinSkipsNgramAndPicksTyped) {
     // A pattern operator on the same path does take the NGRAM candidate.
     exec::ExprIndexRequirement prefix_req{
         .field_id = json_fid,
-        .reader = exec::RequiredReader::Ngram,
+        .reader = exec::RequiredReader::PatternMatch,
         .value_type = DataType::VARCHAR,
         .is_json_field = true,
         .json_path = "/a",
