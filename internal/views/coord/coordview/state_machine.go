@@ -1,6 +1,10 @@
 package coordview
 
 import (
+	"cmp"
+	"maps"
+	"slices"
+
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/views/qviews"
@@ -36,6 +40,14 @@ type CoordQueryViewStateMachine struct {
 	// Per-QN ready segment IDs reported during Preparing.
 	// Used by Balancer/Manager for progress tracking and decision-making.
 	qnReadySegments map[int64][]int64
+
+	// Per-segment loaded index IDs reported by QNs during Preparing.
+	// When hasExpectedIndexes is true, segments whose loaded index set matches
+	// expectedIndexes are omitted so steady-state memory and ETCD cost stay zero.
+	// Kept out of sm.view so Sync payloads and placement stay immutable.
+	qnSegmentIndexes   map[int64]map[int64]struct{}
+	expectedIndexes    map[int64]struct{}
+	hasExpectedIndexes bool
 
 	// Pending external effects, atomically drained through ShardViewManager by
 	// the Coordinator flush scheduler.
@@ -77,12 +89,13 @@ func (f queryViewFlush) Empty() bool {
 // write-ahead persistence and the Preparing targets for all work nodes.
 func NewCoordQueryViewStateMachineWithRef(view *viewpb.QueryViewOfShard, ref qviews.DataViewRef) *CoordQueryViewStateMachine {
 	sm := &CoordQueryViewStateMachine{
-		state:           qviews.QueryViewStatePreparing,
-		view:            view,
-		ref:             ref,
-		snState:         qviews.QueryViewStateNil,
-		qnStates:        make(map[int64]qviews.QueryViewState, len(view.QueryNode)),
-		qnReadySegments: make(map[int64][]int64, len(view.QueryNode)),
+		state:            qviews.QueryViewStatePreparing,
+		view:             view,
+		ref:              ref,
+		snState:          qviews.QueryViewStateNil,
+		qnStates:         make(map[int64]qviews.QueryViewState, len(view.QueryNode)),
+		qnReadySegments:  make(map[int64][]int64, len(view.QueryNode)),
+		qnSegmentIndexes: make(map[int64]map[int64]struct{}),
 	}
 	for _, qn := range view.QueryNode {
 		sm.qnStates[qn.NodeId] = qviews.QueryViewStateNil
@@ -108,13 +121,46 @@ func NewCoordQueryViewStateMachineWithRef(view *viewpb.QueryViewOfShard, ref qvi
 //   - Unrecoverable: stays Unrecoverable, waits for Manager to call EnterDropping.
 func RecoverCoordQueryViewStateMachineWithRef(view *viewpb.QueryViewOfShard, ref qviews.DataViewRef) *CoordQueryViewStateMachine {
 	recoveredState := qviews.QueryViewState(view.Meta.State)
+	qnSegmentIndexes := make(map[int64]map[int64]struct{})
+	hasPersistedSegmentIndexes := false
+	for _, qn := range view.GetQueryNode() {
+		for _, part := range qn.GetPartitions() {
+			if len(part.GetSegmentLoadedIndexes()) > 0 {
+				hasPersistedSegmentIndexes = true
+			}
+			for _, item := range part.GetSegmentLoadedIndexes() {
+				ids := make(map[int64]struct{}, len(item.GetIndexIds()))
+				for _, id := range item.GetIndexIds() {
+					ids[id] = struct{}{}
+				}
+				qnSegmentIndexes[item.GetSegmentId()] = ids
+			}
+		}
+	}
+	if hasPersistedSegmentIndexes {
+		cleaned := &viewpb.QueryViewOfShard{
+			Meta:          view.Meta,
+			QueryNode:     make([]*viewpb.QueryViewOfQueryNode, len(view.QueryNode)),
+			StreamingNode: view.StreamingNode,
+		}
+		cleaned.ProtoReflect().SetUnknown(view.ProtoReflect().GetUnknown())
+		for i, qn := range view.QueryNode {
+			qnCopy := proto.Clone(qn).(*viewpb.QueryViewOfQueryNode)
+			for _, part := range qnCopy.GetPartitions() {
+				part.SegmentLoadedIndexes = nil
+			}
+			cleaned.QueryNode[i] = qnCopy
+		}
+		view = cleaned
+	}
 	sm := &CoordQueryViewStateMachine{
-		state:           recoveredState,
-		view:            view,
-		ref:             ref,
-		snState:         qviews.QueryViewStateNil,
-		qnStates:        make(map[int64]qviews.QueryViewState, len(view.QueryNode)),
-		qnReadySegments: make(map[int64][]int64, len(view.QueryNode)),
+		state:            recoveredState,
+		view:             view,
+		ref:              ref,
+		snState:          qviews.QueryViewStateNil,
+		qnStates:         make(map[int64]qviews.QueryViewState, len(view.QueryNode)),
+		qnReadySegments:  make(map[int64][]int64, len(view.QueryNode)),
+		qnSegmentIndexes: qnSegmentIndexes,
 	}
 	for _, qn := range view.QueryNode {
 		sm.qnStates[qn.NodeId] = qviews.QueryViewStateNil
@@ -189,6 +235,28 @@ func (sm *CoordQueryViewStateMachine) Ref() qviews.DataViewRef {
 // The map is keyed by QN node ID. Used by Balancer/Manager for decisions.
 func (sm *CoordQueryViewStateMachine) QNReadySegments() map[int64][]int64 {
 	return sm.qnReadySegments
+}
+
+// QNSegmentIndexes returns the per-segment loaded index IDs reported by QNs
+// (or only segments deviating from expectedIndexes when SetExpectedIndexes is configured).
+func (sm *CoordQueryViewStateMachine) QNSegmentIndexes() map[int64]map[int64]struct{} {
+	return sm.qnSegmentIndexes
+}
+
+// SetExpectedIndexes binds the view's required index set from LoadConfig.
+// Segments whose loaded index set equals expected are omitted from in-memory
+// tracking and Up persistence because consumers already default unreported
+// segments to the view's required index set.
+func (sm *CoordQueryViewStateMachine) SetExpectedIndexes(expected map[int64]struct{}) {
+	copied := make(map[int64]struct{}, len(expected))
+	maps.Copy(copied, expected)
+	sm.expectedIndexes = copied
+	sm.hasExpectedIndexes = true
+	for segID, ids := range sm.qnSegmentIndexes {
+		if equalInt64Sets(ids, sm.expectedIndexes) {
+			delete(sm.qnSegmentIndexes, segID)
+		}
+	}
 }
 
 // reportMakesProgress compares a report with this node's last accepted report,
@@ -286,11 +354,18 @@ func (sm *CoordQueryViewStateMachine) EnterDownWithControl(control *viewpb.Query
 		return false
 	}
 	if disableLease {
-		sm.view = sm.viewWithState(qviews.QueryViewState(sm.view.Meta.State))
-		if sm.view.Meta.Control == nil {
-			sm.view.Meta.Control = &viewpb.QueryViewControl{}
+		meta := proto.Clone(sm.view.Meta).(*viewpb.QueryViewMeta)
+		if meta.Control == nil {
+			meta.Control = &viewpb.QueryViewControl{}
 		}
-		sm.view.Meta.Control.PreemptServingLease = true
+		meta.Control.PreemptServingLease = true
+		next := &viewpb.QueryViewOfShard{
+			Meta:          meta,
+			QueryNode:     sm.view.QueryNode,
+			StreamingNode: sm.view.StreamingNode,
+		}
+		next.ProtoReflect().SetUnknown(sm.view.ProtoReflect().GetUnknown())
+		sm.view = next
 	}
 	sm.state = qviews.QueryViewStateDown
 	sm.pending.Persist = sm.viewWithState(qviews.QueryViewStateDown)
@@ -459,8 +534,22 @@ func (sm *CoordQueryViewStateMachine) updateQNReadySegments(nodeID int64, report
 		return
 	}
 	var readySegs []int64
+	recordIndexes := sm.state == qviews.QueryViewStatePreparing
 	for _, p := range qnReport.ViewOfQueryNode().Partitions {
 		readySegs = append(readySegs, p.ReadySegmentIds...)
+		if recordIndexes {
+			for _, item := range p.GetSegmentLoadedIndexes() {
+				ids := make(map[int64]struct{}, len(item.GetIndexIds()))
+				for _, id := range item.GetIndexIds() {
+					ids[id] = struct{}{}
+				}
+				if sm.hasExpectedIndexes && equalInt64Sets(ids, sm.expectedIndexes) {
+					delete(sm.qnSegmentIndexes, item.GetSegmentId())
+					continue
+				}
+				sm.qnSegmentIndexes[item.GetSegmentId()] = ids
+			}
+		}
 	}
 	sm.qnReadySegments[nodeID] = readySegs
 }
@@ -499,15 +588,84 @@ func (sm *CoordQueryViewStateMachine) allNodesDropped() bool {
 // State-machine inputs transfer ownership; neither transitions nor persistence
 // mutate placement. Sync constructors still detach their mutable transport data.
 func (sm *CoordQueryViewStateMachine) viewWithState(state qviews.QueryViewState) *viewpb.QueryViewOfShard {
+	queryNodes := sm.view.QueryNode
+	if state == qviews.QueryViewStateUp && len(sm.qnSegmentIndexes) > 0 {
+		var copiedNodes []*viewpb.QueryViewOfQueryNode
+		hasAny := false
+		for i, qn := range sm.view.QueryNode {
+			qnHas := false
+			for _, part := range qn.GetPartitions() {
+				for _, segID := range part.GetSegmentIds() {
+					idsSet, has := sm.qnSegmentIndexes[segID]
+					if has && (!sm.hasExpectedIndexes || !equalInt64Sets(idsSet, sm.expectedIndexes)) {
+						qnHas = true
+						break
+					}
+				}
+				if qnHas {
+					break
+				}
+			}
+			if !qnHas {
+				continue
+			}
+			if copiedNodes == nil {
+				copiedNodes = slices.Clone(sm.view.QueryNode)
+			}
+			hasAny = true
+			qnCopy := proto.Clone(qn).(*viewpb.QueryViewOfQueryNode)
+			for _, part := range qnCopy.GetPartitions() {
+				var loaded []*viewpb.SegmentLoadedIndexes
+				for _, segID := range part.GetSegmentIds() {
+					idsSet, has := sm.qnSegmentIndexes[segID]
+					if !has || (sm.hasExpectedIndexes && equalInt64Sets(idsSet, sm.expectedIndexes)) {
+						continue
+					}
+					var ids []int64
+					if len(idsSet) > 0 {
+						ids = make([]int64, 0, len(idsSet))
+						for id := range idsSet {
+							ids = append(ids, id)
+						}
+						slices.Sort(ids)
+					}
+					loaded = append(loaded, &viewpb.SegmentLoadedIndexes{
+						SegmentId: segID,
+						IndexIds:  ids,
+					})
+				}
+				slices.SortFunc(loaded, func(a, b *viewpb.SegmentLoadedIndexes) int {
+					return cmp.Compare(a.GetSegmentId(), b.GetSegmentId())
+				})
+				part.SegmentLoadedIndexes = loaded
+			}
+			copiedNodes[i] = qnCopy
+		}
+		if hasAny {
+			queryNodes = copiedNodes
+		}
+	}
 	v := &viewpb.QueryViewOfShard{
 		Meta:          proto.Clone(sm.view.Meta).(*viewpb.QueryViewMeta),
-		QueryNode:     sm.view.QueryNode,
+		QueryNode:     queryNodes,
 		StreamingNode: sm.view.StreamingNode,
 	}
 	// Preserve unknown wire fields without copying protobuf's internal mutex.
 	v.ProtoReflect().SetUnknown(sm.view.ProtoReflect().GetUnknown())
 	v.Meta.State = viewpb.QueryViewState(state)
 	return v
+}
+
+func equalInt64Sets(a, b map[int64]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // NewCoordQueryViewStateMachine preserves the standalone state-machine API.

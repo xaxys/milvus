@@ -92,8 +92,8 @@ func (s *qnShardView) applyOneLocked(av *handler.ApplyView) {
 				Key:  key,
 				Meta: proto.Clone(meta).(*viewpb.QueryViewMeta),
 				View: proto.Clone(qnView.ViewOfQueryNode()).(*viewpb.QueryViewOfQueryNode),
-				OnReady: func(readySegments map[int64][]int64) {
-					s.notifySegmentsReady(key.QueryViewVersion, readySegments)
+				OnReady: func(readySegments map[int64][]int64, loadedIndexes ...map[int64][]int64) {
+					s.notifySegmentsReady(key.QueryViewVersion, readySegments, loadedIndexes...)
 				},
 				OnUnrecoverable: func() {
 					s.notifyUnrecoverable(key.QueryViewVersion)
@@ -134,7 +134,7 @@ func (s *qnShardView) applyOneLocked(av *handler.ApplyView) {
 
 // notifySegmentsReady is called by SegmentManager callback when segments
 // have been loaded. Drives the SM from Preparing → Ready.
-func (s *qnShardView) notifySegmentsReady(version qviews.QueryViewVersion, readySegments map[int64][]int64) {
+func (s *qnShardView) notifySegmentsReady(version qviews.QueryViewVersion, readySegments map[int64][]int64, loadedIndexes ...map[int64][]int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -145,7 +145,7 @@ func (s *qnShardView) notifySegmentsReady(version qviews.QueryViewVersion, ready
 
 	key := entry.View.QueryViewKey()
 	before := entry.sm.State()
-	entry.sm.OnSegmentsReady(readySegments)
+	entry.sm.OnSegmentsReady(readySegments, loadedIndexes...)
 	qvobserve.Observe(context.TODO(), qvobserve.QueryNodeSegmentsReadyEvent{
 		ViewStateTransition: qvobserve.ViewStateTransition{
 			CollectionID: collectionIDForEntry(entry),

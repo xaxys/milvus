@@ -1758,3 +1758,112 @@ func TestControlledReleaseUpgradesAllDownViewsWithoutChangingHandoff(t *testing.
 		require.True(t, sm.View().Meta.GetControl().GetPreemptServingLease())
 	}
 }
+
+func TestSteadyStateExpectedIndexesOmittedAndEnterDownWithControlKeepsPlacementImmutable(t *testing.T) {
+	view := &viewpb.QueryViewOfShard{
+		Meta: &viewpb.QueryViewMeta{
+			CollectionId:    testCollectionID,
+			ReplicaId:       testReplicaID,
+			Vchannel:        testVChannel,
+			LoadInfoVersion: 3,
+			Version: &viewpb.QueryViewVersion{
+				DataVersion:  &viewpb.DataVersion{StreamingVersion: 1, CompactVersion: 1},
+				QueryVersion: 1,
+			},
+			State: viewpb.QueryViewState_QueryViewStatePreparing,
+		},
+		StreamingNode: &viewpb.QueryViewOfStreamingNode{},
+		QueryNode: []*viewpb.QueryViewOfQueryNode{
+			{
+				NodeId: 1,
+				Partitions: []*viewpb.QueryViewOfPartition{
+					{PartitionId: 10, SegmentIds: []int64{1002, 1000, 1001}},
+				},
+			},
+		},
+	}
+
+	sm := NewCoordQueryViewStateMachine(view)
+	sm.SetExpectedIndexes(map[int64]struct{}{11: {}, 12: {}})
+	drainPending(sm)
+
+	// Seg 1000 carries all expected indexes {11, 12}; seg 1002 carries {12, 11}
+	// (expected); seg 1001 is missing index 12 (carries only {11}).
+	reportMeta := &viewpb.QueryViewMeta{
+		CollectionId: view.Meta.CollectionId,
+		ReplicaId:    view.Meta.ReplicaId,
+		Vchannel:     view.Meta.Vchannel,
+		Version:      view.Meta.Version,
+		State:        viewpb.QueryViewState_QueryViewStateReady,
+	}
+	sm.OnNodeStateReported(qviews.NewQueryViewAtQueryNode(reportMeta, &viewpb.QueryViewOfQueryNode{
+		NodeId: 1,
+		Partitions: []*viewpb.QueryViewOfPartition{
+			{
+				PartitionId:     10,
+				SegmentIds:      []int64{1002, 1000, 1001},
+				ReadySegmentIds: []int64{1000, 1001, 1002},
+				SegmentLoadedIndexes: []*viewpb.SegmentLoadedIndexes{
+					{SegmentId: 1000, IndexIds: []int64{11, 12}},
+					{SegmentId: 1001, IndexIds: []int64{11}},
+					{SegmentId: 1002, IndexIds: []int64{12, 11}},
+				},
+			},
+		},
+	}))
+	sm.OnNodeStateReported(snReport(view, qviews.QueryViewStateUp))
+	require.Equal(t, qviews.QueryViewStateUp, sm.State())
+
+	// Only deviating segment 1001 is tracked in memory and persisted on Up.
+	require.Len(t, sm.QNSegmentIndexes(), 1)
+	_, has1001 := sm.QNSegmentIndexes()[1001]
+	require.True(t, has1001)
+
+	flush := sm.ConsumeFlush()
+	require.NotNil(t, flush.Persist)
+	persistedLoaded := flush.Persist.GetQueryNode()[0].GetPartitions()[0].GetSegmentLoadedIndexes()
+	require.Len(t, persistedLoaded, 1)
+	require.Equal(t, int64(1001), persistedLoaded[0].GetSegmentId())
+	require.Equal(t, []int64{11}, persistedLoaded[0].GetIndexIds())
+
+	// Recovering the Up view and calling EnterDownWithControl must NEVER mutate
+	// sm.View().QueryNode or attach SegmentLoadedIndexes to Down/Dropped syncs.
+	recovered := RecoverCoordQueryViewStateMachine(flush.Persist)
+	require.Empty(t, recovered.View().GetQueryNode()[0].GetPartitions()[0].GetSegmentLoadedIndexes())
+	require.True(t, recovered.EnterDownWithControl(&viewpb.QueryViewControl{PreemptServingLease: true}))
+	require.Empty(t, recovered.View().GetQueryNode()[0].GetPartitions()[0].GetSegmentLoadedIndexes())
+
+	downFlush := recovered.ConsumeFlush()
+	require.NotNil(t, downFlush.Persist)
+	require.Empty(t, downFlush.Persist.GetQueryNode()[0].GetPartitions()[0].GetSegmentLoadedIndexes())
+	for _, syncView := range downFlush.Sync {
+		for _, qn := range syncView.IntoProto().GetQueryNode() {
+			for _, part := range qn.GetPartitions() {
+				require.Empty(t, part.GetSegmentLoadedIndexes())
+			}
+		}
+	}
+
+	// Steady-state view where ALL segments carry expected indexes persists 0 entries.
+	steadySM := NewCoordQueryViewStateMachine(buildTestView(1))
+	steadySM.SetExpectedIndexes(map[int64]struct{}{12: {}})
+	drainPending(steadySM)
+	steadySM.OnNodeStateReported(qviews.NewQueryViewAtQueryNode(reportMeta, &viewpb.QueryViewOfQueryNode{
+		NodeId: 1,
+		Partitions: []*viewpb.QueryViewOfPartition{
+			{
+				PartitionId:     10,
+				SegmentIds:      []int64{1000},
+				ReadySegmentIds: []int64{1000},
+				SegmentLoadedIndexes: []*viewpb.SegmentLoadedIndexes{
+					{SegmentId: 1000, IndexIds: []int64{12}},
+				},
+			},
+		},
+	}))
+	steadySM.OnNodeStateReported(snReport(view, qviews.QueryViewStateUp))
+	steadyFlush := steadySM.ConsumeFlush()
+	require.NotNil(t, steadyFlush.Persist)
+	require.Empty(t, steadySM.QNSegmentIndexes())
+	require.Empty(t, steadyFlush.Persist.GetQueryNode()[0].GetPartitions()[0].GetSegmentLoadedIndexes())
+}

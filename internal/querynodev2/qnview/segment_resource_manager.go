@@ -80,10 +80,10 @@ type preparedSegmentRead struct {
 	schema        int32
 	load          uint64
 	manifest      int64
-	loadedIndexes map[int64]struct{}
 	snapshot      *querypb.SegmentLoadInfo
 	base          *segmentBase
 	read          segments.ReadState
+	loadedIndexes []int64
 }
 
 type segmentBase struct {
@@ -480,8 +480,9 @@ func (r *segmentResource) nextBindingLocked() (*segmentBinding, time.Time) {
 		if b.prepared != nil && !b.reported {
 			b.reported = true
 			cb, partition, id := b.view.req.OnReady, b.partitionID, r.id
+			loaded := slices.Clone(b.prepared.loadedIndexes)
 			if cb != nil {
-				go cb(map[int64][]int64{partition: {id}})
+				go cb(map[int64][]int64{partition: {id}}, map[int64][]int64{id: loaded})
 			}
 		}
 	}
@@ -558,7 +559,7 @@ func readCoversRequiredIndexes(read *preparedSegmentRead, b *segmentBinding) boo
 	}
 	missingRequired := false
 	for _, req := range required {
-		if _, ok := read.loadedIndexes[req.GetIndexID()]; !ok {
+		if _, ok := slices.BinarySearch(read.loadedIndexes, req.GetIndexID()); !ok {
 			missingRequired = true
 			break
 		}
@@ -582,7 +583,7 @@ func readCoversRequiredIndexes(read *preparedSegmentRead, b *segmentBinding) boo
 	}
 	for _, req := range required {
 		id := req.GetIndexID()
-		if _, loaded := read.loadedIndexes[id]; !loaded {
+		if _, loaded := slices.BinarySearch(read.loadedIndexes, id); !loaded {
 			if _, inSnapshot := present[id]; inSnapshot {
 				return false
 			}
@@ -692,10 +693,6 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 		m.mu.Unlock()
 		go r.catchup(base)
 	}
-	loadedIndexes := make(map[int64]struct{}, len(info.GetIndexInfos()))
-	for _, index := range info.GetIndexInfos() {
-		loadedIndexes[index.GetIndexID()] = struct{}{}
-	}
 	// Only this operation uses the filtered copy; the base retains the immutable source snapshot.
 	snapshot.LoadInfo = info
 	read, err := m.loader.PrepareReadState(ctx, base.segment, reuse, collection, snapshot)
@@ -706,10 +703,24 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 		schema:        b.view.req.Meta.GetSchemaVersion(),
 		load:          b.view.req.Meta.GetLoadInfoVersion(),
 		manifest:      snapshotManifestVersion(snapshot),
-		loadedIndexes: loadedIndexes,
 		base:          base,
 		read:          read,
+		loadedIndexes: extractPreparedIndexIDs(info),
 	}, nil
+}
+
+func extractPreparedIndexIDs(info *querypb.SegmentLoadInfo) []int64 {
+	if len(info.GetIndexInfos()) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(info.GetIndexInfos()))
+	for _, idx := range info.GetIndexInfos() {
+		if idx != nil {
+			ids = append(ids, idx.GetIndexID())
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
 }
 
 func (r *segmentResource) catchup(base *segmentBase) {
