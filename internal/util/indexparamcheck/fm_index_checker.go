@@ -12,16 +12,18 @@ const (
 	// locate latency; no effect on Count). Default 8 when unset.
 	FmSaSampleRateKey = "fm_sa_sample_rate"
 
-	fmSaSampleRateMin = 4
-	fmSaSampleRateMax = 256
+	fmSaSampleRateDefault = 8
+	fmSaSampleRateMin     = 4
+	fmSaSampleRateMax     = 256
 
 	// FmBlockBytesKey is the optional rank-directory block granularity in bytes
 	// (a power-of-two multiple of 8 in [8, 128]); larger shrinks the resident
 	// directory RAM at no throughput cost up to ~64. Default 64 when unset.
 	FmBlockBytesKey = "fm_block_bytes"
 
-	fmBlockBytesMin = 8
-	fmBlockBytesMax = 128
+	fmBlockBytesDefault = 64
+	fmBlockBytesMin     = 8
+	fmBlockBytesMax     = 128
 )
 
 // FMIndexChecker validates params for the FM-index scalar index, an exact
@@ -48,6 +50,9 @@ func (c *FMIndexChecker) CheckTrain(dataType schemapb.DataType, elementType sche
 		if rate < fmSaSampleRateMin || rate > fmSaSampleRateMax {
 			return merr.WrapErrParameterInvalidMsg("fm_sa_sample_rate for FM-index must be in [%d, %d], got: %d", fmSaSampleRateMin, fmSaSampleRateMax, rate)
 		}
+		params[FmSaSampleRateKey] = strconv.Itoa(rate)
+	} else {
+		params[FmSaSampleRateKey] = strconv.Itoa(fmSaSampleRateDefault)
 	}
 
 	if bbStr, ok := params[FmBlockBytesKey]; ok {
@@ -60,6 +65,9 @@ func (c *FMIndexChecker) CheckTrain(dataType schemapb.DataType, elementType sche
 		if bb < fmBlockBytesMin || bb > fmBlockBytesMax || (bb&(bb-1)) != 0 {
 			return merr.WrapErrParameterInvalidMsg("fm_block_bytes for FM-index must be a power of two in [%d, %d], got: %d", fmBlockBytesMin, fmBlockBytesMax, bb)
 		}
+		params[FmBlockBytesKey] = strconv.Itoa(bb)
+	} else {
+		params[FmBlockBytesKey] = strconv.Itoa(fmBlockBytesDefault)
 	}
 
 	return c.scalarIndexChecker.CheckTrain(dataType, elementType, params)

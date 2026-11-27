@@ -35,7 +35,7 @@ import (
 // ValidateIndexParams performs structural validation on an index definition.
 // Moved from internal/datacoord so that rootcoord's add-function-field bound-index
 // prepare can share it with datacoord's CreateIndex/AlterIndex/snapshot restore paths.
-func ValidateIndexParams(index *model.Index) error {
+func ValidateIndexParams(index *model.Index, isVectorField bool) error {
 	if err := checkDuplicateKey(index.IndexParams, "indexParams"); err != nil {
 		return err
 	}
@@ -59,6 +59,12 @@ func ValidateIndexParams(index *model.Index) error {
 	}
 	if err := ValidateOffsetCacheIndexParams(indexType, userIndexParams); err != nil {
 		return merr.WrapErrParameterInvalidMsg("invalid offset cache index params: %s", err.Error())
+	}
+	if err := ValidateVisibleIndexParams(isVectorField, indexParams); err != nil {
+		return err
+	}
+	if err := ValidateVisibleIndexParams(isVectorField, userIndexParams); err != nil {
+		return err
 	}
 	return nil
 }
@@ -405,6 +411,9 @@ func ValidateFieldIndexParams(field *schemapb.FieldSchema, indexParamsMap map[st
 	}
 	if err := ValidateWarmupIndexParams(indexParamsMap); err != nil {
 		return merr.WrapErrParameterInvalidMsg("invalid warmup params: %s", err.Error())
+	}
+	if err := ValidateVisibleIndexParams(typeutil.IsVectorType(field.GetDataType()), indexParamsMap); err != nil {
+		return err
 	}
 	indexType := indexParamsMap[common.IndexTypeKey]
 	checker, err := GetIndexCheckerMgrInstance().GetChecker(indexType)

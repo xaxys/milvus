@@ -63,6 +63,8 @@ func (c *NgramIndexChecker) CheckTrain(dataType schemapb.DataType, elementType s
 	if minGram <= 0 || maxGram <= 0 || minGram > maxGram {
 		return merr.WrapErrParameterInvalidMsg("invalid min_gram or max_gram value for Ngram index, min_gram: %d, max_gram: %d", minGram, maxGram)
 	}
+	params[MinGramKey] = strconv.Itoa(minGram)
+	params[MaxGramKey] = strconv.Itoa(maxGram)
 
 	return c.scalarIndexChecker.CheckTrain(dataType, elementType, params)
 }

@@ -2600,6 +2600,92 @@ func TestDescribeIndexWithWarmup(t *testing.T) {
 	assert.Equal(t, "sync", indexInfo["warmup"])
 }
 
+func TestIndexAPIsOptionalIndexNameAndFieldName(t *testing.T) {
+	paramtable.Init()
+	paramtable.Get().Save(paramtable.Get().QuotaConfig.QuotaAndLimitsEnabled.Key, "false")
+	defer paramtable.Get().Reset(paramtable.Get().QuotaConfig.QuotaAndLimitsEnabled.Key)
+
+	mp := mocks.NewMockProxy(t)
+	testEngine := initHTTPServerV2(mp, false)
+
+	postJSON := func(path, body string) map[string]any {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(body)))
+		w := httptest.NewRecorder()
+		testEngine.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		var out map[string]any
+		assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		return out
+	}
+
+	// 1. describeIndex without indexName (narrowed by fieldName)
+	mp.EXPECT().DescribeIndex(mock.Anything, mock.MatchedBy(func(req *milvuspb.DescribeIndexRequest) bool {
+		return req.GetCollectionName() == "coll_a" && req.GetFieldName() == "age" && req.GetIndexName() == ""
+	})).Return(&milvuspb.DescribeIndexResponse{
+		Status: &StatusSuccess,
+		IndexDescriptions: []*milvuspb.IndexDescription{
+			{
+				IndexName: "idx_age",
+				FieldName: "age",
+				Params: []*commonpb.KeyValuePair{
+					{Key: common.IndexTypeKey, Value: "INVERTED"},
+					{Key: common.IndexVisibleKey, Value: "false"},
+				},
+				State: commonpb.IndexState_Finished,
+			},
+		},
+	}, nil).Once()
+	descResp := postJSON(versionalV2(IndexCategory, DescribeAction), `{"collectionName":"coll_a","fieldName":"age"}`)
+	assert.Equal(t, float64(0), descResp["code"])
+
+	// 2. dropIndex without indexName (passes fieldName through to Proxy.DropIndex)
+	mp.EXPECT().DropIndex(mock.Anything, mock.MatchedBy(func(req *milvuspb.DropIndexRequest) bool {
+		return req.GetCollectionName() == "coll_a" && req.GetFieldName() == "age" && req.GetIndexName() == ""
+	})).Return(commonSuccessStatus, nil).Once()
+	dropResp := postJSON(versionalV2(IndexCategory, DropAction), `{"collectionName":"coll_a","fieldName":"age"}`)
+	assert.Equal(t, float64(0), dropResp["code"])
+
+	// 3. alterIndexProperties without indexName or fieldName passes empty IndexName to Proxy.AlterIndex
+	mp.EXPECT().AlterIndex(mock.Anything, mock.MatchedBy(func(req *milvuspb.AlterIndexRequest) bool {
+		return req.GetCollectionName() == "coll_a" && req.GetIndexName() == "" &&
+			len(req.GetExtraParams()) == 1 && req.GetExtraParams()[0].GetKey() == common.IndexVisibleKey &&
+			req.GetExtraParams()[0].GetValue() == "false"
+	})).Return(commonSuccessStatus, nil).Once()
+	alterCollectionOnly := postJSON(versionalV2(IndexCategory, AlterPropertiesAction),
+		`{"collectionName":"coll_a","properties":{"visible":false}}`)
+	assert.Equal(t, float64(0), alterCollectionOnly["code"])
+
+	// 4. alterIndexProperties with fieldName and 1 index resolves indexName via DescribeIndex
+	mp.EXPECT().DescribeIndex(mock.Anything, mock.MatchedBy(func(req *milvuspb.DescribeIndexRequest) bool {
+		return req.GetCollectionName() == "coll_a" && req.GetFieldName() == "age"
+	})).Return(&milvuspb.DescribeIndexResponse{
+		Status: &StatusSuccess,
+		IndexDescriptions: []*milvuspb.IndexDescription{
+			{IndexName: "idx_age", FieldName: "age"},
+		},
+	}, nil).Once()
+	mp.EXPECT().AlterIndex(mock.Anything, mock.MatchedBy(func(req *milvuspb.AlterIndexRequest) bool {
+		return req.GetCollectionName() == "coll_a" && req.GetIndexName() == "idx_age"
+	})).Return(commonSuccessStatus, nil).Once()
+	alterByField := postJSON(versionalV2(IndexCategory, AlterPropertiesAction),
+		`{"collectionName":"coll_a","fieldName":"age","properties":{"visible":true}}`)
+	assert.Equal(t, float64(0), alterByField["code"])
+
+	// 5. dropIndexProperties with fieldName and >1 indexes fails with ErrIndexDuplicate
+	mp.EXPECT().DescribeIndex(mock.Anything, mock.MatchedBy(func(req *milvuspb.DescribeIndexRequest) bool {
+		return req.GetCollectionName() == "coll_a" && req.GetFieldName() == "age"
+	})).Return(&milvuspb.DescribeIndexResponse{
+		Status: &StatusSuccess,
+		IndexDescriptions: []*milvuspb.IndexDescription{
+			{IndexName: "idx_age_1", FieldName: "age"},
+			{IndexName: "idx_age_2", FieldName: "age"},
+		},
+	}, nil).Once()
+	dropPropsDup := postJSON(versionalV2(IndexCategory, DropPropertiesAction),
+		`{"collectionName":"coll_a","fieldName":"age","propertyKeys":["visible"]}`)
+	assert.Equal(t, float64(merr.Code(merr.ErrIndexDuplicate)), dropPropsDup["code"])
+}
+
 func TestCollectionFieldProperties(t *testing.T) {
 	paramtable.Init()
 	// disable rate limit

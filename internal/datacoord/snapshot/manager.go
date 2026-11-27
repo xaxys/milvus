@@ -1187,6 +1187,13 @@ func (sm *Manager) RestoreCollection(
 //
 // Note: Each broadcaster can only be used once due to resource key lock consumption,
 // so we need to create a new broadcaster for each index.
+func (sm *Manager) validateRestoredIndexesPolicy(
+	schema *schemapb.CollectionSchema,
+	indexes []*indexpb.IndexInfo,
+) error {
+	return index.ValidateRestoredIndexesPolicy(schema, indexes)
+}
+
 func (sm *Manager) RestoreIndexes(
 	ctx context.Context,
 	snapshotData *snapshotstorage.SnapshotData,
@@ -1198,6 +1205,14 @@ func (sm *Manager) RestoreIndexes(
 	coll, err := sm.meta.GetCollectionOrNotFound(collectionID)
 	if err != nil {
 		return merr.Wrapf(err, "failed to get collection %d", collectionID)
+	}
+
+	// A snapshot can carry a field with several indexes. Restoring broadcasts the same
+	// CreateIndex DDL Server.CreateIndex does, so a field that is about to get its second
+	// index has to pass the same gate and per-field cap here -- otherwise the restore
+	// could hand a segment with two indexes on one field to a QueryNode that cannot load it.
+	if err := sm.validateRestoredIndexesPolicy(coll.Schema, snapshotData.Indexes); err != nil {
+		return err
 	}
 
 	for _, indexInfo := range snapshotData.Indexes {
@@ -1222,11 +1237,12 @@ func (sm *Manager) RestoreIndexes(
 		}
 
 		// Validate the index params (basic validation without JSON path parsing)
-		if err := indexparamcheck.ValidateIndexParams(idx); err != nil {
+		restoredField := typeutil.GetField(coll.Schema, idx.FieldID)
+		if err := indexparamcheck.ValidateIndexParams(idx, restoredField != nil && typeutil.IsVectorType(restoredField.GetDataType())); err != nil {
 			return merr.Wrapf(err, "failed to validate index %s", indexInfo.GetIndexName())
 		}
 
-		if err := index.CheckOrdinaryArraySortIndex(typeutil.GetField(coll.Schema, idx.FieldID), meta.GetIndexType(idx.IndexParams), sm.IndexEngineVersionManager); err != nil {
+		if err := index.CheckOrdinaryArraySortIndex(restoredField, meta.GetIndexType(idx.IndexParams), sm.IndexEngineVersionManager); err != nil {
 			return merr.Wrapf(err, "failed to validate index %s", indexInfo.GetIndexName())
 		}
 

@@ -842,13 +842,18 @@ func (req *IndexParamReq) GetCollectionName() string { return req.CollectionName
 type IndexReq struct {
 	DbName         string `json:"dbName"`
 	CollectionName string `json:"collectionName" binding:"required"`
-	IndexName      string `json:"indexName" binding:"required"`
+	FieldName      string `json:"fieldName"`
+	IndexName      string `json:"indexName"`
 	Timestamp      uint64 `json:"timestamp"`
 }
 
 func (req *IndexReq) GetDbName() string { return req.DbName }
 func (req *IndexReq) GetCollectionName() string {
 	return req.CollectionName
+}
+
+func (req *IndexReq) GetFieldName() string {
+	return req.FieldName
 }
 
 func (req *IndexReq) GetIndexName() string {
@@ -862,7 +867,8 @@ func (req *IndexReq) GetTimestamp() uint64 {
 type IndexReqWithProperties struct {
 	DbName         string                 `json:"dbName"`
 	CollectionName string                 `json:"collectionName" binding:"required"`
-	IndexName      string                 `json:"indexName" binding:"required"`
+	FieldName      string                 `json:"fieldName"`
+	IndexName      string                 `json:"indexName"`
 	Properties     map[string]interface{} `json:"properties"`
 }
 
@@ -872,6 +878,10 @@ func (req *IndexReqWithProperties) GetCollectionName() string {
 	return req.CollectionName
 }
 
+func (req *IndexReqWithProperties) GetFieldName() string {
+	return req.FieldName
+}
+
 func (req *IndexReqWithProperties) GetIndexName() string {
 	return req.IndexName
 }
@@ -879,7 +889,8 @@ func (req *IndexReqWithProperties) GetIndexName() string {
 type DropIndexPropertiesReq struct {
 	DbName         string   `json:"dbName"`
 	CollectionName string   `json:"collectionName" binding:"required"`
-	IndexName      string   `json:"indexName" binding:"required"`
+	FieldName      string   `json:"fieldName"`
+	IndexName      string   `json:"indexName"`
 	PropertyKeys   []string `json:"propertyKeys"`
 }
 
@@ -887,6 +898,10 @@ func (req *DropIndexPropertiesReq) GetDbName() string { return req.DbName }
 
 func (req *DropIndexPropertiesReq) GetCollectionName() string {
 	return req.CollectionName
+}
+
+func (req *DropIndexPropertiesReq) GetFieldName() string {
+	return req.FieldName
 }
 
 func (req *DropIndexPropertiesReq) GetIndexName() string {

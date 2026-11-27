@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
@@ -57,22 +58,6 @@ func (s *Server) serverID() int64 {
 	return 0
 }
 
-func (s *Server) defaultIndexNameByID(schema *schemapb.CollectionSchema, fieldID int64) (string, error) {
-	for _, field := range schema.GetFields() {
-		if field.FieldID == fieldID {
-			return field.Name, nil
-		}
-	}
-	for _, structField := range schema.GetStructArrayFields() {
-		for _, subField := range structField.GetFields() {
-			if subField.FieldID == fieldID {
-				return subField.Name, nil
-			}
-		}
-	}
-	return "", nil
-}
-
 func (s *Server) getSchema(ctx context.Context, collID int64) (*schemapb.CollectionSchema, error) {
 	coll, err := s.meta.GetCollectionOrNotFound(collID)
 	if err != nil {
@@ -92,15 +77,6 @@ func FieldExists(schema *schemapb.CollectionSchema, fieldID int64) bool {
 			if f.FieldID == fieldID {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-func isJSONField(schema *schemapb.CollectionSchema, fieldID int64) bool {
-	for _, f := range schema.Fields {
-		if f.FieldID == fieldID {
-			return typeutil.IsJSONType(f.DataType)
 		}
 	}
 	return false
@@ -145,11 +121,14 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 	}
 	schema := coll.Schema
 
-	if !FieldExists(schema, req.GetFieldID()) {
+	field := typeutil.GetField(schema, req.GetFieldID())
+	if field == nil {
 		return merr.Status(merr.WrapErrFieldNotFound(req.GetFieldID())), nil
 	}
+	fieldType := field.GetDataType()
+	isVector := typeutil.IsVectorType(fieldType)
 
-	if err := index.CheckOrdinaryArraySortIndex(typeutil.GetField(schema, req.GetFieldID()), common.GetIndexType(req.GetIndexParams()), s.indexEngineVersionManager); err != nil {
+	if err := index.CheckOrdinaryArraySortIndex(field, common.GetIndexType(req.GetIndexParams()), s.indexEngineVersionManager); err != nil {
 		if !req.GetIsAutoIndex() {
 			return merr.Status(err), nil
 		}
@@ -159,7 +138,7 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		setIndexParam(req.GetIndexParams(), common.IndexTypeKey, indexparamcheck.IndexINVERTED)
 	}
 
-	isJSON := isJSONField(schema, req.GetFieldID())
+	isJSON := typeutil.IsJSONType(fieldType)
 	if isJSON {
 		// check json_path and json_cast_type exist
 		jsonPath, err := index.GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
@@ -234,31 +213,32 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		}
 	}
 
-	if req.GetIndexName() == "" {
-		indexes := s.indexMeta.GetFieldIndexes(req.GetCollectionID(), req.GetFieldID(), req.GetIndexName())
-		fieldName, err := s.defaultIndexNameByID(schema, req.GetFieldID())
-		if err != nil {
-			mlog.Warn(ctx, "get field name from schema failed", mlog.Int64("fieldID", req.GetFieldID()))
+	defaultBaseName := field.GetName()
+	if isJSON {
+		jsonPath, _ := index.GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
+		defaultBaseName += jsonPath
+	}
+
+	_, resolvedName, err := s.indexMeta.PlanCreateIndex(req, defaultBaseName, isVector, isJSON)
+	if err != nil {
+		if errors.Is(err, index.ErrIndexOperationIgnored) {
+			if req.GetPreserveIndexId() {
+				req.IndexName = resolvedName
+			} else {
+				mlog.Info(ctx, "index already exists",
+					mlog.Int64("collectionID", req.GetCollectionID()),
+					mlog.Int64("fieldID", req.GetFieldID()),
+					mlog.String("indexName", resolvedName))
+				metrics.IndexRequestCounter.WithLabelValues(metrics.SuccessLabel).Inc()
+				return merr.Success(), nil
+			}
+		} else {
+			mlog.Warn(ctx, "plan create index failed", mlog.Err(err))
+			metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
 			return merr.Status(err), nil
 		}
-		defaultIndexName := fieldName
-		if isJSON {
-			// ignore error, because it's already checked in getIndexParam before
-			jsonPath, _ := index.GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
-			// filter indexes by json path, the length of indexes should not be larger than 1
-			// this is guaranteed by CanCreateIndex
-			indexes = lo.Filter(indexes, func(idx *model.Index, i int) bool {
-				path, _ := index.GetIndexParam(idx.IndexParams, common.JSONPathKey)
-				return path == jsonPath
-			})
-
-			defaultIndexName += jsonPath
-		}
-		if len(indexes) == 0 {
-			req.IndexName = defaultIndexName
-		} else if len(indexes) == 1 {
-			req.IndexName = indexes[0].IndexName
-		}
+	} else {
+		req.IndexName = resolvedName
 	}
 
 	// Allocate or use provided index ID
@@ -275,31 +255,6 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		mlog.Info(ctx, "using preserved index ID for snapshot restore",
 			mlog.Int64("indexID", indexID))
 	} else {
-		// Normal path: allocate new index ID
-		var err error
-		_, err = s.allocator.AllocID(ctx)
-		if err != nil {
-			mlog.Warn(ctx, "failed to alloc indexID", mlog.Err(err))
-			metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
-			return merr.Status(err), nil
-		}
-
-		indexID, err = s.indexMeta.CanCreateIndex(req, isJSON)
-		if err != nil {
-			if errors.Is(err, index.ErrIndexOperationIgnored) {
-				mlog.Info(ctx, "index already exists",
-					mlog.Int64("collectionID", req.GetCollectionID()),
-					mlog.Int64("fieldID", req.GetFieldID()),
-					mlog.String("indexName", req.GetIndexName()))
-				metrics.IndexRequestCounter.WithLabelValues(metrics.SuccessLabel).Inc()
-				return merr.Success(), nil
-			}
-			mlog.Error(ctx, "Check CanCreateIndex fail", mlog.Err(err))
-			metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
-			return merr.Status(err), nil
-		}
-	}
-	if indexID == 0 {
 		if indexID, err = s.allocator.AllocID(ctx); err != nil {
 			mlog.Warn(ctx, "failed to alloc indexID", mlog.Err(err))
 			metrics.IndexRequestCounter.WithLabelValues(metrics.FailLabel).Inc()
@@ -323,7 +278,7 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 		UserIndexParams: req.GetUserIndexParams(),
 	}
 	// Validate the index params.
-	if err := indexparamcheck.ValidateIndexParams(idx); err != nil {
+	if err := indexparamcheck.ValidateIndexParams(idx, isVector); err != nil {
 		return nil, err
 	}
 
@@ -353,8 +308,13 @@ func (s *Server) CreateIndex(ctx context.Context, req *indexpb.CreateIndexReques
 }
 
 func UpdateParams(idx *model.Index, from []*commonpb.KeyValuePair, updates []*commonpb.KeyValuePair) []*commonpb.KeyValuePair {
-	params := make(map[string]string)
-	for _, param := range from {
+	updateKeys := make([]string, 0, len(updates))
+	for _, param := range updates {
+		updateKeys = append(updateKeys, param.GetKey())
+	}
+	cleaned := index.DeleteParams(from, updateKeys)
+	params := make(map[string]string, len(cleaned)+len(updates))
+	for _, param := range cleaned {
 		params[param.GetKey()] = param.GetValue()
 	}
 
@@ -376,10 +336,6 @@ func (s *Server) AlterIndex(ctx context.Context, req *indexpb.AlterIndexRequest)
 		mlog.Any("params", req.GetParams()),
 		mlog.Any("deletekeys", req.GetDeleteKeys()))
 
-	if req.IndexName == "" {
-		return merr.Status(merr.WrapErrParameterInvalidMsg("index name is empty")), nil
-	}
-
 	if err := merr.CheckHealthy(s.GetStateCode()); err != nil {
 		mlog.Warn(ctx, msgDataCoordIsUnhealthy(paramtable.GetNodeID()), mlog.Err(err))
 		return merr.Status(err), nil
@@ -394,6 +350,11 @@ func (s *Server) AlterIndex(ctx context.Context, req *indexpb.AlterIndexRequest)
 	indexes := s.indexMeta.GetIndexesForCollection(req.GetCollectionID(), req.GetIndexName())
 	if len(indexes) == 0 {
 		err := merr.WrapErrIndexNotFound(req.GetIndexName())
+		return merr.Status(err), nil
+	}
+	if len(indexes) > 1 {
+		mlog.Warn(ctx, msgAmbiguousIndexName())
+		err := merr.WrapErrIndexDuplicate(req.GetIndexName())
 		return merr.Status(err), nil
 	}
 
@@ -415,16 +376,20 @@ func (s *Server) AlterIndex(ctx context.Context, req *indexpb.AlterIndexRequest)
 	reqIndexParamMap := funcutil.KeyValuePair2Map(req.GetParams())
 
 	for _, idx := range indexes {
+		fieldSchema, err := schemaHelper.GetFieldFromID(idx.FieldID)
+		if err != nil {
+			mlog.Warn(context.TODO(), "failed to get field schema", mlog.Err(err))
+			return merr.Status(err), nil
+		}
+		isVecIndex := typeutil.IsVectorType(fieldSchema.DataType)
 		if len(req.GetParams()) > 0 {
-			fieldSchema, err := schemaHelper.GetFieldFromID(idx.FieldID)
-			if err != nil {
-				mlog.Warn(context.TODO(), "failed to get field schema", mlog.Err(err))
-				return merr.Status(err), nil
-			}
-			isVecIndex := typeutil.IsVectorType(fieldSchema.DataType)
 			err = common.ValidateAutoIndexMmapConfig(Params.AutoIndexConfig.Enable.GetAsBool(), isVecIndex, reqIndexParamMap)
 			if err != nil {
 				mlog.Warn(context.TODO(), "failed to validate auto index mmap config", mlog.Err(err))
+				return merr.Status(err), nil
+			}
+			if err := indexparamcheck.ValidateVisibleIndexParams(isVecIndex, reqIndexParamMap); err != nil {
+				mlog.Warn(ctx, "failed to validate visible index param", mlog.Err(err))
 				return merr.Status(err), nil
 			}
 
@@ -461,7 +426,7 @@ func (s *Server) AlterIndex(ctx context.Context, req *indexpb.AlterIndexRequest)
 			idx.IndexParams = newIndexParams
 		}
 
-		if err := indexparamcheck.ValidateIndexParams(idx); err != nil {
+		if err := indexparamcheck.ValidateIndexParams(idx, isVecIndex); err != nil {
 			return merr.Status(err), nil
 		}
 	}
@@ -1081,6 +1046,18 @@ func (s *Server) DescribeIndex(ctx context.Context, req *indexpb.DescribeIndexRe
 		s.completeIndexInfo(indexInfo, idx, segments, false, createTs)
 		indexInfos = append(indexInfos, indexInfo)
 	}
+	// Hand out a deterministic order (ascending indexID). The store behind this is
+	// a map, so without sorting the order changes between calls -- anything that
+	// picks "the field's index" from the list (the proxy's load config, for one)
+	// would then flap between reloads. Sorting here is a convenience for every
+	// client; a client that needs a *specific* index must still select it by
+	// indexID rather than by position, since an older coordinator does not sort.
+	sort.Slice(indexInfos, func(i, j int) bool {
+		if indexInfos[i].GetFieldID() != indexInfos[j].GetFieldID() {
+			return indexInfos[i].GetFieldID() < indexInfos[j].GetFieldID()
+		}
+		return indexInfos[i].GetIndexID() < indexInfos[j].GetIndexID()
+	})
 	return &indexpb.DescribeIndexResponse{
 		Status:     merr.Success(),
 		IndexInfos: indexInfos,
@@ -1190,6 +1167,11 @@ func (s *Server) DropIndex(ctx context.Context, req *indexpb.DropIndexRequest) (
 		mlog.Info(ctx, fmt.Sprintf("there is no index on collection: %d with the index name: %s", req.CollectionID, req.IndexName))
 		return merr.Success(), nil
 	}
+	if !req.GetDropAll() && len(indexes) > 1 {
+		mlog.Warn(ctx, msgAmbiguousIndexName())
+		err := merr.WrapErrIndexDuplicate(req.GetIndexName())
+		return merr.Status(err), nil
+	}
 	// we do not support drop vector index on loaded collection
 	loaded, err := isCollectionLoaded(ctx, s.mixCoord, req.GetCollectionID())
 	if err != nil {
@@ -1218,12 +1200,6 @@ func (s *Server) DropIndex(ctx context.Context, req *indexpb.DropIndexRequest) (
 				return merr.Status(merr.WrapErrParameterInvalidMsg("vector index cannot be dropped on loaded collection: %d", req.GetCollectionID())), nil
 			}
 		}
-	}
-
-	if !req.GetDropAll() && len(indexes) > 1 {
-		mlog.Warn(ctx, msgAmbiguousIndexName())
-		err := merr.WrapErrIndexDuplicate(req.GetIndexName())
-		return merr.Status(err), nil
 	}
 	indexIDs := make([]UniqueID, 0)
 	for _, idx := range indexes {

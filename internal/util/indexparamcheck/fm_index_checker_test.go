@@ -15,14 +15,20 @@ func Test_FMIndexChecker_CheckTrain(t *testing.T) {
 		params := map[string]string{}
 		err := checker.CheckTrain(schemapb.DataType_VarChar, schemapb.DataType_None, params)
 		assert.NoError(t, err)
+		assert.Equal(t, "8", params[FmSaSampleRateKey])
+		assert.Equal(t, "64", params[FmBlockBytesKey])
 	})
 
 	t.Run("valid fmindex on varchar with sample rate", func(t *testing.T) {
-		for _, rate := range []string{"4", "32", "256", "+8"} {
+		for _, rate := range []string{"4", "32", "256", "+8", "08"} {
 			params := map[string]string{FmSaSampleRateKey: rate}
 			err := checker.CheckTrain(schemapb.DataType_VarChar, schemapb.DataType_None, params)
 			assert.NoError(t, err)
 		}
+		norm := map[string]string{FmSaSampleRateKey: "08", FmBlockBytesKey: "064"}
+		assert.NoError(t, checker.CheckTrain(schemapb.DataType_VarChar, schemapb.DataType_None, norm))
+		assert.Equal(t, "8", norm[FmSaSampleRateKey])
+		assert.Equal(t, "64", norm[FmBlockBytesKey])
 	})
 
 	t.Run("invalid fmindex on unsupported field type", func(t *testing.T) {

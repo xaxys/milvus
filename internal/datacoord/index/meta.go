@@ -503,7 +503,7 @@ func (m *IndexMeta) UpdateIndexTasksMetrics() {
 	}
 }
 
-func checkIdenticalJSON(index *model.Index, req *indexpb.CreateIndexRequest) bool {
+func CheckIdenticalJSON(index *model.Index, req *indexpb.CreateIndexRequest) bool {
 	// Skip error handling since json path existence is guaranteed in CreateIndex
 	jsonPath1, _ := GetIndexParam(index.IndexParams, common.JSONPathKey)
 	jsonPath2, _ := GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
@@ -513,177 +513,327 @@ func checkIdenticalJSON(index *model.Index, req *indexpb.CreateIndexRequest) boo
 	}
 	castType1, _ := GetIndexParam(index.IndexParams, common.JSONCastTypeKey)
 	castType2, _ := GetIndexParam(req.GetIndexParams(), common.JSONCastTypeKey)
-	return castType1 == castType2
+	if castType1 != castType2 {
+		return false
+	}
+	castFunc1, _ := GetIndexParam(index.IndexParams, common.JSONCastFunctionKey)
+	castFunc2, _ := GetIndexParam(req.GetIndexParams(), common.JSONCastFunctionKey)
+	return castFunc1 == castFunc2
 }
 
-func checkParams(fieldIndex *model.Index, req *indexpb.CreateIndexRequest) bool {
-	metaTypeParams := DeleteParams(fieldIndex.TypeParams, []string{common.MmapEnabledKey, common.WarmupKey})
-	reqTypeParams := DeleteParams(req.TypeParams, []string{common.MmapEnabledKey, common.WarmupKey})
-	if len(metaTypeParams) != len(reqTypeParams) {
+func sameKeyValuePairs(a, b []*commonpb.KeyValuePair) bool {
+	if len(a) != len(b) {
 		return false
 	}
-	notEq := false
-	for _, param1 := range metaTypeParams {
-		exist := false
-		for _, param2 := range reqTypeParams {
-			if param2.Key == param1.Key && param2.Value == param1.Value {
-				exist = true
+	for _, p1 := range a {
+		found := false
+		for _, p2 := range b {
+			if p2.Key == p1.Key && p2.Value == p1.Value {
+				found = true
+				break
 			}
 		}
-		if !exist {
-			notEq = true
-			break
+		if !found {
+			return false
 		}
 	}
-	if notEq {
-		return false
-	}
+	return true
+}
 
-	useAutoIndex := false
-	userIndexParamsWithoutConfigableKey := make([]*commonpb.KeyValuePair, 0)
-	for _, param := range fieldIndex.UserIndexParams {
-		if indexparams.IsConfigableIndexParam(param.Key) {
+func hasAutoIndexParam(params []*commonpb.KeyValuePair) bool {
+	v, err := GetIndexParam(params, common.IndexTypeKey)
+	return err == nil && v == common.AutoIndexName
+}
+
+func hasJSONParam(params []*commonpb.KeyValuePair) bool {
+	for _, p := range params {
+		if p.GetKey() == common.JSONPathKey ||
+			p.GetKey() == common.JSONCastTypeKey ||
+			p.GetKey() == common.JSONCastFunctionKey {
+			return true
+		}
+	}
+	return false
+}
+
+var mutableIndexTypeParams = []string{
+	common.MmapEnabledKey,
+	common.WarmupKey,
+	common.WarmupScalarFieldKey,
+	common.WarmupScalarIndexKey,
+	common.WarmupVectorFieldKey,
+	common.WarmupVectorIndexKey,
+	common.MaxLengthKey,
+	common.MaxCapacityKey,
+	common.EnableAnalyzerKey,
+	common.AnalyzerParamKey,
+	common.FieldSkipLoadKey,
+}
+
+func stripConfigurableIndexParams(params []*commonpb.KeyValuePair) []*commonpb.KeyValuePair {
+	out := make([]*commonpb.KeyValuePair, 0, len(params))
+	for _, p := range params {
+		if indexparams.IsConfigableIndexParam(p.Key) {
 			continue
 		}
-		if param.Key == common.IndexTypeKey && param.Value == common.AutoIndexName {
-			useAutoIndex = true
+		if p.Key == common.ParamsKey {
+			var nested map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(p.Value), &nested); err == nil && nested != nil {
+				changed := false
+				for k := range nested {
+					if indexparams.IsConfigableIndexParam(k) {
+						delete(nested, k)
+						changed = true
+					}
+				}
+				if changed {
+					if len(nested) == 0 {
+						continue
+					}
+					if encoded, err := json.Marshal(nested); err == nil {
+						out = append(out, &commonpb.KeyValuePair{Key: p.Key, Value: string(encoded)})
+						continue
+					}
+				}
+			}
 		}
-		userIndexParamsWithoutConfigableKey = append(userIndexParamsWithoutConfigableKey, param)
+		out = append(out, p)
 	}
+	return out
+}
 
-	if len(userIndexParamsWithoutConfigableKey) != len(req.GetUserIndexParams()) {
+func stripAutoIndexUserParams(params []*commonpb.KeyValuePair) []*commonpb.KeyValuePair {
+	stripped := stripConfigurableIndexParams(params)
+	out := make([]*commonpb.KeyValuePair, 0, len(stripped))
+	for _, p := range stripped {
+		if p.GetKey() == common.IndexTypeKey && p.GetValue() == common.AutoIndexName {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func normalizeScalarIndexParams(params []*commonpb.KeyValuePair) []*commonpb.KeyValuePair {
+	stripped := stripConfigurableIndexParams(params)
+	kvMap := make(map[string]string, len(stripped)+2)
+	for _, p := range stripped {
+		kvMap[p.GetKey()] = p.GetValue()
+	}
+	if idxType, ok := kvMap[common.IndexTypeKey]; ok {
+		kvMap[common.IndexTypeKey] = indexparamcheck.CanonicalScalarIndexType(idxType)
+	}
+	if kvMap[common.IndexTypeKey] == indexparamcheck.IndexFMINDEX {
+		if _, ok := kvMap[indexparamcheck.FmSaSampleRateKey]; !ok {
+			kvMap[indexparamcheck.FmSaSampleRateKey] = "8"
+		}
+		if _, ok := kvMap[indexparamcheck.FmBlockBytesKey]; !ok {
+			kvMap[indexparamcheck.FmBlockBytesKey] = "64"
+		}
+	}
+	for _, intKey := range []string{
+		indexparamcheck.MinGramKey,
+		indexparamcheck.MaxGramKey,
+		indexparamcheck.FmSaSampleRateKey,
+		indexparamcheck.FmBlockBytesKey,
+		common.BitmapCardinalityLimitKey,
+	} {
+		if raw, ok := kvMap[intKey]; ok {
+			if n, err := strconv.Atoi(raw); err == nil {
+				kvMap[intKey] = strconv.Itoa(n)
+			}
+		}
+	}
+	out := make([]*commonpb.KeyValuePair, 0, len(kvMap))
+	for k, v := range kvMap {
+		out = append(out, &commonpb.KeyValuePair{Key: k, Value: v})
+	}
+	return out
+}
+
+// SameScalarIndexDefinition reports whether req resolves to the exact same scalar
+// index build definition as fieldIndex without mutating req.
+func SameScalarIndexDefinition(fieldIndex *model.Index, req *indexpb.CreateIndexRequest, isJSON bool) bool {
+	if isJSON && !CheckIdenticalJSON(fieldIndex, req) {
 		return false
 	}
-	for _, param1 := range userIndexParamsWithoutConfigableKey {
+	return matchIndexParams(fieldIndex, req, false)
+}
+
+func CheckParams(fieldIndex *model.Index, req *indexpb.CreateIndexRequest) bool {
+	if common.IsIndexInfoVisible(fieldIndex.IndexParams, fieldIndex.UserIndexParams) !=
+		common.IsIndexInfoVisible(req.GetIndexParams(), req.GetUserIndexParams()) {
+		return false
+	}
+	return matchIndexParams(fieldIndex, req, true)
+}
+
+func matchIndexParams(fieldIndex *model.Index, req *indexpb.CreateIndexRequest, allowAutoIndexDrift bool) bool {
+	if (hasJSONParam(fieldIndex.IndexParams) || hasJSONParam(req.GetIndexParams())) &&
+		!CheckIdenticalJSON(fieldIndex, req) {
+		return false
+	}
+	metaTypeParams := DeleteParams(fieldIndex.TypeParams, mutableIndexTypeParams)
+	reqTypeParams := DeleteParams(req.GetTypeParams(), mutableIndexTypeParams)
+	if !sameKeyValuePairs(metaTypeParams, reqTypeParams) {
+		return false
+	}
+
+	idxType, _ := GetIndexParam(fieldIndex.IndexParams, common.IndexTypeKey)
+	reqType, _ := GetIndexParam(req.GetIndexParams(), common.IndexTypeKey)
+	if indexparamcheck.IsScalarIndexType(idxType) && indexparamcheck.IsScalarIndexType(reqType) {
+		if allowAutoIndexDrift {
+			useAutoIndex := fieldIndex.IsAutoIndex || hasAutoIndexParam(fieldIndex.UserIndexParams)
+			reqAutoIndex := req.GetIsAutoIndex() || hasAutoIndexParam(req.GetUserIndexParams())
+			if useAutoIndex || reqAutoIndex {
+				return useAutoIndex && reqAutoIndex &&
+					sameKeyValuePairs(
+						stripAutoIndexUserParams(fieldIndex.UserIndexParams),
+						stripAutoIndexUserParams(req.GetUserIndexParams()),
+					)
+			}
+		}
+		metaResolved := normalizeScalarIndexParams(fieldIndex.IndexParams)
+		reqResolved := normalizeScalarIndexParams(req.GetIndexParams())
+		return sameKeyValuePairs(metaResolved, reqResolved)
+	}
+
+	useAutoIndex := fieldIndex.IsAutoIndex || hasAutoIndexParam(fieldIndex.UserIndexParams)
+	metaUserParams := stripConfigurableIndexParams(fieldIndex.UserIndexParams)
+	reqUserParams := stripConfigurableIndexParams(req.GetUserIndexParams())
+	if len(metaUserParams) != len(reqUserParams) {
+		return false
+	}
+	for _, param1 := range metaUserParams {
 		exist := false
-		for i, param2 := range req.GetUserIndexParams() {
+		for _, param2 := range reqUserParams {
 			if param2.Key == param1.Key && param2.Value == param1.Value {
 				exist = true
 				break
-			} else if param1.Key == common.MetricTypeKey && param2.Key == param1.Key && useAutoIndex && !req.GetUserAutoindexMetricTypeSpecified() {
-				// when users use autoindex, metric type is the only thing they can specify
-				// if they do not specify metric type, will use autoindex default metric type
-				// when autoindex default config upgraded, remain the old metric type at the very first time for compatibility
-				// warn! replace request metric type
+			}
+			if allowAutoIndexDrift &&
+				param1.Key == common.MetricTypeKey &&
+				param2.Key == param1.Key &&
+				useAutoIndex &&
+				!req.GetUserAutoindexMetricTypeSpecified() {
 				mlog.Warn(context.TODO(), "user not specify autoindex metric type, autoindex config has changed, use old metric for compatibility",
 					mlog.String("old metric type", param1.Value), mlog.String("new metric type", param2.Value))
-				req.GetUserIndexParams()[i].Value = param1.Value
-				for j, param := range req.GetIndexParams() {
-					if param.Key == common.MetricTypeKey {
-						req.GetIndexParams()[j].Value = param1.Value
-						break
-					}
-				}
 				exist = true
 				break
 			}
 		}
 		if !exist {
-			notEq = true
-			break
+			return false
 		}
 	}
-	// Check whether new index type match old, if not, only
-	// allow autoindex config changed when upgraded to new config
-	// using store meta config to rewrite new config
-	if !notEq && req.GetIsAutoIndex() && useAutoIndex {
-		for _, param1 := range fieldIndex.IndexParams {
-			if param1.Key == common.IndexTypeKey &&
-				indexparamcheck.IsScalarIndexType(param1.Value) {
-				for _, param2 := range req.GetIndexParams() {
-					if param1.Key == param2.Key && param1.Value != param2.Value {
-						req.IndexParams = make([]*commonpb.KeyValuePair, len(fieldIndex.IndexParams))
-						copy(req.IndexParams, fieldIndex.IndexParams)
-						break
+	return true
+}
+
+// PlanCreateIndex validates index creation policy, resolves unnamed index names,
+// and checks collection-wide name uniqueness and idempotency in a single read-locked pass.
+func (m *IndexMeta) PlanCreateIndex(
+	req *indexpb.CreateIndexRequest,
+	defaultBaseName string,
+	isVector bool,
+	isJSON bool,
+) (UniqueID, string, error) {
+	m.fieldIndexLock.RLock()
+	defer m.fieldIndexLock.RUnlock()
+
+	reqName := req.GetIndexName()
+	reqPath, _ := GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
+	indexes := m.Indexes[req.GetCollectionID()]
+
+	var fieldActive []*model.Index
+	var sameKeyScalar []*model.Index
+	var collidingIndex *model.Index
+	targetName := reqName
+	if targetName == "" {
+		targetName = defaultBaseName
+	}
+
+	for _, idx := range indexes {
+		if idx.IsDeleted {
+			continue
+		}
+		if idx.FieldID == req.GetFieldID() {
+			if (reqName == "" || idx.IndexName == reqName) &&
+				(!isJSON || CheckIdenticalJSON(idx, req)) &&
+				matchIndexParams(idx, req, true) {
+				existingVisible := common.IsIndexInfoVisible(idx.IndexParams, idx.UserIndexParams)
+				if existingVisible != common.IsIndexInfoVisible(req.GetIndexParams(), req.GetUserIndexParams()) {
+					return 0, "", merr.WrapErrParameterInvalidMsg(
+						"CreateIndex failed: index %q already exists with %s=%t; use AlterIndex to change %s",
+						idx.IndexName,
+						common.IndexVisibleKey,
+						existingVisible,
+						common.IndexVisibleKey)
+				}
+				return idx.IndexID, idx.IndexName, ErrIndexOperationIgnored
+			}
+			fieldActive = append(fieldActive, idx)
+			if !isVector {
+				if isJSON {
+					idxPath, _ := GetIndexParam(idx.IndexParams, common.JSONPathKey)
+					if idxPath == reqPath {
+						sameKeyScalar = append(sameKeyScalar, idx)
 					}
+				} else {
+					sameKeyScalar = append(sameKeyScalar, idx)
 				}
 			}
 		}
-	}
-	mlog.Info(context.TODO(), "final request", mlog.Any("create index request", req.String()))
-	return !notEq
-}
-
-// CanCreateIndex currently is used in Unittest
-func (m *IndexMeta) CanCreateIndex(req *indexpb.CreateIndexRequest, isJSON bool) (UniqueID, error) {
-	m.fieldIndexLock.RLock()
-	defer m.fieldIndexLock.RUnlock()
-	indexID, err := m.canCreateIndex(req, isJSON)
-	if err != nil {
-		return 0, err
-	}
-
-	return indexID, nil
-}
-
-func (m *IndexMeta) canCreateIndex(req *indexpb.CreateIndexRequest, isJSON bool) (UniqueID, error) {
-	indexes, ok := m.Indexes[req.CollectionID]
-	if !ok {
-		return 0, nil
-	}
-	for _, index := range indexes {
-		if index.IsDeleted {
-			continue
+		if idx.IndexName == targetName && collidingIndex == nil {
+			collidingIndex = idx
 		}
-		if req.IndexName == index.IndexName {
-			if req.FieldID == index.FieldID && checkParams(index, req) &&
-				/*only check json params when it is json index*/ (!isJSON || checkIdenticalJSON(index, req)) {
-				return index.IndexID, ErrIndexOperationIgnored
-			}
-			errMsg := "at most one distinct index is allowed per field"
-			mlog.Warn(context.TODO(), errMsg,
-				mlog.String("source index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
-					index.IndexName, index.FieldID, index.IndexParams, index.UserIndexParams, index.TypeParams)),
-				mlog.String("current index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
-					req.GetIndexName(), req.GetFieldID(), req.GetIndexParams(), req.GetUserIndexParams(), req.GetTypeParams())))
-			return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
-		}
-		if req.FieldID == index.FieldID {
-			if isJSON {
-				// Skip error handling since json path existence is guaranteed in CreateIndex
-				jsonPath1, _ := GetIndexParam(index.IndexParams, common.JSONPathKey)
-				jsonPath2, _ := GetIndexParam(req.GetIndexParams(), common.JSONPathKey)
+	}
 
-				if jsonPath1 != jsonPath2 {
-					// if json path is not same, create index is allowed
-					continue
-				}
-			}
-			// creating multiple indexes on same field is not supported
-			errMsg := "CreateIndex failed: creating multiple indexes on same field is not supported"
+	if isVector {
+		if len(fieldActive) > 0 {
+			errMsg := "CreateIndex failed: creating multiple indexes on a vector field is not supported"
 			mlog.Warn(context.TODO(), errMsg)
-			// Client-caused conflict, same family as the "one distinct index per
-			// field" case above: return an input-class error rather than
-			// ServiceInternal (code 5, "never return out of Milvus") so the
-			// caller is not blamed with a system error / counted as a system-caused failure.
-			return 0, merr.WrapErrParameterInvalidMsg("%s", errMsg)
+			return 0, "", merr.WrapErrParameterInvalidMsg("%s", errMsg)
+		}
+	} else {
+		if len(sameKeyScalar) >= MaxScalarIndexesPerField {
+			return 0, "", merr.WrapErrParameterInvalidMsg(
+				"CreateIndex failed: field %d already has %d indexes, the limit is %d",
+				req.GetFieldID(),
+				len(sameKeyScalar),
+				MaxScalarIndexesPerField)
+		}
+		if len(sameKeyScalar) > 0 {
+			if err := CheckMultiScalarIndexPerField(req.GetFieldID()); err != nil {
+				return 0, "", err
+			}
+			for _, idx := range sameKeyScalar {
+				if SameScalarIndexDefinition(idx, req, isJSON) {
+					return 0, "", merr.WrapErrParameterInvalidMsg(
+						"CreateIndex failed: field %d already has index %q with the same definition",
+						req.GetFieldID(),
+						idx.IndexName)
+				}
+			}
 		}
 	}
-	return 0, nil
-}
 
-// HasSameReq determine whether there are same indexing tasks.
-func (m *IndexMeta) HasSameReq(req *indexpb.CreateIndexRequest) (bool, UniqueID) {
-	m.fieldIndexLock.RLock()
-	defer m.fieldIndexLock.RUnlock()
-
-	for _, fieldIndex := range m.Indexes[req.CollectionID] {
-		if fieldIndex.IsDeleted {
-			continue
+	if collidingIndex != nil {
+		if reqName == "" {
+			return 0, "", merr.WrapErrParameterInvalidMsg(
+				"index name %q derived for field %d is already used by an index with a different definition; specify index_name explicitly",
+				targetName,
+				req.GetFieldID())
 		}
-		if fieldIndex.FieldID != req.FieldID || fieldIndex.IndexName != req.IndexName {
-			continue
-		}
-		if !checkParams(fieldIndex, req) {
-			continue
-		}
-		mlog.Debug(context.TODO(), "has same index", mlog.Int64("collectionID", req.CollectionID),
-			mlog.Int64("fieldID", req.FieldID), mlog.String("indexName", req.IndexName),
-			mlog.Int64("indexID", fieldIndex.IndexID))
-		return true, fieldIndex.IndexID
+		errMsg := "index name is already used by another index in this collection"
+		mlog.Warn(context.TODO(), errMsg,
+			mlog.String("source index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
+				collidingIndex.IndexName, collidingIndex.FieldID, collidingIndex.IndexParams, collidingIndex.UserIndexParams, collidingIndex.TypeParams)),
+			mlog.String("current index", fmt.Sprintf("{index_name: %s, field_id: %d, index_params: %v, user_params: %v, type_params: %v}",
+				req.GetIndexName(), req.GetFieldID(), req.GetIndexParams(), req.GetUserIndexParams(), req.GetTypeParams())))
+		return 0, "", merr.WrapErrParameterInvalidMsg("%s", errMsg)
 	}
 
-	return false, 0
+	return 0, targetName, nil
 }
 
 func (m *IndexMeta) CreateIndex(ctx context.Context, index *model.Index) error {

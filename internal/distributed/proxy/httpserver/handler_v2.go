@@ -915,18 +915,13 @@ func (h *HandlersV2) getCollectionDetails(ctx context.Context, c *gin.Context, a
 	} else {
 		errMessage += err.Error() + ";"
 	}
-	vectorField := ""
-	for _, field := range coll.Schema.Fields {
-		if typeutil.IsVectorType(field.DataType) {
-			vectorField = field.Name
-			break
-		}
-	}
 	indexDesc := []gin.H{}
+	// DescribeCollection returns every index of the collection. Do not narrow the request
+	// to a field: DescribeIndex now honors field_name, and passing the first vector
+	// field's name would hide scalar indexes and other vector fields.
 	descIndexReq := &milvuspb.DescribeIndexRequest{
 		DbName:         dbName,
 		CollectionName: collectionName,
-		FieldName:      vectorField,
 	}
 	indexResp, err := h.wrapperProxy(ctx, c, descIndexReq, h.checkAuth, true, "/milvus.proto.milvus.MilvusService/DescribeIndex", func(reqCtx context.Context, req any) (any, error) {
 		return h.proxy.DescribeIndex(reqCtx, req.(*milvuspb.DescribeIndexRequest))
@@ -3820,10 +3815,15 @@ func (h *HandlersV2) describeIndex(ctx context.Context, c *gin.Context, anyReq a
 	collectionGetter, _ := anyReq.(requestutil.CollectionNameGetter)
 	indexGetter, _ := anyReq.(IndexNameGetter)
 	timeGetter, _ := anyReq.(TimestampGetter)
+	var fieldName string
+	if fieldGetter, ok := anyReq.(requestutil.FieldNameGetter); ok {
+		fieldName = fieldGetter.GetFieldName()
+	}
 
 	req := &milvuspb.DescribeIndexRequest{
 		DbName:         dbName,
 		CollectionName: collectionGetter.GetCollectionName(),
+		FieldName:      fieldName,
 		IndexName:      indexGetter.GetIndexName(),
 		Timestamp:      timeGetter.GetTimestamp(),
 	}
@@ -3917,9 +3917,14 @@ func (h *HandlersV2) createIndex(ctx context.Context, c *gin.Context, anyReq any
 func (h *HandlersV2) dropIndex(ctx context.Context, c *gin.Context, anyReq any, dbName string) (interface{}, error) {
 	collGetter, _ := anyReq.(requestutil.CollectionNameGetter)
 	indexGetter, _ := anyReq.(IndexNameGetter)
+	var fieldName string
+	if fieldGetter, ok := anyReq.(requestutil.FieldNameGetter); ok {
+		fieldName = fieldGetter.GetFieldName()
+	}
 	req := &milvuspb.DropIndexRequest{
 		DbName:         dbName,
 		CollectionName: collGetter.GetCollectionName(),
+		FieldName:      fieldName,
 		IndexName:      indexGetter.GetIndexName(),
 	}
 	c.Set(ContextRequest, req)
@@ -3931,6 +3936,50 @@ func (h *HandlersV2) dropIndex(ctx context.Context, c *gin.Context, anyReq any, 
 		HTTPReturn(c, http.StatusOK, wrapperReturnDefault())
 	}
 	return resp, err
+}
+
+func (h *HandlersV2) resolveHTTPIndexNameByField(ctx context.Context, c *gin.Context, authReq any, dbName, collectionName, fieldName string) (string, bool, error) {
+	if h.checkAuth {
+		if err := h.checkAuthorizationV2(ctx, c, false, authReq); err != nil {
+			return "", false, err
+		}
+		ctx = c.Request.Context()
+	}
+	descResp, err := h.proxy.DescribeIndex(ctx, &milvuspb.DescribeIndexRequest{
+		DbName:         dbName,
+		CollectionName: collectionName,
+		FieldName:      fieldName,
+	})
+	if err == nil {
+		err = merr.Error(descResp.GetStatus())
+	}
+	if err != nil {
+		c.Set("error_type", merr.GetErrorType(err).String())
+		HTTPAbortReturn(c, http.StatusOK, gin.H{
+			HTTPReturnCode:    merr.Code(err),
+			HTTPReturnMessage: err.Error(),
+		})
+		return "", false, err
+	}
+	if len(descResp.GetIndexDescriptions()) == 0 {
+		err = merr.WrapErrIndexNotFoundForCollection(collectionName)
+		c.Set("error_type", merr.GetErrorType(err).String())
+		HTTPAbortReturn(c, http.StatusOK, gin.H{
+			HTTPReturnCode:    merr.Code(err),
+			HTTPReturnMessage: err.Error(),
+		})
+		return "", false, err
+	}
+	if len(descResp.GetIndexDescriptions()) > 1 {
+		err = merr.WrapErrIndexDuplicate(fieldName)
+		c.Set("error_type", merr.GetErrorType(err).String())
+		HTTPAbortReturn(c, http.StatusOK, gin.H{
+			HTTPReturnCode:    merr.Code(err),
+			HTTPReturnMessage: err.Error(),
+		})
+		return "", false, err
+	}
+	return descResp.GetIndexDescriptions()[0].GetIndexName(), true, nil
 }
 
 func (h *HandlersV2) alterIndexProperties(ctx context.Context, c *gin.Context, anyReq any, dbName string) (interface{}, error) {
@@ -3945,6 +3994,13 @@ func (h *HandlersV2) alterIndexProperties(ctx context.Context, c *gin.Context, a
 		extraParams = append(extraParams, &commonpb.KeyValuePair{Key: key, Value: fmt.Sprintf("%v", value)})
 	}
 	req.ExtraParams = extraParams
+	if req.IndexName == "" && httpReq.FieldName != "" {
+		resolved, ok, err := h.resolveHTTPIndexNameByField(ctx, c, req, dbName, httpReq.CollectionName, httpReq.FieldName)
+		if !ok {
+			return nil, err
+		}
+		req.IndexName = resolved
+	}
 
 	c.Set(ContextRequest, req)
 	resp, err := h.wrapperProxyWithLimit(ctx, c, req, h.checkAuth, false, "/milvus.proto.milvus.MilvusService/AlterIndex", true, h.proxy, func(reqCtx context.Context, req any) (interface{}, error) {
@@ -3963,6 +4019,13 @@ func (h *HandlersV2) dropIndexProperties(ctx context.Context, c *gin.Context, an
 		CollectionName: httpReq.CollectionName,
 		DeleteKeys:     httpReq.PropertyKeys,
 		IndexName:      httpReq.IndexName,
+	}
+	if req.IndexName == "" && httpReq.FieldName != "" {
+		resolved, ok, err := h.resolveHTTPIndexNameByField(ctx, c, req, dbName, httpReq.CollectionName, httpReq.FieldName)
+		if !ok {
+			return nil, err
+		}
+		req.IndexName = resolved
 	}
 	c.Set(ContextRequest, req)
 	resp, err := h.wrapperProxyWithLimit(ctx, c, req, h.checkAuth, false, "/milvus.proto.milvus.MilvusService/AlterIndex", true, h.proxy, func(reqCtx context.Context, req any) (interface{}, error) {

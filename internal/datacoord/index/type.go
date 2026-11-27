@@ -21,6 +21,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/json"
 	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
 	"github.com/milvus-io/milvus/internal/util/vecindexmgr"
 	"github.com/milvus-io/milvus/pkg/v3/common"
@@ -114,14 +115,37 @@ func CheckFMIndexEngineVersion(indexParams []*commonpb.KeyValuePair, resolvedSca
 }
 
 func DeleteParams(from []*commonpb.KeyValuePair, deletes []string) []*commonpb.KeyValuePair {
-	params := make(map[string]string)
-	for _, param := range from {
-		params[param.GetKey()] = param.GetValue()
-	}
-
-	// delete the params
+	deleteSet := make(map[string]struct{}, len(deletes))
 	for _, key := range deletes {
-		delete(params, key)
+		deleteSet[key] = struct{}{}
+	}
+	params := make(map[string]string, len(from))
+	for _, param := range from {
+		k, v := param.GetKey(), param.GetValue()
+		if _, dropped := deleteSet[k]; dropped {
+			continue
+		}
+		if k == common.ParamsKey && len(deleteSet) > 0 {
+			var nested map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(v), &nested); err == nil && nested != nil {
+				changed := false
+				for dk := range deleteSet {
+					if _, exists := nested[dk]; exists {
+						delete(nested, dk)
+						changed = true
+					}
+				}
+				if changed {
+					if len(nested) == 0 {
+						continue
+					}
+					if encoded, err := json.Marshal(nested); err == nil {
+						v = string(encoded)
+					}
+				}
+			}
+		}
+		params[k] = v
 	}
 
 	return lo.MapToSlice(params, func(k string, v string) *commonpb.KeyValuePair {

@@ -15,7 +15,10 @@ func Test_NgramIndexChecker_CheckTrain(t *testing.T) {
 
 	for _, dtype := range []schemapb.DataType{schemapb.DataType_VarChar, schemapb.DataType_Text} {
 		t.Run("valid ngram on "+dtype.String(), func(t *testing.T) {
-			assert.NoError(t, checker.CheckTrain(dtype, schemapb.DataType_None, map[string]string{MinGramKey: "2", MaxGramKey: "3"}))
+			params := map[string]string{MinGramKey: "02", MaxGramKey: "03"}
+			assert.NoError(t, checker.CheckTrain(dtype, schemapb.DataType_None, params))
+			assert.Equal(t, "2", params[MinGramKey])
+			assert.Equal(t, "3", params[MaxGramKey])
 		})
 	}
 
