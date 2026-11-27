@@ -425,15 +425,22 @@ PhyMatchFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
     auto match_type = expr_->get_match_type();
     int64_t threshold = expr_->get_count();
 
+    auto* exec_ctx = context.get_exec_context();
+    auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
     VectorPtr match_result;
     if (elem_count > 0) {
-        if (auto* exec_ctx = context.get_exec_context(); exec_ctx != nullptr) {
-            if (auto* explain = exec_ctx->explain();
-                explain != nullptr && !inputs_.empty()) {
-                MarkExplainDomainNonEmpty(inputs_[0], explain);
-            }
+        if (explain != nullptr && !inputs_.empty()) {
+            MarkExplainDomainNonEmpty(inputs_[0], explain);
         }
+        const bool time_leaf =
+            explain != nullptr && !inputs_.empty() && inputs_[0] != nullptr &&
+            inputs_[0]->expr_id() != 0 && Expr::HasActiveEvalInput(eval_ctx);
+        ExecutionExplainRecorder::ScopedLeafEvalTimer leaf_timer(
+            time_leaf ? inputs_[0]->explain_slot() : nullptr);
         inputs_[0]->Eval(eval_ctx, match_result);
+        if (match_result == nullptr || match_result->size() == 0) {
+            leaf_timer.Cancel();
+        }
     } else if (!use_offsets) {
         // Keep element-level child expressions aligned across all-empty batches.
         inputs_[0]->MoveCursor();
@@ -489,8 +496,6 @@ PhyMatchFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
     // MatchExpr carries no expr_id; when its predicate is a single leaf
     // (conjunctions and NOT nodes already attribute their own children),
     // credit the evaluated element batch and element matches here.
-    auto* exec_ctx = context.get_exec_context();
-    auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
     if (explain != nullptr && inputs_[0]->expr_id() != 0) {
         const auto& elem_mask = eval_ctx.get_bitmap_input();
         const int64_t active_elems =

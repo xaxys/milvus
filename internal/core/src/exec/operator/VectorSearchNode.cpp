@@ -225,21 +225,41 @@ PhyVectorSearchNode::GetOutput() {
         explain_shared != nullptr) {
         if (search_result.filtered_vector_search_fn_) {
             const int32_t vec_step = get_operator_id();
+            int32_t consumer_step =
+                explain_shared->FindOperatorStep(ExplainOperatorKind::kGroupBy);
+            if (consumer_step < 0) {
+                consumer_step = explain_shared->NextOperatorStep(vec_step);
+            }
             auto orig_fn = std::move(search_result.filtered_vector_search_fn_);
             search_result.filtered_vector_search_fn_ =
-                [orig_fn = std::move(orig_fn), explain_shared, vec_step](
+                [orig_fn = std::move(orig_fn),
+                 explain_shared,
+                 vec_step,
+                 consumer_step](
                     const BitsetView& filter, int64_t topk, SearchResult& out) {
+                    const auto phase2_start = std::chrono::steady_clock::now();
                     orig_fn(filter, topk, out);
+                    const auto phase2_ns =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - phase2_start)
+                            .count();
                     const int64_t candidates =
                         CountValidSearchOffsets(out.seg_offsets_);
                     if (candidates > 0) {
                         explain_shared->AddOperatorRowsOut(vec_step,
                                                            candidates);
-                        const int32_t consumer_step =
-                            explain_shared->active_step();
                         if (consumer_step >= 0 && consumer_step != vec_step) {
                             explain_shared->AddOperatorRowsIn(consumer_step,
                                                               candidates);
+                        }
+                    }
+                    if (phase2_ns > 0) {
+                        if (consumer_step >= 0 && consumer_step != vec_step) {
+                            explain_shared->TransferOperatorTimeNs(
+                                vec_step, consumer_step, phase2_ns);
+                        } else {
+                            explain_shared->AddOperatorTimeNs(vec_step,
+                                                              phase2_ns);
                         }
                     }
                 };

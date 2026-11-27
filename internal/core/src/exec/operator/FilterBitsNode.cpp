@@ -164,6 +164,10 @@ PhyFilterBitsNode::EnsureOperatorCacheLookup() {
         return false;
     }
     auto* cache_segment = query_context_->get_segment();
+    const bool track_explain = query_context_->explain() != nullptr;
+    const auto lookup_start = track_explain
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
     RunExprCacheBestEffort([&]() {
         auto key =
             ExprCacheHelper::MakeKey(cache_segment,
@@ -186,6 +190,12 @@ PhyFilterBitsNode::EnsureOperatorCacheLookup() {
             std::make_shared<RowVector>(std::move(col_res));
         whole_filter_cache_hit_ = true;
     });
+    if (track_explain) {
+        operator_cache_lookup_ns_ =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - lookup_start)
+                .count();
+    }
     return whole_filter_cache_hit_;
 }
 
@@ -244,8 +254,11 @@ PhyFilterBitsNode::GetOutput() {
             explain->SetOperatorRows(
                 get_operator_id(), need_process_rows_, rows_out);
             explain->MarkOperatorCached(get_operator_id());
-            RecordWholeFilterCacheHitExplain(
-                exprs_->exprs(), explain, need_process_rows_, rows_out);
+            RecordWholeFilterCacheHitExplain(exprs_->exprs(),
+                                             explain,
+                                             need_process_rows_,
+                                             rows_out,
+                                             operator_cache_lookup_ns_);
         }
         MarkFeature(query_context_->get_plan_options().feature_recorder.get(),
                     FeatureBit::ExprCacheHit);
@@ -263,7 +276,7 @@ PhyFilterBitsNode::GetOutput() {
     const auto prefetch_start = recording
                                     ? std::chrono::steady_clock::now()
                                     : std::chrono::steady_clock::time_point{};
-    exprs_->WaitPrefetch();
+    WaitPrefetch();
     if (recording) {
         span.SetAttribute("prefetch_wait_us",
                           std::chrono::duration<double, std::micro>(

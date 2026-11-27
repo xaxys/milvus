@@ -16,7 +16,9 @@
 
 #pragma once
 
+#include <folly/ScopeGuard.h>
 #include <folly/futures/Future.h>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -85,6 +87,27 @@ class PhyMvccNode : public Operator {
     void
     WaitPrefetch() override {
         if (prefetch_future_.has_value()) {
+            auto* qc =
+                operator_context_ != nullptr &&
+                        operator_context_->get_exec_context() != nullptr
+                    ? operator_context_->get_exec_context()->get_query_context()
+                    : nullptr;
+            auto* explain = qc != nullptr ? qc->explain() : nullptr;
+            const auto start = explain != nullptr
+                                   ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
+            auto guard = folly::makeGuard([&]() noexcept {
+                if (explain != nullptr) {
+                    const auto ns =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+                    if (ns > 0) {
+                        explain->AddOperatorPrefetchWaitNs(get_operator_id(),
+                                                           ns);
+                    }
+                }
+            });
             auto future = std::move(*prefetch_future_);
             prefetch_future_.reset();
             std::move(future).get();

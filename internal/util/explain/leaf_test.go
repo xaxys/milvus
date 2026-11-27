@@ -359,6 +359,70 @@ func TestWholeFilterUnattributedCacheOnlyAttributesBareSingleLeaf(t *testing.T) 
 		assert.Equal(t, 1, all[0].Reasons[0].Segments)
 	})
 
+	t.Run("bare single leaf merges cold index timing and whole-operator cached timing cleanly", func(t *testing.T) {
+		leaves := map[int64]LeafInfo{
+			1: {Condition: "a == 1", Type: "equal", FieldID: 101, Field: "a"},
+		}
+		asts := map[int]PlanAST{
+			-1: {DocAST: &ExprAST{ExprID: 1}},
+		}
+		mixedTimed := &internalpb.ExecutionExplain{
+			Version: 1,
+			Group: &internalpb.ExplainSegmentGroup{
+				Segments:       3,
+				SealedSegments: 3,
+				RowsTotal:      300,
+				Operators: []*internalpb.ExplainOperatorStats{{
+					Kind:           internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+					Segments:       3,
+					CachedSegments: 2,
+					RowsIn:         300,
+					RowsOut:        30,
+					Time:           &internalpb.ExplainTimeAccum{Count: 3, SumUs: 520, MinUs: 8, MaxUs: 500},
+					Conditions: []*internalpb.ExplainConditionStats{{
+						ExprId:       1,
+						FieldId:      101,
+						Segments:     3,
+						RowsIn:       300,
+						IdxScan:      100,
+						RowsOut:      30,
+						EvalTime:     &internalpb.ExplainTimeAccum{Count: 3, SumUs: 500, MinUs: 8, MaxUs: 480},
+						PrefetchTime: &internalpb.ExplainTimeAccum{Count: 3, SumUs: 150, MinUs: 0, MaxUs: 150},
+						Used: []*internalpb.ExplainIndexUseStats{{
+							IndexId:  501,
+							Family:   "sort",
+							Segments: 1,
+							RowsIn:   100,
+							IdxScan:  100,
+							RowsOut:  10,
+							EvalTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 480, MinUs: 480, MaxUs: 480},
+						}},
+						Reasons: []*internalpb.ExplainDeclineStats{{
+							Reason:       "cached",
+							Segments:     2,
+							RowsIn:       200,
+							RowsOut:      20,
+							EvalTime:     &internalpb.ExplainTimeAccum{Count: 2, SumUs: 20, MinUs: 8, MaxUs: 12},
+							PrefetchTime: &internalpb.ExplainTimeAccum{Count: 2, SumUs: 0, MinUs: 0, MaxUs: 0},
+						}},
+					}},
+				}},
+			},
+		}
+		summary := SummarizeWithSubSearches([]*internalpb.ExecutionExplain{mixedTimed}, leaves, nil, asts)
+		require.Len(t, summary.Operators, 1)
+		assert.Equal(t, &TimeStats{SumUs: 520, MinUs: 8, AvgUs: 173, MaxUs: 500}, summary.Operators[0].TimeUs)
+		all := summary.AllConditions()
+		require.Len(t, all, 1)
+		assert.Equal(t, 3, all[0].Segments)
+		assert.Equal(t, &TimeStats{SumUs: 500, MinUs: 8, AvgUs: 166, MaxUs: 480}, all[0].EvalTimeUs)
+		assert.Equal(t, &TimeStats{SumUs: 150, MinUs: 0, AvgUs: 50, MaxUs: 150}, all[0].PrefetchTimeUs)
+		require.Len(t, all[0].Used, 1)
+		assert.Equal(t, &TimeStats{SumUs: 480, MinUs: 480, AvgUs: 480, MaxUs: 480}, all[0].Used[0].EvalTimeUs)
+		require.Len(t, all[0].Reasons, 1)
+		assert.Equal(t, &TimeStats{SumUs: 20, MinUs: 8, AvgUs: 10, MaxUs: 12}, all[0].Reasons[0].EvalTimeUs)
+	})
+
 	t.Run("compound OR/NOT/MATCH AST keeps operator cached_segments without fabricating per-leaf rows", func(t *testing.T) {
 		leaves := map[int64]LeafInfo{
 			1: {Condition: "a == 1", Type: "equal", FieldID: 101, Field: "a"},
@@ -479,4 +543,165 @@ func TestMatchZeroCountAndMultiOperandSubItemRendering(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(rawJSON), &decoded))
 	assert.Equal(t, int64(0), decoded.Operators[0].Conditions[0].Count)
 	assert.True(t, decoded.Operators[0].Conditions[0].HasCount)
+}
+
+func TestSummarizeTimingStatsPrefetchWaitAndTextJSONFormatting(t *testing.T) {
+	leaves := map[int64]LeafInfo{
+		1: {Condition: `title contains "%降噪%"`, Type: "contains", FieldID: 101, Field: "title"},
+		2: {Condition: "stock > 0", Type: "range", FieldID: 102, Field: "stock"},
+	}
+
+	// Segment 1: evaluated both leaves; filter blocked 79ms waiting on 80ms async prefetch.
+	seg1 := singleSegmentExplain(false, 50000,
+		&internalpb.ExplainOperatorStats{
+			Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+			Segments:         1,
+			RowsIn:           50000,
+			RowsOut:          30,
+			Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 81000, MinUs: 81000, MaxUs: 81000},
+			PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 79000, MinUs: 79000, MaxUs: 79000},
+			Conditions: []*internalpb.ExplainConditionStats{
+				{
+					ExprId:       1,
+					FieldId:      101,
+					Segments:     1,
+					RowsIn:       50000,
+					IdxScan:      50000,
+					RawScan:      30,
+					RowsOut:      30,
+					EvalOrders:   []*internalpb.ExplainEvalOrderCount{{EvalOrder: 1, Segments: 1}},
+					EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+					PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 80000, MinUs: 80000, MaxUs: 80000},
+					Used: []*internalpb.ExplainIndexUseStats{{
+						IndexId:      501,
+						Family:       "ngram",
+						Segments:     1,
+						RowsIn:       50000,
+						IdxScan:      50000,
+						RawScan:      30,
+						RowsOut:      30,
+						EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+						PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 80000, MinUs: 80000, MaxUs: 80000},
+					}},
+				},
+				{
+					ExprId:       2,
+					FieldId:      102,
+					Segments:     1,
+					RowsIn:       30,
+					IdxScan:      30,
+					RowsOut:      30,
+					EvalOrders:   []*internalpb.ExplainEvalOrderCount{{EvalOrder: 2, Segments: 1}},
+					EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 200, MinUs: 200, MaxUs: 200},
+					PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+				},
+			},
+		},
+		&internalpb.ExplainOperatorStats{
+			Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+			Segments:         1,
+			RowsIn:           30,
+			RowsOut:          10,
+			Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 4000, MinUs: 4000, MaxUs: 4000},
+			PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+		},
+	)
+
+	// Segment 2: leaf 1 returned 0 rows so leaf 2 was short-circuited (skipped_segments=1),
+	// though leaf 2's background prefetch still ran for 400us.
+	seg2 := singleSegmentExplain(true, 10000,
+		&internalpb.ExplainOperatorStats{
+			Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+			Segments:         1,
+			RowsIn:           10000,
+			RowsOut:          0,
+			Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1000, MinUs: 1000, MaxUs: 1000},
+			PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+			Conditions: []*internalpb.ExplainConditionStats{
+				{
+					ExprId:          1,
+					FieldId:         101,
+					Segments:        1,
+					RawScanSegments: 1,
+					RowsIn:          10000,
+					RawScan:         10000,
+					RowsOut:         0,
+					EvalOrders:      []*internalpb.ExplainEvalOrderCount{{EvalOrder: 1, Segments: 1}},
+					EvalTime:        &internalpb.ExplainTimeAccum{Count: 1, SumUs: 900, MinUs: 900, MaxUs: 900},
+					PrefetchTime:    &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+					Reasons: []*internalpb.ExplainDeclineStats{{
+						Reason:       "growing",
+						Segments:     1,
+						RowsIn:       10000,
+						RawScan:      10000,
+						RowsOut:      0,
+						EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 900, MinUs: 900, MaxUs: 900},
+						PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+					}},
+				},
+				{
+					ExprId:          2,
+					FieldId:         102,
+					Segments:        1,
+					SkippedSegments: 1,
+					EvalOrders:      []*internalpb.ExplainEvalOrderCount{{EvalOrder: 2, Segments: 1}},
+					PrefetchTime:    &internalpb.ExplainTimeAccum{Count: 1, SumUs: 400, MinUs: 400, MaxUs: 400},
+				},
+			},
+		},
+		&internalpb.ExplainOperatorStats{
+			Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+			Segments:         1,
+			RowsIn:           0,
+			RowsOut:          0,
+			Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 100, MinUs: 100, MaxUs: 100},
+			PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+		},
+	)
+
+	summary := Summarize([]*internalpb.ExecutionExplain{seg1, seg2}, leaves)
+	NameIndexUses(summary, map[int64]string{501: "title_ngram"})
+
+	require.Len(t, summary.Operators, 2)
+	fOp := summary.Operators[0]
+	assert.Equal(t, &TimeStats{SumUs: 82000, MinUs: 1000, AvgUs: 41000, MaxUs: 81000}, fOp.TimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 79000, MinUs: 0, AvgUs: 39500, MaxUs: 79000}, fOp.PrefetchWaitTimeUs)
+
+	// vector_search had prefetch_wait_time sum=0, so PrefetchWaitTimeUs is omitted (nil).
+	vsOp := summary.Operators[1]
+	assert.Equal(t, &TimeStats{SumUs: 4100, MinUs: 100, AvgUs: 2050, MaxUs: 4000}, vsOp.TimeUs)
+	assert.Nil(t, vsOp.PrefetchWaitTimeUs)
+
+	// Leaf 2 has 1 evaluated segment (200us) and 1 skipped segment (prefetch 400us).
+	leaf2 := fOp.Conditions[1]
+	assert.Equal(t, 1, leaf2.SkippedSegments)
+	assert.Equal(t, &TimeStats{SumUs: 200, MinUs: 200, AvgUs: 200, MaxUs: 200}, leaf2.EvalTimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 400, MinUs: 0, AvgUs: 200, MaxUs: 400}, leaf2.PrefetchTimeUs)
+
+	text := RenderSummaryText(summary)
+	assert.Contains(t, text, "[op 0] filter (segments=2, rows: 60000 -> 30, time_us: avg=41000, max=81000, min=1000, sum=82000, prefetch_wait_us: avg=39500, max=79000, min=0, sum=79000)")
+	assert.Contains(t, text, "[op 1] vector_search (segments=2, rows: 30 -> 10, time_us: avg=2050, max=4000, min=100, sum=4100)")
+	assert.NotContains(t, text, "[op 1] vector_search (segments=2, rows: 30 -> 10, time_us: avg=2050, max=4000, min=100, sum=4100, prefetch_wait_us")
+	assert.Contains(t, text, "expr: stock > 0 (segments=2, skipped_segments=1, rows: 30 -> 30, idx_scan=30, raw_scan=0, eval_order=2, eval_us=200, prefetch_us: avg=200, max=400, min=0, sum=400)")
+
+	rawJSON, err := RenderSummaryJSON(summary)
+	require.NoError(t, err)
+	assert.Contains(t, rawJSON, `"prefetch_wait_time_us":{"sum_us":79000,"min_us":0,"avg_us":39500,"max_us":79000}`)
+
+	var roundTrip Summary
+	require.NoError(t, json.Unmarshal([]byte(rawJSON), &roundTrip))
+	assert.Equal(t, summary.Operators[0].PrefetchWaitTimeUs, roundTrip.Operators[0].PrefetchWaitTimeUs)
+	assert.Equal(t, leaf2.EvalTimeUs, roundTrip.Operators[0].Conditions[1].EvalTimeUs)
+	assert.Equal(t, leaf2.PrefetchTimeUs, roundTrip.Operators[0].Conditions[1].PrefetchTimeUs)
+
+	// Mixed timed + untimed segments (rolling upgrade) suppress incomplete operator timing.
+	untimedSeg := singleSegmentExplain(false, 500, &internalpb.ExplainOperatorStats{
+		Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+		Segments: 1,
+		RowsIn:   500,
+		RowsOut:  10,
+	})
+	mixed := Summarize([]*internalpb.ExecutionExplain{seg1, untimedSeg}, leaves)
+	assert.Nil(t, mixed.Operators[0].TimeUs)
+	assert.Nil(t, mixed.Operators[0].PrefetchWaitTimeUs)
 }

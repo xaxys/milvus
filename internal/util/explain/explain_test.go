@@ -507,3 +507,193 @@ func TestMergeStage1ExplainStatelessModes(t *testing.T) {
 		assert.Equal(t, int64(2), evictOp.GetConditions()[0].GetSegments())
 	})
 }
+
+func TestMergeStage1ExplainTimingAndPrefetchWait(t *testing.T) {
+	stage1 := &internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:       2,
+			SealedSegments: 2,
+			RowsTotal:      1000,
+			Operators: []*internalpb.ExplainOperatorStats{{
+				Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+				Segments:         2,
+				RowsIn:           1000,
+				RowsOut:          80,
+				Time:             &internalpb.ExplainTimeAccum{Count: 2, SumUs: 3000, MinUs: 1000, MaxUs: 2000},
+				PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 2, SumUs: 1200, MinUs: 400, MaxUs: 800},
+				Conditions: []*internalpb.ExplainConditionStats{{
+					ExprId:       1,
+					FieldId:      101,
+					Segments:     2,
+					RowsIn:       1000,
+					IdxScan:      1000,
+					RowsOut:      80,
+					EvalTime:     &internalpb.ExplainTimeAccum{Count: 2, SumUs: 1600, MinUs: 600, MaxUs: 1000},
+					PrefetchTime: &internalpb.ExplainTimeAccum{Count: 2, SumUs: 5000, MinUs: 2000, MaxUs: 3000},
+					Used: []*internalpb.ExplainIndexUseStats{{
+						IndexId:      5001,
+						Family:       "sort",
+						Segments:     2,
+						RowsIn:       1000,
+						IdxScan:      1000,
+						RowsOut:      80,
+						EvalTime:     &internalpb.ExplainTimeAccum{Count: 2, SumUs: 1600, MinUs: 600, MaxUs: 1000},
+						PrefetchTime: &internalpb.ExplainTimeAccum{Count: 2, SumUs: 5000, MinUs: 2000, MaxUs: 3000},
+					}},
+				}},
+			}},
+		},
+	}
+
+	// Stage 2 ran pre-filter on 2 sealed segments (reused Stage 1 whole-filter cache)
+	// plus 1 cold growing segment merged separately after Stage 1 sealed replacement.
+	stage2SealedPre := &internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:       2,
+			SealedSegments: 2,
+			RowsTotal:      1000,
+			Operators: []*internalpb.ExplainOperatorStats{
+				{
+					Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+					Segments:         2,
+					CachedSegments:   2,
+					RowsIn:           1000,
+					RowsOut:          80,
+					Time:             &internalpb.ExplainTimeAccum{Count: 2, SumUs: 22, MinUs: 10, MaxUs: 12},
+					PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 2, SumUs: 0, MinUs: 0, MaxUs: 0},
+				},
+				{
+					Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+					Segments:         2,
+					RowsIn:           80,
+					RowsOut:          10,
+					Time:             &internalpb.ExplainTimeAccum{Count: 2, SumUs: 3000, MinUs: 1200, MaxUs: 1800},
+					PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 2, SumUs: 300, MinUs: 0, MaxUs: 300},
+				},
+			},
+		},
+	}
+	stage2Growing := &internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:        1,
+			GrowingSegments: 1,
+			RowsTotal:       500,
+			Operators: []*internalpb.ExplainOperatorStats{
+				{
+					Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+					Segments:         1,
+					RowsIn:           500,
+					RowsOut:          40,
+					Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 600, MinUs: 600, MaxUs: 600},
+					PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+					Conditions: []*internalpb.ExplainConditionStats{{
+						ExprId:          1,
+						FieldId:         101,
+						Segments:        1,
+						RawScanSegments: 1,
+						RowsIn:          500,
+						RawScan:         500,
+						RowsOut:         40,
+						EvalTime:        &internalpb.ExplainTimeAccum{Count: 1, SumUs: 500, MinUs: 500, MaxUs: 500},
+						PrefetchTime:    &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+						Reasons: []*internalpb.ExplainDeclineStats{{
+							Reason:       "growing",
+							Segments:     1,
+							RowsIn:       500,
+							RawScan:      500,
+							RowsOut:      40,
+							EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 500, MinUs: 500, MaxUs: 500},
+							PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+						}},
+					}},
+				},
+				{
+					Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+					Segments:         1,
+					RowsIn:           40,
+					RowsOut:          10,
+					Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+					PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+				},
+			},
+		},
+	}
+
+	mergedSealed, ok := MergeStage1Explain(stage2SealedPre, stage1)
+	require.True(t, ok)
+	merged := Merge(mergedSealed, stage2Growing)
+
+	summary := Summarize([]*internalpb.ExecutionExplain{merged}, map[int64]LeafInfo{
+		1: {Condition: "price > 10", Type: "range", FieldID: 101, Field: "price"},
+	})
+	require.Len(t, summary.Operators, 2)
+	fOp := summary.Operators[0]
+	assert.Equal(t, &TimeStats{SumUs: 3600, MinUs: 600, AvgUs: 1200, MaxUs: 2000}, fOp.TimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 1200, MinUs: 0, AvgUs: 400, MaxUs: 800}, fOp.PrefetchWaitTimeUs)
+	require.Len(t, fOp.Conditions, 1)
+	cond := fOp.Conditions[0]
+	assert.Equal(t, &TimeStats{SumUs: 2100, MinUs: 500, AvgUs: 700, MaxUs: 1000}, cond.EvalTimeUs)
+	assert.Equal(t, &TimeStats{SumUs: 5000, MinUs: 0, AvgUs: 1666, MaxUs: 3000}, cond.PrefetchTimeUs)
+
+	// Over-counted accumulator (Count > expectedDenom) is suppressed rather than emitted
+	// with a mismatched denominator.
+	assert.Nil(t, primaryTimeStats(&internalpb.ExplainTimeAccum{Count: 3, SumUs: 300, MinUs: 10, MaxUs: 250}, 2))
+
+	// Zero-row sealed segments bypass ExprResCacheManager in both stages and record into
+	// op.Time; MergeStage1Explain replaces s2Op directly with s1Op without double-counting.
+	s1WithZeroRow := &internalpb.ExecutionExplain{
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:       2,
+			SealedSegments: 2,
+			RowsTotal:      100,
+			Operators: []*internalpb.ExplainOperatorStats{
+				{
+					Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+					Segments: 2,
+					RowsIn:   100,
+					RowsOut:  20,
+					Time:     &internalpb.ExplainTimeAccum{Count: 2, SumUs: 502, MinUs: 2, MaxUs: 500},
+					Conditions: []*internalpb.ExplainConditionStats{
+						{
+							ExprId:   1,
+							FieldId:  101,
+							Segments: 1,
+							RowsIn:   100,
+							RowsOut:  20,
+							IdxScan:  100,
+							EvalTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 480, MinUs: 480, MaxUs: 480},
+						},
+					},
+				},
+			},
+		},
+	}
+	s2WithZeroRow := &internalpb.ExecutionExplain{
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:       2,
+			SealedSegments: 2,
+			RowsTotal:      100,
+			Operators: []*internalpb.ExplainOperatorStats{
+				{
+					Kind:           internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+					Segments:       2,
+					CachedSegments: 1,
+					RowsIn:         100,
+					RowsOut:        20,
+					Time:           &internalpb.ExplainTimeAccum{Count: 2, SumUs: 6, MinUs: 1, MaxUs: 5},
+				},
+			},
+		},
+	}
+	mergedZeroRow, ok := MergeStage1Explain(s2WithZeroRow, s1WithZeroRow)
+	require.True(t, ok)
+	zeroRowSummary := Summarize([]*internalpb.ExecutionExplain{mergedZeroRow}, map[int64]LeafInfo{
+		1: {Condition: "price > 10", Type: "range", FieldID: 101, Field: "price"},
+	})
+	require.Len(t, zeroRowSummary.Operators, 1)
+	assert.Equal(t, 2, zeroRowSummary.Operators[0].Segments)
+	assert.Equal(t, &TimeStats{SumUs: 502, MinUs: 2, AvgUs: 251, MaxUs: 500}, zeroRowSummary.Operators[0].TimeUs)
+}

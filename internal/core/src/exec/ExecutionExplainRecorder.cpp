@@ -152,6 +152,15 @@ ExecutionExplainRecorder::Finish() const {
     const bool fold_filter_into_mvcc =
         (folded_filter_idx >= 0 && mvcc_idx >= 0);
 
+    auto set_time_accum = [](proto::internal::ExplainTimeAccum* dst,
+                             int64_t us) {
+        const int64_t clamped = std::max<int64_t>(0, us);
+        dst->set_count(1);
+        dst->set_sum_us(clamped);
+        dst->set_min_us(clamped);
+        dst->set_max_us(clamped);
+    };
+
     std::vector<proto::internal::ExplainOperatorStats*> op_nodes;
     if (!operators_.empty()) {
         op_nodes.resize(operators_.size(), nullptr);
@@ -174,12 +183,28 @@ ExecutionExplainRecorder::Finish() const {
             if (op.cached) {
                 op_pb->set_cached_segments(1);
             }
-            const int64_t rows_in =
-                (fold_filter_into_mvcc && static_cast<int>(i) == mvcc_idx)
-                    ? operators_[folded_filter_idx].rows_in
-                    : op.rows_in;
+            const bool is_folded_mvcc =
+                fold_filter_into_mvcc && static_cast<int>(i) == mvcc_idx;
+            const int64_t rows_in = is_folded_mvcc
+                                        ? operators_[folded_filter_idx].rows_in
+                                        : op.rows_in;
             op_pb->set_rows_in(rows_in);
             op_pb->set_rows_out(op.rows_out);
+            const int64_t raw_time_ns =
+                is_folded_mvcc ? std::max<int64_t>(
+                                     0, operators_[folded_filter_idx].time_ns) +
+                                     std::max<int64_t>(0, op.time_ns)
+                               : std::max<int64_t>(0, op.time_ns);
+            const int64_t raw_pw_ns =
+                is_folded_mvcc
+                    ? std::max<int64_t>(
+                          0, operators_[folded_filter_idx].prefetch_wait_ns) +
+                          std::max<int64_t>(0, op.prefetch_wait_ns)
+                    : std::max<int64_t>(0, op.prefetch_wait_ns);
+            const int64_t clamped_pw_ns = std::min(raw_time_ns, raw_pw_ns);
+            set_time_accum(op_pb->mutable_time(), NsToUs(raw_time_ns));
+            set_time_accum(op_pb->mutable_prefetch_wait_time(),
+                           NsToUs(clamped_pw_ns));
             op_nodes[i] = op_pb;
         }
     }
@@ -199,7 +224,8 @@ ExecutionExplainRecorder::Finish() const {
         }
         const auto* slot = find_slot(expr_id);
         if (slot != nullptr &&
-            slot->evaluated.load(std::memory_order_relaxed)) {
+            (slot->evaluated.load(std::memory_order_relaxed) ||
+             slot->eval_ns.load(std::memory_order_relaxed) > 0)) {
             return false;
         }
         return true;
@@ -414,7 +440,20 @@ ExecutionExplainRecorder::Finish() const {
                     c_pb->set_element_hits(cond.element_hits);
                     standalone_out = std::max(standalone_out, cond.rows_out);
                 }
+                int64_t eval_us = 0;
+                int64_t pf_us = 0;
+                if (const auto* slot = find_slot(cond.expr_id);
+                    slot != nullptr) {
+                    eval_us =
+                        NsToUs(slot->eval_ns.load(std::memory_order_relaxed));
+                    pf_us = NsToUs(
+                        slot->prefetch_ns.load(std::memory_order_relaxed));
+                }
                 if (cond.expr_id != 0) {
+                    set_time_accum(c_pb->mutable_prefetch_time(), pf_us);
+                    if (!cond_skipped) {
+                        set_time_accum(c_pb->mutable_eval_time(), eval_us);
+                    }
                     if (auto oit = eval_orders_.find(cond.expr_id);
                         oit != eval_orders_.end() && oit->second > 0) {
                         auto* eo = c_pb->add_eval_orders();
@@ -442,6 +481,11 @@ ExecutionExplainRecorder::Finish() const {
                         u_pb->set_idx_scan(u.idx_scan);
                         u_pb->set_raw_scan(u.raw_scan);
                         u_pb->set_element_hits(u.element_hits);
+                        if (single_access_path && cond.expr_id != 0) {
+                            set_time_accum(u_pb->mutable_eval_time(), eval_us);
+                            set_time_accum(u_pb->mutable_prefetch_time(),
+                                           pf_us);
+                        }
                     }
                     bool has_raw_fallback = false;
                     for (const auto& [reason, r] : cond.reasons) {
@@ -458,6 +502,11 @@ ExecutionExplainRecorder::Finish() const {
                         }
                         r_pb->set_idx_scan(r.idx_scan);
                         r_pb->set_raw_scan(r.raw_scan);
+                        if (single_access_path && cond.expr_id != 0) {
+                            set_time_accum(r_pb->mutable_eval_time(), eval_us);
+                            set_time_accum(r_pb->mutable_prefetch_time(),
+                                           pf_us);
+                        }
                     }
                     if (has_raw_fallback) {
                         c_pb->set_raw_scan_segments(1);

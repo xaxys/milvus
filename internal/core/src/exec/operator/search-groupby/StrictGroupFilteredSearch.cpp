@@ -15,6 +15,7 @@
 // limitations under the License.
 #include "SearchGroupByOperator.h"
 
+#include <array>
 #include <chrono>
 #include <atomic>
 #include <limits>
@@ -23,6 +24,7 @@
 #include "common/Tracer.h"
 #include "common/Consts.h"
 #include "common/JsonUtils.h"
+#include "exec/operator/Utils.h"
 #include "exec/operator/search-groupby/GroupMembership.h"
 #include "fmt/format.h"
 #include "monitor/Monitor.h"
@@ -66,6 +68,22 @@ struct GroupByMap {
     size_t
     GetGroupCount() const {
         return group_map_.size();
+    }
+
+    size_t
+    MinPullsToCapacity() const noexcept {
+        const auto cap = static_cast<size_t>(std::max(0, group_capacity_));
+        return group_map_.size() < cap ? (cap - group_map_.size()) : 0;
+    }
+
+    size_t
+    MinPullsToEnough() const noexcept {
+        if (!strict_group_size_) {
+            return MinPullsToCapacity();
+        }
+        return enough_group_count_ < group_capacity_
+                   ? static_cast<size_t>(group_capacity_ - enough_group_count_)
+                   : 0;
     }
 
     void
@@ -332,7 +350,9 @@ RecordStrictGroupPhase2Stats(const StrictGroupPhase2Stats& stats) {
         stats.bitmap_build_us / 1000.0));
 }
 
-template <typename T, typename StopPredicate>
+template <typename T,
+          typename StopPredicate,
+          typename MinPullsFn = size_t (*)()>
 size_t
 ConsumeGroupByIteratorUntil(
     const std::shared_ptr<VectorIterator>& iterator,
@@ -340,24 +360,41 @@ ConsumeGroupByIteratorUntil(
     GroupByMap<T>& group_map,
     GroupByResultCollector<T>& collector,
     StopPredicate&& should_stop,
-    size_t max_candidates = std::numeric_limits<size_t>::max()) {
+    size_t max_candidates = std::numeric_limits<size_t>::max(),
+    MinPullsFn&& min_pulls = +[]() noexcept { return size_t(1); }) {
+    constexpr size_t kMaxPullBatch = 64;
+    std::array<std::pair<int64_t, float>, kMaxPullBatch> pulled;
     size_t candidates = 0;
-    while (candidates < max_candidates && !should_stop() &&
-           iterator->HasNext()) {
-        auto offset_dis_pair = iterator->Next();
-        ++candidates;
-        AssertInfo(
-            offset_dis_pair.has_value(),
-            "Wrong state! iterator cannot return valid result whereas it "
-            "still tells hasNext, terminate groupBy operation");
-        auto offset = offset_dis_pair->first;
-        auto distance = offset_dis_pair->second;
-        if (collector.IsAcceptedOffset(offset)) {
-            continue;
+    while (candidates < max_candidates && !should_stop()) {
+        const size_t batch_limit = std::min({kMaxPullBatch,
+                                             max_candidates - candidates,
+                                             std::max<size_t>(1, min_pulls())});
+        size_t pulled_count = 0;
+        {
+            CountingVectorIterator::ScopedBatchTimer pull_timer(iterator.get());
+            while (pulled_count < batch_limit && iterator->HasNext()) {
+                auto offset_dis_pair = iterator->Next();
+                AssertInfo(offset_dis_pair.has_value(),
+                           "Wrong state! iterator cannot return valid result "
+                           "whereas it still tells hasNext, terminate groupBy "
+                           "operation");
+                pulled[pulled_count++] = *offset_dis_pair;
+            }
         }
-        auto group = data_getter->Get(offset);
-        if (group_map.Push(group)) {
-            collector.Add(offset, distance, std::move(group));
+        if (pulled_count == 0) {
+            break;
+        }
+        candidates += pulled_count;
+        for (size_t i = 0; i < pulled_count; ++i) {
+            auto offset = pulled[i].first;
+            auto distance = pulled[i].second;
+            if (collector.IsAcceptedOffset(offset)) {
+                continue;
+            }
+            auto group = data_getter->Get(offset);
+            if (group_map.Push(group)) {
+                collector.Add(offset, distance, std::move(group));
+            }
         }
     }
     return candidates;
@@ -471,7 +508,8 @@ TryStrictGroupFiltered(const std::shared_ptr<VectorIterator>& iterator,
             group_map,
             collector,
             [&] { return group_map.IsGroupCapacityReached(); },
-            static_cast<size_t>(phase1_budget));
+            static_cast<size_t>(phase1_budget),
+            [&] { return group_map.MinPullsToCapacity(); });
         if (stats.phase1_candidates == static_cast<size_t>(phase1_budget) &&
             !group_map.IsGroupCapacityReached()) {
             group_map.LockCurrentGroups();
@@ -714,9 +752,14 @@ TrySingleFieldStrictGroup(
         GroupByResultCollector<T> collector;
         if (!TryStrictGroupFiltered(
                 iterator, getter, map, collector, &context)) {
-            ConsumeGroupByIteratorUntil(iterator, getter, map, collector, [&] {
-                return map.IsGroupResEnough();
-            });
+            ConsumeGroupByIteratorUntil(
+                iterator,
+                getter,
+                map,
+                collector,
+                [&] { return map.IsGroupResEnough(); },
+                std::numeric_limits<size_t>::max(),
+                [&] { return map.MinPullsToEnough(); });
         }
         std::vector<GroupByValueType> single_groups;
         collector.SortAndAppend(

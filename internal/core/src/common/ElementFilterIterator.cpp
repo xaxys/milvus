@@ -27,6 +27,7 @@
 #include "common/Vector.h"
 #include "exec/expression/EvalCtx.h"
 #include "exec/expression/Expr.h"
+#include "exec/operator/Utils.h"
 
 namespace milvus {
 
@@ -45,8 +46,11 @@ ElementFilterIterator::ElementFilterIterator(
 bool
 ElementFilterIterator::HasNext() {
     // If cache is empty and base iterator has more, fetch more
-    while (filtered_buffer_.empty() && base_iterator_->HasNext()) {
+    while (filtered_buffer_.empty()) {
         FetchAndFilterBatch();
+        if (element_ids_buffer_.empty()) {
+            break;
+        }
     }
     return !filtered_buffer_.empty();
 }
@@ -72,12 +76,17 @@ ElementFilterIterator::FetchAndFilterBatch() {
     element_ids_buffer_.reserve(kBatchSize);
     distances_buffer_.reserve(kBatchSize);
 
-    while (base_iterator_->HasNext() &&
-           element_ids_buffer_.size() < kBatchSize) {
-        auto pair = base_iterator_->Next();
-        if (pair.has_value()) {
-            element_ids_buffer_.push_back(static_cast<int32_t>(pair->first));
-            distances_buffer_.push_back(pair->second);
+    {
+        exec::CountingVectorIterator::ScopedBatchTimer pull_timer(
+            base_iterator_.get());
+        while (base_iterator_->HasNext() &&
+               element_ids_buffer_.size() < kBatchSize) {
+            auto pair = base_iterator_->Next();
+            if (pair.has_value()) {
+                element_ids_buffer_.push_back(
+                    static_cast<int32_t>(pair->first));
+                distances_buffer_.push_back(pair->second);
+            }
         }
     }
 

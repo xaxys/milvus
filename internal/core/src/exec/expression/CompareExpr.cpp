@@ -580,8 +580,10 @@ PhyCompareFilterExpr::ExecCompareWithValueLookup(OpType, EvalCtx& context) {
         const int64_t active_rows =
             !bitmap_input.empty() ? static_cast<int64_t>(bitmap_input.count())
                                   : real_batch_size;
-        RecordCompareExplain(
-            left_values != nullptr, right_values != nullptr, active_rows);
+        if (active_rows > 0) {
+            RecordCompareExplain(
+                left_values != nullptr, right_values != nullptr, active_rows);
+        }
     }
     // The sequential cursor (current_data_global_pos_) is advanced once per
     // Eval by the caller, so this path must not move it again.
@@ -621,10 +623,12 @@ PhyCompareFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                            ? static_cast<int64_t>(bitmap_input.count())
                            : static_cast<int64_t>(col->size());
             }
-            if (rows > 0 || !explain_recorded_) {
+            if (rows > 0 || (active_count_ == 0 && !has_offset_input_ &&
+                             !explain_recorded_)) {
                 RecordCompareExplain(false, false, rows);
             }
-        } else if (result == nullptr && !explain_recorded_) {
+        } else if (result == nullptr && active_count_ == 0 &&
+                   !has_offset_input_ && !explain_recorded_) {
             RecordCompareExplain(is_left_indexed_, is_right_indexed_, 0);
         }
     }

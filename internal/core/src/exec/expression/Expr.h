@@ -551,6 +551,19 @@ class Expr : public std::enable_shared_from_this<Expr> {
         RefreshExplainSlot();
     }
 
+    static bool
+    HasActiveEvalInput(EvalCtx& context) noexcept {
+        if (auto* offsets = context.get_offset_input();
+            offsets != nullptr && offsets->empty()) {
+            return false;
+        }
+        const auto& bitmap = context.get_bitmap_input();
+        if (!bitmap.empty() && bitmap.none()) {
+            return false;
+        }
+        return true;
+    }
+
     virtual void
     MarkNullRejecting() {
     }
@@ -597,8 +610,18 @@ class Expr : public std::enable_shared_from_this<Expr> {
 
     virtual void
     WaitPrefetch() {
+        std::exception_ptr first_exc;
         for (const auto& input : inputs_) {
-            input->WaitPrefetch();
+            try {
+                input->WaitPrefetch();
+            } catch (...) {
+                if (!first_exc) {
+                    first_exc = std::current_exception();
+                }
+            }
+        }
+        if (first_exc) {
+            std::rethrow_exception(first_exc);
         }
     }
 
@@ -4563,10 +4586,32 @@ class SegmentExpr : public Expr {
     // completed.
     struct LeafEvalGuard {
         SegmentExpr* self{nullptr};
+        bool record_decision{false};
+
+        LeafEvalGuard() noexcept = default;
+
+        LeafEvalGuard(SegmentExpr* s, bool rec) noexcept
+            : self(s), record_decision(rec) {
+        }
+
+        LeafEvalGuard(LeafEvalGuard&& other) noexcept
+            : self(std::exchange(other.self, nullptr)),
+              record_decision(std::exchange(other.record_decision, false)) {
+        }
+
+        LeafEvalGuard(const LeafEvalGuard&) = delete;
+        LeafEvalGuard&
+        operator=(const LeafEvalGuard&) = delete;
+
+        void
+        Cancel() noexcept {
+            record_decision = false;
+        }
+
         ~LeafEvalGuard() noexcept {
             if (self != nullptr) {
                 self->current_bitmap_input_ = TargetBitmapView{};
-                if (!self->explain_decision_recorded_ &&
+                if (record_decision && !self->explain_decision_recorded_ &&
                     std::uncaught_exceptions() == 0) {
                     self->EnsureExplainDecisionRecorded();
                 }
@@ -4581,13 +4626,25 @@ class SegmentExpr : public Expr {
             !prefetch_future_.has_value()) {
             SetHasOffsetInput(true);
         }
-        WaitPrefetch();
+        JoinPrefetchFuture();
         SetHasOffsetInput(input != nullptr);
         EnsureExecPathDetermined();
-        if (explain_ != nullptr) {
-            current_bitmap_input_ = context.get_bitmap_input();
+
+        if (explain_ == nullptr) {
+            return LeafEvalGuard{};
         }
-        return LeafEvalGuard{explain_ != nullptr ? this : nullptr};
+
+        const bool has_batch_rows =
+            input != nullptr ? !input->empty() : (GetNextBatchSize() > 0);
+        if (!has_batch_rows || !HasActiveEvalInput(context)) {
+            if (active_count_ == 0 && input == nullptr) {
+                EnsureExplainDecisionRecorded();
+            }
+            return LeafEvalGuard{};
+        }
+
+        current_bitmap_input_ = context.get_bitmap_input();
+        return LeafEvalGuard(this, !explain_decision_recorded_);
     }
 
     void
@@ -4960,24 +5017,51 @@ class SegmentExpr : public Expr {
     PrefetchAsync(const std::shared_ptr<folly::CPUThreadPoolExecutor>
                       prefetch_pool) override {
         auto self = std::static_pointer_cast<SegmentExpr>(shared_from_this());
-        prefetch_future_.emplace(folly::via(prefetch_pool.get(), [self]() {
-            self->PrefetchOnCurrentThread();
-        }));
+        prefetch_future_.emplace(
+            folly::via(prefetch_pool.get(), [self, weak_rec = op_explain_]() {
+                const auto rec = weak_rec.lock();
+                self->PrefetchOnCurrentThread(rec != nullptr &&
+                                              rec.get() == self->explain_);
+            }));
     }
 
     // Execute the prefetch body without scheduling another task. This keeps
     // composition wrappers that already run on the prefetch pool from adding
     // a second queueing hop.
     void
-    PrefetchOnCurrentThread() {
+    PrefetchOnCurrentThread(bool track_explain = false) {
         if (op_ctx_ != nullptr &&
             op_ctx_->cancellation_token.isCancellationRequested()) {
             return;
         }
-        EnsureExecPathDetermined();
+        if (track_explain) {
+            const auto prep_start = std::chrono::steady_clock::now();
+            EnsureExecPathDetermined();
+            const auto prep_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - prep_start)
+                    .count();
+            if (prep_ns > 0) {
+                AttributePrefetchNs(prep_ns);
+            }
+        } else {
+            EnsureExecPathDetermined();
+        }
         if (exec_path_ != ExprExecPath::RawData &&
             selected_reader_ != nullptr) {
-            selected_reader_->Prefetch();
+            if (track_explain) {
+                const auto io_start = std::chrono::steady_clock::now();
+                selected_reader_->Prefetch();
+                const auto io_ns =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - io_start)
+                        .count();
+                if (io_ns > 0) {
+                    AttributePrefetchNs(io_ns);
+                }
+            } else {
+                selected_reader_->Prefetch();
+            }
         }
         if (exec_path_ == ExprExecPath::RawData) {
             auto column = CaptureDataScanResources().first;
@@ -4988,7 +5072,19 @@ class SegmentExpr : public Expr {
                 return;
             }
             if (ShouldPrefetchRawDataEagerly()) {
-                PrefetchRawData();
+                if (track_explain && !SkipsRawDataPrefetch()) {
+                    const auto io_start = std::chrono::steady_clock::now();
+                    PrefetchRawData();
+                    const auto io_ns =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - io_start)
+                            .count();
+                    if (io_ns > 0) {
+                        AttributePrefetchNs(io_ns);
+                    }
+                } else {
+                    PrefetchRawData();
+                }
                 prefetched_ = true;
             } else {
                 raw_data_prefetch_deferred_ = true;
@@ -5044,6 +5140,11 @@ class SegmentExpr : public Expr {
         return raw_data_prefetch_start_chunk_;
     }
 
+    virtual bool
+    SkipsRawDataPrefetch() const {
+        return false;
+    }
+
     virtual void
     PrefetchRawData() {
         PrefetchRawData(field_id_);
@@ -5082,17 +5183,25 @@ class SegmentExpr : public Expr {
     }
 
     void
-    WaitPrefetch() override {
+    JoinPrefetchFuture() {
         if (prefetch_future_.has_value()) {
             auto future = std::move(*prefetch_future_);
             prefetch_future_.reset();
             std::move(future).get();
-            return;
         }
-        EnsureExecPathDetermined();
+    }
+
+    void
+    WaitPrefetch() override {
+        JoinPrefetchFuture();
     }
 
  protected:
+    virtual void
+    AttributePrefetchNs(int64_t ns) {
+        ExecutionExplainRecorder::AddSlotPrefetchNs(explain_slot_, ns);
+    }
+
     // Non-reentrant nested-index check for callers already inside
     // DetermineExecPath(). Do not call CanUseNestedIndex() from there because
     // it re-enters EnsureExecPathDetermined()'s std::call_once.
@@ -5365,7 +5474,8 @@ void
 RecordWholeFilterCacheHitExplain(const std::vector<ExprPtr>& exprs,
                                  ExecutionExplainRecorder* explain,
                                  int64_t rows_in,
-                                 int64_t rows_out);
+                                 int64_t rows_out,
+                                 int64_t bare_leaf_eval_ns = 0);
 
 void
 MarkExplainDomainEmpty(const ExprPtr& expr, ExecutionExplainRecorder* explain);
@@ -5489,8 +5599,18 @@ class ExprSet {
 
     void
     WaitPrefetch() {
+        std::exception_ptr first_exc;
         for (const auto& expr : exprs_) {
-            expr->WaitPrefetch();
+            try {
+                expr->WaitPrefetch();
+            } catch (...) {
+                if (!first_exc) {
+                    first_exc = std::current_exception();
+                }
+            }
+        }
+        if (first_exc) {
+            std::rethrow_exception(first_exc);
         }
     }
 

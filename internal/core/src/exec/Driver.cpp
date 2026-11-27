@@ -20,8 +20,10 @@
 #include <folly/ScopeGuard.h>
 #include <folly/Try.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <exception>
 #include <memory>
 #include <string>
@@ -225,6 +227,7 @@ DriverFactory::CreateDriver(
     ctx->driver_ = driver.get();
     if (auto* qc = ctx->task_ ? ctx->task_->query_context().get() : nullptr;
         qc != nullptr && qc->explain() != nullptr) {
+        driver->explain_ = qc->explain();
         const auto* pg = qc->get_placeholder_group();
         const bool element_level_search =
             pg != nullptr && !pg->empty() && pg->at(0).element_level_;
@@ -371,6 +374,20 @@ Driver::initializeOperators() {
     if (!operatorsInitialized_.exchange(true, std::memory_order_acq_rel)) {
         // This thread won the initialization race. Perform initialization.
         for (auto& op : operators_) {
+            if (explain_ == nullptr) {
+                op->initialize();
+                continue;
+            }
+            const auto start = std::chrono::steady_clock::now();
+            auto guard = folly::makeGuard([&]() noexcept {
+                const auto ns =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - start)
+                        .count();
+                if (ns > 0) {
+                    explain_->AddOperatorTimeNs(op->get_operator_id(), ns);
+                }
+            });
             op->initialize();
         }
         // Use release semantics to ensure all initialization writes are
@@ -418,6 +435,9 @@ Driver::Close() {
         [task = ctx_->task_, this]() { Task::RemoveDriver(task, this); });
     std::exception_ptr close_error;
     for (auto& op : operators_) {
+        const auto close_start = explain_ != nullptr
+                                     ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
         try {
             op->WaitPrefetch();
         } catch (...) {
@@ -430,6 +450,15 @@ Driver::Close() {
         } catch (...) {
             if (close_error == nullptr) {
                 close_error = std::current_exception();
+            }
+        }
+        if (explain_ != nullptr) {
+            const auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - close_start)
+                    .count();
+            if (ns > 0) {
+                explain_->AddOperatorTimeNs(op->get_operator_id(), ns);
             }
         }
     }
@@ -462,55 +491,82 @@ Driver::Next(std::shared_ptr<BlockingState>& blocking_state) {
 //     (the classification chosen at the throw site, e.g. ExprInvalid, must
 //     survive to the CGO boundary instead of collapsing to UnexpectedError).
 //   - any other std::exception -> legacy UnexpectedError classification.
-#define CALL_OPERATOR(call_func, operator, method_name)                \
-    try {                                                              \
-        ExecutionExplainRecorder::ScopedActiveStep _active_step_guard( \
-            explain_recorder, (operator)->get_operator_id());          \
-        call_func;                                                     \
-    } catch (folly::FutureCancellation & e) {                          \
-        auto err_msg = fmt::format(                                    \
-            "Operator::{} cancelled for [Operator:{}, plan node "      \
-            "id: {}] : {}",                                            \
-            method_name,                                               \
-            operator->ToString(),                                      \
-            operator->get_plannode_id(),                               \
-            e.what());                                                 \
-        throw ExecOperatorException(ErrorCode::FollyCancel, err_msg);  \
-    } catch (milvus::SegcoreError & e) {                               \
-        std::string stack_trace = milvus::impl::EasyStackTrace();      \
-        auto err_msg = fmt::format(                                    \
-            "Operator::{} failed for [Operator:{}, plan node id: "     \
-            "{}] : {}\nStack trace: {}",                               \
-            method_name,                                               \
-            operator->ToString(),                                      \
-            operator->get_plannode_id(),                               \
-            e.what(),                                                  \
-            stack_trace);                                              \
-        LOG_ERROR("{}", err_msg);                                      \
-        throw ExecOperatorException(e.get_error_code(), err_msg);      \
-    } catch (std::exception & e) {                                     \
-        std::string stack_trace = milvus::impl::EasyStackTrace();      \
-        auto err_msg = fmt::format(                                    \
-            "Operator::{} failed for [Operator:{}, plan node id: "     \
-            "{}] : {}\nStack trace: {}",                               \
-            method_name,                                               \
-            operator->ToString(),                                      \
-            operator->get_plannode_id(),                               \
-            e.what(),                                                  \
-            stack_trace);                                              \
-        LOG_ERROR("{}", err_msg);                                      \
-        throw ExecOperatorException(err_msg);                          \
+#define CALL_OPERATOR(call_func, operator, method_name)                    \
+    try {                                                                  \
+        if (explain_ == nullptr) {                                         \
+            call_func;                                                     \
+        } else {                                                           \
+            const int32_t op_step_ = (operator)->get_operator_id();        \
+            const auto op_call_start_ = std::chrono::steady_clock::now();  \
+            auto op_time_guard_ = folly::makeGuard([&]() noexcept {        \
+                const auto ns =                                            \
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(  \
+                        std::chrono::steady_clock::now() - op_call_start_) \
+                        .count();                                          \
+                if (ns > 0 && op_step_ >= 0) {                             \
+                    if (static_cast<size_t>(op_step_) <                    \
+                        local_op_time_ns.size()) {                         \
+                        local_op_time_ns[op_step_] += ns;                  \
+                    } else {                                               \
+                        explain_->AddOperatorTimeNs(op_step_, ns);         \
+                    }                                                      \
+                }                                                          \
+            });                                                            \
+            call_func;                                                     \
+        }                                                                  \
+    } catch (folly::FutureCancellation & e) {                              \
+        auto err_msg = fmt::format(                                        \
+            "Operator::{} cancelled for [Operator:{}, plan node "          \
+            "id: {}] : {}",                                                \
+            method_name,                                                   \
+            operator->ToString(),                                          \
+            operator->get_plannode_id(),                                   \
+            e.what());                                                     \
+        throw ExecOperatorException(ErrorCode::FollyCancel, err_msg);      \
+    } catch (milvus::SegcoreError & e) {                                   \
+        std::string stack_trace = milvus::impl::EasyStackTrace();          \
+        auto err_msg = fmt::format(                                        \
+            "Operator::{} failed for [Operator:{}, plan node id: "         \
+            "{}] : {}\nStack trace: {}",                                   \
+            method_name,                                                   \
+            operator->ToString(),                                          \
+            operator->get_plannode_id(),                                   \
+            e.what(),                                                      \
+            stack_trace);                                                  \
+        LOG_ERROR("{}", err_msg);                                          \
+        throw ExecOperatorException(e.get_error_code(), err_msg);          \
+    } catch (std::exception & e) {                                         \
+        std::string stack_trace = milvus::impl::EasyStackTrace();          \
+        auto err_msg = fmt::format(                                        \
+            "Operator::{} failed for [Operator:{}, plan node id: "         \
+            "{}] : {}\nStack trace: {}",                                   \
+            method_name,                                                   \
+            operator->ToString(),                                          \
+            operator->get_plannode_id(),                                   \
+            e.what(),                                                      \
+            stack_trace);                                                  \
+        LOG_ERROR("{}", err_msg);                                          \
+        throw ExecOperatorException(err_msg);                              \
     }
 
 StopReason
 Driver::RunInternal(std::shared_ptr<Driver>& self,
                     std::shared_ptr<BlockingState>& blocking_state,
                     RowVectorPtr& result) {
+    std::array<int64_t, 16> local_op_time_ns{};
+    auto flush_local_op_time = folly::makeGuard([&]() noexcept {
+        if (explain_ == nullptr) {
+            return;
+        }
+        for (size_t step = 0; step < local_op_time_ns.size(); ++step) {
+            if (local_op_time_ns[step] > 0) {
+                explain_->AddOperatorTimeNs(static_cast<int32_t>(step),
+                                            local_op_time_ns[step]);
+                local_op_time_ns[step] = 0;
+            }
+        }
+    });
     try {
-        ExecutionExplainRecorder* explain_recorder =
-            (get_task() && get_task()->query_context())
-                ? get_task()->query_context()->explain()
-                : nullptr;
         initializeOperators();
         if (ENABLE_DRIVER_PREFETCH.load(std::memory_order_relaxed)) {
             std::call_once(self->once_, [self]() { self->PrefetchAsync(); });
@@ -620,7 +676,23 @@ Driver::RunInternal(std::shared_ptr<Driver>& self,
 void
 Driver::PrefetchAsync() {
     auto prefetch_pool = GetPrefetchThreadPool();
+    if (explain_ == nullptr) {
+        for (auto& op : operators_) {
+            op->PrefetchAsync(prefetch_pool);
+        }
+        return;
+    }
     for (auto& op : operators_) {
+        const auto start = std::chrono::steady_clock::now();
+        auto guard = folly::makeGuard([this, op = op.get(), start]() noexcept {
+            const auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count();
+            if (ns > 0) {
+                explain_->AddOperatorTimeNs(op->get_operator_id(), ns);
+            }
+        });
         op->PrefetchAsync(prefetch_pool);
     }
 }

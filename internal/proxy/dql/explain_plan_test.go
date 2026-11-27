@@ -988,3 +988,79 @@ func TestRenderExplainPreservesProxyASTTreeAndOrder(t *testing.T) {
 	require.Len(t, summary.Operators[0].Conditions[1].Children, 1)
 	assert.Equal(t, "stock in [1, 2]", summary.Operators[0].Conditions[1].Children[0].Condition)
 }
+
+func TestRenderExplainTimingAndPrefetchWaitInJSONAndText(t *testing.T) {
+	schema := &schemapb.CollectionSchema{
+		Fields: []*schemapb.FieldSchema{{FieldID: 101, Name: "title"}},
+	}
+	leaves := map[int64]explain.LeafInfo{
+		3: {Condition: `title contains "%降噪%"`, Type: "contains", FieldID: 101, Field: "title"},
+	}
+	seg := &internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:       1,
+			SealedSegments: 1,
+			RowsTotal:      50000,
+			Operators: []*internalpb.ExplainOperatorStats{
+				{
+					Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+					Segments:         1,
+					RowsIn:           50000,
+					RowsOut:          31,
+					Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 8100, MinUs: 8100, MaxUs: 8100},
+					PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 6300, MinUs: 6300, MaxUs: 6300},
+					Conditions: []*internalpb.ExplainConditionStats{{
+						ExprId:       3,
+						FieldId:      101,
+						Segments:     1,
+						RowsIn:       50000,
+						IdxScan:      50000,
+						RawScan:      31,
+						RowsOut:      31,
+						EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+						PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 6500, MinUs: 6500, MaxUs: 6500},
+						Used: []*internalpb.ExplainIndexUseStats{{
+							IndexId:      459123456789100001,
+							Family:       "ngram",
+							Segments:     1,
+							RowsIn:       50000,
+							IdxScan:      50000,
+							RawScan:      31,
+							RowsOut:      31,
+							EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+							PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 6500, MinUs: 6500, MaxUs: 6500},
+						}},
+					}},
+				},
+				{
+					Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+					Segments:         1,
+					RowsIn:           31,
+					RowsOut:          10,
+					Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 4200, MinUs: 4200, MaxUs: 4200},
+					PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 0, MinUs: 0, MaxUs: 0},
+				},
+			},
+		},
+	}
+
+	textOut, err := renderExplain(enableExplainKV(), []*internalpb.ExecutionExplain{seg}, leaves, schema, nil, func([]int64) map[int64]string {
+		return map[int64]string{459123456789100001: "title_ngram"}
+	})
+	require.NoError(t, err)
+	assert.Contains(t, textOut, "[op 0] filter (segments=1, rows: 50000 -> 31, time_us=8100, prefetch_wait_us=6300)")
+	assert.Contains(t, textOut, `expr: title contains "%降噪%" (segments=1, rows: 50000 -> 31, idx_scan=50000, raw_scan=31, eval_us=1500, prefetch_us=6500)`)
+	assert.Contains(t, textOut, "index title_ngram (ngram): segments=1, rows: 50000 -> 31, idx_scan=50000, raw_scan=31, eval_us=1500, prefetch_us=6500")
+	assert.Contains(t, textOut, "[op 1] vector_search (segments=1, rows: 31 -> 10, time_us=4200)")
+
+	jsonOut, err := renderExplain(enableJSONExplainKV(), []*internalpb.ExecutionExplain{seg}, leaves, schema, nil, func([]int64) map[int64]string {
+		return map[int64]string{459123456789100001: "title_ngram"}
+	})
+	require.NoError(t, err)
+	assert.Contains(t, jsonOut, `"time_us":{"sum_us":8100,"min_us":8100,"avg_us":8100,"max_us":8100}`)
+	assert.Contains(t, jsonOut, `"prefetch_wait_time_us":{"sum_us":6300,"min_us":6300,"avg_us":6300,"max_us":6300}`)
+	assert.Contains(t, jsonOut, `"eval_time_us":{"sum_us":1500,"min_us":1500,"avg_us":1500,"max_us":1500}`)
+	assert.Contains(t, jsonOut, `"prefetch_time_us":{"sum_us":6500,"min_us":6500,"avg_us":6500,"max_us":6500}`)
+	assert.NotContains(t, jsonOut, "459123456789100001")
+}

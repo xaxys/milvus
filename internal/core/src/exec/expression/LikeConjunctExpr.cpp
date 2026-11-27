@@ -78,8 +78,9 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
     auto* explain = context.get_exec_context() == nullptr
                         ? nullptr
                         : context.get_exec_context()->explain();
+    const bool track_explain = explain != nullptr;
     const bool track_leaf_rows =
-        explain != nullptr &&
+        track_explain &&
         std::any_of(ngram_exprs_.begin(),
                     ngram_exprs_.end(),
                     [](const auto& e) { return e && e->expr_id() != 0; });
@@ -91,18 +92,23 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
             phase1_cum_.reserve(ngram_exprs_.size());
         }
         for (auto& expr : ngram_exprs_) {
-            const int64_t p1_in = explain != nullptr
-                                      ? static_cast<int64_t>(candidates.count())
-                                      : 0;
+            const int64_t p1_in =
+                track_explain ? static_cast<int64_t>(candidates.count()) : 0;
+            expr->EnsureExecPathDetermined();
             expr->EnsureExplainDecisionRecorded();
-            if (explain != nullptr && expr->expr_id() != 0) {
-                if (auto* slot = expr->explain_slot(); slot != nullptr) {
+            auto* slot = expr->explain_slot();
+            if (track_explain && expr->expr_id() != 0) {
+                if (slot != nullptr) {
                     ExecutionExplainRecorder::AddSlotPhase1IdxScan(slot, p1_in);
                 } else {
                     explain->AddPhase1IdxScan(expr->expr_id(), p1_in);
                 }
             }
-            expr->ExecuteNgramPhase1(candidates);
+            {
+                ExecutionExplainRecorder::ScopedLeafEvalTimer p1_timer(
+                    track_explain ? slot : nullptr);
+                expr->ExecuteNgramPhase1(candidates);
+            }
             if (track_leaf_rows) {
                 phase1_cum_.push_back(candidates.clone());
             }
@@ -121,6 +127,21 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         batch_candidates &= bitmap_input;
     }
 
+    auto record_leaf_rows = [&](size_t idx, int64_t in_rows, int64_t out_rows) {
+        if (!track_leaf_rows) {
+            return;
+        }
+        auto& expr = ngram_exprs_[idx];
+        if (expr->expr_id() == 0) {
+            return;
+        }
+        if (auto* slot = expr->explain_slot(); slot != nullptr) {
+            ExecutionExplainRecorder::AddSlotRows(slot, in_rows, out_rows);
+        } else {
+            explain->AddRows(expr->expr_id(), in_rows, out_rows);
+        }
+    };
+
     const int64_t batch_in =
         !track_leaf_rows ? 0
                          : (bitmap_input.empty()
@@ -136,10 +157,7 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
                     slice &= bitmap_input;
                 }
                 const int64_t out_rows = static_cast<int64_t>(slice.count());
-                if (ngram_exprs_[i]->expr_id() != 0) {
-                    explain->AddRows(
-                        ngram_exprs_[i]->expr_id(), prev_out, out_rows);
-                }
+                record_leaf_rows(i, prev_out, out_rows);
                 prev_out = out_rows;
             }
         }
@@ -147,15 +165,18 @@ PhyLikeConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         int64_t prev_out = batch_in;
         for (size_t i = 0; i < ngram_exprs_.size(); ++i) {
             const int64_t in_rows = (i == 0) ? batch_in : prev_out;
-            ngram_exprs_[i]->ExecuteNgramPhase2(
-                batch_candidates, current_pos_, real_batch_size);
+            ngram_exprs_[i]->EnsureExecPathDetermined();
+            ngram_exprs_[i]->EnsureExplainDecisionRecorded();
+            {
+                ExecutionExplainRecorder::ScopedLeafEvalTimer p2_timer(
+                    track_explain ? ngram_exprs_[i]->explain_slot() : nullptr);
+                ngram_exprs_[i]->ExecuteNgramPhase2(
+                    batch_candidates, current_pos_, real_batch_size);
+            }
             if (track_leaf_rows) {
                 const int64_t out_rows =
                     static_cast<int64_t>(batch_candidates.count());
-                if (ngram_exprs_[i]->expr_id() != 0) {
-                    explain->AddRows(
-                        ngram_exprs_[i]->expr_id(), in_rows, out_rows);
-                }
+                record_leaf_rows(i, in_rows, out_rows);
                 prev_out = out_rows;
                 if (out_rows == 0) {
                     break;

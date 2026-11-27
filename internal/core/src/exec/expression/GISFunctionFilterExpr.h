@@ -191,6 +191,12 @@ class PhyGISFunctionFilterExpr : public SegmentExpr {
         return expr_->op_ != proto::plan::GISFunctionFilterExpr_GISOp_STIsValid;
     }
 
+    bool
+    SkipsRawDataPrefetch() const override {
+        return segment_ != nullptr &&
+               segment_->GetGeometryCache(field_id_) != nullptr;
+    }
+
     void
     PrefetchRawData() override {
         if (segment_ != nullptr &&

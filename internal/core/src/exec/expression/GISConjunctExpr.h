@@ -90,6 +90,10 @@ struct GISGroupState {
     int64_t pending_batch_size{0};
     int64_t pending_coarse_in{0};
     TargetBitmap pending_outer_mask;
+    // Query-thread-only carry from unindexed/degraded Coarse::Eval to the first
+    // Refine::Eval batch so trailing predicates skipped by Refine short-circuit
+    // receive zero eval_ns. Never touched from prefetch_pool.
+    int64_t pending_degraded_coarse_ns{0};
 
     void
     FlushZeroSurvivorBatchExplain(ExecutionExplainRecorder* explain,
@@ -337,6 +341,11 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
     // selection lands on RawData (no usable index), prefetching the raw column
     // would only warm data this node never touches, so make it a no-op. The
     // Refine node, which does read that column, prefetches it itself.
+    bool
+    SkipsRawDataPrefetch() const override {
+        return true;
+    }
+
     void
     PrefetchRawData() override {
     }
@@ -350,6 +359,35 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
                                      ? explain->EnsureLeafSlot(p.expr_id)
                                      : nullptr;
             }
+        }
+    }
+
+ protected:
+    void
+    AttributePrefetchNs(int64_t ns) override {
+        if (ns <= 0 || st_ == nullptr) {
+            return;
+        }
+        size_t active = 0;
+        for (const auto& p : st_->preds) {
+            if (p.explain_slot != nullptr) {
+                ++active;
+            }
+        }
+        if (active == 0) {
+            return;
+        }
+        const int64_t base = ns / static_cast<int64_t>(active);
+        const int64_t rem = ns % static_cast<int64_t>(active);
+        size_t idx = 0;
+        for (const auto& p : st_->preds) {
+            if (p.explain_slot == nullptr) {
+                continue;
+            }
+            const int64_t share =
+                base + (static_cast<int64_t>(idx) < rem ? 1 : 0);
+            ExecutionExplainRecorder::AddSlotPrefetchNs(p.explain_slot, share);
+            ++idx;
         }
     }
 
@@ -460,6 +498,13 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
     // Coarse narrows survivors to a small subset that bulk_subscript fetches
     // lazily). Defined out-of-line so the GeometryCache header stays out of this
     // one.
+    bool
+    SkipsRawDataPrefetch() const override {
+        return segment_ != nullptr &&
+               (segment_->GetGeometryCache(st_->field_id) != nullptr ||
+                (!st_->preds.empty() && st_->preds.front().has_index));
+    }
+
     void
     PrefetchRawData() override;
 
@@ -472,6 +517,35 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
                                      ? explain->EnsureLeafSlot(p.expr_id)
                                      : nullptr;
             }
+        }
+    }
+
+ protected:
+    void
+    AttributePrefetchNs(int64_t ns) override {
+        if (ns <= 0 || st_ == nullptr) {
+            return;
+        }
+        size_t active = 0;
+        for (const auto& p : st_->preds) {
+            if (p.explain_slot != nullptr) {
+                ++active;
+            }
+        }
+        if (active == 0) {
+            return;
+        }
+        const int64_t base = ns / static_cast<int64_t>(active);
+        const int64_t rem = ns % static_cast<int64_t>(active);
+        size_t idx = 0;
+        for (const auto& p : st_->preds) {
+            if (p.explain_slot == nullptr) {
+                continue;
+            }
+            const int64_t share =
+                base + (static_cast<int64_t>(idx) < rem ? 1 : 0);
+            ExecutionExplainRecorder::AddSlotPrefetchNs(p.explain_slot, share);
+            ++idx;
         }
     }
 

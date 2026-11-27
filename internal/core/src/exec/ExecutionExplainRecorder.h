@@ -18,6 +18,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -27,6 +28,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/ExplainOperatorKind.h"
@@ -54,7 +56,48 @@ class ExecutionExplainRecorder {
         std::atomic<int64_t> raw_scan{0};
         std::atomic<int64_t> rows_out{0};
         std::atomic<int64_t> phase1_idx_scan{0};
+        std::atomic<int64_t> eval_ns{0};
+        std::atomic<int64_t> prefetch_ns{0};
         std::atomic<bool> evaluated{false};
+    };
+
+    class ScopedLeafEvalTimer {
+     public:
+        explicit ScopedLeafEvalTimer(LeafSlot* slot) noexcept
+            : slot_(slot),
+              start_(slot_ != nullptr
+                         ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{}) {
+        }
+
+        ScopedLeafEvalTimer(ScopedLeafEvalTimer&& other) noexcept
+            : slot_(std::exchange(other.slot_, nullptr)), start_(other.start_) {
+        }
+
+        ScopedLeafEvalTimer(const ScopedLeafEvalTimer&) = delete;
+        ScopedLeafEvalTimer&
+        operator=(const ScopedLeafEvalTimer&) = delete;
+
+        void
+        Cancel() noexcept {
+            slot_ = nullptr;
+        }
+
+        ~ScopedLeafEvalTimer() noexcept {
+            if (slot_ != nullptr) {
+                const auto ns =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - start_)
+                        .count();
+                if (ns > 0) {
+                    slot_->eval_ns.fetch_add(ns, std::memory_order_relaxed);
+                }
+            }
+        }
+
+     private:
+        LeafSlot* slot_;
+        std::chrono::steady_clock::time_point start_;
     };
 
     explicit ExecutionExplainRecorder(int64_t rows_total,
@@ -114,6 +157,20 @@ class ExecutionExplainRecorder {
         slot->evaluated.store(true, std::memory_order_relaxed);
         if (rows > 0) {
             slot->phase1_idx_scan.fetch_add(rows, std::memory_order_relaxed);
+        }
+    }
+
+    static void
+    AddSlotEvalNs(LeafSlot* slot, int64_t ns) noexcept {
+        if (slot != nullptr && ns > 0) {
+            slot->eval_ns.fetch_add(ns, std::memory_order_relaxed);
+        }
+    }
+
+    static void
+    AddSlotPrefetchNs(LeafSlot* slot, int64_t ns) noexcept {
+        if (slot != nullptr && ns > 0) {
+            slot->prefetch_ns.fetch_add(ns, std::memory_order_relaxed);
         }
     }
 
@@ -274,37 +331,63 @@ class ExecutionExplainRecorder {
     }
 
     int32_t
-    active_step() const noexcept {
-        return active_step_.load(std::memory_order_relaxed);
-    }
-
-    int32_t
-    SetActiveStep(int32_t step) noexcept {
-        return active_step_.exchange(step, std::memory_order_relaxed);
-    }
-
-    class ScopedActiveStep {
-     public:
-        ScopedActiveStep(ExecutionExplainRecorder* recorder,
-                         int32_t step) noexcept
-            : recorder_(recorder) {
-            if (recorder_ != nullptr) {
-                prev_ = recorder_->SetActiveStep(step);
+    FindOperatorStep(ExplainOperatorKind kind) const {
+        if (kind == ExplainOperatorKind::kUnknown) {
+            return -1;
+        }
+        std::lock_guard lock(mu_);
+        for (size_t i = 0; i < operators_.size(); ++i) {
+            if (operators_[i].kind == kind) {
+                return static_cast<int32_t>(i);
             }
         }
-        ~ScopedActiveStep() {
-            if (recorder_ != nullptr) {
-                recorder_->SetActiveStep(prev_);
-            }
-        }
-        ScopedActiveStep(const ScopedActiveStep&) = delete;
-        ScopedActiveStep&
-        operator=(const ScopedActiveStep&) = delete;
+        return -1;
+    }
 
-     private:
-        ExecutionExplainRecorder* recorder_;
-        int32_t prev_{-1};
-    };
+    void
+    AddOperatorTimeNs(int32_t step, int64_t ns) {
+        if (step < 0 || ns <= 0) {
+            return;
+        }
+        std::lock_guard lock(mu_);
+        if (static_cast<size_t>(step) < operators_.size()) {
+            operators_[step].time_ns += ns;
+        }
+    }
+
+    // Transfers lazy work performed inside debit_step's GetOutput back to
+    // credit_step (e.g., CountingVectorIterator or StrictGroup Phase 2).
+    // Allows debit_step's accumulator to go temporarily negative before
+    // Driver flushes debit_step's wall duration; Finish() clamps at zero.
+    void
+    TransferOperatorTimeNs(int32_t credit_step,
+                           int32_t debit_step,
+                           int64_t ns) {
+        if (ns <= 0 || credit_step == debit_step) {
+            return;
+        }
+        std::lock_guard lock(mu_);
+        if (credit_step >= 0 &&
+            static_cast<size_t>(credit_step) < operators_.size()) {
+            operators_[credit_step].time_ns += ns;
+        }
+        if (debit_step >= 0 &&
+            static_cast<size_t>(debit_step) < operators_.size()) {
+            operators_[debit_step].time_ns -= ns;
+        }
+    }
+
+    void
+    AddOperatorPrefetchWaitNs(int32_t step, int64_t ns) {
+        if (step < 0 || ns <= 0) {
+            return;
+        }
+        std::lock_guard lock(mu_);
+        if (static_cast<size_t>(step) < operators_.size() &&
+            !operators_[step].cached) {
+            operators_[step].prefetch_wait_ns += ns;
+        }
+    }
 
     void
     MarkOperatorCached(int32_t step) {
@@ -315,16 +398,6 @@ class ExecutionExplainRecorder {
         if (static_cast<size_t>(step) < operators_.size()) {
             operators_[step].cached = true;
         }
-    }
-
-    bool
-    IsOperatorCached(int32_t step) const {
-        if (step < 0) {
-            return false;
-        }
-        std::lock_guard lock(mu_);
-        return static_cast<size_t>(step) < operators_.size() &&
-               operators_[step].cached;
     }
 
     void
@@ -410,6 +483,22 @@ class ExecutionExplainRecorder {
     }
 
     void
+    AddLeafEvalNs(int64_t expr_id, int64_t ns) {
+        if (expr_id == 0 || ns <= 0) {
+            return;
+        }
+        AddSlotEvalNs(EnsureLeafSlot(expr_id), ns);
+    }
+
+    void
+    AddLeafPrefetchNs(int64_t expr_id, int64_t ns) {
+        if (expr_id == 0 || ns <= 0) {
+            return;
+        }
+        AddSlotPrefetchNs(EnsureLeafSlot(expr_id), ns);
+    }
+
+    void
     AddOperandScan(FieldId field_id,
                    int64_t expr_id,
                    bool used_index,
@@ -466,12 +555,19 @@ class ExecutionExplainRecorder {
     Finish() const;
 
  private:
+    static int64_t
+    NsToUs(int64_t ns) noexcept {
+        return ns <= 0 ? 0 : (ns + 500) / 1000;
+    }
+
     struct OperatorSlot {
         int32_t step{0};
         ExplainOperatorKind kind{ExplainOperatorKind::kUnknown};
         std::string domain;
         int64_t rows_in{0};
         int64_t rows_out{0};
+        int64_t time_ns{0};
+        int64_t prefetch_wait_ns{0};
         bool cached{false};
         bool internal_folded{false};
     };
@@ -576,7 +672,6 @@ class ExecutionExplainRecorder {
     mutable std::vector<OperatorSlot> operators_;
     mutable std::map<int64_t, int32_t> expr_operator_steps_;
     mutable int32_t default_filter_step_{-1};
-    std::atomic<int32_t> active_step_{-1};
 };
 
 }  // namespace milvus::exec

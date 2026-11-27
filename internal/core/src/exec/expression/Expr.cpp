@@ -94,7 +94,14 @@ ExprSet::Eval(int32_t begin,
     auto* query_ctx =
         exec_ctx != nullptr ? exec_ctx->get_query_context() : nullptr;
     auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
-    if (explain != nullptr && !explain_eval_marked_) {
+    if (explain == nullptr) {
+        for (size_t i = begin; i < end; ++i) {
+            milvus::exec::checkCancellation(query_ctx);
+            exprs_[i]->Eval(context, results[i]);
+        }
+        return;
+    }
+    if (!explain_eval_marked_) {
         explain_eval_marked_ = true;
         for (size_t i = begin; i < end; ++i) {
             MarkExplainEvalEntered({exprs_[i]}, explain);
@@ -102,14 +109,22 @@ ExprSet::Eval(int32_t begin,
     }
     for (size_t i = begin; i < end; ++i) {
         milvus::exec::checkCancellation(query_ctx);
-        exprs_[i]->Eval(context, results[i]);
+        const bool is_leaf = exprs_[i] != nullptr && exprs_[i]->expr_id() != 0;
+        const bool has_active = is_leaf && Expr::HasActiveEvalInput(context);
+        {
+            ExecutionExplainRecorder::ScopedLeafEvalTimer leaf_timer(
+                has_active ? exprs_[i]->explain_slot() : nullptr);
+            exprs_[i]->Eval(context, results[i]);
+            if (results[i] == nullptr || results[i]->size() == 0) {
+                leaf_timer.Cancel();
+            }
+        }
         // The set is where a top-level leaf is evaluated, so report the rows it
         // was handed and matched here. A logical top-level expression carries no
         // expr_id; the conjunction that owns the nested leaves reports them.
-        if (explain != nullptr && exprs_[i]->expr_id() != 0 &&
-            results[i] != nullptr) {
+        if (has_active && results[i] != nullptr) {
             if (auto col = std::dynamic_pointer_cast<ColumnVector>(results[i]);
-                col != nullptr && col->IsBitmap()) {
+                col != nullptr && col->IsBitmap() && col->size() > 0) {
                 const auto& mask = context.get_bitmap_input();
                 const auto rows_in = mask.empty()
                                          ? static_cast<int64_t>(col->size())
@@ -1298,7 +1313,8 @@ void
 RecordWholeFilterCacheHitExplain(const std::vector<ExprPtr>& exprs,
                                  ExecutionExplainRecorder* explain,
                                  int64_t rows_in,
-                                 int64_t rows_out) {
+                                 int64_t rows_out,
+                                 int64_t bare_leaf_eval_ns) {
     if (explain == nullptr) {
         return;
     }
@@ -1323,6 +1339,9 @@ RecordWholeFilterCacheHitExplain(const std::vector<ExprPtr>& exprs,
                 explain->MarkLeafEvaluated(expr_id);
                 if (bare_single_leaf) {
                     explain->AddRows(expr_id, rows_in, rows_out);
+                    if (bare_leaf_eval_ns > 0) {
+                        explain->AddLeafEvalNs(expr_id, bare_leaf_eval_ns);
+                    }
                 }
             });
     }
