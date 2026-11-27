@@ -292,7 +292,7 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 			SourceID: t.getNodeID(),
 		},
 		Status:             merr.Success(),
-		Explain:            queryNodeExplain(t.ctx, results),
+		Explain:            queryNodeExplain(t.ctx, results, t.plan.GetPlanOptions().GetExplainDetail()),
 		ComputedResults:    reducedResult.GetComputedResults(),
 		Ids:                reducedResult.Ids,
 		FieldsData:         reducedResult.FieldsData,
@@ -342,6 +342,7 @@ func (t *QueryTask) buildMaterializeResult(reduced *segcorepb.RetrieveResults, s
 func queryNodeExplain(
 	ctx context.Context,
 	results []segments.RetrieveSegmentResult,
+	explainDetail bool,
 ) *internalpb.ExecutionExplain {
 	rawSegments := make([]*internalpb.ExecutionExplain, 0, len(results))
 	for _, result := range results {
@@ -353,6 +354,17 @@ func queryNodeExplain(
 		if err := proto.Unmarshal(blob, node); err != nil {
 			mlog.Warn(ctx, "failed to decode segment execution explain", mlog.Err(err))
 			continue
+		}
+		if explainDetail {
+			if g := node.GetGroup(); g != nil {
+				var segID int64
+				isGrowing := g.GetGrowingSegments() > 0
+				if result.Segment != nil {
+					segID = result.Segment.ID()
+					isGrowing = isGrowing || result.Segment.Type() == segments.SegmentTypeGrowing
+				}
+				explain.AttachSegmentDetail(node, segID, isGrowing)
+			}
 		}
 		rawSegments = append(rawSegments, node)
 	}

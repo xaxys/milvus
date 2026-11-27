@@ -28,7 +28,13 @@ import (
 )
 
 const (
-	summaryLevel    = "summary"
+	LevelSummary = "summary"
+	LevelDetail  = "detail"
+
+	SegmentStateSealed  = "sealed"
+	SegmentStateGrowing = "growing"
+
+	summaryLevel    = LevelSummary
 	scalarIndexKind = "scalar_index"
 	primaryKeyName  = "primary_key"
 	unknownReason   = "unknown"
@@ -99,6 +105,15 @@ type OperatorSummary struct {
 	kind internalpb.ExplainOperatorKind
 }
 
+// SegmentDetail is the per-segment operator pipeline breakdown emitted when
+// explain level is "detail".
+type SegmentDetail struct {
+	SegmentID int64             `json:"segment_id"`
+	State     string            `json:"state"`
+	RowsTotal int64             `json:"rows_total"`
+	Operators []OperatorSummary `json:"operators,omitempty"`
+}
+
 // SubSearchSummary is the per-sub-request operator pipeline summary for HybridSearch.
 type SubSearchSummary struct {
 	SubReqIndex     int               `json:"sub_req_index"`
@@ -107,7 +122,9 @@ type SubSearchSummary struct {
 	SealedSegments  int               `json:"sealed_segments"`
 	GrowingSegments int               `json:"growing_segments"`
 	RowsTotal       int64             `json:"rows_total"`
+	OmittedSegments int               `json:"omitted_segments,omitempty"`
 	Operators       []OperatorSummary `json:"operators"`
+	SegmentDetails  []SegmentDetail   `json:"segments_detail,omitempty"`
 }
 
 // Summary is the client-visible execution summary of one Search, HybridSearch,
@@ -118,7 +135,9 @@ type Summary struct {
 	SealedSegments  int                `json:"sealed_segments"`
 	GrowingSegments int                `json:"growing_segments"`
 	RowsTotal       int64              `json:"rows_total"`
+	OmittedSegments int                `json:"omitted_segments,omitempty"`
 	Operators       []OperatorSummary  `json:"operators,omitempty"`
+	SegmentDetails  []SegmentDetail    `json:"segments_detail,omitempty"`
 	SubSearches     []SubSearchSummary `json:"sub_searches,omitempty"`
 }
 
@@ -146,6 +165,54 @@ func (s *Summary) AllConditions() []Condition {
 	for _, sub := range s.SubSearches {
 		for _, op := range sub.Operators {
 			out = appendLeafConditions(out, op.Conditions)
+		}
+	}
+	return out
+}
+
+func collectConditionIndexIDs(conds []Condition, seen map[int64]struct{}, dst *[]int64) {
+	for _, c := range conds {
+		if c.Logic != "" {
+			collectConditionIndexIDs(c.Children, seen, dst)
+			continue
+		}
+		for _, used := range c.Used {
+			if used.IndexID == 0 {
+				continue
+			}
+			if _, ok := seen[used.IndexID]; ok {
+				continue
+			}
+			seen[used.IndexID] = struct{}{}
+			*dst = append(*dst, used.IndexID)
+		}
+	}
+}
+
+// NeededIndexIDs returns all distinct non-zero IndexIDs referenced across
+// top-level operators, per-segment details, and hybrid sub-searches.
+func (s *Summary) NeededIndexIDs() []int64 {
+	if s == nil {
+		return nil
+	}
+	var out []int64
+	seen := make(map[int64]struct{})
+	for _, op := range s.Operators {
+		collectConditionIndexIDs(op.Conditions, seen, &out)
+	}
+	for _, seg := range s.SegmentDetails {
+		for _, op := range seg.Operators {
+			collectConditionIndexIDs(op.Conditions, seen, &out)
+		}
+	}
+	for _, sub := range s.SubSearches {
+		for _, op := range sub.Operators {
+			collectConditionIndexIDs(op.Conditions, seen, &out)
+		}
+		for _, seg := range sub.SegmentDetails {
+			for _, op := range seg.Operators {
+				collectConditionIndexIDs(op.Conditions, seen, &out)
+			}
 		}
 	}
 	return out
@@ -417,9 +484,19 @@ func FinalizeSummary(summary *Summary, indexNames map[int64]string, fieldNames m
 	for i := range summary.Operators {
 		finalizeConditionsRecursive(summary.Operators[i].Conditions, indexNames, fieldNames)
 	}
+	for i := range summary.SegmentDetails {
+		for j := range summary.SegmentDetails[i].Operators {
+			finalizeConditionsRecursive(summary.SegmentDetails[i].Operators[j].Conditions, indexNames, fieldNames)
+		}
+	}
 	for i := range summary.SubSearches {
 		for j := range summary.SubSearches[i].Operators {
 			finalizeConditionsRecursive(summary.SubSearches[i].Operators[j].Conditions, indexNames, fieldNames)
+		}
+		for j := range summary.SubSearches[i].SegmentDetails {
+			for k := range summary.SubSearches[i].SegmentDetails[j].Operators {
+				finalizeConditionsRecursive(summary.SubSearches[i].SegmentDetails[j].Operators[k].Conditions, indexNames, fieldNames)
+			}
 		}
 	}
 }
@@ -437,16 +514,91 @@ func leavesForSubReq(leaves map[int64]LeafInfo, subReqIndex int) map[int64]LeafI
 	return out
 }
 
+func segmentTotalTimeUs(seg SegmentDetail) int64 {
+	var total int64
+	for _, op := range seg.Operators {
+		if op.TimeUs != nil && op.TimeUs.SumUs > 0 {
+			total += op.TimeUs.SumUs
+		}
+	}
+	return total
+}
+
+func buildSegmentDetailsFromGroup(
+	g *internalpb.ExplainSegmentGroup,
+	scopedLeaves map[int64]LeafInfo,
+	planAST PlanAST,
+) ([]SegmentDetail, int) {
+	if g == nil {
+		return nil, 0
+	}
+	omitted := int(max(int64(0), g.GetOmittedSegmentDetails()))
+	raw := g.GetSegmentDetails()
+	if len(raw) == 0 {
+		return nil, omitted
+	}
+	details := make([]SegmentDetail, 0, len(raw))
+	for _, d := range raw {
+		if d == nil || d.GetGroup() == nil {
+			continue
+		}
+		dg := d.GetGroup()
+		state := SegmentStateSealed
+		if d.GetIsGrowing() || dg.GetGrowingSegments() > 0 {
+			state = SegmentStateGrowing
+		}
+		segCount := int(dg.GetSegments())
+		if segCount <= 0 {
+			segCount = 1
+		}
+		ops := buildOperatorsFromGroup(dg, segCount, dg.GetRowsTotal(), scopedLeaves, planAST)
+		details = append(details, SegmentDetail{
+			SegmentID: d.GetSegmentId(),
+			State:     state,
+			RowsTotal: dg.GetRowsTotal(),
+			Operators: ops,
+		})
+	}
+	sort.SliceStable(details, func(i, j int) bool {
+		ti, tj := segmentTotalTimeUs(details[i]), segmentTotalTimeUs(details[j])
+		if ti != tj {
+			return ti > tj
+		}
+		if details[i].RowsTotal != details[j].RowsTotal {
+			return details[i].RowsTotal > details[j].RowsTotal
+		}
+		return details[i].SegmentID < details[j].SegmentID
+	})
+	return details, omitted
+}
+
 // SummarizeWithSubSearches builds the final Summary for Search, Query, or
-// HybridSearch, organizing operator condition trees according to Proxy's ASTs.
+// HybridSearch at the default "summary" level.
 func SummarizeWithSubSearches(
 	explains []*internalpb.ExecutionExplain,
 	leaves map[int64]LeafInfo,
 	subSearches []SubSearchMeta,
 	asts map[int]PlanAST,
 ) *Summary {
+	return SummarizeWithSubSearchesAndLevel(LevelSummary, explains, leaves, subSearches, asts)
+}
+
+// SummarizeWithSubSearchesAndLevel builds the final Summary for Search, Query,
+// or HybridSearch at the requested explain level ("summary" or "detail"),
+// organizing operator condition trees according to Proxy's ASTs.
+func SummarizeWithSubSearchesAndLevel(
+	level string,
+	explains []*internalpb.ExecutionExplain,
+	leaves map[int64]LeafInfo,
+	subSearches []SubSearchMeta,
+	asts map[int]PlanAST,
+) *Summary {
+	normLevel := LevelSummary
+	if level == LevelDetail {
+		normLevel = LevelDetail
+	}
 	summary := &Summary{
-		Level: summaryLevel,
+		Level: normLevel,
 	}
 
 	merged := AssembleHybridExplain(explains...)
@@ -503,6 +655,11 @@ func SummarizeWithSubSearches(
 			if ops == nil {
 				ops = []OperatorSummary{}
 			}
+			var segDetails []SegmentDetail
+			var omitted int
+			if normLevel == LevelDetail {
+				segDetails, omitted = buildSegmentDetailsFromGroup(g, scopedLeaves, planAST)
+			}
 			summary.SubSearches = append(summary.SubSearches, SubSearchSummary{
 				SubReqIndex:     idx,
 				AnnsField:       metaAnns[idx],
@@ -510,7 +667,9 @@ func SummarizeWithSubSearches(
 				SealedSegments:  sealed,
 				GrowingSegments: growing,
 				RowsTotal:       rowsTotal,
+				OmittedSegments: omitted,
 				Operators:       ops,
+				SegmentDetails:  segDetails,
 			})
 		}
 		return summary
@@ -531,6 +690,9 @@ func SummarizeWithSubSearches(
 		planAST = asts[-1]
 	}
 	summary.Operators = buildOperatorsFromGroup(g, summary.Segments, summary.RowsTotal, leaves, planAST)
+	if normLevel == LevelDetail {
+		summary.SegmentDetails, summary.OmittedSegments = buildSegmentDetailsFromGroup(g, leaves, planAST)
+	}
 	return summary
 }
 
@@ -940,6 +1102,7 @@ func RenderSummaryText(s *Summary) string {
 			for _, op := range sub.Operators {
 				writeOperator(&b, 2, op)
 			}
+			writeSegmentDetails(&b, 2, sub.SegmentDetails, sub.OmittedSegments)
 		}
 		return b.String()
 	}
@@ -947,7 +1110,27 @@ func RenderSummaryText(s *Summary) string {
 	for _, op := range s.Operators {
 		writeOperator(&b, 1, op)
 	}
+	writeSegmentDetails(&b, 1, s.SegmentDetails, s.OmittedSegments)
 	return b.String()
+}
+
+func writeSegmentDetails(b *strings.Builder, depth int, details []SegmentDetail, omitted int) {
+	if len(details) == 0 && omitted <= 0 {
+		return
+	}
+	writeIndent(b, depth)
+	if omitted > 0 {
+		fmt.Fprintf(b, "segments_detail (count=%d, omitted_segments=%d):\n", len(details), omitted)
+	} else {
+		fmt.Fprintf(b, "segments_detail (count=%d):\n", len(details))
+	}
+	for _, seg := range details {
+		writeIndent(b, depth+1)
+		fmt.Fprintf(b, "[segment %d] %s (rows_total=%d)\n", seg.SegmentID, seg.State, seg.RowsTotal)
+		for _, op := range seg.Operators {
+			writeOperator(b, depth+2, op)
+		}
+	}
 }
 
 // RenderSummaryJSON formats a summary as JSON.

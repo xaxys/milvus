@@ -283,6 +283,7 @@ func TestExplainParams(t *testing.T) {
 	cfg, err = ParseExplainConfig([]*commonpb.KeyValuePair{kv(explainKey, "default")})
 	require.NoError(t, err)
 	assert.True(t, cfg.Enabled)
+	assert.Equal(t, "summary", cfg.Level)
 	assert.Equal(t, "text", cfg.Format)
 
 	cfg, err = ParseExplainConfig([]*commonpb.KeyValuePair{
@@ -291,21 +292,31 @@ func TestExplainParams(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.True(t, cfg.Enabled)
+	assert.Equal(t, "summary", cfg.Level)
 	assert.Equal(t, "json", cfg.Format)
+
+	cfg, err = ParseExplainConfig([]*commonpb.KeyValuePair{
+		kv(explainKey, "DETAIL"),
+	})
+	require.NoError(t, err)
+	assert.True(t, cfg.Enabled)
+	assert.Equal(t, "detail", cfg.Level)
+	assert.Equal(t, "text", cfg.Format)
 
 	_, err = ParseExplainConfig([]*commonpb.KeyValuePair{kv(explainFormatKey, "yaml")})
 	assert.Error(t, err)
 	_, err = ParseExplainConfig([]*commonpb.KeyValuePair{kv(explainKey, "verbose")})
 	assert.Error(t, err)
-	_, err = ParseExplainConfig([]*commonpb.KeyValuePair{kv(explainKey, "detail")})
+	_, err = ParseExplainConfig([]*commonpb.KeyValuePair{kv(explainKey, "trace")})
 	assert.Error(t, err)
 
 	// Nested ParamsKey JSON (RESTful v2 / search_params["params"]).
 	cfg, err = ParseExplainConfig([]*commonpb.KeyValuePair{
-		kv(ParamsKey, `{"explain": "summary", "explain_format": "json"}`),
+		kv(ParamsKey, `{"explain": "detail", "explain_format": "json"}`),
 	})
 	require.NoError(t, err)
 	assert.True(t, cfg.Enabled)
+	assert.Equal(t, "detail", cfg.Level)
 	assert.Equal(t, "json", cfg.Format)
 
 	cfg, err = ParseExplainConfig([]*commonpb.KeyValuePair{
@@ -569,12 +580,19 @@ func TestConfigureExplainPlanAndEmptyExprUntagged(t *testing.T) {
 	plan = newPlan()
 	require.NoError(t, configureExplainPlan(plan, enableExplainKV(), false, true, -1, schema, &next, &leaves))
 	assert.True(t, plan.GetPlanOptions().GetEnableExplain())
+	assert.False(t, plan.GetPlanOptions().GetExplainDetail())
 	assert.Equal(t, int64(1), plan.GetQuery().GetPredicates().GetExprId())
 	assert.Len(t, leaves, 1)
 
-	// Requery clears EnableExplain.
+	// Detail mode sets both EnableExplain and ExplainDetail.
+	require.NoError(t, configureExplainPlan(plan, []*commonpb.KeyValuePair{{Key: explainKey, Value: explainLevelDetail}}, false, true, -1, schema, &next, &leaves))
+	assert.True(t, plan.GetPlanOptions().GetEnableExplain())
+	assert.True(t, plan.GetPlanOptions().GetExplainDetail())
+
+	// Requery clears both EnableExplain and ExplainDetail.
 	require.NoError(t, configureExplainPlan(plan, enableJSONExplainKV(), true, true, -1, schema, &next, &leaves))
 	assert.False(t, plan.GetPlanOptions().GetEnableExplain())
+	assert.False(t, plan.GetPlanOptions().GetExplainDetail())
 }
 
 func TestExplainIndexNamesUsesMetaCacheAndInvalidation(t *testing.T) {
@@ -875,8 +893,17 @@ func TestRenderExplainZeroSegmentsAndAttachZeroSegmentExplain(t *testing.T) {
 	assert.Nil(t, status)
 
 	assert.Error(t, ValidateExplainParams([]*commonpb.KeyValuePair{{Key: explainKey, Value: "invalid"}}))
-	assert.Error(t, ValidateExplainParams([]*commonpb.KeyValuePair{{Key: explainKey, Value: "detail"}}))
-	assert.Error(t, AttachZeroSegmentExplain(&status, []*commonpb.KeyValuePair{{Key: explainKey, Value: "detail"}}, "", nil, helper, schema))
+	assert.Error(t, ValidateExplainParams([]*commonpb.KeyValuePair{{Key: explainKey, Value: "trace"}}))
+	assert.NoError(t, ValidateExplainParams([]*commonpb.KeyValuePair{{Key: explainKey, Value: "detail"}}))
+	assert.Error(t, AttachZeroSegmentExplain(&status, []*commonpb.KeyValuePair{{Key: explainKey, Value: "trace"}}, "", nil, helper, schema))
+
+	var detailZeroStatus *commonpb.Status
+	require.NoError(t, AttachZeroSegmentExplain(&detailZeroStatus, []*commonpb.KeyValuePair{
+		{Key: explainKey, Value: explainLevelDetail},
+		{Key: explainFormatKey, Value: explainFormatJSON},
+	}, "", nil, helper, schema))
+	require.NotNil(t, detailZeroStatus)
+	assert.JSONEq(t, `{"level":"detail","segments":0,"sealed_segments":0,"growing_segments":0,"rows_total":0}`, detailZeroStatus.GetExtraInfo()[explainKey])
 
 	// Canceled request context skips index lookup instead of detaching via WithoutCancel.
 	canceledCtx, cancel := context.WithCancel(context.Background())
@@ -1063,4 +1090,60 @@ func TestRenderExplainTimingAndPrefetchWaitInJSONAndText(t *testing.T) {
 	assert.Contains(t, jsonOut, `"eval_time_us":{"sum_us":1500,"min_us":1500,"avg_us":1500,"max_us":1500}`)
 	assert.Contains(t, jsonOut, `"prefetch_time_us":{"sum_us":6500,"min_us":6500,"avg_us":6500,"max_us":6500}`)
 	assert.NotContains(t, jsonOut, "459123456789100001")
+}
+
+func TestRenderExplainDetailModeJSONAndTextNoInternalIDLeak(t *testing.T) {
+	schema := &schemapb.CollectionSchema{
+		Fields: []*schemapb.FieldSchema{{FieldID: 101, Name: "title"}},
+	}
+	leaves := map[int64]explain.LeafInfo{
+		3: {Condition: `title contains "%降噪%"`, Type: "contains", FieldID: 101, Field: "title"},
+	}
+
+	fast := explainSegment()
+	fast.Group.Operators[0].Time = &internalpb.ExplainTimeAccum{Count: 1, SumUs: 900, MinUs: 900, MaxUs: 900}
+	explain.AttachSegmentDetail(fast, 77001, false)
+
+	slow := explainSegment()
+	slow.Group.RowsTotal = 80000
+	slow.Group.Operators[0].RowsIn = 80000
+	slow.Group.Operators[0].Time = &internalpb.ExplainTimeAccum{Count: 1, SumUs: 9500, MinUs: 9500, MaxUs: 9500}
+	explain.AttachSegmentDetail(slow, 77002, false)
+
+	merged := explain.Merge(fast, slow)
+
+	detailTextKV := []*commonpb.KeyValuePair{{Key: explainKey, Value: explainLevelDetail}}
+	detailJSONKV := []*commonpb.KeyValuePair{
+		{Key: explainKey, Value: explainLevelDetail},
+		{Key: explainFormatKey, Value: explainFormatJSON},
+	}
+	resolver := func([]int64) map[int64]string {
+		return map[int64]string{459123456789100001: "title_ngram"}
+	}
+
+	textOut, err := renderExplain(detailTextKV, []*internalpb.ExecutionExplain{merged}, leaves, schema, nil, resolver)
+	require.NoError(t, err)
+	assert.Contains(t, textOut, "  segments_detail (count=2):\n")
+	assert.Contains(t, textOut, "    [segment 77002] sealed (rows_total=80000)\n")
+	assert.Contains(t, textOut, "    [segment 77001] sealed (rows_total=50000)\n")
+	assert.Less(t, strings.Index(textOut, "[segment 77002]"), strings.Index(textOut, "[segment 77001]"))
+	assert.NotContains(t, textOut, "459123456789100001")
+
+	jsonOut, err := renderExplain(detailJSONKV, []*internalpb.ExecutionExplain{merged}, leaves, schema, nil, resolver)
+	require.NoError(t, err)
+	assert.Contains(t, jsonOut, `"level":"detail"`)
+	assert.Contains(t, jsonOut, `"segment_id":77002`)
+	assert.Contains(t, jsonOut, `"segment_id":77001`)
+	assert.NotContains(t, jsonOut, "459123456789100001")
+	assert.NotContains(t, jsonOut, `"expr_id"`)
+	assert.NotContains(t, jsonOut, `"field_id"`)
+	assert.NotContains(t, jsonOut, `"index_id"`)
+	assert.NotContains(t, jsonOut, `"node_id"`)
+
+	var summary explain.Summary
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &summary))
+	assert.Equal(t, "detail", summary.Level)
+	require.Len(t, summary.SegmentDetails, 2)
+	assert.Equal(t, int64(77002), summary.SegmentDetails[0].SegmentID)
+	assert.Equal(t, "title_ngram", summary.SegmentDetails[0].Operators[0].Conditions[0].Used[0].IndexName)
 }

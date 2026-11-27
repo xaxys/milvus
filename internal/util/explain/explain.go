@@ -253,6 +253,24 @@ func mergeOperatorStats(dst, src *internalpb.ExplainOperatorStats) {
 	})
 }
 
+// AttachSegmentDetail snapshots a single-segment ExecutionExplain's group into
+// its SegmentDetails slice before worker-level Merge folds multiple segments.
+func AttachSegmentDetail(node *internalpb.ExecutionExplain, segmentID int64, isGrowing bool) {
+	if node == nil || node.GetGroup() == nil {
+		return
+	}
+	g := node.GetGroup()
+	single := proto.Clone(g).(*internalpb.ExplainSegmentGroup)
+	single.SegmentRefs = nil
+	single.SegmentDetails = nil
+	single.OmittedSegmentDetails = 0
+	g.SegmentDetails = []*internalpb.ExplainSegmentDetail{{
+		SegmentId: segmentID,
+		IsGrowing: isGrowing,
+		Group:     single,
+	}}
+}
+
 // MergeGroup merges src into dst in place, aligning physical operators by their
 // global topological ExplainOperatorKind enum.
 func MergeGroup(dst, src *internalpb.ExplainSegmentGroup) {
@@ -263,6 +281,7 @@ func MergeGroup(dst, src *internalpb.ExplainSegmentGroup) {
 	dst.SealedSegments += src.GetSealedSegments()
 	dst.GrowingSegments += src.GetGrowingSegments()
 	dst.RowsTotal += src.GetRowsTotal()
+	dst.OmittedSegmentDetails += src.GetOmittedSegmentDetails()
 
 	if len(src.GetSegmentRefs()) > 0 {
 		seen := make(map[int64]struct{}, len(dst.SegmentRefs)+len(src.SegmentRefs))
@@ -279,6 +298,18 @@ func MergeGroup(dst, src *internalpb.ExplainSegmentGroup) {
 			seen[ref.GetSegmentId()] = struct{}{}
 			dst.SegmentRefs = append(dst.SegmentRefs, proto.Clone(ref).(*internalpb.ExplainSegmentRef))
 		}
+	}
+
+	if len(src.GetSegmentDetails()) > 0 {
+		for _, detail := range src.GetSegmentDetails() {
+			if detail == nil || detail.GetGroup() == nil {
+				continue
+			}
+			dst.SegmentDetails = append(dst.SegmentDetails, proto.Clone(detail).(*internalpb.ExplainSegmentDetail))
+		}
+		sort.SliceStable(dst.SegmentDetails, func(i, j int) bool {
+			return dst.SegmentDetails[i].GetSegmentId() < dst.SegmentDetails[j].GetSegmentId()
+		})
 	}
 
 	if len(src.GetOperators()) == 0 {
@@ -396,19 +427,45 @@ func deriveGroupFromSubSearches(subs []*internalpb.ExplainSubSearchGroup) *inter
 			continue
 		}
 		var subTrackedSegs, subTrackedSealed, subTrackedGrowing, subTrackedRows int64
-		for _, ref := range g.GetSegmentRefs() {
-			if ref == nil {
-				continue
+		if len(g.GetSegmentRefs()) > 0 {
+			for _, ref := range g.GetSegmentRefs() {
+				if ref == nil {
+					continue
+				}
+				subTrackedSegs++
+				if ref.GetIsGrowing() {
+					subTrackedGrowing++
+				} else {
+					subTrackedSealed++
+				}
+				subTrackedRows += ref.GetRowsTotal()
+				if _, exists := seen[ref.GetSegmentId()]; !exists {
+					seen[ref.GetSegmentId()] = ref
+				}
 			}
-			subTrackedSegs++
-			if ref.GetIsGrowing() {
-				subTrackedGrowing++
-			} else {
-				subTrackedSealed++
-			}
-			subTrackedRows += ref.GetRowsTotal()
-			if _, exists := seen[ref.GetSegmentId()]; !exists {
-				seen[ref.GetSegmentId()] = ref
+		} else if len(g.GetSegmentDetails()) > 0 {
+			for _, detail := range g.GetSegmentDetails() {
+				if detail == nil || detail.GetGroup() == nil {
+					continue
+				}
+				isGrowing := detail.GetIsGrowing() || detail.GetGroup().GetGrowingSegments() > 0
+				rows := detail.GetGroup().GetRowsTotal()
+				subTrackedSegs++
+				if isGrowing {
+					subTrackedGrowing++
+				} else {
+					subTrackedSealed++
+				}
+				subTrackedRows += rows
+				if segID := detail.GetSegmentId(); segID != 0 {
+					if _, exists := seen[segID]; !exists {
+						seen[segID] = &internalpb.ExplainSegmentRef{
+							SegmentId: segID,
+							RowsTotal: rows,
+							IsGrowing: isGrowing,
+						}
+					}
+				}
 			}
 		}
 		if u := g.GetSegments() - subTrackedSegs; u > maxUSegs {
@@ -503,31 +560,11 @@ func findOperator(g *internalpb.ExplainSegmentGroup, kind internalpb.ExplainOper
 	return nil
 }
 
-// MergeStage1Explain statelessly merges Stage 1 sealed filter statistics into a
-// cloned copy of Stage 2's sealed ExecutionExplain on the coordinator:
-//   - When Stage 2 switched from pre-filter to iterative_filter (no EXPLAIN_OP_FILTER
-//     in Stage 2), Stage 1's filter operator is inserted in topological order.
-//   - When Stage 2 kept pre-filter on sealed segments, Stage 2's filter operator
-//     (which reused Stage 1's cached filter bitmap) is replaced directly by Stage 1's
-//     actual filter operator statistics.
-func MergeStage1Explain(stage2 *internalpb.ExecutionExplain, stage1 ...*internalpb.ExecutionExplain) (*internalpb.ExecutionExplain, bool) {
-	s1 := Merge(stage1...)
-	if stage2 == nil || stage2.GetGroup() == nil || s1 == nil || s1.GetGroup() == nil {
-		return stage2, false
-	}
-	cloned, ok := proto.Clone(stage2).(*internalpb.ExecutionExplain)
-	if !ok || cloned == nil || cloned.GetGroup() == nil {
-		return stage2, false
-	}
-
-	s1Group := s1.GetGroup()
-	s2Group := cloned.GetGroup()
-	if s1Group.GetSealedSegments() != s2Group.GetSealedSegments() ||
-		(s1Group.GetSealedSegments() == 0 && s1Group.GetSegments() != s2Group.GetSegments()) {
-		return stage2, false
+func mergeStage1OperatorsIntoGroup(s2Group, s1Group *internalpb.ExplainSegmentGroup) bool {
+	if s2Group == nil || s1Group == nil {
+		return false
 	}
 	mutated := false
-
 	for _, kind := range []internalpb.ExplainOperatorKind{
 		internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
 		internalpb.ExplainOperatorKind_EXPLAIN_OP_ELEMENT_FILTER,
@@ -548,6 +585,56 @@ func MergeStage1Explain(stage2 *internalpb.ExecutionExplain, stage1 ...*internal
 		proto.Reset(s2Op)
 		proto.Merge(s2Op, s1Op)
 		mutated = true
+	}
+	return mutated
+}
+
+// MergeStage1Explain statelessly merges Stage 1 sealed filter statistics into a
+// cloned copy of Stage 2's sealed ExecutionExplain on the coordinator:
+//   - When Stage 2 switched from pre-filter to iterative_filter (no EXPLAIN_OP_FILTER
+//     in Stage 2), Stage 1's filter operator is inserted in topological order.
+//   - When Stage 2 kept pre-filter on sealed segments, Stage 2's filter operator
+//     (which reused Stage 1's cached filter bitmap) is replaced directly by Stage 1's
+//     actual filter operator statistics.
+//
+// When per-segment details are present on both Stage 1 and Stage 2, the same
+// operator splice is applied per matching sealed segment_id.
+func MergeStage1Explain(stage2 *internalpb.ExecutionExplain, stage1 ...*internalpb.ExecutionExplain) (*internalpb.ExecutionExplain, bool) {
+	s1 := Merge(stage1...)
+	if stage2 == nil || stage2.GetGroup() == nil || s1 == nil || s1.GetGroup() == nil {
+		return stage2, false
+	}
+	cloned, ok := proto.Clone(stage2).(*internalpb.ExecutionExplain)
+	if !ok || cloned == nil || cloned.GetGroup() == nil {
+		return stage2, false
+	}
+
+	s1Group := s1.GetGroup()
+	s2Group := cloned.GetGroup()
+	if s1Group.GetSealedSegments() != s2Group.GetSealedSegments() ||
+		(s1Group.GetSealedSegments() == 0 && s1Group.GetSegments() != s2Group.GetSegments()) {
+		return stage2, false
+	}
+	mutated := mergeStage1OperatorsIntoGroup(s2Group, s1Group)
+
+	if len(s1Group.GetSegmentDetails()) > 0 && len(s2Group.GetSegmentDetails()) > 0 {
+		s1BySeg := make(map[int64]*internalpb.ExplainSegmentGroup, len(s1Group.GetSegmentDetails()))
+		for _, d1 := range s1Group.GetSegmentDetails() {
+			if d1 == nil || d1.GetGroup() == nil || d1.GetSegmentId() == 0 {
+				continue
+			}
+			s1BySeg[d1.GetSegmentId()] = d1.GetGroup()
+		}
+		for _, d2 := range s2Group.GetSegmentDetails() {
+			if d2 == nil || d2.GetGroup() == nil || d2.GetIsGrowing() || d2.GetSegmentId() == 0 {
+				continue
+			}
+			if d1Group := s1BySeg[d2.GetSegmentId()]; d1Group != nil {
+				if mergeStage1OperatorsIntoGroup(d2.GetGroup(), d1Group) {
+					mutated = true
+				}
+			}
+		}
 	}
 
 	if !mutated {
