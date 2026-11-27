@@ -512,7 +512,8 @@ class SegmentGrowingImpl : public SegmentGrowing {
 
     FieldIndexCapability
     ResolveIndexCapability(milvus::OpContext*,
-                           FieldId field_id) const override {
+                           FieldId field_id,
+                           CapabilityResolveHint = {}) const override {
         return growing_indexes_.Capability(field_id);
     }
 

@@ -735,13 +735,22 @@ func (ex *Executor) getLoadInfo(ctx context.Context, collectionID, segmentID int
 		mlog.Warn(context.TODO(), "fail to get index meta of collection", mlog.Err(err))
 		return nil, nil, err
 	}
-	// update the field index params
+	visibleIndexInfos := make([]*indexpb.IndexInfo, 0, len(indexInfos))
+	for _, indexInfo := range indexInfos {
+		if common.IsIndexInfoVisible(indexInfo.GetIndexParams(), indexInfo.GetUserIndexParams()) {
+			visibleIndexInfos = append(visibleIndexInfos, indexInfo)
+		}
+	}
+	// update the field index params and omit invisible indexes
+	visibleSegmentIndexes := make([]*querypb.FieldIndexInfo, 0, len(indexes[segment.GetID()]))
 	for _, segmentIndex := range indexes[segment.GetID()] {
 		index, found := lo.Find(indexInfos, func(indexInfo *indexpb.IndexInfo) bool {
 			return indexInfo.IndexID == segmentIndex.IndexID
 		})
 		if !found {
 			mlog.Warn(context.TODO(), "no collection index info for the given segment index", mlog.String("indexName", segmentIndex.GetIndexName()))
+		} else if !common.IsIndexInfoVisible(index.GetIndexParams(), index.GetUserIndexParams()) {
+			continue
 		}
 
 		params := funcutil.KeyValuePair2Map(segmentIndex.GetIndexParams())
@@ -753,9 +762,10 @@ func (ex *Executor) getLoadInfo(ctx context.Context, collectionID, segmentID int
 		segmentIndex.IndexParams = funcutil.Map2KeyValuePair(params)
 		segmentIndex.IndexParams = append(segmentIndex.IndexParams,
 			&commonpb.KeyValuePair{Key: common.LoadPriorityKey, Value: priority.String()})
+		visibleSegmentIndexes = append(visibleSegmentIndexes, segmentIndex)
 	}
 
-	loadInfo := utils.PackSegmentLoadInfo(segment, channel.GetSeekPosition(), indexes[segment.GetID()])
+	loadInfo := utils.PackSegmentLoadInfo(segment, channel.GetSeekPosition(), visibleSegmentIndexes)
 	loadInfo.Priority = priority
-	return loadInfo, indexInfos, nil
+	return loadInfo, visibleIndexInfos, nil
 }

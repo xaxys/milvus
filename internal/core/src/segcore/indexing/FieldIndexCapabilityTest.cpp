@@ -714,4 +714,87 @@ TEST(IndexInventoryTest, EagerAndLazyProjectionMetadataMatchesAcrossClones) {
     EXPECT_EQ(ResolvedIndexes(lazy).front(), ResolvedIndexes(clone).front());
 }
 
+TEST(IndexInventoryTest, StaticCapabilityKeepsUnselectedLazySiblingsCold) {
+    IndexInventory inventory;
+    const FieldId fid(20);
+    // Typed JSON projections carry no static_capability because caps.json_paths
+    // depends on persisted completeness metadata; CapabilityResolveHint::json_path
+    // keeps unrelated JSON path siblings cold while resolving the target path's
+    // authoritative caps.
+    IndexRegistration warm_reg{IndexKey{fid, IndexIdentity::PreBuiltIndex(1)}};
+    warm_reg.json_path = "/a";
+    warm_reg.json_cast_type = JsonCastType::FromString("VARCHAR");
+
+    IndexRegistration cold_reg{IndexKey{fid, IndexIdentity::PreBuiltIndex(2)}};
+    cold_reg.json_path = "/b";
+    cold_reg.json_cast_type = JsonCastType::FromString("VARCHAR");
+
+    int warm_calls = 0;
+    int cold_calls = 0;
+    inventory.Register(
+        std::make_shared<IndexInventory::Entry>(warm_reg, [&](OpContext*) {
+            ++warm_calls;
+            return IndexInventory::ResolvedData{
+                "inverted",
+                DataType::VARCHAR,
+                {.predicate = true, .json_paths = true, .exact = true},
+                TestSlot(
+                    "warm",
+                    {.predicate = true, .json_paths = true, .exact = true})};
+        }));
+    inventory.Register(
+        std::make_shared<IndexInventory::Entry>(cold_reg, [&](OpContext*) {
+            ++cold_calls;
+            return IndexInventory::ResolvedData{
+                "ngram",
+                DataType::VARCHAR,
+                {.ngram_candidates = true},
+                TestSlot("cold", {.ngram_candidates = true})};
+        }));
+
+    const auto caps =
+        inventory.ResolveCapability(nullptr, fid, {.json_path = "/a"});
+    EXPECT_EQ(warm_calls, 1);
+    EXPECT_EQ(cold_calls, 0);
+    EXPECT_TRUE(caps.has_unmatched_entries());
+    ASSERT_NE(caps.Find(warm_reg.key), nullptr);
+    EXPECT_EQ(caps.Find(warm_reg.key)->family, "inverted");
+    EXPECT_TRUE(caps.Find(warm_reg.key)->caps.json_paths);
+    EXPECT_EQ(caps.Find(cold_reg.key), nullptr);
+
+    auto reader = inventory.CreateIndexReader(nullptr, warm_reg.key);
+    ASSERT_NE(reader, nullptr);
+    EXPECT_TRUE(SameCaps(caps.Find(warm_reg.key)->caps, reader->Caps()));
+    EXPECT_EQ(warm_calls, 1);
+    EXPECT_EQ(cold_calls, 0);
+
+    // Non-JSON scalar entries with static_capability stay cold during
+    // ResolveCapability and validate SameCaps on CreateIndexReader.
+    const FieldId scalar_fid(21);
+    IndexRegistration scalar_reg{
+        IndexKey{scalar_fid, IndexIdentity::PreBuiltIndex(10)}};
+    scalar_reg.static_capability = StaticIndexCapability{
+        .family = "inverted",
+        .value_type = DataType::VARCHAR,
+        .caps = {.predicate = true, .exact = true},
+    };
+    int scalar_calls = 0;
+    inventory.Register(
+        std::make_shared<IndexInventory::Entry>(scalar_reg, [&](OpContext*) {
+            ++scalar_calls;
+            return IndexInventory::ResolvedData{
+                "inverted",
+                DataType::VARCHAR,
+                {.predicate = true, .exact = true},
+                TestSlot("scalar", {.predicate = true, .exact = true})};
+        }));
+    const auto scalar_caps = inventory.ResolveCapability(nullptr, scalar_fid);
+    EXPECT_EQ(scalar_calls, 0);
+    EXPECT_FALSE(scalar_caps.has_unmatched_entries());
+    ASSERT_NE(scalar_caps.Find(scalar_reg.key), nullptr);
+    auto scalar_reader = inventory.CreateIndexReader(nullptr, scalar_reg.key);
+    ASSERT_NE(scalar_reader, nullptr);
+    EXPECT_EQ(scalar_calls, 1);
+}
+
 }  // namespace milvus::segcore

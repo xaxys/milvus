@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/metacache"
@@ -35,6 +36,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
+	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
@@ -668,6 +670,71 @@ func (suite *IndexCheckerSuite) TestCreateNewJsonIndex() {
 	suite.Len(tasks, 1)
 	suite.Len(tasks[0].Actions(), 1)
 	suite.Equal(tasks[0].Actions()[0].(*task.SegmentAction).Type(), task.ActionTypeReopen)
+}
+
+func TestVisiblePropertyFiltersIndexCheck(t *testing.T) {
+	paramtable.Init()
+	ctx := context.Background()
+
+	catalog := catalogmocks.NewQueryCoordCatalog(t)
+	catalog.EXPECT().SaveCollection(mock.Anything, mock.Anything).Return(nil)
+	catalog.EXPECT().SaveReplica(mock.Anything, mock.Anything).Return(nil)
+	catalog.EXPECT().SaveResourceGroup(mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	nodeMgr := session.NewNodeManager()
+	metaStore := metacache.NewMetaStore(nil)
+	metaMgr := meta.NewMeta(params.RandomIncrementIDAllocator(), catalog, nodeMgr, metaStore)
+	distManager := meta.NewDistributionManager(nodeMgr)
+	broker := meta.NewMockBroker(t)
+	targetMgr := meta.NewMockTargetManager(t)
+	checker := NewIndexChecker(metaMgr, distManager, broker, nodeMgr, targetMgr)
+	targetMgr.EXPECT().GetSealedSegment(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _, sid int64, _ int32) *datapb.SegmentInfo {
+			return &datapb.SegmentInfo{ID: sid, Level: datapb.SegmentLevel_L1}
+		}).Maybe()
+
+	coll := utils.CreateTestCollection(1, 1)
+	coll.FieldIndexID = map[int64]int64{101: 1000}
+	schema := &schemapb.CollectionSchema{
+		Name: "test_visible_index",
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: 101, DataType: schemapb.DataType_Int64, Name: "age"},
+		},
+	}
+	require.NoError(t, checker.meta.PutCollection(ctx, coll))
+	metaStore.PutCollection(&metacache.CollectionInfo{ID: coll.GetCollectionID(), Schema: schema})
+	require.NoError(t, checker.meta.Put(ctx, utils.CreateTestReplica(200, 1, []int64{1})))
+	nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{NodeID: 1, Address: "localhost", Hostname: "localhost"}))
+	checker.meta.HandleNodeUp(ctx, 1)
+
+	segment := utils.CreateTestSegment(1, 1, 2, 1, 1, "test-insert-channel")
+	segment.IndexInfo = map[int64]*querypb.FieldIndexInfo{
+		1000: {FieldID: 101, IndexID: 1000, EnableIndex: true},
+	}
+	checker.dist.SegmentDistManager.Update(1, segment)
+
+	// 1. A second index 1001 with visible=false does NOT trigger segment reopen.
+	broker.EXPECT().ListIndexes(mock.Anything, mock.Anything).Return([]*indexpb.IndexInfo{
+		{FieldID: 101, IndexID: 1000},
+		{
+			FieldID:     101,
+			IndexID:     1001,
+			IndexParams: []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+		},
+	}, nil).Once()
+	require.Empty(t, checker.Check(ctx))
+
+	// 2. Hiding loaded index 1000 via visible=false triggers segment reopen to unload it.
+	broker.EXPECT().ListIndexes(mock.Anything, mock.Anything).Return([]*indexpb.IndexInfo{
+		{
+			FieldID:         101,
+			IndexID:         1000,
+			UserIndexParams: []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+		},
+	}, nil).Once()
+	tasks := checker.Check(ctx)
+	require.Len(t, tasks, 1)
+	require.Equal(t, task.ActionTypeReopen, tasks[0].Actions()[0].(*task.SegmentAction).Type())
 }
 
 func TestIndexChecker(t *testing.T) {

@@ -475,8 +475,12 @@ class SealedDataGetter : public DataGetter<OutputType> {
             requirement.json_path = json_path.value();
         }
 
-        const auto capabilities =
-            segment_.ResolveIndexCapability(op_ctx_, field_id_);
+        const auto capabilities = segment_.ResolveIndexCapability(
+            op_ctx_,
+            field_id_,
+            is_json ? segcore::CapabilityResolveHint{.json_path =
+                                                         requirement.json_path}
+                    : segcore::CapabilityResolveHint{});
         const auto decision = DetermineExecPath(requirement, capabilities);
         if (!decision.key.has_value()) {
             return false;
@@ -497,7 +501,7 @@ class SealedDataGetter : public DataGetter<OutputType> {
 
         const index::IIndexReaderBase* reader = index_reader_.get();
         if constexpr (is_json) {
-            if (entry->caps.json_paths) {
+            if (index_reader_->Caps().json_paths) {
                 auto* json_reader =
                     dynamic_cast<const index::IJsonIndexReader*>(reader);
                 AssertInfo(json_reader != nullptr,

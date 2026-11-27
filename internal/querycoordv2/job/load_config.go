@@ -150,7 +150,7 @@ func (c *CurrentLoadConfig) IntoLoadConfigMessageHeader() *messagespb.AlterLoadC
 		return partitionIDs[i] < partitionIDs[j]
 	})
 
-	loadFields := generateLoadFields(c.GetLoadFields(), c.GetFieldIndexID())
+	loadFields := GenerateLoadFields(c.GetLoadFields(), c.GetFieldIndexID(), c.Collection.GetRequiredFields())
 
 	replicas := make([]*messagespb.LoadReplicaConfig, 0, len(c.Replicas))
 	for _, replica := range c.Replicas {
@@ -179,7 +179,7 @@ func (c *CurrentLoadConfig) IntoLoadConfigMessageHeader() *messagespb.AlterLoadC
 // It returns a nil message (with a nil error) when the expected load config is identical to
 // the current one, i.e. there is nothing to broadcast and the operation is a no-op.
 func GenerateAlterLoadConfigMessage(ctx context.Context, req *AlterLoadConfigRequest) (message.BroadcastMutableMessage, error) {
-	loadFields := generateLoadFields(req.Expected.ExpectedLoadFields, req.Expected.ExpectedFieldIndexID)
+	loadFields := GenerateLoadFields(req.Expected.ExpectedLoadFields, req.Expected.ExpectedFieldIndexID, req.Expected.ExpectedRequiredFields)
 	loadReplicaConfigs, err := req.generateReplicas(ctx)
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ func GenerateAlterLoadConfigMessage(ctx context.Context, req *AlterLoadConfigReq
 		AutoLoad:                 req.Expected.ExpectedAutoLoad,
 	}
 	// check if the load configuration is changed; nothing to broadcast if not.
-	if previousHeader := req.Current.IntoLoadConfigMessageHeader(); proto.Equal(previousHeader, header) {
+	if previousHeader := req.Current.IntoLoadConfigMessageHeader(); EqualAlterLoadConfigHeaders(previousHeader, header) {
 		return nil, nil
 	}
 	return message.NewAlterLoadConfigMessageBuilderV2().
@@ -211,18 +211,67 @@ func GenerateAlterLoadConfigMessage(ctx context.Context, req *AlterLoadConfigReq
 		MustBuildBroadcast(), nil
 }
 
-// generateLoadFields generates the load fields for the collection.
-func generateLoadFields(loadedFields []int64, fieldIndexID map[int64]int64) []*messagespb.LoadFieldConfig {
+// EqualAlterLoadConfigHeaders compares two AlterLoadConfigMessageHeaders with
+// RequiredFields canonicalized by FieldId so schema field ordering never causes
+// a false mismatch against canonicalized persisted state.
+func EqualAlterLoadConfigHeaders(a, b *messagespb.AlterLoadConfigMessageHeader) bool {
+	if a == nil || b == nil {
+		return proto.Equal(a, b)
+	}
+	return proto.Equal(withSortedRequiredFields(a), withSortedRequiredFields(b))
+}
+
+func withSortedRequiredFields(h *messagespb.AlterLoadConfigMessageHeader) *messagespb.AlterLoadConfigMessageHeader {
+	if len(h.GetRequiredFields()) <= 1 {
+		return h
+	}
+	cloned := proto.Clone(h).(*messagespb.AlterLoadConfigMessageHeader)
+	sort.Slice(cloned.RequiredFields, func(i, j int) bool {
+		return cloned.RequiredFields[i].GetFieldId() < cloned.RequiredFields[j].GetFieldId()
+	})
+	return cloned
+}
+
+// GenerateLoadFields generates the load fields for the collection, inheriting
+// index selections from requiredFields whenever requiredFields specifies the field.
+func GenerateLoadFields(
+	loadedFields []int64,
+	fieldIndexID map[int64]int64,
+	requiredFields []*messagespb.LoadFieldConfig,
+) []*messagespb.LoadFieldConfig {
+	requiredByField := make(map[int64]*messagespb.LoadFieldConfig, len(requiredFields))
+	for _, rf := range requiredFields {
+		requiredByField[rf.GetFieldId()] = rf
+	}
 	loadFields := lo.Map(loadedFields, func(fieldID int64, _ int) *messagespb.LoadFieldConfig {
-		if indexID, ok := fieldIndexID[fieldID]; ok {
+		if rf, ok := requiredByField[fieldID]; ok {
+			if len(rf.GetIndexIds()) > 0 {
+				return &messagespb.LoadFieldConfig{
+					FieldId:  fieldID,
+					IndexId:  rf.GetIndexIds()[0],
+					IndexIds: append([]int64(nil), rf.GetIndexIds()...),
+				}
+			}
+			if rf.GetIndexId() != 0 {
+				return &messagespb.LoadFieldConfig{
+					FieldId:  fieldID,
+					IndexId:  rf.GetIndexId(),
+					IndexIds: []int64{rf.GetIndexId()},
+				}
+			}
 			return &messagespb.LoadFieldConfig{
 				FieldId: fieldID,
-				IndexId: indexID,
+			}
+		}
+		if indexID, ok := fieldIndexID[fieldID]; ok && indexID != 0 {
+			return &messagespb.LoadFieldConfig{
+				FieldId:  fieldID,
+				IndexId:  indexID,
+				IndexIds: []int64{indexID},
 			}
 		}
 		return &messagespb.LoadFieldConfig{
 			FieldId: fieldID,
-			IndexId: 0,
 		}
 	})
 	sort.Slice(loadFields, func(i, j int) bool {

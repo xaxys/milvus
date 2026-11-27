@@ -415,6 +415,7 @@ message AlterLoadConfigMessageBody {
 message LoadFieldConfig {
     int64 field_id = 1;
     int64 index_id = 2;
+    repeated int64 index_ids = 3;
 }
 
 // LoadReplicaConfig is the config of a replica.

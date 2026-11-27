@@ -315,33 +315,20 @@ SegmentLoadInfo::ComputeDiffIndexes(LoadDiff& diff, SegmentLoadInfo& new_info) {
             new_index_ids.insert(index_id);
         }
     }
-    std::unordered_map<FieldId, std::unordered_set<std::string>>
-        new_json_index_paths;
-    for (const auto& [field_id, index_paths] :
-         new_info.json_index_path_cache_) {
-        if (!new_info.HasFieldInSchema(field_id)) {
-            continue;
-        }
-        for (const auto& index_path : index_paths) {
-            new_json_index_paths[field_id].insert(index_path.second);
-        }
-    }
-    // Find indexes to load/replace: indexes in new_info but not in current
-    // Only consider fields that exist in the current schema (skip dropped fields)
+    // Find indexes to load/replace: indexes in new_info but not in current.
+    // Scalar indexes always use indexes_to_load + indexes_to_drop by indexID;
+    // indexes_to_replace is reserved strictly for vector index replacement.
     for (const auto& [field_id, load_index_infos] :
          new_info.converted_field_index_cache_) {
-        // Schema-driven: skip indexes for fields not in current schema.
-        // Use the target field selection; the previous load may include
-        // fields dropped by this operation.
         if (!new_info.HasFieldInSchema(field_id)) {
             continue;
         }
         for (const auto& load_index_info : load_index_infos) {
             if (current_index_ids.find(load_index_info.index_id) ==
                 current_index_ids.end()) {
-                // New index_id: check if field already has an index loaded
-                if (current_indexed_fields.find(field_id) !=
-                    current_indexed_fields.end()) {
+                if (IsVectorDataType(load_index_info.field_type) &&
+                    current_indexed_fields.find(field_id) !=
+                        current_indexed_fields.end()) {
                     diff.indexes_to_replace[field_id].push_back(
                         load_index_info);
                 } else {
@@ -351,25 +338,28 @@ SegmentLoadInfo::ComputeDiffIndexes(LoadDiff& diff, SegmentLoadInfo& new_info) {
         }
     }
 
-    // Find indexes to drop: fields that have indexes in current but not in new_info
+    // Find scalar indexes to drop by indexID, and vector fields whose index left
+    // without a replacement.
     for (const auto& [field_id, index_ids] : field_index_id_cache_) {
-        for (auto index_id : index_ids) {
-            if (!new_info.HasFieldInSchema(field_id) ||
-                new_index_ids.find(index_id) == new_index_ids.end()) {
-                auto field_paths = json_index_path_cache_.find(field_id);
-                if (field_paths != json_index_path_cache_.end()) {
-                    auto path = field_paths->second.find(index_id);
-                    if (path != field_paths->second.end()) {
-                        if (new_json_index_paths[field_id].find(path->second) ==
-                            new_json_index_paths[field_id].end()) {
-                            diff.json_indexes_to_drop[field_id].insert(
-                                path->second);
-                        }
-                        continue;
-                    }
-                }
-                diff.indexes_to_drop.insert(field_id);
+        if (vector_indexed_fields_.find(field_id) !=
+            vector_indexed_fields_.end()) {
+            bool any_left = new_info.HasFieldInSchema(field_id);
+            if (any_left) {
+                auto it = new_info.field_index_id_cache_.find(field_id);
+                any_left = it != new_info.field_index_id_cache_.end() &&
+                           !it->second.empty();
             }
+            if (!any_left) {
+                diff.vector_indexes_to_drop.insert(field_id);
+            }
+            continue;
+        }
+        for (auto index_id : index_ids) {
+            if (new_info.HasFieldInSchema(field_id) &&
+                new_index_ids.find(index_id) != new_index_ids.end()) {
+                continue;
+            }
+            diff.indexes_to_drop[field_id].insert(index_id);
         }
     }
 }
@@ -872,7 +862,11 @@ SegmentLoadInfo::ComputeDiffDefaultFields(LoadDiff& diff,
                                           SegmentLoadInfo& new_info,
                                           const SealedFieldLayoutPtr& fields) {
     std::set<FieldId> new_info_fields = new_info.CollectDataFields();
-    std::set<FieldId> current_fields = CollectDataFields();
+    // Only fields with materialized row/column storage (or previously default-filled)
+    // already own a column in runtime->fields. Fields that previously relied solely on
+    // a raw-data-carrying index (e.g. STL_SORT) have no column in runtime->fields and
+    // must be default-filled if that index coverage disappears on reopen.
+    std::set<FieldId> current_fields = CollectRowColumnFields();
 
     // Build "current handled" set:
     // - Fields with data source in current

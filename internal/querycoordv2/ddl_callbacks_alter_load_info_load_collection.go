@@ -22,9 +22,9 @@ import (
 	"sort"
 
 	"github.com/samber/lo"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/metacache"
 	"github.com/milvus-io/milvus/internal/querycoordv2/job"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
@@ -110,6 +110,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 	// it.
 	expectedReplicasNumber = completePlacementForOutOfScopeResourceGroups(
 		ctx, req.GetCollectionID(), scopedResourceGroups, expectedReplicasNumber, legacyLoadConfig)
+	expectedRequiredFields := s.resolveExpectedRequiredFields(coll.ID, coll.Schema, req.GetFieldIndexID())
 	alterLoadConfigReq := &job.AlterLoadConfigRequest{
 		Meta:           s.meta,
 		CollectionInfo: coll,
@@ -119,7 +120,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 			ExpectedReplicaNumber:            expectedReplicasNumber,
 			ExpectedFieldIndexID:             req.GetFieldIndexID(),
 			ExpectedLoadFields:               loadmgr.PreloadFieldIDsForSchema(coll.Schema, req.GetLoadFields()),
-			ExpectedRequiredFields:           loadmgr.FieldsToMessage(loadmgr.RequiredFieldsForSchema(coll.Schema)),
+			ExpectedRequiredFields:           expectedRequiredFields,
 			ExpectedPriority:                 req.GetPriority(),
 			ExpectedUserSpecifiedReplicaMode: userSpecifiedReplicaMode,
 			ExpectedAutoLoad:                 autoLoad,
@@ -132,6 +133,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 		ReplicaNumber:            expectedReplicasNumber,
 		FieldIndexID:             req.GetFieldIndexID(),
 		LoadFields:               req.GetLoadFields(),
+		RequiredFields:           expectedRequiredFields,
 		Priority:                 req.GetPriority(),
 		UserSpecifiedReplicaMode: userSpecifiedReplicaMode,
 		AutoLoad:                 autoLoad,
@@ -222,8 +224,21 @@ type qviewsExpectedLoadConfig struct {
 	ReplicaNumber            map[string]int
 	FieldIndexID             map[int64]int64
 	LoadFields               []int64
+	RequiredFields           []*messagespb.LoadFieldConfig
 	Priority                 commonpb.LoadPriority
 	UserSpecifiedReplicaMode bool
+}
+
+func (s *Server) resolveExpectedRequiredFields(
+	collectionID int64,
+	schema *schemapb.CollectionSchema,
+	fieldIndexID map[int64]int64,
+) []*messagespb.LoadFieldConfig {
+	var store *loadmgr.LoadConfigStore
+	if s != nil && s.qviewsRuntime != nil {
+		store = s.qviewsRuntime.loadConfigStore
+	}
+	return loadmgr.FieldsToMessage(store.ResolveSchemaFields(collectionID, schema, fieldIndexID))
 }
 
 func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
@@ -236,17 +251,21 @@ func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
 	if err != nil {
 		return nil, err
 	}
+	requiredFields := expected.RequiredFields
+	if requiredFields == nil {
+		requiredFields = s.resolveExpectedRequiredFields(coll.ID, coll.Schema, expected.FieldIndexID)
+	}
 	header := &messagespb.AlterLoadConfigMessageHeader{
 		DbId:                     coll.DatabaseID,
 		CollectionId:             coll.ID,
 		PartitionIds:             sortedInt64s(expected.PartitionIDs),
-		LoadFields:               generateQViewsLoadFields(loadmgr.PreloadFieldIDsForSchema(coll.Schema, expected.LoadFields), expected.FieldIndexID),
-		RequiredFields:           loadmgr.FieldsToMessage(loadmgr.RequiredFieldsForSchema(coll.Schema)),
+		LoadFields:               job.GenerateLoadFields(loadmgr.PreloadFieldIDsForSchema(coll.Schema, expected.LoadFields), expected.FieldIndexID, requiredFields),
+		RequiredFields:           requiredFields,
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: expected.UserSpecifiedReplicaMode,
 		AutoLoad:                 expected.AutoLoad,
 	}
-	if proto.Equal(loadConfigIntoAlterLoadConfigHeader(current), header) {
+	if job.EqualAlterLoadConfigHeaders(loadConfigIntoAlterLoadConfigHeader(current), header) {
 		return nil, nil
 	}
 	return message.NewAlterLoadConfigMessageBuilderV2().
@@ -338,19 +357,6 @@ func sortedReplicaAssignments(cfg *loadmgr.LoadConfig) []*loadmgr.ReplicaAssignm
 		return replicas[i].ReplicaID < replicas[j].ReplicaID
 	})
 	return replicas
-}
-
-func generateQViewsLoadFields(loadedFields []int64, fieldIndexID map[int64]int64) []*messagespb.LoadFieldConfig {
-	loadFields := lo.Map(loadedFields, func(fieldID int64, _ int) *messagespb.LoadFieldConfig {
-		return &messagespb.LoadFieldConfig{
-			FieldId: fieldID,
-			IndexId: fieldIndexID[fieldID],
-		}
-	})
-	sort.Slice(loadFields, func(i, j int) bool {
-		return loadFields[i].GetFieldId() < loadFields[j].GetFieldId()
-	})
-	return loadFields
 }
 
 func cloneAndSortLoadFields(fields []*viewpb.LoadFieldConfig) []*viewpb.LoadFieldConfig {

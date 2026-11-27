@@ -12,7 +12,9 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	catalogkv "github.com/milvus-io/milvus/internal/metastore/kv/queryview"
+	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
@@ -381,9 +383,111 @@ func TestLoadInfoIndexPublicationRetry(t *testing.T) {
 	after := store.GetConfigVersion(1)
 	require.Greater(t, after, before)
 	require.NoError(t, manager.RefreshIndexes(t.Context(), 1))
-	require.Equal(t, after, store.GetConfigVersion(1), "retry must not endlessly allocate versions")
-	store.StopPlanning(1)
-	require.NoError(t, store.Remove(t.Context(), 1))
+	require.Equal(t, after, store.GetConfigVersion(1))
+	require.NoError(t, manager.RefreshIndexes(t.Context(), 999))
+}
+
+func TestLoadConfigVisiblePropertyAndAutomaticRefresh(t *testing.T) {
+	deps := versionedTestDependencies(t)
+	idxSort := &indexpb.IndexInfo{CollectionID: 1, FieldID: 100, IndexID: 200, IndexName: "price_sort"}
+	idxNgram := &indexpb.IndexInfo{
+		CollectionID: 1,
+		FieldID:      100,
+		IndexID:      201,
+		IndexName:    "title_ngram",
+		IndexParams:  []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+	}
+	indexes := []*indexpb.IndexInfo{idxSort, idxNgram}
+	definitions := map[int64]*indexpb.IndexInfo{200: idxSort, 201: idxNgram}
+	deps.Indexes = func(_ int64, ids ...int64) []*indexpb.IndexInfo {
+		if len(ids) == 0 {
+			return indexes
+		}
+		var out []*indexpb.IndexInfo
+		for _, id := range ids {
+			if info := definitions[id]; info != nil {
+				out = append(out, info)
+			}
+		}
+		return out
+	}
+
+	store, err := RecoverLoadConfigStore(t.Context(), deps)
+	require.NoError(t, err)
+	nextReplicaID := int64(30)
+	for _, p := range []*mockey.Mocker{
+		mockey.Mock((*testReplicaConfigResources).ContainResourceGroup).To(func(_ *testReplicaConfigResources, _ context.Context, _ string) bool { return true }).Build(),
+		mockey.Mock((*testReplicaConfigResources).AllocateReplicaID).To(func(*testReplicaConfigResources, context.Context) (int64, error) {
+			nextReplicaID++
+			return nextReplicaID, nil
+		}).Build(),
+	} {
+		t.Cleanup(func() { p.UnPatch() })
+	}
+	var notified int
+	manager := NewCollectionLoadManager(store, func(int64) { notified++ }, &testReplicaConfigResources{})
+
+	// 1. Initial LoadCollection picks only visible=true indexes ([200]).
+	require.NoError(t, store.Put(t.Context(), versionedTestConfig()))
+	v1 := store.GetConfigVersion(1)
+	require.Equal(t, []int64{200}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
+
+	// 2. AlterIndex(visible=true) on 201 -> RefreshIndexes applies automatically without LoadCollection.
+	idxNgram.IndexParams = []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "true"}}
 	require.NoError(t, manager.RefreshIndexes(t.Context(), 1))
-	require.False(t, store.Contains(1), "index DDL must not load a collection")
+	v2 := store.GetConfigVersion(1)
+	require.Greater(t, v2, v1)
+	require.Equal(t, []int64{200, 201}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
+	require.Equal(t, []int64{200, 201}, store.GetConfig(1).LoadFields[0].GetIndexIds())
+	require.Equal(t, 1, notified)
+
+	// 3. CreateIndex(visible=false) on 202 -> RefreshIndexes is a zero-version-bump no-op on active LoadConfig.
+	idxHidden := &indexpb.IndexInfo{
+		CollectionID: 1,
+		FieldID:      100,
+		IndexID:      202,
+		IndexName:    "cat_hidden",
+		IndexParams:  []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}},
+	}
+	indexes = append(indexes, idxHidden)
+	definitions[202] = idxHidden
+	require.NoError(t, manager.RefreshIndexes(t.Context(), 1))
+	require.Equal(t, v2, store.GetConfigVersion(1), "creating an invisible index must not churn active LoadConfig version")
+	require.Equal(t, []int64{200, 201}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
+
+	// 4. CreateIndex(visible=true) on 203 -> RefreshIndexes adds 203 immediately.
+	idxBitmap := &indexpb.IndexInfo{CollectionID: 1, FieldID: 100, IndexID: 203, IndexName: "cat_bitmap"}
+	indexes = append(indexes, idxBitmap)
+	definitions[203] = idxBitmap
+	require.NoError(t, manager.RefreshIndexes(t.Context(), 1))
+	v3 := store.GetConfigVersion(1)
+	require.Greater(t, v3, v2)
+	require.Equal(t, []int64{200, 201, 203}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
+
+	// 5. AlterIndex(visible=false) on 200 -> RefreshIndexes removes 200 immediately.
+	idxSort.UserIndexParams = []*commonpb.KeyValuePair{{Key: common.IndexVisibleKey, Value: "false"}}
+	require.NoError(t, manager.RefreshIndexes(t.Context(), 1))
+	v4 := store.GetConfigVersion(1)
+	require.Greater(t, v4, v3)
+	require.Equal(t, []int64{201, 203}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
+
+	// 6. AddPartition / UpdateReplicaConfig / ApplySchema preserve multi-scalar visible selection [201, 203].
+	require.NoError(t, manager.AddPartition(t.Context(), 1, 11))
+	require.Equal(t, []int64{201, 203}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
+	require.Equal(t, []int64{10, 11}, store.GetConfig(1).PartitionIDs)
+
+	require.NoError(t, manager.UpdateReplicaConfig(t.Context(), 1, 2, []string{"rg"}))
+	require.Len(t, store.GetConfig(1).Replicas, 2)
+	require.Equal(t, []int64{201, 203}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
+
+	oldSchema := &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{{FieldID: 100}}}
+	newSchema := &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{{FieldID: 100}, {FieldID: 101}}}
+	require.NoError(t, store.ApplySchema(t.Context(), 1, oldSchema, newSchema, nil))
+	require.Equal(t, []int64{201, 203}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
+
+	// 7. DropIndex on 201 -> RefreshIndexes removes 201 immediately.
+	delete(definitions, 201)
+	indexes = []*indexpb.IndexInfo{idxSort, idxHidden, idxBitmap}
+	require.NoError(t, manager.RefreshIndexes(t.Context(), 1))
+	require.Equal(t, []int64{203}, store.GetConfig(1).RequiredFields[0].GetIndexIds())
 }

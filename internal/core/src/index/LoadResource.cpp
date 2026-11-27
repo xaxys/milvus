@@ -487,6 +487,14 @@ CanUseIndexRawDataForField(DataType field_type, bool has_raw_data) {
            field_type != DataType::VECTOR_ARRAY && field_type != DataType::JSON;
 }
 
+bool
+ScalarIndexTypeHasRawData(DataType field_type, std::string_view index_type) {
+    const bool raw = index_type == ASCENDING_SORT ||
+                     index_type == MARISA_TRIE ||
+                     index_type == MARISA_TRIE_UPPER;
+    return CanUseIndexRawDataForField(field_type, raw);
+}
+
 LoadResourceRequest
 IndexLoadResource(DataType field_type,
                   DataType element_type,

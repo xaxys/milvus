@@ -35,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
@@ -306,12 +307,17 @@ func (s *Server) requiredLoadResourceByRG(ctx context.Context, req *job.AlterLoa
 		return nil, err
 	}
 
+	expectedIndexes := indexes
+	if allowedIDs, ok := s.expectedAllowedIndexIDs(collectionID, req.CollectionInfo.Schema, req.Expected); ok {
+		expectedIndexes = filterIndexesByIndexIDs(indexes, allowedIDs)
+	}
+
 	expectedUsage, err := estimateLoadResourceForLoadConfig(
 		ctx,
 		req.CollectionInfo.Schema,
 		req.CollectionInfo.Properties,
 		segments,
-		indexes,
+		expectedIndexes,
 		req.Expected.ExpectedLoadFields,
 	)
 	if err != nil {
@@ -327,6 +333,10 @@ func (s *Server) requiredLoadResourceByRG(ctx context.Context, req *job.AlterLoa
 		currentPartitionSet := typeutil.NewSet(req.Current.GetPartitionIDs()...)
 		currentSegments := filterSegmentsByPartitionIDs(segments, currentPartitionSet)
 		if len(currentSegments) > 0 {
+			currentIndexes := indexes
+			if activeIDs, ok := s.currentAllowedIndexIDs(req.Current.Collection.GetRequiredFields()); ok {
+				currentIndexes = filterIndexesByIndexIDs(indexes, activeIDs)
+			}
 			currentUsage, err = estimateLoadResourceForLoadConfig(
 				ctx,
 				// The live collection view. This used to prefer a schema
@@ -335,7 +345,7 @@ func (s *Server) requiredLoadResourceByRG(ctx context.Context, req *job.AlterLoa
 				req.CollectionInfo.Schema,
 				req.CollectionInfo.Properties,
 				currentSegments,
-				indexes,
+				currentIndexes,
 				req.Current.GetLoadFields(),
 			)
 			if err != nil {
@@ -346,6 +356,72 @@ func (s *Server) requiredLoadResourceByRG(ctx context.Context, req *job.AlterLoa
 	}
 
 	return buildRequiredLoadResourceByRGForLoadConfig(expectedUsage, currentUsage, currentReplicasNumber, req.Expected.ExpectedReplicaNumber), nil
+}
+
+func collectFieldConfigIndexIDs(fields []*messagespb.LoadFieldConfig) (typeutil.Set[int64], bool) {
+	ids := typeutil.NewSet[int64]()
+	hasExplicit := false
+	for _, field := range fields {
+		if len(field.GetIndexIds()) > 0 {
+			hasExplicit = true
+			ids.Insert(field.GetIndexIds()...)
+		} else if field.GetIndexId() != 0 {
+			hasExplicit = true
+			ids.Insert(field.GetIndexId())
+		}
+	}
+	return ids, hasExplicit
+}
+
+func (s *Server) expectedAllowedIndexIDs(
+	collectionID int64,
+	schema *schemapb.CollectionSchema,
+	expected job.ExpectedLoadConfig,
+) (typeutil.Set[int64], bool) {
+	if ids, ok := collectFieldConfigIndexIDs(expected.ExpectedRequiredFields); ok {
+		return ids, true
+	}
+	if s.qviewsRuntime == nil || !s.qviewsRuntime.loadConfigStore.HasIndexSource() {
+		return nil, false
+	}
+	if len(expected.ExpectedRequiredFields) > 0 {
+		return typeutil.NewSet[int64](), true
+	}
+	resolved := s.qviewsRuntime.loadConfigStore.ResolveSchemaFields(collectionID, schema, expected.ExpectedFieldIndexID)
+	ids := typeutil.NewSet[int64]()
+	for _, field := range resolved {
+		ids.Insert(field.GetIndexIds()...)
+	}
+	return ids, true
+}
+
+func (s *Server) currentAllowedIndexIDs(fields []*messagespb.LoadFieldConfig) (typeutil.Set[int64], bool) {
+	if ids, ok := collectFieldConfigIndexIDs(fields); ok {
+		return ids, true
+	}
+	if s.qviewsRuntime != nil && s.qviewsRuntime.loadConfigStore.HasIndexSource() && len(fields) > 0 {
+		return typeutil.NewSet[int64](), true
+	}
+	return nil, false
+}
+
+func filterIndexesByIndexIDs(indexes map[int64][]*querypb.FieldIndexInfo, allowedIDs typeutil.Set[int64]) map[int64][]*querypb.FieldIndexInfo {
+	if len(indexes) == 0 {
+		return nil
+	}
+	filtered := make(map[int64][]*querypb.FieldIndexInfo, len(indexes))
+	for segmentID, infos := range indexes {
+		kept := lo.Filter(infos, func(info *querypb.FieldIndexInfo, _ int) bool {
+			return allowedIDs.Contain(info.GetIndexID())
+		})
+		if len(kept) > 0 {
+			filtered[segmentID] = kept
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 func estimateLoadResourceForLoadConfig(ctx context.Context, schema *schemapb.CollectionSchema, collectionProperties []*commonpb.KeyValuePair, segments []*datapb.SegmentInfo, indexes map[int64][]*querypb.FieldIndexInfo, loadFields []int64) (autoscaleResourceUsage, error) {

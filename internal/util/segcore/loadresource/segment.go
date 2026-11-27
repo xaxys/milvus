@@ -166,7 +166,23 @@ func ResolveSegmentEstimateLogs(schema *schemapb.CollectionSchema, loadInfo *que
 	return binlogs, deltalogs
 }
 
+// skipColumnsAllIndexesProvideRawData drops a field's binlogs from the estimate when every
+// loaded index of that field provides raw data. A field with several indexes is skippable
+// only that way: the C++ loader (SegmentLoadInfo::BuildCache) keeps the raw column unless
+// all of them can provide raw data, and a reader may pin any one of them.
+func skipColumnsAllIndexesProvideRawData(id2Binlogs map[int64]*datapb.FieldBinlog, allIndexesHaveRawData map[int64]bool, preferFieldData bool) {
+	if preferFieldData {
+		return
+	}
+	for fieldID := range id2Binlogs {
+		if all, ok := allIndexesHaveRawData[fieldID]; ok && all {
+			delete(id2Binlogs, fieldID)
+		}
+	}
+}
+
 func EstimateSegmentFinalResource(ctx context.Context, schema *schemapb.CollectionSchema, loadInfo *querypb.SegmentLoadInfo, options SegmentFinalEstimateOptions, runner Runner) (SegmentResourceUsage, error) {
+	allIndexesHaveRawData := make(map[int64]bool)
 	if schema == nil {
 		return SegmentResourceUsage{}, merr.WrapErrServiceInternalMsg("collection schema is nil")
 	}
@@ -211,8 +227,17 @@ func EstimateSegmentFinalResource(ctx context.Context, schema *schemapb.Collecti
 		evictable.MemoryBytes += estimate.FinalMemoryBytes
 		evictable.DiskBytes += estimate.FinalDiskBytes
 
-		if estimate.HasRawData && !options.PreferFieldDataWhenIndexHasRawData {
-			delete(id2Binlogs, fieldID)
+		// Record whether EVERY index of the field provides raw data, then keep the
+		// column in the estimate unless all of them do. Primary key columns are never
+		// skipped so Delete and PK lookups always retain raw PK data.
+		rawCapable := estimate.HasRawData && !fieldSchema.GetIsPrimaryKey()
+		if v, ok := allIndexesHaveRawData[fieldID]; ok {
+			allIndexesHaveRawData[fieldID] = v && rawCapable
+		} else {
+			allIndexesHaveRawData[fieldID] = rawCapable
+		}
+
+		if rawCapable && !options.PreferFieldDataWhenIndexHasRawData {
 			continue
 		}
 
@@ -231,6 +256,8 @@ func EstimateSegmentFinalResource(ctx context.Context, schema *schemapb.Collecti
 			delete(id2Binlogs, fieldID)
 		}
 	}
+
+	skipColumnsAllIndexesProvideRawData(id2Binlogs, allIndexesHaveRawData, options.PreferFieldDataWhenIndexHasRawData)
 
 	for fieldID, fieldBinlog := range id2Binlogs {
 		fieldIDs := fieldBinlog.GetChildFields()
@@ -333,6 +360,7 @@ func EstimateSegmentFinalResource(ctx context.Context, schema *schemapb.Collecti
 //   - when tiered eviction is disabled, the result is the max resource usage of both
 //     the segment evictable and inevictable part
 func EstimateSegmentLoadingResource(ctx context.Context, schema *schemapb.CollectionSchema, loadInfo *querypb.SegmentLoadInfo, options SegmentLoadingEstimateOptions, runner Runner) (SegmentResourceUsage, error) {
+	allIndexesHaveRawData := make(map[int64]bool)
 	var segMemoryLoadingSize, segDiskLoadingSize uint64
 	var indexMemorySize uint64
 	var fieldGPUMemorySize []uint64
@@ -380,11 +408,19 @@ func EstimateSegmentLoadingResource(ctx context.Context, schema *schemapb.Collec
 				fieldGPUMemorySize = append(fieldGPUMemorySize, estimateResult.MaxMemoryBytes)
 			}
 
+			// Same rule as the C++ loader: a non-primary column may be skipped only when
+			// every index of this field provides raw data.
+			rawCapable := estimateResult.HasRawData && !fieldSchema.GetIsPrimaryKey()
+			if v, ok := allIndexesHaveRawData[fieldID]; ok {
+				allIndexesHaveRawData[fieldID] = v && rawCapable
+			} else {
+				allIndexesHaveRawData[fieldID] = rawCapable
+			}
+
 			// could skip binlog or
 			// could be missing for new field or storage v2 group 0
-			if estimateResult.HasRawData &&
+			if rawCapable &&
 				!options.PreferFieldDataWhenIndexHasRawData {
-				delete(id2Binlogs, fieldID)
 				continue
 			}
 
@@ -409,6 +445,8 @@ func EstimateSegmentLoadingResource(ctx context.Context, schema *schemapb.Collec
 	}
 
 	// PART 2: calculate size of binlogs
+	skipColumnsAllIndexesProvideRawData(id2Binlogs, allIndexesHaveRawData, options.PreferFieldDataWhenIndexHasRawData)
+
 	for fieldID, fieldBinlog := range id2Binlogs {
 		fieldIDs := fieldBinlog.GetChildFields()
 		// legacy default split

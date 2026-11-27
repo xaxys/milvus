@@ -64,6 +64,15 @@ IndexInventory::Entry::Resolve(milvus::OpContext* op_ctx) const {
             auto result = factory_(op_ctx);
             AssertInfo(result.index != nullptr,
                        "lazy index factory returned null owner");
+            if (registration_.static_capability.has_value()) {
+                const auto& sc = *registration_.static_capability;
+                AssertInfo(sc.family == result.family &&
+                               sc.value_type == result.value_type &&
+                               SameCaps(sc.caps, result.caps),
+                           "static index capability for field {} disagrees "
+                           "with resolved metadata",
+                           registration_.key.field_id.get());
+            }
             resolved_ = std::move(result);
             // Release the captured load metadata before publishing the result.
             factory_ = nullptr;
@@ -125,7 +134,8 @@ IndexInventory::Drop(const IndexKey& key) {
 
 FieldIndexCapability
 IndexInventory::ResolveCapability(milvus::OpContext* op_ctx,
-                                  FieldId field_id) const {
+                                  FieldId field_id,
+                                  CapabilityResolveHint hint) const {
     const auto field_it = entries_.find(field_id);
     if (field_it == entries_.end()) {
         return FieldIndexCapability(field_id);
@@ -133,17 +143,49 @@ IndexInventory::ResolveCapability(milvus::OpContext* op_ctx,
     const auto& field_entries = field_it->second;
     std::vector<IndexCapabilityEntry> entries;
     entries.reserve(field_entries.size());
+    bool has_unmatched_entries = false;
     for (const auto& [key, entry] : field_entries) {
-        const auto& resolved = entry->Resolve(op_ctx);
         const auto& registration = entry->registration();
+        if (!entry->IsResolved()) {
+            if (hint.json_path.has_value() &&
+                registration.json_cast_type.data_type() !=
+                    JsonCastType::DataType::UNKNOWN &&
+                registration.json_cast_type.data_type() !=
+                    JsonCastType::DataType::JSON &&
+                registration.json_path != *hint.json_path) {
+                // Unrelated typed JSON path: cannot match or trigger path-scoped
+                // hints for *hint.json_path; keep its lazy slot completely cold.
+                has_unmatched_entries = true;
+                continue;
+            }
+            if (registration.static_capability.has_value()) {
+                const auto& sc = *registration.static_capability;
+                entries.push_back(
+                    IndexCapabilityEntry{key,
+                                         registration.json_path,
+                                         registration.json_cast_type,
+                                         sc.family,
+                                         sc.value_type,
+                                         sc.caps,
+                                         registration.params,
+                                         registration.json_cast_function,
+                                         registration.has_raw_data});
+                continue;
+            }
+        }
+        const auto& resolved = entry->Resolve(op_ctx);
         entries.push_back(IndexCapabilityEntry{key,
                                                registration.json_path,
                                                registration.json_cast_type,
                                                resolved.family,
                                                resolved.value_type,
-                                               resolved.caps});
+                                               resolved.caps,
+                                               registration.params,
+                                               registration.json_cast_function,
+                                               registration.has_raw_data});
     }
-    return FieldIndexCapability(field_id, std::move(entries));
+    return FieldIndexCapability(
+        field_id, std::move(entries), has_unmatched_entries);
 }
 
 std::vector<IndexRegistration>

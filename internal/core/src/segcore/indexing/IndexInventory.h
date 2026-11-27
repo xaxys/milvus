@@ -62,6 +62,11 @@ class IndexInventory {
         const ResolvedData&
         Resolve(milvus::OpContext* op_ctx) const;
 
+        bool
+        IsResolved() const {
+            return ready_.load(std::memory_order_acquire);
+        }
+
         index::IndexPtr
         Peek() const;
 
@@ -90,10 +95,12 @@ class IndexInventory {
     Drop(const IndexKey& key);
 
     // Resolves this field's entries and assembles a fresh capability list.
-    // Lazy resolution may read artifact metadata but does not load readers.
-    // All entries must resolve; successful entries are reused after failures.
+    // Entries with complete static capability metadata avoid lazy I/O until
+    // CreateIndexReader pins the chosen candidate.
     FieldIndexCapability
-    ResolveCapability(milvus::OpContext* op_ctx, FieldId field_id) const;
+    ResolveCapability(milvus::OpContext* op_ctx,
+                      FieldId field_id,
+                      CapabilityResolveHint hint = {}) const;
 
     // Copies registrations without resolving entries or exposing slots/readers.
     std::vector<IndexRegistration>

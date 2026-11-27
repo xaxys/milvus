@@ -151,8 +151,6 @@ func cloneFieldConfigs(fields []*viewpb.LoadFieldConfig) []*viewpb.LoadFieldConf
 }
 
 // FieldsFromMessage converts WAL intent into independent QueryView requirements.
-// Publication resolves the complete selected index set from DataCoord, since the
-// historical WAL message expresses at most one index per field.
 func FieldsFromMessage(fields []*messagespb.LoadFieldConfig) []*viewpb.LoadFieldConfig {
 	if fields == nil {
 		return nil
@@ -160,7 +158,9 @@ func FieldsFromMessage(fields []*messagespb.LoadFieldConfig) []*viewpb.LoadField
 	out := make([]*viewpb.LoadFieldConfig, 0, len(fields))
 	for _, field := range fields {
 		next := &viewpb.LoadFieldConfig{FieldId: field.GetFieldId()}
-		if id := field.GetIndexId(); id != 0 {
+		if len(field.GetIndexIds()) > 0 {
+			next.IndexIds = append([]int64(nil), field.GetIndexIds()...)
+		} else if id := field.GetIndexId(); id != 0 {
 			next.IndexIds = []int64{id}
 		}
 		out = append(out, next)
@@ -168,9 +168,8 @@ func FieldsFromMessage(fields []*messagespb.LoadFieldConfig) []*viewpb.LoadField
 	return out
 }
 
-// FieldsToMessage projects load intent into the existing WAL message. Its scalar
-// index hint is not the authoritative QueryView index selection; publication
-// resolves every selected index from committed metadata.
+// FieldsToMessage projects QueryView load field configs into WAL messages,
+// populating both repeated index_ids and legacy single index_id.
 func FieldsToMessage(fields []*viewpb.LoadFieldConfig) []*messagespb.LoadFieldConfig {
 	if fields == nil {
 		return nil
@@ -180,6 +179,7 @@ func FieldsToMessage(fields []*viewpb.LoadFieldConfig) []*messagespb.LoadFieldCo
 		next := &messagespb.LoadFieldConfig{FieldId: field.GetFieldId()}
 		if len(field.GetIndexIds()) != 0 {
 			next.IndexId = field.IndexIds[0]
+			next.IndexIds = append([]int64(nil), field.IndexIds...)
 		}
 		out = append(out, next)
 	}

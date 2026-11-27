@@ -306,7 +306,8 @@ class SegmentInterface {
     // inspect registrations must use IndexRegistrations instead.
     virtual FieldIndexCapability
     ResolveIndexCapability(milvus::OpContext* op_ctx,
-                           FieldId field_id) const = 0;
+                           FieldId field_id,
+                           CapabilityResolveHint hint = {}) const = 0;
 
     // Reads registrations without initializing lazy indexes. Used for lifecycle
     // operations, vector-index lookup, and feature accounting.

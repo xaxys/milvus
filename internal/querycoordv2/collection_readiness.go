@@ -115,7 +115,13 @@ func (s *Server) prepareAutoLoadRequest(ctx context.Context, coll *milvuspb.Desc
 	}
 	fieldIndexes := make(map[int64]int64)
 	for _, index := range indexes.GetIndexInfos() {
-		fieldIndexes[index.GetFieldID()] = index.GetIndexID()
+		if !common.IsIndexInfoVisible(index.GetIndexParams(), index.GetUserIndexParams()) {
+			continue
+		}
+		fid := index.GetFieldID()
+		if cur, ok := fieldIndexes[fid]; !ok || index.GetIndexID() < cur {
+			fieldIndexes[fid] = index.GetIndexID()
+		}
 	}
 	// QueryView load configs carry explicit field IDs, including the default
 	// all-fields case; do not use the empty-list shorthand for all fields.
