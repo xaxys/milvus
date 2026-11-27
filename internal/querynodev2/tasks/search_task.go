@@ -731,11 +731,25 @@ func (t *SearchTask) Wait() error {
 	return <-t.notifier
 }
 
+func planExplainDetail(serializedPlan []byte) bool {
+	if len(serializedPlan) == 0 {
+		return false
+	}
+	plan := &planpb.PlanNode{}
+	if err := proto.Unmarshal(serializedPlan, plan); err != nil {
+		return false
+	}
+	return plan.GetPlanOptions().GetExplainDetail()
+}
+
 // buildExplain merges per-segment execution explain payloads into a single
 // worker-level ExplainSegmentGroup, recording per-segment references so
-// HybridSearch sub-requests compute an exact segment union before Proxy strips them.
+// HybridSearch sub-requests compute an exact segment union before Proxy strips them,
+// and retaining per-segment details when explain="detail" is requested.
 func (t *SearchTask) buildExplain(results []*segments.SearchResult, searchedSegments []segments.Segment) *internalpb.ExecutionExplain {
 	trackSegmentRefs := t.req.GetReq().GetIsAdvanced()
+	detailParsed := false
+	explainDetail := false
 	rawSegments := make([]*internalpb.ExecutionExplain, 0, len(results))
 	for i, result := range results {
 		if i >= len(searchedSegments) {
@@ -749,13 +763,27 @@ func (t *SearchTask) buildExplain(results []*segments.SearchResult, searchedSegm
 		if node == nil {
 			continue
 		}
-		if trackSegmentRefs {
-			if g := node.GetGroup(); g != nil {
+		if !detailParsed {
+			explainDetail = planExplainDetail(t.req.GetReq().GetSerializedExprPlan())
+			detailParsed = true
+		}
+		if g := node.GetGroup(); g != nil {
+			seg := searchedSegments[i]
+			var segID int64
+			isGrowing := g.GetGrowingSegments() > 0
+			if seg != nil {
+				segID = seg.ID()
+				isGrowing = isGrowing || seg.Type() == segments.SegmentTypeGrowing
+			}
+			if trackSegmentRefs {
 				g.SegmentRefs = []*internalpb.ExplainSegmentRef{{
-					SegmentId: searchedSegments[i].ID(),
+					SegmentId: segID,
 					RowsTotal: g.GetRowsTotal(),
-					IsGrowing: g.GetGrowingSegments() > 0,
+					IsGrowing: isGrowing,
 				}}
+			}
+			if explainDetail {
+				explain.AttachSegmentDetail(node, segID, isGrowing)
 			}
 		}
 		rawSegments = append(rawSegments, node)

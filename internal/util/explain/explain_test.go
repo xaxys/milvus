@@ -697,3 +697,153 @@ func TestMergeStage1ExplainTimingAndPrefetchWait(t *testing.T) {
 	assert.Equal(t, 2, zeroRowSummary.Operators[0].Segments)
 	assert.Equal(t, &TimeStats{SumUs: 502, MinUs: 2, AvgUs: 251, MaxUs: 500}, zeroRowSummary.Operators[0].TimeUs)
 }
+
+func TestAttachSegmentDetailMergeAndStage1Pairing(t *testing.T) {
+	seg200 := &internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:              1,
+			SealedSegments:        1,
+			RowsTotal:             400,
+			OmittedSegmentDetails: 5,
+			SegmentRefs: []*internalpb.ExplainSegmentRef{
+				{SegmentId: 200, RowsTotal: 400},
+			},
+		},
+	}
+	AttachSegmentDetail(seg200, 200, false)
+	// Child snapshot must not carry recursive refs/details/omitted counters; outer group resets omitted on single-seg attach only on child.
+	seg200.Group.OmittedSegmentDetails = 2
+	require.Len(t, seg200.GetGroup().GetSegmentDetails(), 1)
+	assert.Empty(t, seg200.GetGroup().GetSegmentDetails()[0].GetGroup().GetSegmentRefs())
+	assert.Empty(t, seg200.GetGroup().GetSegmentDetails()[0].GetGroup().GetSegmentDetails())
+	assert.Zero(t, seg200.GetGroup().GetSegmentDetails()[0].GetGroup().GetOmittedSegmentDetails())
+
+	seg100 := &internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:        1,
+			GrowingSegments: 1,
+			RowsTotal:       150,
+		},
+	}
+	AttachSegmentDetail(seg100, 100, true)
+
+	// Merge is commutative on SegmentDetails even when Operators is empty.
+	ab := Merge(seg200, seg100)
+	ba := Merge(seg100, seg200)
+	require.Len(t, ab.GetGroup().GetSegmentDetails(), 2)
+	require.Len(t, ba.GetGroup().GetSegmentDetails(), 2)
+	assert.Equal(t, int64(100), ab.GetGroup().GetSegmentDetails()[0].GetSegmentId())
+	assert.True(t, ab.GetGroup().GetSegmentDetails()[0].GetIsGrowing())
+	assert.Equal(t, int64(200), ab.GetGroup().GetSegmentDetails()[1].GetSegmentId())
+	assert.Equal(t, ab.GetGroup().GetSegmentDetails()[0].GetSegmentId(), ba.GetGroup().GetSegmentDetails()[0].GetSegmentId())
+	assert.Equal(t, int64(2), ab.GetGroup().GetOmittedSegmentDetails())
+
+	// AssembleHybridExplain derives exact top-level union from SegmentDetails even when SegmentRefs is absent.
+	hSub0 := WrapSubSearch(0, []*internalpb.ExecutionExplain{seg200})
+	hSub1 := WrapSubSearch(1, []*internalpb.ExecutionExplain{seg200, seg100})
+	hSub0.SubSearches[0].Group.SegmentRefs = nil
+	hSub1.SubSearches[0].Group.SegmentRefs = nil
+	hAssembled := AssembleHybridExplain(hSub0, hSub1)
+	require.NotNil(t, hAssembled)
+	assert.Equal(t, int64(2), hAssembled.GetGroup().GetSegments())
+	assert.Equal(t, int64(1), hAssembled.GetGroup().GetSealedSegments())
+	assert.Equal(t, int64(1), hAssembled.GetGroup().GetGrowingSegments())
+	assert.Equal(t, int64(550), hAssembled.GetGroup().GetRowsTotal())
+	assert.Len(t, hAssembled.GetSubSearches()[0].GetGroup().GetSegmentDetails(), 1)
+	assert.Len(t, hAssembled.GetSubSearches()[1].GetGroup().GetSegmentDetails(), 2)
+
+	// Two-Stage Search per-segment pairing splices Stage 1 cold filter into matching sealed SegmentDetails.
+	s1Seg1 := singleSegmentExplain(false, 1000, &internalpb.ExplainOperatorStats{
+		Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+		Segments: 1,
+		RowsIn:   1000,
+		RowsOut:  50,
+		Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 900, MinUs: 900, MaxUs: 900},
+		Conditions: []*internalpb.ExplainConditionStats{{
+			ExprId:   1,
+			FieldId:  101,
+			Segments: 1,
+			RowsIn:   1000,
+			IdxScan:  1000,
+			RowsOut:  50,
+			EvalTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 850, MinUs: 850, MaxUs: 850},
+			Used: []*internalpb.ExplainIndexUseStats{{
+				IndexId:  501,
+				Family:   "ngram",
+				Segments: 1,
+				RowsIn:   1000,
+				IdxScan:  1000,
+				RowsOut:  50,
+				EvalTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 850, MinUs: 850, MaxUs: 850},
+			}},
+		}},
+	})
+	AttachSegmentDetail(s1Seg1, 301, false)
+	s1Seg2 := singleSegmentExplain(false, 2000, &internalpb.ExplainOperatorStats{
+		Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+		Segments: 1,
+		RowsIn:   2000,
+		RowsOut:  10,
+		Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 4000, MinUs: 4000, MaxUs: 4000},
+	})
+	AttachSegmentDetail(s1Seg2, 302, false)
+	stage1Worker := Merge(s1Seg1, s1Seg2)
+
+	// Stage 2 seg 301 kept pre-filter (cached), seg 302 switched to iterative_filter (no EXPLAIN_OP_FILTER).
+	s2Seg1 := singleSegmentExplain(false, 1000,
+		&internalpb.ExplainOperatorStats{
+			Kind:           internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+			Segments:       1,
+			CachedSegments: 1,
+			RowsIn:         1000,
+			RowsOut:        50,
+			Time:           &internalpb.ExplainTimeAccum{Count: 1, SumUs: 5, MinUs: 5, MaxUs: 5},
+		},
+		&internalpb.ExplainOperatorStats{
+			Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+			Segments: 1,
+			RowsIn:   50,
+			RowsOut:  10,
+			Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 300, MinUs: 300, MaxUs: 300},
+		},
+	)
+	AttachSegmentDetail(s2Seg1, 301, false)
+	s2Seg2 := singleSegmentExplain(false, 2000,
+		&internalpb.ExplainOperatorStats{
+			Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+			Segments: 1,
+			RowsIn:   2000,
+			RowsOut:  20,
+			Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 600, MinUs: 600, MaxUs: 600},
+		},
+		&internalpb.ExplainOperatorStats{
+			Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_ITERATIVE_FILTER,
+			Segments: 1,
+			RowsIn:   20,
+			RowsOut:  5,
+			Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 100, MinUs: 100, MaxUs: 100},
+		},
+	)
+	AttachSegmentDetail(s2Seg2, 302, false)
+	stage2Worker := Merge(s2Seg1, s2Seg2)
+
+	paired, ok := MergeStage1Explain(stage2Worker, stage1Worker)
+	require.True(t, ok)
+	require.Len(t, paired.GetGroup().GetSegmentDetails(), 2)
+
+	d301 := paired.GetGroup().GetSegmentDetails()[0].GetGroup()
+	require.Len(t, d301.GetOperators(), 2)
+	assert.Zero(t, d301.GetOperators()[0].GetCachedSegments())
+	assert.Equal(t, int64(900), d301.GetOperators()[0].GetTime().GetSumUs())
+	require.Len(t, d301.GetOperators()[0].GetConditions(), 1)
+	assert.Equal(t, int64(501), d301.GetOperators()[0].GetConditions()[0].GetUsed()[0].GetIndexId())
+
+	d302 := paired.GetGroup().GetSegmentDetails()[1].GetGroup()
+	require.Len(t, d302.GetOperators(), 3)
+	assert.Equal(t, internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER, d302.GetOperators()[0].GetKind())
+	assert.Equal(t, int64(4000), d302.GetOperators()[0].GetTime().GetSumUs())
+	assert.Equal(t, internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH, d302.GetOperators()[1].GetKind())
+	assert.Equal(t, internalpb.ExplainOperatorKind_EXPLAIN_OP_ITERATIVE_FILTER, d302.GetOperators()[2].GetKind())
+}

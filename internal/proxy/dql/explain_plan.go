@@ -54,16 +54,18 @@ const (
 	explainValueFalse   = "false"
 	explainValueTrue    = "true"
 	explainValueDefault = "default"
-	explainLevelSummary = "summary"
+	explainLevelSummary = explain.LevelSummary
+	explainLevelDetail  = explain.LevelDetail
 
 	explainFormatText = "text"
 	explainFormatJSON = "json"
 )
 
-// ExplainConfig holds the validated user-facing explain switch and output
-// format parsed once per request.
+// ExplainConfig holds the validated user-facing explain switch, verbosity
+// level, and output format parsed once per request.
 type ExplainConfig struct {
 	Enabled bool
+	Level   string
 	Format  string
 }
 
@@ -101,12 +103,17 @@ func ParseExplainConfig(params []*commonpb.KeyValuePair) (ExplainConfig, error) 
 		switch value := strings.ToLower(strings.TrimSpace(rawSwitch)); value {
 		case "", explainValueFalse:
 			cfg.Enabled = false
+			cfg.Level = ""
 		case explainValueTrue, explainValueDefault, explainLevelSummary:
 			cfg.Enabled = true
+			cfg.Level = explainLevelSummary
+		case explainLevelDetail:
+			cfg.Enabled = true
+			cfg.Level = explainLevelDetail
 		default:
 			return ExplainConfig{}, merr.WrapErrParameterInvalidMsg(
-				"invalid %s %q: expected %q, %q or %q",
-				explainKey, rawSwitch, explainValueFalse, explainValueDefault, explainLevelSummary)
+				"invalid %s %q: expected %q, %q, %q or %q",
+				explainKey, rawSwitch, explainValueFalse, explainValueDefault, explainLevelSummary, explainLevelDetail)
 		}
 	}
 	rawFormat, hasFormat, err := lookupStringParamWithNestedFallback(explainFormatKey, params)
@@ -219,16 +226,13 @@ func renderExplainWithConfig(
 		return "", nil
 	}
 
-	summary := explain.SummarizeWithSubSearches(explains, leaves, subSearches, asts)
-
-	var neededIDs []int64
-	for _, condition := range summary.AllConditions() {
-		for _, used := range condition.Used {
-			if used.IndexID != 0 {
-				neededIDs = append(neededIDs, used.IndexID)
-			}
-		}
+	level := cfg.Level
+	if level == "" {
+		level = explainLevelSummary
 	}
+	summary := explain.SummarizeWithSubSearchesAndLevel(level, explains, leaves, subSearches, asts)
+
+	neededIDs := summary.NeededIndexIDs()
 	var resolvedIndexes map[int64]string
 	if len(neededIDs) > 0 && indexNames != nil {
 		resolvedIndexes = indexNames(neededIDs)
@@ -328,6 +332,7 @@ func configureExplainPlanWithConfig(
 	if disableExplain || !cfg.Enabled {
 		if plan.PlanOptions != nil {
 			plan.PlanOptions.EnableExplain = false
+			plan.PlanOptions.ExplainDetail = false
 		}
 		return
 	}
@@ -335,6 +340,7 @@ func configureExplainPlanWithConfig(
 		plan.PlanOptions = &planpb.PlanOption{}
 	}
 	plan.PlanOptions.EnableExplain = true
+	plan.PlanOptions.ExplainDetail = cfg.Level == explainLevelDetail
 	if hasUserExpr {
 		assignExplainIDsWithAST(plan, subReqIndex, schema, next, leaves, asts)
 	}

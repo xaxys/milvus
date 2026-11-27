@@ -8377,6 +8377,7 @@ func TestRESTfulV2ExplainPassthrough(t *testing.T) {
 	}, nil)
 
 	explainJSONStr := `{"level":"summary","segments":2,"rows_total":1000}`
+	explainDetailJSONStr := `{"level":"detail","segments":1,"rows_total":500,"segments_detail":[{"segment_id":42,"state":"sealed","rows_total":500}]}`
 	explainTextStr := "query (segments=2, rows_total=1000)\n"
 
 	mp.EXPECT().Query(mock.Anything, mock.MatchedBy(func(req *milvuspb.QueryRequest) bool {
@@ -8395,6 +8396,23 @@ func TestRESTfulV2ExplainPassthrough(t *testing.T) {
 			Field:     &schemapb.FieldData_Scalars{Scalars: &schemapb.ScalarField{Data: &schemapb.ScalarField_LongData{LongData: &schemapb.LongArray{Data: []int64{1}}}}},
 		}},
 	}, nil).Twice()
+
+	mp.EXPECT().Query(mock.Anything, mock.MatchedBy(func(req *milvuspb.QueryRequest) bool {
+		v, err := funcutil.GetAttrByKeyFromRepeatedKV("explain", req.GetQueryParams())
+		return err == nil && v == "detail"
+	})).Return(&milvuspb.QueryResults{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			ExtraInfo: map[string]string{"report_value": "2", "explain": explainDetailJSONStr},
+		},
+		OutputFields: []string{"id"},
+		FieldsData: []*schemapb.FieldData{{
+			FieldName: "id",
+			FieldId:   100,
+			Type:      schemapb.DataType_Int64,
+			Field:     &schemapb.FieldData_Scalars{Scalars: &schemapb.ScalarField{Data: &schemapb.ScalarField_LongData{LongData: &schemapb.LongArray{Data: []int64{1}}}}},
+		}},
+	}, nil).Once()
 
 	mp.EXPECT().Search(mock.Anything, mock.MatchedBy(func(req *milvuspb.SearchRequest) bool {
 		v, err := funcutil.GetAttrByKeyFromRepeatedKV("explain", req.GetSearchParams())
@@ -8441,13 +8459,20 @@ func TestRESTfulV2ExplainPassthrough(t *testing.T) {
 		return resp
 	}
 
-	// 1. query forwards queryParams.explain and embeds JSON explain as structured object.
+	// 1. query forwards queryParams.explain ("summary" and "detail") and embeds JSON explain as structured object.
 	qResp := send(QueryAction, `{"collectionName":"book","filter":"id > 0","outputFields":["id"],"queryParams":{"explain":"summary","explain_format":"json"}}`)
 	assert.EqualValues(t, 0, qResp[HTTPReturnCode])
 	explainMap, ok := qResp[HTTPReturnExplain].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "summary", explainMap["level"])
 	assert.EqualValues(t, 2, explainMap["segments"])
+
+	qDetailResp := send(QueryAction, `{"collectionName":"book","filter":"id > 0","outputFields":["id"],"queryParams":{"explain":"detail","explain_format":"json"}}`)
+	assert.EqualValues(t, 0, qDetailResp[HTTPReturnCode])
+	detailMap, ok := qDetailResp[HTTPReturnExplain].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "detail", detailMap["level"])
+	assert.Len(t, detailMap["segments_detail"], 1)
 
 	// 2. get forwards queryParams.explain and embeds JSON explain.
 	gResp := send(GetAction, `{"collectionName":"book","id":[1],"outputFields":["id"],"queryParams":{"explain":"summary","explain_format":"json"}}`)

@@ -282,6 +282,14 @@ message ExplainSegmentRef {
   bool is_growing = 3;
 }
 
+// Per-segment execution breakdown retained across workers and reducers when
+// explain="detail" is requested.
+message ExplainSegmentDetail {
+  int64 segment_id = 1;
+  bool is_growing = 2;
+  ExplainSegmentGroup group = 3;
+}
+
 message ExplainSegmentGroup {
   int64 segments = 1;
   int64 sealed_segments = 2;
@@ -289,6 +297,9 @@ message ExplainSegmentGroup {
   int64 rows_total = 4;
   repeated ExplainOperatorStats operators = 5;
   repeated ExplainSegmentRef segment_refs = 6;
+  repeated ExplainSegmentDetail segment_details = 7;
+  // Number of participating segment details elided by truncation policies.
+  int64 omitted_segment_details = 8;
 }
 
 message ExplainSubSearchGroup {

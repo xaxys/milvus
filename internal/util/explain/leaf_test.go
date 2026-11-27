@@ -705,3 +705,199 @@ func TestSummarizeTimingStatsPrefetchWaitAndTextJSONFormatting(t *testing.T) {
 	assert.Nil(t, mixed.Operators[0].TimeUs)
 	assert.Nil(t, mixed.Operators[0].PrefetchWaitTimeUs)
 }
+
+func TestSummarizeDetailModeSortingFinalizationAndHybrid(t *testing.T) {
+	leaves := map[int64]LeafInfo{
+		1: {Condition: `title contains "%降噪%"`, Type: "contains", FieldID: 101, Field: "title"},
+	}
+
+	// Fast sealed segment (total op time = 1200us).
+	fastSealed := singleSegmentExplain(false, 20000,
+		&internalpb.ExplainOperatorStats{
+			Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+			Segments: 1,
+			RowsIn:   20000,
+			RowsOut:  15,
+			Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 800, MinUs: 800, MaxUs: 800},
+			Conditions: []*internalpb.ExplainConditionStats{{
+				ExprId:   1,
+				FieldId:  101,
+				Segments: 1,
+				RowsIn:   20000,
+				IdxScan:  20000,
+				RowsOut:  15,
+				EvalTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 750, MinUs: 750, MaxUs: 750},
+				Used: []*internalpb.ExplainIndexUseStats{{
+					IndexId:  901,
+					Family:   "ngram",
+					Segments: 1,
+					RowsIn:   20000,
+					IdxScan:  20000,
+					RowsOut:  15,
+					EvalTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 750, MinUs: 750, MaxUs: 750},
+				}},
+			}},
+		},
+		&internalpb.ExplainOperatorStats{
+			Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+			Segments: 1,
+			RowsIn:   15,
+			RowsOut:  5,
+			Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 400, MinUs: 400, MaxUs: 400},
+		},
+	)
+	AttachSegmentDetail(fastSealed, 449101, false)
+
+	// Slow cold sealed segment (total op time = 85000us).
+	slowSealed := singleSegmentExplain(false, 50000,
+		&internalpb.ExplainOperatorStats{
+			Kind:             internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+			Segments:         1,
+			RowsIn:           50000,
+			RowsOut:          30,
+			Time:             &internalpb.ExplainTimeAccum{Count: 1, SumUs: 81000, MinUs: 81000, MaxUs: 81000},
+			PrefetchWaitTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 79000, MinUs: 79000, MaxUs: 79000},
+			Conditions: []*internalpb.ExplainConditionStats{{
+				ExprId:       1,
+				FieldId:      101,
+				Segments:     1,
+				RowsIn:       50000,
+				IdxScan:      50000,
+				RawScan:      30,
+				RowsOut:      30,
+				EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+				PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 80000, MinUs: 80000, MaxUs: 80000},
+				Used: []*internalpb.ExplainIndexUseStats{{
+					IndexId:      902,
+					Family:       "ngram",
+					Segments:     1,
+					RowsIn:       50000,
+					IdxScan:      50000,
+					RawScan:      30,
+					RowsOut:      30,
+					EvalTime:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+					PrefetchTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 80000, MinUs: 80000, MaxUs: 80000},
+				}},
+			}},
+		},
+		&internalpb.ExplainOperatorStats{
+			Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+			Segments: 1,
+			RowsIn:   30,
+			RowsOut:  10,
+			Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 4000, MinUs: 4000, MaxUs: 4000},
+		},
+	)
+	AttachSegmentDetail(slowSealed, 449102, false)
+
+	// Growing segment (total op time = 2000us).
+	growingSeg := singleSegmentExplain(true, 10000,
+		&internalpb.ExplainOperatorStats{
+			Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+			Segments: 1,
+			RowsIn:   10000,
+			RowsOut:  8,
+			Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+			Conditions: []*internalpb.ExplainConditionStats{{
+				ExprId:          1,
+				FieldId:         101,
+				Segments:        1,
+				RawScanSegments: 1,
+				RowsIn:          10000,
+				RawScan:         10000,
+				RowsOut:         8,
+				EvalTime:        &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+				Reasons: []*internalpb.ExplainDeclineStats{{
+					Reason:   "growing",
+					Segments: 1,
+					RowsIn:   10000,
+					RawScan:  10000,
+					RowsOut:  8,
+					EvalTime: &internalpb.ExplainTimeAccum{Count: 1, SumUs: 1500, MinUs: 1500, MaxUs: 1500},
+				}},
+			}},
+		},
+		&internalpb.ExplainOperatorStats{
+			Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+			Segments: 1,
+			RowsIn:   8,
+			RowsOut:  4,
+			Time:     &internalpb.ExplainTimeAccum{Count: 1, SumUs: 500, MinUs: 500, MaxUs: 500},
+		},
+	)
+	AttachSegmentDetail(growingSeg, 449103, true)
+
+	// Default summary mode hides SegmentDetails even if present on proto.
+	summaryOnly := SummarizeWithSubSearches([]*internalpb.ExecutionExplain{fastSealed, slowSealed, growingSeg}, leaves, nil, nil)
+	assert.Equal(t, LevelSummary, summaryOnly.Level)
+	assert.Empty(t, summaryOnly.SegmentDetails)
+
+	// Detail mode emits slowest-first SegmentDetails alongside aggregated Operators.
+	detail := SummarizeWithSubSearchesAndLevel(LevelDetail, []*internalpb.ExecutionExplain{fastSealed, slowSealed, growingSeg}, leaves, nil, nil)
+	assert.Equal(t, LevelDetail, detail.Level)
+	assert.Zero(t, detail.OmittedSegments)
+	assert.ElementsMatch(t, []int64{901, 902}, detail.NeededIndexIDs())
+	assert.Len(t, detail.AllConditions(), 1, "AllConditions must not duplicate leaf conditions across N segments")
+
+	FinalizeSummary(detail, map[int64]string{901: "title_ngram_a", 902: "title_ngram_b"}, map[int64]string{101: "title"})
+
+	require.Len(t, detail.SegmentDetails, 3)
+	assert.Equal(t, int64(449102), detail.SegmentDetails[0].SegmentID)
+	assert.Equal(t, SegmentStateSealed, detail.SegmentDetails[0].State)
+	assert.Equal(t, int64(50000), detail.SegmentDetails[0].RowsTotal)
+	assert.Equal(t, "title_ngram_b", detail.SegmentDetails[0].Operators[0].Conditions[0].Used[0].IndexName)
+
+	assert.Equal(t, int64(449103), detail.SegmentDetails[1].SegmentID)
+	assert.Equal(t, SegmentStateGrowing, detail.SegmentDetails[1].State)
+
+	assert.Equal(t, int64(449101), detail.SegmentDetails[2].SegmentID)
+	assert.Equal(t, SegmentStateSealed, detail.SegmentDetails[2].State)
+	assert.Equal(t, "title_ngram_a", detail.SegmentDetails[2].Operators[0].Conditions[0].Used[0].IndexName)
+
+	text := RenderSummaryText(detail)
+	assert.Contains(t, text, "  segments_detail (count=3):\n")
+	assert.Contains(t, text, "    [segment 449102] sealed (rows_total=50000)\n")
+	assert.Contains(t, text, "      [op 0] filter (segments=1, rows: 50000 -> 30, time_us=81000, prefetch_wait_us=79000)\n")
+	assert.Contains(t, text, "    [segment 449103] growing (rows_total=10000)\n")
+	assert.Less(t, strings.Index(text, "[segment 449102]"), strings.Index(text, "[segment 449103]"))
+	assert.Less(t, strings.Index(text, "[segment 449103]"), strings.Index(text, "[segment 449101]"))
+
+	rawJSON, err := RenderSummaryJSON(detail)
+	require.NoError(t, err)
+	assert.Contains(t, rawJSON, `"level":"detail"`)
+	assert.NotContains(t, rawJSON, `"omitted_segments"`)
+	assert.Contains(t, rawJSON, `"segments_detail":[`)
+
+	var decoded Summary
+	require.NoError(t, json.Unmarshal([]byte(rawJSON), &decoded))
+	require.Len(t, decoded.SegmentDetails, 3)
+	assert.Equal(t, int64(449102), decoded.SegmentDetails[0].SegmentID)
+
+	// HybridSearch detail mode renders per-sub-search segments_detail and omitted_segments when non-zero.
+	hSub0 := WrapSubSearch(0, []*internalpb.ExecutionExplain{fastSealed, slowSealed})
+	hSub0.SubSearches[0].Group.OmittedSegmentDetails = 7
+	hSub1 := WrapSubSearch(1, []*internalpb.ExecutionExplain{growingSeg})
+	hybridDetail := SummarizeWithSubSearchesAndLevel(
+		LevelDetail,
+		[]*internalpb.ExecutionExplain{hSub0, hSub1},
+		leaves,
+		[]SubSearchMeta{{SubReqIndex: 0, AnnsField: "dense_vec"}, {SubReqIndex: 1, AnnsField: "sparse_vec"}},
+		nil,
+	)
+	FinalizeSummary(hybridDetail, map[int64]string{901: "title_ngram_a", 902: "title_ngram_b"}, map[int64]string{101: "title"})
+	require.Len(t, hybridDetail.SubSearches, 2)
+	assert.Equal(t, 7, hybridDetail.SubSearches[0].OmittedSegments)
+	require.Len(t, hybridDetail.SubSearches[0].SegmentDetails, 2)
+	assert.Equal(t, int64(449102), hybridDetail.SubSearches[0].SegmentDetails[0].SegmentID)
+	require.Len(t, hybridDetail.SubSearches[1].SegmentDetails, 1)
+	assert.Equal(t, SegmentStateGrowing, hybridDetail.SubSearches[1].SegmentDetails[0].State)
+
+	hybridText := RenderSummaryText(hybridDetail)
+	assert.Contains(t, hybridText, "    segments_detail (count=2, omitted_segments=7):\n")
+	assert.Contains(t, hybridText, "      [segment 449102] sealed (rows_total=50000)\n")
+	assert.Contains(t, hybridText, "    segments_detail (count=1):\n")
+
+	hybridJSON, err := RenderSummaryJSON(hybridDetail)
+	require.NoError(t, err)
+	assert.Contains(t, hybridJSON, `"omitted_segments":7`)
+}

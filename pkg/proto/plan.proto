@@ -448,6 +448,9 @@ message PlanOption {
    // Enable ExecutionExplainRecorder creation and leaf attribution when the
    // request asks for explain output.
    bool enable_explain = 5;
+   // Retain per-segment ExplainSegmentDetail breakdowns across workers and
+   // reducers when explain="detail" is requested.
+   bool explain_detail = 6;
 };
 
 message PlanNode {

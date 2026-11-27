@@ -18,6 +18,7 @@ package tasks
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"math"
 	"math/rand"
@@ -31,10 +32,12 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/segcorepb"
 )
 
 func TestTakeForOutputRequestDecision(t *testing.T) {
@@ -482,6 +485,81 @@ func (s *SearchTaskSuite) TestSearchTaskMinNQ() {
 		}
 		s.Equal(int64(2), task.MinNQ())
 	})
+}
+
+func TestPlanExplainDetailAndQueryNodeExplainDetail(t *testing.T) {
+	assert.False(t, planExplainDetail(nil))
+	assert.False(t, planExplainDetail([]byte{0xff}))
+
+	summaryPlan, err := proto.Marshal(&planpb.PlanNode{
+		PlanOptions: &planpb.PlanOption{EnableExplain: true, ExplainDetail: false},
+	})
+	require.NoError(t, err)
+	assert.False(t, planExplainDetail(summaryPlan))
+
+	detailPlan, err := proto.Marshal(&planpb.PlanNode{
+		PlanOptions: &planpb.PlanOption{EnableExplain: true, ExplainDetail: true},
+	})
+	require.NoError(t, err)
+	assert.True(t, planExplainDetail(detailPlan))
+
+	sealedBlob, err := proto.Marshal(&internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:       1,
+			SealedSegments: 1,
+			RowsTotal:      500,
+			Operators: []*internalpb.ExplainOperatorStats{{
+				Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+				Segments: 1,
+				RowsIn:   500,
+				RowsOut:  25,
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	growingBlob, err := proto.Marshal(&internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:        1,
+			GrowingSegments: 1,
+			RowsTotal:       120,
+			Operators: []*internalpb.ExplainOperatorStats{{
+				Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+				Segments: 1,
+				RowsIn:   120,
+				RowsOut:  10,
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	mockSealed := segments.NewMockSegment(t)
+	mockSealed.EXPECT().ID().Return(int64(8801)).Maybe()
+	mockSealed.EXPECT().Type().Return(segments.SegmentTypeSealed).Maybe()
+
+	mockGrowing := segments.NewMockSegment(t)
+	mockGrowing.EXPECT().ID().Return(int64(8802)).Maybe()
+	mockGrowing.EXPECT().Type().Return(segments.SegmentTypeGrowing).Maybe()
+
+	inputs := []segments.RetrieveSegmentResult{
+		{Segment: mockGrowing, Result: &segcorepb.RetrieveResults{Explain: growingBlob}},
+		{Segment: mockSealed, Result: &segcorepb.RetrieveResults{Explain: sealedBlob}},
+	}
+
+	mergedSummary := queryNodeExplain(context.Background(), inputs, false)
+	require.NotNil(t, mergedSummary)
+	assert.Equal(t, int64(2), mergedSummary.GetGroup().GetSegments())
+	assert.Empty(t, mergedSummary.GetGroup().GetSegmentDetails())
+
+	mergedDetail := queryNodeExplain(context.Background(), inputs, true)
+	require.NotNil(t, mergedDetail)
+	require.Len(t, mergedDetail.GetGroup().GetSegmentDetails(), 2)
+	assert.Equal(t, int64(8801), mergedDetail.GetGroup().GetSegmentDetails()[0].GetSegmentId())
+	assert.False(t, mergedDetail.GetGroup().GetSegmentDetails()[0].GetIsGrowing())
+	assert.Equal(t, int64(8802), mergedDetail.GetGroup().GetSegmentDetails()[1].GetSegmentId())
+	assert.True(t, mergedDetail.GetGroup().GetSegmentDetails()[1].GetIsGrowing())
 }
 
 func TestSearchTask(t *testing.T) {
