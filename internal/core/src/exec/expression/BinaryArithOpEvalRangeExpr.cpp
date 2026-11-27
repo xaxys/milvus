@@ -39,14 +39,13 @@ namespace exec {
 
 void
 PhyBinaryArithOpEvalRangeExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    WaitPrefetch();
+    auto* input = context.get_offset_input();
+    auto eval_guard =
+        PrepareLeafEval(context, /*bind_offset_before_wait=*/false);
     tracer::AutoSpan span(
         "PhyBinaryArithOpEvalRangeExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("data_type", static_cast<int>(expr_->column_.data_type_));
     span.SetAttribute("op_type", static_cast<int>(expr_->op_type_));
-
-    auto input = context.get_offset_input();
-    SetHasOffsetInput((input != nullptr));
     auto data_type = expr_->column_.data_type_;
     const bool is_nested_array =
         data_type == DataType::ARRAY &&
@@ -1517,6 +1516,7 @@ PhyBinaryArithOpEvalRangeExpr::ExecArrayLengthFromChunks(
                 j - i);
             i = j;
         }
+        RecordRawScan(real_batch_size);
         return res_vec;
     }
 
@@ -1541,6 +1541,7 @@ PhyBinaryArithOpEvalRangeExpr::ExecArrayLengthFromChunks(
             count);
         done += count;
     }
+    RecordRawScan(real_batch_size);
     MoveCursorForData();
     return res_vec;
 }

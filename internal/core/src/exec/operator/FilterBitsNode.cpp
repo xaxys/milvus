@@ -27,6 +27,7 @@
 #include "common/Types.h"
 #include "exec/QueryContext.h"
 #include "exec/expression/EvalCtx.h"
+#include "exec/ExecutionExplainRecorder.h"
 #include "exec/expression/ExprCache.h"
 #include "expr/ITypeExpr.h"
 #include "fmt/core.h"
@@ -143,6 +144,51 @@ PhyFilterBitsNode::IsFinished() {
     return AllInputProcessed();
 }
 
+bool
+PhyFilterBitsNode::CanUseExprCache() const {
+    auto* cache_segment = query_context_->get_segment();
+    return enable_expr_cache_ && !expr_cache_key_.empty() &&
+           ExprCacheHelper::HasCacheIdentity(
+               cache_segment, query_context_->get_read_snapshot().get()) &&
+           cache_segment->type() == SegmentType::Sealed &&
+           ExprResCacheManager::IsEnabled();
+}
+
+bool
+PhyFilterBitsNode::EnsureOperatorCacheLookup() {
+    if (cache_lookup_done_) {
+        return whole_filter_cache_hit_;
+    }
+    cache_lookup_done_ = true;
+    if (!CanUseExprCache()) {
+        return false;
+    }
+    auto* cache_segment = query_context_->get_segment();
+    RunExprCacheBestEffort([&]() {
+        auto key =
+            ExprCacheHelper::MakeKey(cache_segment,
+                                     query_context_->get_read_snapshot().get(),
+                                     expr_cache_key_);
+        ExprResCacheManager::Value cached;
+        cached.active_count = need_process_rows_;
+        if (!ExprResCacheManager::Instance().Get(key, cached) ||
+            cached.result == nullptr ||
+            cached.result->size() != need_process_rows_) {
+            return;
+        }
+
+        std::vector<VectorPtr> col_res;
+        col_res.push_back(std::make_shared<ColumnVector>(
+            cached.result->clone(),
+            cached.valid_result ? cached.valid_result->clone()
+                                : TargetBitmap(need_process_rows_, true)));
+        prefetched_cached_output_ =
+            std::make_shared<RowVector>(std::move(col_res));
+        whole_filter_cache_hit_ = true;
+    });
+    return whole_filter_cache_hit_;
+}
+
 RowVectorPtr
 PhyFilterBitsNode::GetOutput() {
     milvus::exec::checkCancellation(query_context_);
@@ -180,50 +226,38 @@ PhyFilterBitsNode::GetOutput() {
     // (segment_id, FilterBitsNode signature + dynamic filter context), so
     // cross-query reuse is automatic only when the effective predicate matches.
     auto* cache_segment = query_context_->get_segment();
-    const bool can_use_cache =
-        enable_expr_cache_ && !expr_cache_key_.empty() &&
-        ExprCacheHelper::HasCacheIdentity(
-            cache_segment, query_context_->get_read_snapshot().get()) &&
-        cache_segment->type() == SegmentType::Sealed &&
-        ExprResCacheManager::IsEnabled();
-    if (can_use_cache) {
-        RowVectorPtr cached_output;
-        RunExprCacheBestEffort([&]() {
-            auto key = ExprCacheHelper::MakeKey(
-                cache_segment,
-                query_context_->get_read_snapshot().get(),
-                expr_cache_key_);
-            ExprResCacheManager::Value cached;
-            cached.active_count = need_process_rows_;
-            if (!ExprResCacheManager::Instance().Get(key, cached) ||
-                cached.result == nullptr ||
-                cached.result->size() != need_process_rows_) {
-                return;
-            }
-
-            std::vector<VectorPtr> col_res;
-            col_res.push_back(std::make_shared<ColumnVector>(
-                cached.result->clone(),
-                cached.valid_result ? cached.valid_result->clone()
-                                    : TargetBitmap(need_process_rows_, true)));
-            cached_output = std::make_shared<RowVector>(std::move(col_res));
-            num_processed_rows_ = need_process_rows_;
-        });
-        if (cached_output != nullptr) {
-            MarkFeature(
-                query_context_->get_plan_options().feature_recorder.get(),
-                FeatureBit::ExprCacheHit);
-            if (recording) {
-                span.SetAttribute("cache_hit", true);
-                span.SetAttribute("prefetch_wait_us", 0.0);
-                const auto cached = std::static_pointer_cast<ColumnVector>(
-                    cached_output->child(0));
-                record_result(
-                    TargetBitmapView(cached->GetRawData(), cached->size()),
-                    0.0);
-            }
-            return cached_output;
+    const bool can_use_cache = CanUseExprCache();
+    if (EnsureOperatorCacheLookup() && prefetched_cached_output_ != nullptr) {
+        auto cached_output = std::move(prefetched_cached_output_);
+        num_processed_rows_ = need_process_rows_;
+        if (auto* explain = query_context_->explain(); explain != nullptr) {
+            auto cached_col = std::dynamic_pointer_cast<ColumnVector>(
+                cached_output->child(0));
+            const int64_t rows_out =
+                cached_col != nullptr
+                    ? static_cast<int64_t>(
+                          cached_col->size() -
+                          TargetBitmapView(cached_col->GetRawData(),
+                                           cached_col->size())
+                              .count())
+                    : 0;
+            explain->SetOperatorRows(
+                get_operator_id(), need_process_rows_, rows_out);
+            explain->MarkOperatorCached(get_operator_id());
+            RecordWholeFilterCacheHitExplain(
+                exprs_->exprs(), explain, need_process_rows_, rows_out);
         }
+        MarkFeature(query_context_->get_plan_options().feature_recorder.get(),
+                    FeatureBit::ExprCacheHit);
+        if (recording) {
+            span.SetAttribute("cache_hit", true);
+            span.SetAttribute("prefetch_wait_us", 0.0);
+            const auto cached =
+                std::static_pointer_cast<ColumnVector>(cached_output->child(0));
+            record_result(
+                TargetBitmapView(cached->GetRawData(), cached->size()), 0.0);
+        }
+        return cached_output;
     }
 
     const auto prefetch_start = recording
@@ -264,6 +298,12 @@ PhyFilterBitsNode::GetOutput() {
         TargetBitmapView valid_view(col_vec->GetValidRawData(), col_vec_size);
         ConvertPredicateToFilteredBitset(view, valid_view, col_vec_size);
         num_processed_rows_ = col_vec_size;
+        if (auto* explain = query_context_->explain(); explain != nullptr) {
+            explain->SetOperatorRows(
+                get_operator_id(),
+                need_process_rows_,
+                static_cast<int64_t>(col_vec_size - view.count()));
+        }
 
         AssertInfo(col_vec_size == need_process_rows_,
                    "bitset size: {}, need_process_rows_: {}",
@@ -329,6 +369,12 @@ PhyFilterBitsNode::GetOutput() {
     TargetBitmapView valid_bitset_view(valid_bitset);
     ConvertPredicateToFilteredBitset(
         bitset_view, valid_bitset_view, bitset.size());
+    if (auto* explain = query_context_->explain(); explain != nullptr) {
+        explain->SetOperatorRows(
+            get_operator_id(),
+            need_process_rows_,
+            static_cast<int64_t>(bitset.size() - bitset_view.count()));
+    }
 
     AssertInfo(bitset.size() == need_process_rows_,
                "bitset size: {}, need_process_rows_: {}",

@@ -24,11 +24,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
-var trueLiteral = &ExprWithType{
-	dataType: schemapb.DataType_Bool,
-	expr:     alwaysTrueExpr(),
-}
-
 type ExprParams struct {
 	UseJSONStats bool
 }
@@ -164,7 +159,10 @@ func handleExprInternal(schema *typeutil.SchemaHelper, exprStr string, visitorAr
 	}()
 
 	if isEmptyExpression(exprStr) {
-		return trueLiteral
+		return &ExprWithType{
+			dataType: schemapb.DataType_Bool,
+			expr:     alwaysTrueExpr(),
+		}
 	}
 	ast, err := handleInternal(exprStr)
 	if err != nil {

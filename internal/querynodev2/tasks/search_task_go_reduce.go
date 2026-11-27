@@ -428,6 +428,7 @@ func (t *SearchTask) encodeAndAssignReducedResult(
 	}
 	searchResults.SlicedOffset = 1
 	searchResults.SlicedNumCount = 1
+	searchResults.Explain = t.explain
 	searchResults.CostAggregation = &internalpb.CostAggregation{
 		ServiceTime:          tr.ElapseSpan().Milliseconds(),
 		TotalRelatedDataSize: relatedDataSize,

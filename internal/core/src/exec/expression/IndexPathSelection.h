@@ -169,6 +169,11 @@ enum class DeclineReason {
     kLiteralNotSupported,
     // A hinted index for this field/path is not loaded on the segment.
     kHintedIndexNotSelected,
+    // The field has entries, but none of them could serve this leaf (coarse
+    // bucket used by the explain payload; the debug log carries the exact gate).
+    kIndexUnusable,
+    // Answered from an in-memory expression/geometry cache with zero storage scan.
+    kCached,
 };
 
 inline const char*
@@ -192,6 +197,10 @@ ToString(DeclineReason reason) {
             return "literal_not_supported";
         case DeclineReason::kHintedIndexNotSelected:
             return "hinted_index_not_selected";
+        case DeclineReason::kIndexUnusable:
+            return "index_unusable";
+        case DeclineReason::kCached:
+            return "cached";
         case DeclineReason::kNone:
         default:
             return "none";
@@ -595,6 +604,8 @@ DetermineExecPath(const ExprIndexRequirement& req,
                 return 1;
         }
     };
+    // Most specific gate reached across candidates on this field, plus the
+    // most specific gate reached among hinted candidates for strict-hint errors.
     DeclineReason best_reject = capabilities.has_unmatched_entries()
                                     ? DeclineReason::kJsonPathNotCovered
                                     : DeclineReason::kNone;

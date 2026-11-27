@@ -246,6 +246,18 @@ class ITypeExpr {
         return type_;
     }
 
+    // Request-unique id of this expression node, assigned by the proxy and
+    // carried in the plan proto. Zero when the sender did not assign one.
+    int64_t
+    expr_id() const {
+        return expr_id_;
+    }
+
+    void
+    SetExprId(int64_t expr_id) {
+        expr_id_ = expr_id;
+    }
+
     virtual std::string
     ToString() const = 0;
 
@@ -259,6 +271,7 @@ class ITypeExpr {
 
  protected:
     DataType type_;
+    int64_t expr_id_{0};
     std::vector<std::shared_ptr<const ITypeExpr>> inputs_;
 };
 

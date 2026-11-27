@@ -40,12 +40,11 @@ namespace exec {
 
 void
 PhyNullExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    WaitPrefetch();
+    auto* input = context.get_offset_input();
+    auto eval_guard =
+        PrepareLeafEval(context, /*bind_offset_before_wait=*/false);
     tracer::AutoSpan span("PhyNullExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("data_type", static_cast<int>(expr_->column_.data_type_));
-
-    auto input = context.get_offset_input();
-    SetHasOffsetInput(input != nullptr);
     if (expr_->column_.element_level_) {
         result = ExecElementLevelNull(input);
         return;
@@ -139,15 +138,17 @@ PhyNullExpr::DetermineExecPath() {
                                          ? !is_element_nullable_
                                          : !expr_->column_.nullable_;
     if (schema_not_nullable) {
-        is_constant_folded_ = true;
+        SetSchemaNotNullable();
         exec_path_ = ExprExecPath::RawData;
         return;
     }
     // Element validity is read from raw data; a field without null elements
-    // is not read at all.
+    // is not read at all. A non-nullable column is answered directly from the
+    // schema in PreCheckNullable without touching an index or column.
     if (expr_->column_.element_level_ ||
         IsVectorDataType(expr_->column_.data_type_) ||
         expr_->column_.data_type_ == DataType::JSON) {
+        decline_reason_ = DeclineReason::kCapabilityMismatch;
         exec_path_ = ExprExecPath::RawData;
         return;
     }
@@ -239,6 +240,7 @@ PhyNullExpr::ExecVectorNull(OffsetVector* input) {
                                                offsets.data(),
                                                offsets.size(),
                                                TargetBitmapView(valid_res));
+        RecordRawScan(static_cast<int64_t>(offsets.size()));
         return BuildNullResult(std::move(valid_res));
     }
 
@@ -250,6 +252,7 @@ PhyNullExpr::ExecVectorNull(OffsetVector* input) {
                                          current_data_global_pos_,
                                          batch_size,
                                          TargetBitmapView(valid_res));
+    RecordRawScan(batch_size);
     current_data_global_pos_ += batch_size;
     return BuildNullResult(std::move(valid_res));
 }

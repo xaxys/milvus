@@ -204,6 +204,21 @@ class PhyConjunctFilterExpr : public Expr {
         like_indices_ = std::move(indices);
     }
 
+    void
+    SetEvalOrderBase(int32_t base) {
+        eval_order_base_ = base;
+    }
+
+    int32_t
+    EvalOrderBase() const {
+        return eval_order_base_;
+    }
+
+    bool
+    IsBatchNgramIndex(size_t idx) const {
+        return batch_ngram_indices_.count(idx) > 0;
+    }
+
  private:
     // Build the bitmap of rows that still need the following expressions:
     // its count drives the batch-level early exit and the bitmap itself
@@ -228,6 +243,8 @@ class PhyConjunctFilterExpr : public Expr {
     bool like_batch_initialized_{false};
     // Indices of expressions executed via batch ngram (to skip in normal iteration)
     std::set<size_t> batch_ngram_indices_;
+    // 1-based starting execution order assigned to this conjunction subtree.
+    int32_t eval_order_base_{0};
 };
 }  //namespace exec
 }  // namespace milvus

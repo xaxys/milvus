@@ -498,3 +498,75 @@ func TestLegacyTwoStageSearchChannelCountWithRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestTwoStageSearchMergesStage1ExplainOnlyWhenCompleted(t *testing.T) {
+	stage1Explain := &internalpb.ExecutionExplain{
+		Version: 1,
+		Group: &internalpb.ExplainSegmentGroup{
+			Segments:       1,
+			SealedSegments: 1,
+			RowsTotal:      100,
+			Operators: []*internalpb.ExplainOperatorStats{{
+				Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+				Segments: 1,
+				RowsIn:   100,
+				RowsOut:  20,
+				Conditions: []*internalpb.ExplainConditionStats{{
+					ExprId:   1,
+					FieldId:  101,
+					Segments: 1,
+					RowsIn:   100,
+					RowsOut:  20,
+					IdxScan:  100,
+					Used: []*internalpb.ExplainIndexUseStats{{
+						IndexId:  901,
+						Family:   "sort",
+						Segments: 1,
+						RowsIn:   100,
+						RowsOut:  20,
+						IdxScan:  100,
+					}},
+				}},
+			}},
+		},
+	}
+	makeStage2Response := func() *viewpb.SearchOnViewResponse {
+		return &viewpb.SearchOnViewResponse{
+			LegacyResults: &internalpb.SearchResults{
+				Explain: &internalpb.ExecutionExplain{
+					Version: 1,
+					Group: &internalpb.ExplainSegmentGroup{
+						Segments:       1,
+						SealedSegments: 1,
+						RowsTotal:      100,
+						Operators: []*internalpb.ExplainOperatorStats{{
+							Kind:           internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+							Segments:       1,
+							CachedSegments: 1,
+							RowsIn:         100,
+							RowsOut:        20,
+						}},
+					},
+				},
+			},
+		}
+	}
+
+	incomplete := twoStageSearch{
+		completed: false,
+		filters:   map[int64]*internalpb.SearchResults{11: {Explain: stage1Explain}},
+	}
+	respFallback := makeStage2Response()
+	incomplete.mergeFeatures(qviews.NewQueryNode(11), respFallback)
+	require.Empty(t, respFallback.GetLegacyResults().GetExplain().GetGroup().GetOperators()[0].GetConditions())
+
+	complete := twoStageSearch{
+		completed: true,
+		filters:   map[int64]*internalpb.SearchResults{11: {Explain: stage1Explain}},
+	}
+	respMerged := makeStage2Response()
+	complete.mergeFeatures(qviews.NewQueryNode(11), respMerged)
+	filterOp := respMerged.GetLegacyResults().GetExplain().GetGroup().GetOperators()[0]
+	require.Len(t, filterOp.GetConditions(), 1)
+	require.Zero(t, filterOp.GetCachedSegments())
+}

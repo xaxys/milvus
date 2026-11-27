@@ -63,6 +63,12 @@ class ValueLookupSource final {
         };
         const auto decision = DetermineExecPath(req, capabilities);
         if (!decision.key.has_value()) {
+            fallback_reason_ = decision.fallback_reason;
+            if (fallback_reason_ == DeclineReason::kNoIndexOnField &&
+                (segment->HasIndex(field_id) ||
+                 !segment->IndexRegistrations(field_id).empty())) {
+                fallback_reason_ = DeclineReason::kCapabilityMismatch;
+            }
             return;
         }
 
@@ -75,6 +81,7 @@ class ValueLookupSource final {
         if (segment->type() == SegmentType::Growing) {
             growing_pin_ = segment->PinGrowingIndex(op_ctx, field_id);
             if (!growing_pin_) {
+                fallback_reason_ = DeclineReason::kIndexUnusable;
                 return;
             }
             reader = &growing_pin_.Reader();
@@ -82,6 +89,7 @@ class ValueLookupSource final {
         } else {
             index_reader_ = segment->CreateIndexReader(op_ctx, *decision.key);
             if (!index_reader_) {
+                fallback_reason_ = DeclineReason::kIndexUnusable;
                 return;
             }
             reader = index_reader_.get();
@@ -92,6 +100,10 @@ class ValueLookupSource final {
                    "reader capabilities",
                    field_id.get());
         ValidateReader(field_id, data_type, reader);
+        entry_ = *entry;
+        if (active_count > 0 && covered_end_ <= 0) {
+            fallback_reason_ = DeclineReason::kIndexUnusable;
+        }
         reader_ = reader;
     }
 
@@ -101,6 +113,9 @@ class ValueLookupSource final {
     ValueLookupSource(ValueLookupSource&& other) noexcept
         : index_reader_(std::move(other.index_reader_)),
           growing_pin_(std::move(other.growing_pin_)),
+          entry_(std::move(other.entry_)),
+          fallback_reason_(
+              std::exchange(other.fallback_reason_, DeclineReason::kNone)),
           reader_(std::exchange(other.reader_, nullptr)),
           covered_end_(std::exchange(other.covered_end_, 0)) {
     }
@@ -113,6 +128,9 @@ class ValueLookupSource final {
         covered_end_ = 0;
         index_reader_ = std::move(other.index_reader_);
         growing_pin_ = std::move(other.growing_pin_);
+        entry_ = std::move(other.entry_);
+        fallback_reason_ =
+            std::exchange(other.fallback_reason_, DeclineReason::kNone);
         reader_ = std::exchange(other.reader_, nullptr);
         covered_end_ = std::exchange(other.covered_end_, 0);
         return *this;
@@ -121,6 +139,21 @@ class ValueLookupSource final {
     bool
     HasReader() const {
         return reader_ != nullptr;
+    }
+
+    bool
+    HasCoveredRows() const {
+        return HasReader() && covered_end_ > 0;
+    }
+
+    const std::optional<segcore::IndexCapabilityEntry>&
+    SelectedEntry() const {
+        return entry_;
+    }
+
+    DeclineReason
+    FallbackReason() const {
+        return fallback_reason_;
     }
 
     bool
@@ -195,6 +228,8 @@ class ValueLookupSource final {
     // Borrowed interfaces are destroyed before their owning reader or snapshot.
     index::IIndexReaderBasePtr index_reader_;
     index::GrowingIndexSnapshotPin growing_pin_;
+    std::optional<segcore::IndexCapabilityEntry> entry_;
+    DeclineReason fallback_reason_{DeclineReason::kNone};
     const index::IIndexReaderBase* reader_{nullptr};
     int64_t covered_end_{0};
 };

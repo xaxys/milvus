@@ -416,6 +416,9 @@ struct SearchResult {
     // record the storage usage in search
     StorageCost search_storage_cost_;
 
+    // Serialized execution explain of the run that produced this result.
+    std::string explain_blob_;
+
     bool element_level_{false};
     // Execution features seen while producing this result, moved into the
     // request's FeatureRecorder by the operator that owns the query context.

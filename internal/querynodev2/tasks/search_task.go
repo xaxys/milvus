@@ -18,6 +18,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/function/chain"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/internal/util/segcore"
@@ -64,6 +65,9 @@ type SearchTask struct {
 	others           []*SearchTask
 	notifier         chan error
 	serverID         int64
+	// What the segments of this task recorded, wrapped as the querynode level
+	// of the explain tree. Shared by every sub-task result this task produces.
+	explain *internalpb.ExecutionExplain
 
 	tr           *timerecord.TimeRecorder
 	scheduleSpan trace.Span
@@ -240,6 +244,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 	if err != nil {
 		return err
 	}
+	t.explain = t.buildExplain(results, searchedSegments)
 
 	// In filter-only mode, extract filter statistics and return early.
 	// This supports two-stage search: stage-1 collects per-segment valid
@@ -271,6 +276,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 				SealedSegmentIDsSearched: segmentIDs,
 				FilterValidCounts:        validCounts,
 				FeatureBits:              featureBits,
+				Explain:                  t.explain,
 				CostAggregation: &internalpb.CostAggregation{
 					ServiceTime:          tr.ElapseSpan().Milliseconds(),
 					TotalRelatedDataSize: relatedDataSize,
@@ -303,6 +309,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 			}
 			searchResults.SlicedOffset = 1
 			searchResults.SlicedNumCount = 1
+			searchResults.Explain = t.explain
 			searchResults.CostAggregation = &internalpb.CostAggregation{
 				ServiceTime: tr.ElapseSpan().Milliseconds(),
 			}
@@ -511,12 +518,13 @@ func (t *SearchTask) canMerge(other *SearchTask) bool {
 	}
 	// Plans are identical, so checking one is sufficient. Keep function-chain
 	// failures scoped to the original request instead of propagating them to
-	// every request in a merged task through Done.
+	// every request in a merged task through Done, and keep explain requests
+	// isolated so concurrent callers do not pollute each other's counters.
 	plan := &planpb.PlanNode{}
 	if err := proto.Unmarshal(t.req.GetReq().GetSerializedExprPlan(), plan); err != nil {
 		return false
 	}
-	if len(plan.GetQuerynodeFunctionChains()) > 0 {
+	if len(plan.GetQuerynodeFunctionChains()) > 0 || plan.GetPlanOptions().GetEnableExplain() {
 		return false
 	}
 
@@ -721,6 +729,38 @@ func (t *SearchTask) Done(err error) {
 
 func (t *SearchTask) Wait() error {
 	return <-t.notifier
+}
+
+// buildExplain merges per-segment execution explain payloads into a single
+// worker-level ExplainSegmentGroup, recording per-segment references so
+// HybridSearch sub-requests compute an exact segment union before Proxy strips them.
+func (t *SearchTask) buildExplain(results []*segments.SearchResult, searchedSegments []segments.Segment) *internalpb.ExecutionExplain {
+	trackSegmentRefs := t.req.GetReq().GetIsAdvanced()
+	rawSegments := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for i, result := range results {
+		if i >= len(searchedSegments) {
+			break
+		}
+		node, err := result.GetExplain()
+		if err != nil {
+			mlog.Warn(t.ctx, "failed to decode segment execution explain", mlog.Err(err))
+			continue
+		}
+		if node == nil {
+			continue
+		}
+		if trackSegmentRefs {
+			if g := node.GetGroup(); g != nil {
+				g.SegmentRefs = []*internalpb.ExplainSegmentRef{{
+					SegmentId: searchedSegments[i].ID(),
+					RowsTotal: g.GetRowsTotal(),
+					IsGrowing: g.GetGrowingSegments() > 0,
+				}}
+			}
+		}
+		rawSegments = append(rawSegments, node)
+	}
+	return explain.Merge(rawSegments...)
 }
 
 func (t *SearchTask) SearchResult() *internalpb.SearchResults {

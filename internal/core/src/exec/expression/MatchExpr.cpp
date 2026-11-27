@@ -290,6 +290,15 @@ PhyMatchFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
             }
         }
         if (selected_elements == 0) {
+            if (selected_row_count > 0 || total_elements == 0) {
+                if (auto* exec_ctx = context.get_exec_context();
+                    exec_ctx != nullptr) {
+                    if (auto* explain = exec_ctx->explain();
+                        explain != nullptr && !inputs_.empty()) {
+                        MarkExplainDomainEmpty(inputs_[0], explain);
+                    }
+                }
+            }
             // Every selected row is empty (or NULL). Quantifier results are
             // constant; skip predicate Eval and do not join its data prefetch.
             // MoveCursor selects/advances the appropriate sequential cursors.
@@ -418,6 +427,12 @@ PhyMatchFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
 
     VectorPtr match_result;
     if (elem_count > 0) {
+        if (auto* exec_ctx = context.get_exec_context(); exec_ctx != nullptr) {
+            if (auto* explain = exec_ctx->explain();
+                explain != nullptr && !inputs_.empty()) {
+                MarkExplainDomainNonEmpty(inputs_[0], explain);
+            }
+        }
         inputs_[0]->Eval(eval_ctx, match_result);
     } else if (!use_offsets) {
         // Keep element-level child expressions aligned across all-empty batches.
@@ -434,6 +449,12 @@ PhyMatchFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
                    "Match child returned empty result for non-empty element "
                    "batch, elem_count={}",
                    elem_count);
+        if (auto* exec_ctx = context.get_exec_context(); exec_ctx != nullptr) {
+            if (auto* explain = exec_ctx->explain();
+                explain != nullptr && !inputs_.empty()) {
+                MarkExplainDomainEmpty(inputs_[0], explain);
+            }
+        }
         if (MatchEmptyElements(match_type, threshold)) {
             if (select_rows) {
                 for (const auto position : output_positions) {
@@ -464,6 +485,22 @@ PhyMatchFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
         match_result_col_vec->GetRawData(), match_result_col_vec->size());
     TargetBitmapView match_result_valid_view(
         match_result_col_vec->GetValidRawData(), match_result_col_vec->size());
+
+    // MatchExpr carries no expr_id; when its predicate is a single leaf
+    // (conjunctions and NOT nodes already attribute their own children),
+    // credit the evaluated element batch and element matches here.
+    auto* exec_ctx = context.get_exec_context();
+    auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
+    if (explain != nullptr && inputs_[0]->expr_id() != 0) {
+        const auto& elem_mask = eval_ctx.get_bitmap_input();
+        const int64_t active_elems =
+            elem_mask.empty() ? elem_count
+                              : static_cast<int64_t>(elem_mask.count());
+        ExecutionExplainRecorder::AddSlotRows(
+            inputs_[0]->explain_slot(),
+            active_elems,
+            CountExplainBitmapMatches(match_result_col_vec.get(), elem_mask));
+    }
 
     bool all_valid = match_result_valid_view.all();
 

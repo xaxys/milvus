@@ -207,7 +207,7 @@ class JsonKeyStats {
         return PinWrapper<BsonInvertedIndex*>(std::move(ca), index);
     }
 
-    void
+    int64_t
     ExecuteForSharedData(
         milvus::OpContext* op_ctx,
         PinWrapper<BsonInvertedIndex*>& bson_index_cache,
@@ -218,16 +218,19 @@ class JsonKeyStats {
             bson_index_cache = GetBsonIndex(op_ctx);
         }
         if (bson_index_cache.get() == nullptr || shared_column_ == nullptr) {
-            return;
+            return 0;
         }
+        int64_t scanned = 0;
         bson_index_cache.get()->TermQuery(
             path,
-            [this, &func, op_ctx](const uint32_t* row_id_array,
-                                  const uint32_t* offset_array,
-                                  const int64_t array_len) {
+            [this, &func, &scanned, op_ctx](const uint32_t* row_id_array,
+                                            const uint32_t* offset_array,
+                                            const int64_t array_len) {
+                scanned += array_len;
                 shared_column_->BulkRawBsonAt(
                     op_ctx, func, row_id_array, offset_array, array_len);
             });
+        return scanned;
     }
 
     int64_t

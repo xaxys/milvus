@@ -8362,3 +8362,123 @@ func TestTopLevelResultShapeErrorResponse(t *testing.T) {
 	assert.Equal(t, wantMessage, resp[HTTPReturnMessage])
 	assert.NotContains(t, resp, HTTPReturnData)
 }
+
+func TestRESTfulV2ExplainPassthrough(t *testing.T) {
+	paramtable.Init()
+	paramtable.Get().Save(paramtable.Get().QuotaConfig.QuotaAndLimitsEnabled.Key, "false")
+	defer paramtable.Get().Reset(paramtable.Get().QuotaConfig.QuotaAndLimitsEnabled.Key)
+
+	mp := mocks.NewMockProxy(t)
+	mp.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
+		CollectionName: DefaultCollectionName,
+		Schema:         buildElementNullableStructTestSchema(false),
+		ShardsNum:      ShardNumDefault,
+		Status:         &StatusSuccess,
+	}, nil)
+
+	explainJSONStr := `{"level":"summary","segments":2,"rows_total":1000}`
+	explainTextStr := "query (segments=2, rows_total=1000)\n"
+
+	mp.EXPECT().Query(mock.Anything, mock.MatchedBy(func(req *milvuspb.QueryRequest) bool {
+		v, err := funcutil.GetAttrByKeyFromRepeatedKV("explain", req.GetQueryParams())
+		return err == nil && v == "summary"
+	})).Return(&milvuspb.QueryResults{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			ExtraInfo: map[string]string{"report_value": "2", "explain": explainJSONStr},
+		},
+		OutputFields: []string{"id"},
+		FieldsData: []*schemapb.FieldData{{
+			FieldName: "id",
+			FieldId:   100,
+			Type:      schemapb.DataType_Int64,
+			Field:     &schemapb.FieldData_Scalars{Scalars: &schemapb.ScalarField{Data: &schemapb.ScalarField_LongData{LongData: &schemapb.LongArray{Data: []int64{1}}}}},
+		}},
+	}, nil).Twice()
+
+	mp.EXPECT().Search(mock.Anything, mock.MatchedBy(func(req *milvuspb.SearchRequest) bool {
+		v, err := funcutil.GetAttrByKeyFromRepeatedKV("explain", req.GetSearchParams())
+		return err == nil && v == "default"
+	})).Return(&milvuspb.SearchResults{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			ExtraInfo: map[string]string{"report_value": "1", "explain": explainTextStr},
+		},
+		Results: &schemapb.SearchResultData{
+			NumQueries: 1,
+			TopK:       0,
+			Topks:      []int64{0},
+			Ids:        &schemapb.IDs{},
+		},
+	}, nil).Once()
+
+	mp.EXPECT().HybridSearch(mock.Anything, mock.MatchedBy(func(req *milvuspb.HybridSearchRequest) bool {
+		v, err := funcutil.GetAttrByKeyFromRepeatedKV("explain", req.GetRankParams())
+		fmtV, fmtErr := funcutil.GetAttrByKeyFromRepeatedKV("explain_format", req.GetRankParams())
+		return err == nil && v == "summary" && fmtErr == nil && fmtV == "json"
+	})).Return(&milvuspb.SearchResults{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			ExtraInfo: map[string]string{"report_value": "3", "explain": explainJSONStr},
+		},
+		Results: &schemapb.SearchResultData{
+			NumQueries:   1,
+			TopK:         1,
+			Topks:        []int64{1},
+			Ids:          &schemapb.IDs{IdField: &schemapb.IDs_IntId{IntId: &schemapb.LongArray{Data: []int64{7}}}},
+			Scores:       []float32{0.9},
+			OutputFields: []string{},
+		},
+	}, nil).Once()
+
+	testEngine := initHTTPServerV2(mp, false)
+	send := func(action, body string) map[string]interface{} {
+		w := httptest.NewRecorder()
+		testEngine.ServeHTTP(w, httptest.NewRequest(http.MethodPost, versionalV2(EntityCategory, action), strings.NewReader(body)))
+		require.Equal(t, http.StatusOK, w.Code)
+		resp := map[string]interface{}{}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		return resp
+	}
+
+	// 1. query forwards queryParams.explain and embeds JSON explain as structured object.
+	qResp := send(QueryAction, `{"collectionName":"book","filter":"id > 0","outputFields":["id"],"queryParams":{"explain":"summary","explain_format":"json"}}`)
+	assert.EqualValues(t, 0, qResp[HTTPReturnCode])
+	explainMap, ok := qResp[HTTPReturnExplain].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "summary", explainMap["level"])
+	assert.EqualValues(t, 2, explainMap["segments"])
+
+	// 2. get forwards queryParams.explain and embeds JSON explain.
+	gResp := send(GetAction, `{"collectionName":"book","id":[1],"outputFields":["id"],"queryParams":{"explain":"summary","explain_format":"json"}}`)
+	assert.EqualValues(t, 0, gResp[HTTPReturnCode])
+	_, ok = gResp[HTTPReturnExplain].(map[string]interface{})
+	assert.True(t, ok)
+
+	// 3. search (even on TopK==0 empty results) embeds text explain as string.
+	sResp := send(SearchAction, `{"collectionName":"book","data":[[0.1,0.2]],"annsField":"vec","limit":2,"searchParams":{"explain":"default"}}`)
+	assert.EqualValues(t, 0, sResp[HTTPReturnCode])
+	assert.Equal(t, explainTextStr, sResp[HTTPReturnExplain])
+
+	// 4. hybrid_search forwards top-level params.explain/explain_format onto RankParams and embeds JSON explain.
+	hResp := send(HybridSearchAction, `{"collectionName":"book","search":[{"data":[[0.1,0.2]],"annsField":"vec","limit":2}],"rerank":{"strategy":"rrf","params":{"k":60}},"limit":2,"params":{"explain":"summary","explain_format":"json"}}`)
+	assert.EqualValues(t, 0, hResp[HTTPReturnCode])
+	hExplain, ok := hResp[HTTPReturnExplain].(map[string]interface{})
+	require.True(t, ok)
+	assert.EqualValues(t, 1000, hExplain["rows_total"])
+
+	// 5. appendExtraKVParams JSON-encodes nested map/slice values (e.g., queryParams.params)
+	// instead of Go fmt.Sprintf("%v") map[...] syntax.
+	extraKVs := appendExtraKVParams(nil, map[string]interface{}{
+		"params": map[string]interface{}{"index_hint": "idx_a", "explain": "summary"},
+		"tags":   []interface{}{"x", "y"},
+		"plain":  "ok",
+	})
+	kvMap := make(map[string]string, len(extraKVs))
+	for _, item := range extraKVs {
+		kvMap[item.GetKey()] = item.GetValue()
+	}
+	assert.JSONEq(t, `{"explain":"summary","index_hint":"idx_a"}`, kvMap["params"])
+	assert.JSONEq(t, `["x","y"]`, kvMap["tags"])
+	assert.Equal(t, "ok", kvMap["plain"])
+}

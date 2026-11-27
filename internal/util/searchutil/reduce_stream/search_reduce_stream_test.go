@@ -30,6 +30,7 @@ import (
 
 	commonpb "github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/reduce"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
@@ -1345,4 +1346,45 @@ func newSearchChunk(nq, topK int64, hitsByQuery ...[]testHit) *internalpb.Search
 			},
 		},
 	}
+}
+
+func TestSearchReduceStreamPropagatesAndMergesExplain(t *testing.T) {
+	w1 := newSearchChunk(1, 2, []testHit{{id: 1, score: 0.9}, {id: 2, score: 0.8}})
+	w1.Explain = &internalpb.ExecutionExplain{
+		Version: 1,
+		Group:   &internalpb.ExplainSegmentGroup{Segments: 1, SealedSegments: 1, RowsTotal: 50},
+	}
+	w2 := newSearchChunk(1, 2)
+	w2.Explain = &internalpb.ExecutionExplain{
+		Version: 1,
+		Group:   &internalpb.ExplainSegmentGroup{Segments: 1, GrowingSegments: 1, RowsTotal: 70},
+	}
+
+	chunks1, err := SplitSearchResult(w1, 1)
+	require.NoError(t, err)
+	require.Len(t, chunks1, 2)
+	require.NotNil(t, chunks1[0].GetExplain())
+	require.Nil(t, chunks1[1].GetExplain())
+
+	chunks2, err := SplitSearchResult(w2, 1)
+	require.NoError(t, err)
+	require.Len(t, chunks2, 1)
+	require.NotNil(t, chunks2[0].GetExplain())
+
+	s1 := &fakeReduceStream{recv: []fakeStreamRecv{{chunk: chunks1[0]}, {chunk: chunks1[1]}}}
+	s2 := &fakeReduceStream{recv: []fakeStreamRecv{{chunk: chunks2[0]}}}
+	shardStream, err := NewShardReduceStream(&internalpb.SearchRequest{Nq: 1, Topk: 2}, []ReduceStream{s1, s2}, 1)
+	require.NoError(t, err)
+	finalStream, err := NewReduceStream(&internalpb.SearchRequest{Nq: 1, Topk: 2}, []ReduceStream{shardStream}, 1)
+	require.NoError(t, err)
+	defer finalStream.Close()
+
+	firstOut, err := finalStream.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, firstOut.GetExplain())
+	summary := explain.SummarizeWithSubSearches([]*internalpb.ExecutionExplain{firstOut.GetExplain()}, nil, nil, nil)
+	require.Equal(t, 2, summary.Segments)
+	require.Equal(t, 1, summary.SealedSegments)
+	require.Equal(t, 1, summary.GrowingSegments)
+	require.Equal(t, int64(120), summary.RowsTotal)
 }

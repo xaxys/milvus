@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "common/EasyAssert.h"
+#include "common/ExplainOperatorKind.h"
 #include "common/Types.h"
 #include "common/Utils.h"
 #include "common/protobuf_utils.h"
@@ -66,6 +67,11 @@ class PlanNode {
 
     virtual std::string_view
     name() const = 0;
+
+    virtual ExplainOperatorKind
+    explain_operator_kind() const noexcept {
+        return ExplainOperatorKind::kUnknown;
+    }
 
     virtual expr::ExprInfo
     GatherInfo() const {
@@ -120,6 +126,11 @@ class IterativeFilterNode : public PlanNode {
         return "IterativeFilter";
     }
 
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kIterativeFilter;
+    }
+
     std::string
     ToString() const override {
         return "";
@@ -163,6 +174,11 @@ class FilterBitsNode : public PlanNode {
     std::string_view
     name() const override {
         return "FilterBits";
+    }
+
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kFilter;
     }
 
     std::string
@@ -232,6 +248,11 @@ class IterativeElementFilterNode : public PlanNode {
         return "IterativeElementFilter";
     }
 
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kIterativeElementFilter;
+    }
+
     std::string
     ToString() const override {
         return fmt::format(
@@ -292,6 +313,11 @@ class ElementFilterBitsNode : public PlanNode {
         return "ElementFilterBits";
     }
 
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kElementFilter;
+    }
+
     std::string
     ToString() const override {
         return fmt::format(
@@ -342,6 +368,11 @@ class ProjectNode : public PlanNode {
         return "ProjectNode";
     }
 
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kProject;
+    }
+
     std::string
     ToString() const override {
         return fmt::format("ProjectNode:\n\t[source node:{}]",
@@ -381,6 +412,11 @@ class MvccNode : public PlanNode {
         return "MvccNode";
     }
 
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kMvcc;
+    }
+
     std::string
     ToString() const override {
         return fmt::format("MvccNode:[source_node:{}]", SourceToString());
@@ -412,6 +448,11 @@ class RandomSampleNode : public PlanNode {
     std::string_view
     name() const override {
         return "RandomSampleNode";
+    }
+
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kRandomSample;
     }
 
     std::string
@@ -452,6 +493,11 @@ class VectorSearchNode : public PlanNode {
         return "VectorSearchNode";
     }
 
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kVectorSearch;
+    }
+
     std::string
     ToString() const override {
         return fmt::format("VectorSearchNode:[source_node:{}]",
@@ -483,6 +529,11 @@ class SearchGroupByNode : public PlanNode {
     std::string_view
     name() const override {
         return "SearchGroupByNode";
+    }
+
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kGroupBy;
     }
 
     std::string
@@ -533,6 +584,11 @@ class RescoresNode : public PlanNode {
     std::string_view
     name() const override {
         return "RescoresNode";
+    }
+
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kRescore;
     }
 
     std::string
@@ -587,6 +643,11 @@ class AggregationNode : public PlanNode {
     std::string_view
     name() const override {
         return "agg";
+    }
+
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kAggregation;
     }
 
     const std::vector<expr::FieldAccessTypeExprPtr>&
@@ -679,6 +740,11 @@ class OrderByNode : public PlanNode {
     std::string_view
     name() const override {
         return "OrderBy";
+    }
+
+    ExplainOperatorKind
+    explain_operator_kind() const noexcept override {
+        return ExplainOperatorKind::kOrderBy;
     }
 
     std::string

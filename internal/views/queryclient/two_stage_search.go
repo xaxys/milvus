@@ -7,6 +7,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/featureusage"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/searchutil/optimizers"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -118,6 +119,11 @@ func (s *twoStageSearch) mergeFeatures(node qviews.WorkNode, response *viewpb.Se
 					result.CostAggregation = &internalpb.CostAggregation{}
 				}
 				result.CostAggregation.ServiceTime += cost.GetServiceTime()
+			}
+			if s.completed && filter.GetExplain() != nil && result.GetExplain() != nil {
+				if merged, ok := explain.MergeStage1Explain(result.GetExplain(), filter.GetExplain()); ok {
+					result.Explain = merged
+				}
 			}
 		}
 	}

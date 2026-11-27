@@ -42,7 +42,7 @@ func (queryTaskRunner) Query(ctx context.Context, collection *segcore.CCollectio
 	if err != nil {
 		return nil, err
 	}
-	task := tasks.NewQueryTask(ctx, qnCollection, nil, req)
+	task := tasks.NewQueryTaskWithNodeID(ctx, qnCollection, nil, req, serverID)
 	if err := task.PreExecute(); err != nil {
 		return nil, err
 	}

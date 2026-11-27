@@ -697,6 +697,17 @@ class Schema {
         return function_output_field_ids_.count(field_id) > 0;
     }
 
+    // True for internal system filter columns (entity TTL or multi-tenant
+    // namespace) whose compiler-injected predicates are hidden from user
+    // feature bits and execution explain leaves.
+    bool
+    is_internal_filter_field(FieldId field_id) const noexcept {
+        return (ttl_field_id_opt_.has_value() &&
+                *ttl_field_id_opt_ == field_id) ||
+               (namespace_field_id_opt_.has_value() &&
+                *namespace_field_id_opt_ == field_id);
+    }
+
     void
     add_function_output_field_id(const FieldId& field_id) {
         function_output_field_ids_.insert(field_id);

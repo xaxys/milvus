@@ -41,6 +41,9 @@ struct GISGroupState {
         proto::plan::GISFunctionFilterExpr_GISOp op;
         std::string query_wkt;
         bool has_index{false};
+        int64_t expr_id{0};
+        bool explain_recorded{false};
+        ExecutionExplainRecorder::LeafSlot* explain_slot{nullptr};
         // Per-predicate R-Tree coarse bitmap (segment-level, computed once).
         // An all-ones coarse is always CORRECT -- Refine still evaluates the
         // exact predicate -- but it prunes nothing, so the pruning gain
@@ -69,6 +72,111 @@ struct GISGroupState {
     // per-segment batch execution is single-threaded, so this guard needs no
     // atomicity -- it is only read/written inside PhyGISCoarseConjunctExpr::Eval.
     bool coarse_done{false};
+    // Whether Coarse actually pinned and queried an R-Tree index for explain.
+    bool explain_meta_ready{false};
+    bool explain_used_index{false};
+    int64_t explain_index_id{0};
+    std::string explain_family;
+    std::string explain_path;
+    bool explain_nested{false};
+    std::string explain_decline_reason;
+    // Cumulative per-predicate coarse candidate bitmaps captured only when
+    // explain is active and an R-Tree index was used.
+    std::vector<TargetBitmap> coarse_cum_;
+    // Per-batch input state captured by Coarse so Refine (or Refine::MoveCursor
+    // when Coarse/middle siblings prune the whole batch) attributes exact
+    // per-predicate coarse narrowing.
+    int64_t pending_batch_offset{-1};
+    int64_t pending_batch_size{0};
+    int64_t pending_coarse_in{0};
+    TargetBitmap pending_outer_mask;
+
+    void
+    FlushZeroSurvivorBatchExplain(ExecutionExplainRecorder* explain,
+                                  int64_t batch_offset) {
+        if (pending_batch_offset != batch_offset) {
+            return;
+        }
+        const int64_t coarse_in = pending_coarse_in;
+        const int64_t batch_len = pending_batch_size;
+        TargetBitmap mask = std::move(pending_outer_mask);
+        pending_batch_offset = -1;
+        pending_batch_size = 0;
+        pending_coarse_in = 0;
+        if (explain == nullptr || !explain_used_index || coarse_in <= 0 ||
+            preds.empty()) {
+            return;
+        }
+        auto add_rows = [&](Pred& p, int64_t r_in, int64_t r_out) {
+            if (p.expr_id == 0) {
+                return;
+            }
+            RecordPredDecision(explain, p);
+            if (p.explain_slot != nullptr) {
+                ExecutionExplainRecorder::AddSlotRows(
+                    p.explain_slot, r_in, r_out);
+            } else {
+                explain->AddRows(p.expr_id, r_in, r_out);
+            }
+        };
+        if (is_and) {
+            if (coarse_cum_.size() == preds.size() && batch_len > 0) {
+                int64_t prev_out = coarse_in;
+                for (size_t i = 0; i < preds.size() && prev_out > 0; ++i) {
+                    TargetBitmap slice;
+                    slice.append(coarse_cum_[i], batch_offset, batch_len);
+                    if (!mask.empty()) {
+                        slice &= mask;
+                    }
+                    const int64_t out_rows =
+                        static_cast<int64_t>(slice.count());
+                    add_rows(preds[i], prev_out, out_rows);
+                    prev_out = out_rows;
+                }
+            } else {
+                add_rows(preds[0], coarse_in, 0);
+            }
+        } else {
+            if (coarse_cum_.size() == preds.size() && batch_len > 0) {
+                int64_t rem = coarse_in;
+                int64_t prev_cum = 0;
+                for (size_t i = 0; i < preds.size() && rem > 0; ++i) {
+                    TargetBitmap slice;
+                    slice.append(coarse_cum_[i], batch_offset, batch_len);
+                    if (!mask.empty()) {
+                        slice &= mask;
+                    }
+                    const int64_t new_cum = static_cast<int64_t>(slice.count());
+                    const int64_t hits =
+                        std::max<int64_t>(0, new_cum - prev_cum);
+                    add_rows(preds[i], rem, hits);
+                    rem = std::max<int64_t>(0, rem - hits);
+                    prev_cum = new_cum;
+                }
+            } else {
+                for (auto& p : preds) {
+                    add_rows(p, coarse_in, 0);
+                }
+            }
+        }
+    }
+
+    void
+    RecordPredDecision(ExecutionExplainRecorder* explain, Pred& p) {
+        if (explain == nullptr || !explain_meta_ready || p.expr_id == 0 ||
+            p.explain_recorded) {
+            return;
+        }
+        p.explain_recorded = true;
+        explain->RecordDecision(field_id,
+                                p.expr_id,
+                                explain_used_index,
+                                explain_index_id,
+                                explain_family,
+                                explain_nested,
+                                explain_path,
+                                explain_decline_reason);
+    }
 
     // A state may be destroyed without being evaluated to completion: the
     // FilterBits result cache can bypass the expression tree entirely,
@@ -147,6 +255,64 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
         return "PhyGISCoarseConjunctExpr";
     }
 
+    const GISGroupState&
+    group_state() const {
+        return *st_;
+    }
+
+    void
+    DetermineExecPath() override {
+        auto req = MakeIndexRequirement(RequiredReader::Spatial);
+        req.value_type = DataType::GEOMETRY;
+        SelectAndCreateIndexReader(req);
+    }
+
+    // Must return false even when an R-Tree is present so FilterBits does not
+    // force all-at-once execution on the paired Refine node.
+    bool
+    CanExecuteAllAtOnce() const override {
+        EnsureExecPathDetermined();
+        return false;
+    }
+
+    void
+    RecordExplainDecision() override {
+        const bool used_index = exec_path_ == ExprExecPath::ScalarIndex &&
+                                spatial_reader_ != nullptr &&
+                                !coarse_index_degraded_;
+        st_->explain_used_index = used_index;
+        st_->explain_meta_ready = true;
+        if (explain_ == nullptr) {
+            return;
+        }
+        if (used_index && selected_index_entry_.has_value()) {
+            if (auto id = selected_index_entry_->key.identity.pre_built_id();
+                id.has_value()) {
+                st_->explain_index_id = *id;
+            }
+            st_->explain_family = selected_index_entry_->family;
+            st_->explain_path = selected_index_entry_->json_path;
+            st_->explain_nested = selected_index_entry_->caps.nested;
+        }
+        if (!used_index) {
+            const bool has_geom_cache =
+                segment_->GetGeometryCache(st_->field_id) != nullptr;
+            const DeclineReason resolved =
+                has_geom_cache ? DeclineReason::kCached
+                               : (coarse_index_degraded_
+                                      ? DeclineReason::kIndexUnusable
+                                      : ResolveExplainDeclineReason(
+                                            /*offset_bypassed=*/false,
+                                            /*served_from_cache=*/false));
+            st_->explain_decline_reason = milvus::exec::ToString(resolved);
+        }
+        if (active_count_ == 0) {
+            for (auto& p : st_->preds) {
+                st_->RecordPredDecision(explain_, p);
+            }
+        }
+    }
+
     // The split nodes slice their output by the self-managed segment cursor
     // (current_pos_ / NextBatchSize over active_count_), NOT by an external
     // offset list. They therefore CANNOT serve the offset-input
@@ -166,21 +332,6 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
         st_->coarse_cursor_complete = current_pos_ == active_count_;
     }
 
-    void
-    DetermineExecPath() override {
-        auto req = MakeIndexRequirement(RequiredReader::Spatial);
-        req.value_type = DataType::GEOMETRY;
-        SelectAndCreateIndexReader(req);
-    }
-
-    // Must return false even when an R-Tree is present so FilterBits does not
-    // force all-at-once execution on the paired Refine node.
-    bool
-    CanExecuteAllAtOnce() const override {
-        EnsureExecPathDetermined();
-        return false;
-    }
-
     // The coarse node never reads the raw geometry column: it either queries
     // the R-Tree pinned in DetermineExecPath or emits an all-set bitmap. When
     // selection lands on RawData (no usable index), prefetching the raw column
@@ -188,6 +339,18 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
     // Refine node, which does read that column, prefetches it itself.
     void
     PrefetchRawData() override {
+    }
+
+    void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        SegmentExpr::SetExplainRecorder(explain);
+        if (st_ != nullptr) {
+            for (auto& p : st_->preds) {
+                p.explain_slot = (explain != nullptr && p.expr_id != 0)
+                                     ? explain->EnsureLeafSlot(p.expr_id)
+                                     : nullptr;
+            }
+        }
     }
 
  private:
@@ -215,6 +378,7 @@ class PhyGISCoarseConjunctExpr : public SegmentExpr {
 
     GISGroupStatePtr st_;
     int64_t current_pos_{0};
+    bool coarse_index_degraded_{false};
 };
 
 // Refine node: consumes bitmap_input (== scalars AND B_coarse), and for each
@@ -250,6 +414,20 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
         return "PhyGISRefineConjunctExpr";
     }
 
+    const GISGroupState&
+    group_state() const {
+        return *st_;
+    }
+
+    bool
+    ReportsExecPath() const override {
+        return false;
+    }
+
+    void
+    RecordExplainDecision() override {
+    }
+
     // See PhyGISCoarseConjunctExpr::SupportOffsetInput: the Refine node also
     // slices by its own segment cursor and asserts bitmap_input is sized by
     // real_batch_size, so it cannot consume an external offset list.
@@ -261,6 +439,7 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
     // Self-managed segment-level cursor (independent of exec_path_).
     void
     MoveCursor() override {
+        st_->FlushZeroSurvivorBatchExplain(explain_, current_pos_);
         current_pos_ += NextBatchSize();
         st_->refine_cursor_complete = current_pos_ == active_count_;
     }
@@ -273,11 +452,6 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
         exec_path_ = ExprExecPath::RawData;
     }
 
-    bool
-    ReportsExecPath() const override {
-        return false;
-    }
-
     // Refine reads only survivors -- via the geometry cache or a bulk_subscript
     // over specific offsets -- never a sequential full-column scan, so the base
     // full-column prefetch (prefetch_chunks over every chunk) is mostly wasted.
@@ -288,6 +462,18 @@ class PhyGISRefineConjunctExpr : public SegmentExpr {
     // one.
     void
     PrefetchRawData() override;
+
+    void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        SegmentExpr::SetExplainRecorder(explain);
+        if (st_ != nullptr) {
+            for (auto& p : st_->preds) {
+                p.explain_slot = (explain != nullptr && p.expr_id != 0)
+                                     ? explain->EnsureLeafSlot(p.expr_id)
+                                     : nullptr;
+            }
+        }
+    }
 
     // DELIBERATELY NOT overridden. This node forces RawData, so the inherited
     // base CanExecuteAllAtOnce() returns false and the refine stage is ALWAYS

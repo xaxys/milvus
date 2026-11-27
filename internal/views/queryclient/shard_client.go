@@ -891,7 +891,9 @@ func isEmptySuccessfulQueryResponse(resp *viewpb.QueryOnViewResponse) bool {
 	}
 	return result.GetAllRetrieveCount() == 0 &&
 		typeutil.GetSizeOfIDs(result.GetIds()) == 0 &&
-		len(result.GetFieldsData()) == 0
+		len(result.GetFieldsData()) == 0 &&
+		result.GetExplain() == nil &&
+		len(result.GetComputedResults()) == 0
 }
 
 // workNodesFromPlan converts proto QueryPlanWorkNode list to domain WorkNode types.

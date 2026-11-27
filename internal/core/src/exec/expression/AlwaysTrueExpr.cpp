@@ -24,6 +24,7 @@ namespace exec {
 
 void
 PhyAlwaysTrueExpr::Eval(EvalCtx& context, VectorPtr& result) {
+    RecordExplainDecision();
     auto input = context.get_offset_input();
     has_offset_input_ = (input != nullptr);
     int64_t real_batch_size = (has_offset_input_)

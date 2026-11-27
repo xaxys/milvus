@@ -162,8 +162,24 @@ PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
     EnsureExecPathDetermined();
     auto real_batch_size = NextBatchSize();
     if (real_batch_size == 0) {
+        EnsureExplainDecisionRecorded();
         result = nullptr;
         return;
+    }
+
+    const auto& outer_mask = context.get_bitmap_input();
+    if (!outer_mask.empty()) {
+        AssertInfo(static_cast<int64_t>(outer_mask.size()) == real_batch_size,
+                   "bitmap_input size {} != real_batch_size {}",
+                   outer_mask.size(),
+                   real_batch_size);
+        if (outer_mask.none()) {
+            result = std::make_shared<ColumnVector>(
+                TargetBitmap(real_batch_size, false),
+                TargetBitmap(real_batch_size, true));
+            MoveCursor();
+            return;
+        }
     }
 
     // Phase 1: build B_coarse once for the whole segment.
@@ -173,7 +189,7 @@ PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         int short_index = 0;     // preds whose legacy R-Tree is short
         int no_index = 0;        // preds with no geometry index at all
         for (auto& p : st_->preds) {
-            if (p.has_index) {
+            if (exec_path_ == ExprExecPath::ScalarIndex) {
                 switch (RunRTreeQuery(p)) {
                     case CoarseOutcome::kIndexUnusable:
                         ++unusable_index;
@@ -185,22 +201,48 @@ PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
                         break;
                 }
             } else {
-                // No R-Tree index: coarse degenerates to the full set; the
-                // Refine node still prunes via bitmap_input and fuses
-                // construction. Expected, so it is aggregated into a single
-                // DEBUG line below rather than logged per predicate.
+                // No selected R-Tree index: coarse degenerates to the full set;
+                // the Refine node still prunes via bitmap_input and fuses
+                // construction.
                 p.coarse = TargetBitmap(active_count_, true);
-                ++no_index;
+                if (p.has_index &&
+                    decline_reason_ == DeclineReason::kIndexUnusable) {
+                    ++unusable_index;
+                } else if (!p.has_index) {
+                    ++no_index;
+                }
             }
             if (st_->is_and) {
                 cand &= p.coarse;
             } else {
                 cand |= p.coarse;
             }
-            // p.coarse has been merged into cand and is never read again; the
-            // Refine node consumes the combined coarse_candidates, not the
-            // per-predicate bitmaps. Release it now so we don't hold one extra
-            // active_count_-bit bitmap per predicate for the whole query life.
+        }
+        coarse_index_degraded_ = (unusable_index > 0 || short_index > 0);
+        EnsureExplainDecisionRecorded();
+        if (explain_ != nullptr && st_->explain_used_index) {
+            st_->coarse_cum_.clear();
+            st_->coarse_cum_.reserve(st_->preds.size());
+            TargetBitmap running(active_count_, st_->is_and);
+            for (auto& p : st_->preds) {
+                if (st_->is_and) {
+                    running &= p.coarse;
+                } else {
+                    running |= p.coarse;
+                }
+                st_->coarse_cum_.push_back(running.clone());
+                if (p.expr_id != 0) {
+                    st_->RecordPredDecision(explain_, p);
+                    if (p.explain_slot != nullptr) {
+                        ExecutionExplainRecorder::AddSlotPhase1IdxScan(
+                            p.explain_slot, active_count_);
+                    } else {
+                        explain_->AddPhase1IdxScan(p.expr_id, active_count_);
+                    }
+                }
+            }
+        }
+        for (auto& p : st_->preds) {
             p.coarse = TargetBitmap{};
         }
         // One log per segment per query (this block is guarded by coarse_done),
@@ -281,13 +323,22 @@ PhyGISCoarseConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
     // already decided (also making internal_core_gis_refine_ratio reflect the
     // real pruned work for nested shapes). coarse_candidates itself is left pure
     // B_coarse -- only this per-batch slice is narrowed. See PR #50675 review.
-    const auto& outer_mask = context.get_bitmap_input();
     if (!outer_mask.empty()) {
-        AssertInfo(static_cast<int64_t>(outer_mask.size()) == real_batch_size,
-                   "bitmap_input size {} != real_batch_size {}",
-                   outer_mask.size(),
-                   real_batch_size);
         out &= outer_mask;
+    }
+    if (explain_ != nullptr && st_->explain_used_index) {
+        st_->pending_batch_offset = current_pos_;
+        st_->pending_batch_size = real_batch_size;
+        st_->pending_coarse_in = outer_mask.empty()
+                                     ? real_batch_size
+                                     : static_cast<int64_t>(outer_mask.count());
+        if (!outer_mask.empty()) {
+            TargetBitmap mask_copy;
+            mask_copy.append(outer_mask, 0, real_batch_size);
+            st_->pending_outer_mask = std::move(mask_copy);
+        } else {
+            st_->pending_outer_mask = TargetBitmap{};
+        }
     }
     // valid is all-ones intentionally (see also the Refine node). PRECONDITION:
     // these split nodes NEVER sit under a NOT and "null == not-selected" for
@@ -358,6 +409,8 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
     // drain the prefetch future before reading the raw column so a direct
     // caller that skipped the operator-level wait still sees a warmed column.
     WaitPrefetch();
+    EnsureExecPathDetermined();
+    EnsureExplainDecisionRecorded();
     auto real_batch_size = NextBatchSize();
     if (real_batch_size == 0) {
         result = nullptr;
@@ -400,7 +453,17 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
         survivors &= coarse_slice;
     }
 
-    if (!survivors.none()) {
+    if (survivors.none()) {
+        st_->FlushZeroSurvivorBatchExplain(explain_, seg_offset);
+    } else {
+        int64_t coarse_in = -1;
+        if (st_->pending_batch_offset == seg_offset) {
+            coarse_in = st_->pending_coarse_in;
+            st_->pending_batch_offset = -1;
+            st_->pending_batch_size = 0;
+            st_->pending_coarse_in = 0;
+            st_->pending_outer_mask = TargetBitmap{};
+        }
         // Build per-thread query geometries + prepared forms ONCE per batch.
         // qgeoms is reserved so it never reallocates (prepared references it).
         GEOSContextHandle_t qctx = GetThreadLocalGEOSContext();
@@ -413,11 +476,54 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
             preps.emplace_back(qctx, qgeoms.back());
         }
 
+        // shared_ptr: an in-flight query keeps the published cache snapshot
+        // alive across a concurrent sealed-segment reopen/drop.
+        auto geometry_cache = segment_->GetGeometryCache(st_->field_id);
+        const bool track_explain = explain_ != nullptr;
+        const bool raw_reads = (geometry_cache == nullptr);
+        std::vector<int64_t> in_cnt;
+        std::vector<int64_t> out_cnt;
+        std::vector<int64_t> raw_scanned;
+        if (track_explain) {
+            const size_t n = st_->preds.size();
+            in_cnt.assign(n, 0);
+            out_cnt.assign(n, 0);
+            raw_scanned.assign(n, 0);
+        }
+
+        auto record_invalid_row = [&]() {
+            if (!track_explain || st_->preds.empty()) {
+                return;
+            }
+            if (st_->is_and) {
+                ++in_cnt[0];
+                if (raw_reads) {
+                    ++raw_scanned[0];
+                }
+            } else {
+                for (size_t j = 0; j < st_->preds.size(); ++j) {
+                    ++in_cnt[j];
+                    if (raw_reads) {
+                        ++raw_scanned[j];
+                    }
+                }
+            }
+        };
+
         auto eval_all = [&](const Geometry& left) -> bool {
             bool bit = st_->is_and;
             for (size_t j = 0; j < st_->preds.size(); ++j) {
+                if (track_explain) {
+                    ++in_cnt[j];
+                    if (raw_reads) {
+                        ++raw_scanned[j];
+                    }
+                }
                 bool r = EvalPrepared(
                     st_->preds[j].op, preps[j], qgeoms[j], left, qctx);
+                if (track_explain && r) {
+                    ++out_cnt[j];
+                }
                 bit = st_->is_and ? (bit && r) : (bit || r);
                 if (st_->is_and != bit) {
                     break;  // short-circuit
@@ -442,14 +548,11 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
             }
         }
 
-        // shared_ptr: an in-flight query keeps the published cache snapshot
-        // alive across a concurrent sealed-segment reopen/drop.
-        auto geometry_cache = segment_->GetGeometryCache(st_->field_id);
-
         if (geometry_cache) {
             for (size_t k = 0; k < hit_abs.size(); ++k) {
                 auto cached = geometry_cache->GetByOffset(hit_abs[k]);
                 if (cached == nullptr) {
+                    record_invalid_row();
                     continue;  // null/invalid geometry -> false
                 }
                 if (eval_all(*cached)) {
@@ -470,6 +573,7 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
             GEOSContextHandle_t local_ctx = GetThreadLocalGEOSContext();
             for (size_t k = 0; k < hit_abs.size(); ++k) {
                 if (!vd.empty() && !vd[k]) {
+                    record_invalid_row();
                     continue;
                 }
                 const auto& wkb = geometry_array->data(k);
@@ -482,10 +586,59 @@ PhyGISRefineConjunctExpr::Eval(EvalCtx& context, VectorPtr& result) {
                 // evaluate it to false instead.
                 Geometry left;
                 if (!left.TryParseFromWkb(local_ctx, wkb.data(), wkb.size())) {
+                    record_invalid_row();
                     continue;
                 }
                 if (eval_all(left)) {
                     res.set(hit_local[k]);
+                }
+            }
+        }
+
+        if (track_explain) {
+            for (size_t j = 0; j < st_->preds.size(); ++j) {
+                const int64_t eid = st_->preds[j].expr_id;
+                if (eid != 0 && raw_scanned[j] > 0) {
+                    explain_->AddRawScan(eid, raw_scanned[j]);
+                }
+            }
+            if (st_->explain_used_index) {
+                const int64_t group_in =
+                    coarse_in >= 0 ? coarse_in
+                                   : static_cast<int64_t>(survivors.count());
+                if (st_->is_and) {
+                    for (size_t j = 0; j < st_->preds.size(); ++j) {
+                        const int64_t p_in = (j == 0) ? group_in : in_cnt[j];
+                        if (p_in <= 0) {
+                            break;
+                        }
+                        const int64_t eid = st_->preds[j].expr_id;
+                        if (eid != 0) {
+                            st_->RecordPredDecision(explain_, st_->preds[j]);
+                            explain_->AddRows(eid, p_in, out_cnt[j]);
+                        }
+                    }
+                } else {
+                    int64_t rem = group_in;
+                    for (size_t j = 0; j < st_->preds.size(); ++j) {
+                        if (rem <= 0) {
+                            break;
+                        }
+                        const int64_t eid = st_->preds[j].expr_id;
+                        if (eid != 0) {
+                            st_->RecordPredDecision(explain_, st_->preds[j]);
+                            explain_->AddRows(eid, rem, out_cnt[j]);
+                        }
+                        rem = std::max<int64_t>(0, rem - out_cnt[j]);
+                    }
+                }
+            } else {
+                for (size_t j = 0; j < st_->preds.size(); ++j) {
+                    const int64_t eid = st_->preds[j].expr_id;
+                    if (eid != 0 && in_cnt[j] > 0) {
+                        st_->RecordPredDecision(explain_, st_->preds[j]);
+                        explain_->AddRows(eid, in_cnt[j], out_cnt[j]);
+                    }
                 }
             }
         }

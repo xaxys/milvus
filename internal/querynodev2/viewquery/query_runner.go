@@ -16,7 +16,7 @@ type QueryTaskRunner interface {
 type queryTaskRunner struct{}
 
 func (r queryTaskRunner) Query(ctx context.Context, collection *segments.Collection, selected []segments.Segment, req *querypb.QueryRequest, serverID int64) (*internalpb.RetrieveResults, error) {
-	task := tasks.NewQueryTask(ctx, collection, nil, req)
+	task := tasks.NewQueryTaskWithNodeID(ctx, collection, nil, req, serverID)
 	if err := task.PreExecute(); err != nil {
 		return nil, err
 	}

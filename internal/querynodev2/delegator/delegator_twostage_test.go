@@ -37,6 +37,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/segcorepb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metric"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
@@ -1280,6 +1281,132 @@ func (s *TwoStageSearchSuite) TestExecuteFilterStageWithMultipleNodes() {
 		}
 		s.Equal(int64(600), totalValidCount)
 	})
+}
+
+func (s *TwoStageSearchSuite) TestTwoStageSearchExplainPairsPerWorkerUnderPartialFailure() {
+	s.delegator.Start()
+	paramtable.SetNodeID(1)
+	origRatio := paramtable.Get().QueryNodeCfg.PartialResultRequiredDataRatio.GetValue()
+	paramtable.Get().Save(paramtable.Get().QueryNodeCfg.PartialResultRequiredDataRatio.Key, "0.5")
+	defer paramtable.Get().Save(paramtable.Get().QueryNodeCfg.PartialResultRequiredDataRatio.Key, origRatio)
+	defer func() {
+		s.workerManager.ExpectedCalls = nil
+	}()
+
+	worker1 := &cluster.MockWorker{}
+	worker2 := &cluster.MockWorker{}
+	workers := map[int64]*cluster.MockWorker{1: worker1, 2: worker2}
+
+	stage1WorkerExplain := func(indexID int64) *internalpb.ExecutionExplain {
+		return &internalpb.ExecutionExplain{
+			Version: 1,
+			Group: &internalpb.ExplainSegmentGroup{
+				Segments:       1,
+				SealedSegments: 1,
+				RowsTotal:      10000,
+				Operators: []*internalpb.ExplainOperatorStats{{
+					Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+					Segments: 1,
+					RowsIn:   10000,
+					RowsOut:  100,
+					Conditions: []*internalpb.ExplainConditionStats{{
+						ExprId:   1,
+						FieldId:  101,
+						Segments: 1,
+						RowsIn:   10000,
+						IdxScan:  10000,
+						RowsOut:  100,
+						Used: []*internalpb.ExplainIndexUseStats{{
+							IndexId:  indexID,
+							Family:   "sort",
+							Segments: 1,
+							RowsIn:   10000,
+							IdxScan:  10000,
+							RowsOut:  100,
+						}},
+					}},
+				}},
+			},
+		}
+	}
+
+	// Stage 1: both workers succeed; Stage 2: worker 1 succeeds (with nil SealedSegmentIDsSearched)
+	// while worker 2 fails under partial search (0.5 <= 20000/30000).
+	worker1.EXPECT().SearchSegments(mock.Anything, mock.MatchedBy(func(r *querypb.SearchRequest) bool {
+		return r.GetFilterOnly()
+	})).Return(&internalpb.SearchResults{
+		Status:                   merr.Success(),
+		FilterValidCounts:        []int64{100},
+		SealedSegmentIDsSearched: []int64{8200},
+		Explain:                  stage1WorkerExplain(5001),
+	}, nil)
+	worker2.EXPECT().SearchSegments(mock.Anything, mock.MatchedBy(func(r *querypb.SearchRequest) bool {
+		return r.GetFilterOnly()
+	})).Return(&internalpb.SearchResults{
+		Status:                   merr.Success(),
+		FilterValidCounts:        []int64{100},
+		SealedSegmentIDsSearched: []int64{8201},
+		Explain:                  stage1WorkerExplain(5002),
+	}, nil)
+
+	worker1.EXPECT().SearchSegments(mock.Anything, mock.MatchedBy(func(r *querypb.SearchRequest) bool {
+		return !r.GetFilterOnly()
+	})).Return(&internalpb.SearchResults{
+		Status: merr.Success(),
+		Explain: &internalpb.ExecutionExplain{
+			Version: 1,
+			Group: &internalpb.ExplainSegmentGroup{
+				Segments:       1,
+				SealedSegments: 1,
+				RowsTotal:      10000,
+				Operators: []*internalpb.ExplainOperatorStats{
+					{
+						Kind:           internalpb.ExplainOperatorKind_EXPLAIN_OP_FILTER,
+						Segments:       1,
+						CachedSegments: 1,
+						RowsIn:         10000,
+						RowsOut:        100,
+					},
+					{
+						Kind:     internalpb.ExplainOperatorKind_EXPLAIN_OP_VECTOR_SEARCH,
+						Segments: 1,
+						RowsIn:   100,
+						RowsOut:  10,
+					},
+				},
+			},
+		},
+	}, nil)
+	worker2.EXPECT().SearchSegments(mock.Anything, mock.MatchedBy(func(r *querypb.SearchRequest) bool {
+		return !r.GetFilterOnly()
+	})).Return(nil, merr.WrapErrServiceInternal("worker 2 stage 2 failure"))
+
+	s.workerManager.EXPECT().GetWorker(mock.Anything, mock.AnythingOfType("int64")).Call.Return(func(_ context.Context, nodeID int64) cluster.Worker {
+		return workers[nodeID]
+	}, nil)
+	s.delegator.distribution.AddDistributions(
+		SegmentEntry{NodeID: 1, SegmentID: 8200},
+		SegmentEntry{NodeID: 2, SegmentID: 8201},
+	)
+
+	req := &querypb.SearchRequest{
+		Req:         &internalpb.SearchRequest{Topk: 10, FieldId: 101},
+		DmlChannels: []string{s.vchannelName},
+	}
+	sealed := []SnapshotItem{
+		{NodeID: 1, Segments: []SegmentEntry{{SegmentID: 8200, NodeID: 1}}},
+		{NodeID: 2, Segments: []SegmentEntry{{SegmentID: 8201, NodeID: 2}}},
+	}
+	results, fallback, _, err := s.delegator.twoStageSearch(context.Background(), req, sealed, nil, map[int64]int64{8200: 20000, 8201: 10000})
+	s.Require().NoError(err)
+	s.False(fallback)
+	s.Require().Len(results, 1)
+	exp := results[0].GetExplain()
+	s.Require().NotNil(exp)
+	filterOp := exp.GetGroup().GetOperators()[0]
+	s.Zero(filterOp.GetCachedSegments(), "surviving worker 1 Stage 1 cold filter stats must replace Stage 2 cache hit")
+	s.Require().Len(filterOp.GetConditions(), 1)
+	s.Equal(int64(5001), filterOp.GetConditions()[0].GetUsed()[0].GetIndexId())
 }
 
 func TestTwoStageSearchSuite(t *testing.T) {

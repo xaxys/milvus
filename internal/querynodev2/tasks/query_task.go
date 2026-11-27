@@ -13,11 +13,13 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/internal/util/function/chain"
 	"github.com/milvus-io/milvus/internal/util/materialize"
 	"github.com/milvus-io/milvus/internal/util/queryutil"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
@@ -36,6 +38,15 @@ func NewQueryTask(ctx context.Context,
 	manager *segments.Manager,
 	req *querypb.QueryRequest,
 ) *QueryTask {
+	return NewQueryTaskWithNodeID(ctx, collection, manager, req, 0)
+}
+
+func NewQueryTaskWithNodeID(ctx context.Context,
+	collection *segments.Collection,
+	manager *segments.Manager,
+	req *querypb.QueryRequest,
+	nodeID int64,
+) *QueryTask {
 	ctx, span := otel.Tracer(typeutil.QueryNodeRole).Start(ctx, "schedule")
 	return &QueryTask{
 		ctx:            ctx,
@@ -43,6 +54,7 @@ func NewQueryTask(ctx context.Context,
 		segmentManager: manager,
 		plan:           &planpb.PlanNode{},
 		req:            req,
+		nodeID:         nodeID,
 		notifier:       make(chan error, 1),
 		tr:             timerecord.NewTimeRecorderWithTrace(ctx, "queryTask"),
 		scheduleSpan:   span,
@@ -67,6 +79,7 @@ type QueryTask struct {
 	collection     *segments.Collection
 	segmentManager *segments.Manager
 	req            *querypb.QueryRequest
+	nodeID         int64
 	plan           *planpb.PlanNode // used by RunQNQueryPipeline for reduce
 	queryChain     *chain.QueryChainPlan
 	result         *internalpb.RetrieveResults
@@ -94,10 +107,17 @@ func (t *QueryTask) Context() context.Context {
 	return t.ctx
 }
 
+func (t *QueryTask) getNodeID() int64 {
+	if t.nodeID != 0 {
+		return t.nodeID
+	}
+	return paramtable.GetNodeID()
+}
+
 // PreExecute the task, only call once.
 func (t *QueryTask) PreExecute() error {
 	// Update task wait time metric before execute
-	nodeID := strconv.FormatInt(paramtable.GetNodeID(), 10)
+	nodeID := strconv.FormatInt(t.getNodeID(), 10)
 	inQueueDuration := t.tr.ElapseSpan()
 	inQueueDurationMS := inQueueDuration.Seconds() * 1000
 
@@ -269,9 +289,10 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 
 	t.result = &internalpb.RetrieveResults{
 		Base: &commonpb.MsgBase{
-			SourceID: paramtable.GetNodeID(),
+			SourceID: t.getNodeID(),
 		},
 		Status:             merr.Success(),
+		Explain:            queryNodeExplain(t.ctx, results),
 		ComputedResults:    reducedResult.GetComputedResults(),
 		Ids:                reducedResult.Ids,
 		FieldsData:         reducedResult.FieldsData,
@@ -293,7 +314,7 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 func (t *QueryTask) buildMaterializeResult(reduced *segcorepb.RetrieveResults, sel *queryutil.ArrowSelection, cost *internalpb.CostAggregation) error {
 	header := &internalpb.MaterializeHeader{
 		Status:             merr.Success(),
-		SourceId:           paramtable.GetNodeID(),
+		SourceId:           t.getNodeID(),
 		AllRetrieveCount:   reduced.GetAllRetrieveCount(),
 		ScannedRemoteBytes: reduced.GetScannedRemoteBytes(),
 		ScannedTotalBytes:  reduced.GetScannedTotalBytes(),
@@ -314,6 +335,28 @@ func (t *QueryTask) buildMaterializeResult(reduced *segcorepb.RetrieveResults, s
 	header.ResultSize = enc.ResultSize
 	t.materializeResult.Body = [][]byte{enc.Entry}
 	return nil
+}
+
+// queryNodeExplain merges per-segment execution explain payloads into a single
+// worker-level ExplainSegmentGroup. It is nil when no segment recorded anything.
+func queryNodeExplain(
+	ctx context.Context,
+	results []segments.RetrieveSegmentResult,
+) *internalpb.ExecutionExplain {
+	rawSegments := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for _, result := range results {
+		blob := result.Result.GetExplain()
+		if len(blob) == 0 {
+			continue
+		}
+		node := &internalpb.ExecutionExplain{}
+		if err := proto.Unmarshal(blob, node); err != nil {
+			mlog.Warn(ctx, "failed to decode segment execution explain", mlog.Err(err))
+			continue
+		}
+		rawSegments = append(rawSegments, node)
+	}
+	return explain.Merge(rawSegments...)
 }
 
 func (t *QueryTask) Done(err error) {

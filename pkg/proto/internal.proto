@@ -188,6 +188,108 @@ message SubSearchResults {
   schema.SearchResultData result_data = 8;
 }
 
+// Global topological order of physical execution operators on a segment.
+// Enum values match pipeline execution order so merged operators sort directly
+// by kind without relying on runtime array indices.
+enum ExplainOperatorKind {
+  EXPLAIN_OP_UNKNOWN = 0;
+  EXPLAIN_OP_FILTER = 1;
+  EXPLAIN_OP_RANDOM_SAMPLE = 2;
+  EXPLAIN_OP_MVCC = 3;
+  EXPLAIN_OP_ELEMENT_FILTER = 4;
+  EXPLAIN_OP_VECTOR_SEARCH = 5;
+  EXPLAIN_OP_ITERATIVE_ELEMENT_FILTER = 6;
+  EXPLAIN_OP_ITERATIVE_FILTER = 7;
+  EXPLAIN_OP_GROUP_BY = 8;
+  EXPLAIN_OP_RESCORE = 9;
+  EXPLAIN_OP_PROJECT = 10;
+  EXPLAIN_OP_AGGREGATION = 11;
+  EXPLAIN_OP_ORDER_BY = 12;
+}
+
+message ExplainEvalOrderCount {
+  int32 eval_order = 1;
+  int64 segments = 2;
+}
+
+message ExplainIndexUseStats {
+  int64 index_id = 1;
+  string family = 2;
+  string path = 3;
+  int64 segments = 4;
+  int64 rows_in = 5;
+  int64 rows_out = 6;
+  int64 idx_scan = 7;
+  int64 raw_scan = 8;
+  int64 element_hits = 9;
+}
+
+message ExplainDeclineStats {
+  string reason = 1;
+  int64 segments = 2;
+  int64 rows_in = 3;
+  int64 rows_out = 4;
+  int64 idx_scan = 5;
+  int64 raw_scan = 6;
+}
+
+message ExplainConditionStats {
+  int64 expr_id = 1;
+  int64 field_id = 2;
+  int64 segments = 3;
+  int64 skipped_segments = 4;
+  int64 raw_scan_segments = 5;
+  int64 rows_in = 6;
+  int64 rows_out = 7;
+  int64 idx_scan = 8;
+  int64 raw_scan = 9;
+  int64 element_hits = 10;
+  repeated ExplainEvalOrderCount eval_orders = 11;
+  repeated ExplainIndexUseStats used = 12;
+  repeated ExplainDeclineStats reasons = 13;
+}
+
+message ExplainOperatorStats {
+  ExplainOperatorKind kind = 1;
+  string domain = 2;
+  int64 segments = 3;
+  int64 cached_segments = 4;
+  int64 rows_in = 5;
+  int64 rows_out = 6;
+  repeated ExplainConditionStats conditions = 7;
+}
+
+// Per-segment identity carried on worker explain groups so HybridSearch can
+// compute the exact segment set-union before Proxy strips it.
+message ExplainSegmentRef {
+  int64 segment_id = 1;
+  int64 rows_total = 2;
+  bool is_growing = 3;
+}
+
+message ExplainSegmentGroup {
+  int64 segments = 1;
+  int64 sealed_segments = 2;
+  int64 growing_segments = 3;
+  int64 rows_total = 4;
+  repeated ExplainOperatorStats operators = 5;
+  repeated ExplainSegmentRef segment_refs = 6;
+}
+
+message ExplainSubSearchGroup {
+  int32 sub_req_index = 1;
+  ExplainSegmentGroup group = 2;
+}
+
+// Strongly-typed execution explain summary emitted per segment by Segcore
+// (segments=1) and associatively merged across QueryNodes, ReduceStreams,
+// Two-Stage coordinators, and Proxy.
+message ExecutionExplain {
+  ExplainSegmentGroup group = 1;
+  repeated ExplainSubSearchGroup sub_searches = 2;
+  uint32 version = 3;
+}
+
 message SearchResults {
   common.MsgBase base = 1;
   common.Status status = 2;
@@ -213,6 +315,8 @@ message SearchResults {
   bool is_recall_evaluation = 19;
   int64 scanned_remote_bytes = 20;
   int64 scanned_total_bytes = 21;
+  // Execution explain tree, absent when nothing was recorded.
+  ExecutionExplain explain = 25;
   // pre-decoded SearchResultData, avoids re-marshal/unmarshal between delegator and proxy
   schema.SearchResultData result_data = 22;
   // Per-segment filter valid counts for two-stage search (filter-only mode).
@@ -298,6 +402,8 @@ message RetrieveResults {
   // Execution features segcore used for this request; see
   // SearchResults.feature_bits.
   uint64 feature_bits = 21;
+  // Execution explain tree, absent when nothing was recorded.
+  ExecutionExplain explain = 23;
 
   // Query-local typed columns; selected together with ids at every reduce.
   repeated schema.FieldData computed_results = 22;

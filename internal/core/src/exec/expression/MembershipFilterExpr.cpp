@@ -32,13 +32,12 @@ template <typename LogicalExpr, typename ProbePolicy>
 void
 PhyMembershipFilterExpr<LogicalExpr, ProbePolicy>::Eval(EvalCtx& context,
                                                         VectorPtr& result) {
-    WaitPrefetch();
     // Honor iterative-filter candidate offsets: when the upstream passes an
     // offset input, ExecVisitorImpl must evaluate those candidate rows via
     // ProcessDataByOffsets rather than the first N rows sequentially.
     // Mirrors TermExpr.
-    auto* input = context.get_offset_input();
-    SetHasOffsetInput(input != nullptr);
+    auto eval_guard =
+        PrepareLeafEval(context, /*bind_offset_before_wait=*/false);
     auto data_type = expr_->column_.data_type_;
     switch (data_type) {
         case DataType::INT8: {

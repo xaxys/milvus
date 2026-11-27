@@ -76,6 +76,12 @@ class RawExprCacheAdapter final : public Expr {
     void
     WaitPrefetch() override;
 
+    void
+    SetExplainRecorder(ExecutionExplainRecorder* explain) override {
+        Expr::SetExplainRecorder(explain);
+        input_->SetExplainRecorder(explain);
+    }
+
     const std::shared_ptr<SegmentExpr>&
     wrapped_expr() const {
         return input_;

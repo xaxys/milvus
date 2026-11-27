@@ -520,7 +520,9 @@ class PhyJsonContainsFilterExpr : public SegmentExpr {
             !IsNestedArrayElementOperand()) {
             if (!(expr_->column_.data_type_ == DataType::ARRAY &&
                   expr_->column_.nullable_)) {
-                is_constant_folded_ = true;
+                SetConstantOutcome(
+                    expr_->op_ ==
+                    proto::plan::JSONContainsExpr_JSONOp_ContainsAll);
             }
             exec_path_ = ExprExecPath::RawData;
             return;
@@ -536,12 +538,14 @@ class PhyJsonContainsFilterExpr : public SegmentExpr {
                              return value.val_case() ==
                                     proto::plan::GenericValue::kArrayVal;
                          }))) {
+            decline_reason_ = DeclineReason::kLiteralNotSupported;
             exec_path_ = ExprExecPath::RawData;
             return;
         }
         if (expr_->column_.data_type_ == DataType::ARRAY &&
             (expr_->column_.element_level_ || expr_->vals_.empty() ||
              is_native_list_array_)) {
+            decline_reason_ = DeclineReason::kCapabilityMismatch;
             exec_path_ = ExprExecPath::RawData;
             return;
         }
@@ -553,6 +557,7 @@ class PhyJsonContainsFilterExpr : public SegmentExpr {
                             return !IsInt64SafeForJsonDoubleIndex(
                                 value.int64_val());
                         })) {
+            decline_reason_ = DeclineReason::kFlatJsonRequired;
             exec_path_ = ExprExecPath::RawData;
             return;
         }

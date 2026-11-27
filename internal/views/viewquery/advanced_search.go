@@ -3,6 +3,7 @@ package viewquery
 import (
 	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus/internal/util/explain"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -123,6 +124,7 @@ func assembleAdvancedSearchResults(results []*internalpb.SearchResults) *interna
 			searchResults.IsRecallEvaluation = true
 		}
 		relatedDataSize += result.GetCostAggregation().GetTotalRelatedDataSize()
+		searchResults.FeatureBits |= result.GetFeatureBits()
 		searchResults.ScannedRemoteBytes += result.GetScannedRemoteBytes()
 		searchResults.ScannedTotalBytes += result.GetScannedTotalBytes()
 		for channel, ts := range result.GetChannelsMvcc() {
@@ -143,6 +145,18 @@ func assembleAdvancedSearchResults(results []*internalpb.SearchResults) *interna
 			SlicedOffset:   result.GetSlicedOffset(),
 			ReqIndex:       int64(index),
 		})
+	}
+
+	// AssembleHybridExplain computes the worker-local segment union across
+	// sub-searches and strips SegmentRefs so wire payloads stay O(1).
+	explains := make([]*internalpb.ExecutionExplain, 0, len(results))
+	for i, result := range results {
+		if node := result.GetExplain(); node != nil {
+			explains = append(explains, explain.WrapSubSearch(i, []*internalpb.ExecutionExplain{node}))
+		}
+	}
+	if len(explains) > 0 {
+		searchResults.Explain = explain.AssembleHybridExplain(explains...)
 	}
 
 	searchResults.ChannelsMvcc = channelsMVCC

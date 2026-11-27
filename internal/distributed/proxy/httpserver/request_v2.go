@@ -465,6 +465,7 @@ type QueryReqV2 struct {
 	// aggregation expressions (e.g. count(*), sum(price)) in outputFields.
 	GroupByFields    []string                   `json:"groupByFields"`
 	ExprParams       map[string]json.RawMessage `json:"exprParams"`
+	QueryParams      map[string]interface{}     `json:"queryParams"`
 	ConsistencyLevel string                     `json:"consistencyLevel"`
 }
 
@@ -472,13 +473,14 @@ func (req *QueryReqV2) GetDbName() string         { return req.DbName }
 func (req *QueryReqV2) GetCollectionName() string { return req.CollectionName }
 
 type CollectionIDReq struct {
-	DbName           string      `json:"dbName"`
-	CollectionName   string      `json:"collectionName" binding:"required"`
-	PartitionName    string      `json:"partitionName"`
-	PartitionNames   []string    `json:"partitionNames"`
-	OutputFields     []string    `json:"outputFields"`
-	ID               interface{} `json:"id" binding:"required"`
-	ConsistencyLevel string      `json:"consistencyLevel"`
+	DbName           string                 `json:"dbName"`
+	CollectionName   string                 `json:"collectionName" binding:"required"`
+	PartitionName    string                 `json:"partitionName"`
+	PartitionNames   []string               `json:"partitionNames"`
+	OutputFields     []string               `json:"outputFields"`
+	ID               interface{}            `json:"id" binding:"required"`
+	QueryParams      map[string]interface{} `json:"queryParams"`
+	ConsistencyLevel string                 `json:"consistencyLevel"`
 }
 
 func (req *CollectionIDReq) GetDbName() string         { return req.DbName }
@@ -695,21 +697,22 @@ type SubSearchReq struct {
 }
 
 type HybridSearchReq struct {
-	DbName            string                `json:"dbName"`
-	CollectionName    string                `json:"collectionName" binding:"required"`
-	PartitionNames    []string              `json:"partitionNames"`
-	Search            []SubSearchReq        `json:"search"`
-	Rerank            Rand                  `json:"rerank"`
-	Limit             int32                 `json:"limit"`
-	Offset            int32                 `json:"offset"`
-	GroupByField      string                `json:"groupingField"`
-	GroupSize         *int32                `json:"groupSize"`
-	StrictGroupSize   *bool                 `json:"strictGroupSize"`
-	OutputFields      []string              `json:"outputFields"`
-	ConsistencyLevel  string                `json:"consistencyLevel"`
-	FunctionScore     FunctionScore         `json:"functionScore"`
-	FunctionChains    []FunctionChainReq    `json:"functionChains"`
-	SearchAggregation *SearchAggregationReq `json:"searchAggregation"`
+	DbName            string                 `json:"dbName"`
+	CollectionName    string                 `json:"collectionName" binding:"required"`
+	PartitionNames    []string               `json:"partitionNames"`
+	Search            []SubSearchReq         `json:"search"`
+	Rerank            Rand                   `json:"rerank"`
+	Limit             int32                  `json:"limit"`
+	Offset            int32                  `json:"offset"`
+	GroupByField      string                 `json:"groupingField"`
+	GroupSize         *int32                 `json:"groupSize"`
+	StrictGroupSize   *bool                  `json:"strictGroupSize"`
+	OutputFields      []string               `json:"outputFields"`
+	ConsistencyLevel  string                 `json:"consistencyLevel"`
+	FunctionScore     FunctionScore          `json:"functionScore"`
+	FunctionChains    []FunctionChainReq     `json:"functionChains"`
+	SearchAggregation *SearchAggregationReq  `json:"searchAggregation"`
+	Params            map[string]interface{} `json:"params"`
 }
 
 func (req *HybridSearchReq) GetDbName() string         { return req.DbName }

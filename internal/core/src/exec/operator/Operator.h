@@ -48,6 +48,7 @@ class OperatorContext {
         if (!exec_context_) {
             exec_context_ = std::make_unique<ExecContext>(
                 driver_context_->task_->query_context().get());
+            exec_context_->SetOperatorStep(operator_id_);
         }
         return exec_context_.get();
     }

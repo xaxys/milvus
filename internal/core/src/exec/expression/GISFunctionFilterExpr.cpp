@@ -59,59 +59,28 @@ namespace exec {
                    "segment_offsets should not be nullptr");                     \
         const auto batch_offset = processed_cursor;                              \
         processed_cursor += size;                                                \
-        auto geometry_cache = this->segment_->GetGeometryCache(field_id_);       \
-        if (geometry_cache) {                                                    \
-            /* Cache-owned geometries share one GEOS context; drive the        \
-             * predicate on a per-thread context so concurrent lock-free        \
-             * readers never touch the same non-thread-safe context. */ \
-            GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();           \
-            for (int i = 0; i < size; ++i) {                                     \
-                if (valid_data && !valid_data[i]) {                              \
-                    res[i] = valid_res[i] = false;                               \
-                    continue;                                                    \
-                }                                                                \
-                if (!bitmap_input.empty() &&                                     \
-                    !bitmap_input[batch_offset + i]) {                           \
-                    continue;                                                    \
-                }                                                                \
-                auto absolute_offset = segment_offsets[i];                       \
-                auto cached_geometry =                                           \
-                    geometry_cache->GetByOffset(absolute_offset);                \
-                /* nullptr = empty/corrupt placeholder row (the write paths    \
-                 * keep such rows, see SimpleGeometryCache::AppendDataAt); it   \
-                 * can never satisfy the predicate, so evaluate it to false     \
-                 * instead of failing the whole query. */ \
-                if (cached_geometry == nullptr) {                                \
-                    res[i] = false;                                              \
-                    continue;                                                    \
-                }                                                                \
-                res[i] = cached_geometry->method(right_source, tls_ctx);         \
+        /* Thread-local context: a throwing row can no longer leak a           \
+         * per-batch GEOS_init_r context. TryParseFromWkb throws only on       \
+         * pre-parse allocation failure; a corrupt/placeholder WKB row --      \
+         * or a GEOS-swallowed parse-time OOM, indistinguishable from it       \
+         * (see the KNOWN LIMIT note on TryParseFromWkb) -- evaluates to       \
+         * false. */ \
+        GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();               \
+        for (int i = 0; i < size; ++i) {                                         \
+            if (valid_data && !valid_data[i]) {                                  \
+                res[i] = valid_res[i] = false;                                   \
+                continue;                                                        \
             }                                                                    \
-        } else {                                                                 \
-            /* Thread-local context: a throwing row can no longer leak a       \
-             * per-batch GEOS_init_r context. TryParseFromWkb throws only on    \
-             * pre-parse allocation failure; a corrupt/placeholder WKB row --   \
-             * or a GEOS-swallowed parse-time OOM, indistinguishable from it    \
-             * (see the KNOWN LIMIT note on TryParseFromWkb) -- evaluates to    \
-             * false, matching the cache branch above. */ \
-            GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();           \
-            for (int i = 0; i < size; ++i) {                                     \
-                if (valid_data && !valid_data[i]) {                              \
-                    res[i] = valid_res[i] = false;                               \
-                    continue;                                                    \
-                }                                                                \
-                if (!bitmap_input.empty() &&                                     \
-                    !bitmap_input[batch_offset + i]) {                           \
-                    continue;                                                    \
-                }                                                                \
-                Geometry left;                                                   \
-                if (!left.TryParseFromWkb(                                       \
-                        tls_ctx, data[i].data(), data[i].size())) {              \
-                    res[i] = false;                                              \
-                    continue;                                                    \
-                }                                                                \
-                res[i] = left.method(right_source, tls_ctx);                     \
+            if (!bitmap_input.empty() && !bitmap_input[batch_offset + i]) {      \
+                continue;                                                        \
             }                                                                    \
+            Geometry left;                                                       \
+            if (!left.TryParseFromWkb(                                           \
+                    tls_ctx, data[i].data(), data[i].size())) {                  \
+                res[i] = false;                                                  \
+                continue;                                                        \
+            }                                                                    \
+            res[i] = left.method(right_source, tls_ctx);                         \
         }                                                                        \
     };                                                                           \
     int64_t processed_size = ProcessDataChunks<_DataType, true>(                 \
@@ -138,54 +107,24 @@ namespace exec {
                    "segment_offsets should not be nullptr");                     \
         const auto batch_offset = processed_cursor;                              \
         processed_cursor += size;                                                \
-        auto geometry_cache = this->segment_->GetGeometryCache(field_id_);       \
-        if (geometry_cache) {                                                    \
-            /* Cache-owned geometries share one GEOS context; drive the        \
-             * predicate on a per-thread context so concurrent lock-free        \
-             * readers never touch the same non-thread-safe context. */ \
-            GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();           \
-            for (int i = 0; i < size; ++i) {                                     \
-                if (valid_data && !valid_data[i]) {                              \
-                    res[i] = valid_res[i] = false;                               \
-                    continue;                                                    \
-                }                                                                \
-                if (!bitmap_input.empty() &&                                     \
-                    !bitmap_input[batch_offset + i]) {                           \
-                    continue;                                                    \
-                }                                                                \
-                auto absolute_offset = segment_offsets[i];                       \
-                auto cached_geometry =                                           \
-                    geometry_cache->GetByOffset(absolute_offset);                \
-                /* nullptr = empty/corrupt placeholder row: evaluate to false  \
-                 * instead of failing the query (see the comparison macro). */ \
-                if (cached_geometry == nullptr) {                                \
-                    res[i] = false;                                              \
-                    continue;                                                    \
-                }                                                                \
-                res[i] = cached_geometry->method(                                \
-                    right_source, expr_->distance_, tls_ctx);                    \
+        /* Thread-local context + non-throwing parse: no context leak,         \
+         * corrupt rows evaluate to false (see the comparison macro). */ \
+        GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();               \
+        for (int i = 0; i < size; ++i) {                                         \
+            if (valid_data && !valid_data[i]) {                                  \
+                res[i] = valid_res[i] = false;                                   \
+                continue;                                                        \
             }                                                                    \
-        } else {                                                                 \
-            /* Thread-local context + non-throwing parse: no context leak,     \
-             * corrupt rows evaluate to false (see the comparison macro). */ \
-            GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();           \
-            for (int i = 0; i < size; ++i) {                                     \
-                if (valid_data && !valid_data[i]) {                              \
-                    res[i] = valid_res[i] = false;                               \
-                    continue;                                                    \
-                }                                                                \
-                if (!bitmap_input.empty() &&                                     \
-                    !bitmap_input[batch_offset + i]) {                           \
-                    continue;                                                    \
-                }                                                                \
-                Geometry left;                                                   \
-                if (!left.TryParseFromWkb(                                       \
-                        tls_ctx, data[i].data(), data[i].size())) {              \
-                    res[i] = false;                                              \
-                    continue;                                                    \
-                }                                                                \
-                res[i] = left.method(right_source, expr_->distance_, tls_ctx);   \
+            if (!bitmap_input.empty() && !bitmap_input[batch_offset + i]) {      \
+                continue;                                                        \
             }                                                                    \
+            Geometry left;                                                       \
+            if (!left.TryParseFromWkb(                                           \
+                    tls_ctx, data[i].data(), data[i].size())) {                  \
+                res[i] = false;                                                  \
+                continue;                                                        \
+            }                                                                    \
+            res[i] = left.method(right_source, expr_->distance_, tls_ctx);       \
         }                                                                        \
     };                                                                           \
     int64_t processed_size = ProcessDataChunks<_DataType, true>(                 \
@@ -212,54 +151,24 @@ namespace exec {
                    "segment_offsets should not be nullptr");                     \
         const auto batch_offset = processed_cursor;                              \
         processed_cursor += size;                                                \
-        auto geometry_cache = this->segment_->GetGeometryCache(field_id_);       \
-        if (geometry_cache) {                                                    \
-            /* Cache-owned geometries share one GEOS context; drive the        \
-             * predicate on a per-thread context so concurrent lock-free        \
-             * readers never touch the same non-thread-safe context. */ \
-            GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();           \
-            for (int i = 0; i < size; ++i) {                                     \
-                if (valid_data && !valid_data[i]) {                              \
-                    res[i] = valid_res[i] = false;                               \
-                    continue;                                                    \
-                }                                                                \
-                if (!bitmap_input.empty() &&                                     \
-                    !bitmap_input[batch_offset + i]) {                           \
-                    continue;                                                    \
-                }                                                                \
-                auto absolute_offset = segment_offsets[i];                       \
-                auto cached_geometry =                                           \
-                    geometry_cache->GetByOffset(absolute_offset);                \
-                /* nullptr = empty/corrupt placeholder row: it is not a valid  \
-                 * geometry, so the unary predicate is false (see the           \
-                 * comparison macro). */ \
-                if (cached_geometry == nullptr) {                                \
-                    res[i] = false;                                              \
-                    continue;                                                    \
-                }                                                                \
-                res[i] = cached_geometry->method(tls_ctx);                       \
+        /* Thread-local context + non-throwing parse: no context leak,         \
+         * corrupt rows evaluate to false (see the comparison macro). */ \
+        GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();               \
+        for (int i = 0; i < size; ++i) {                                         \
+            if (valid_data && !valid_data[i]) {                                  \
+                res[i] = valid_res[i] = false;                                   \
+                continue;                                                        \
             }                                                                    \
-        } else {                                                                 \
-            /* Thread-local context + non-throwing parse: no context leak,     \
-             * corrupt rows evaluate to false (see the comparison macro). */ \
-            GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();           \
-            for (int i = 0; i < size; ++i) {                                     \
-                if (valid_data && !valid_data[i]) {                              \
-                    res[i] = valid_res[i] = false;                               \
-                    continue;                                                    \
-                }                                                                \
-                if (!bitmap_input.empty() &&                                     \
-                    !bitmap_input[batch_offset + i]) {                           \
-                    continue;                                                    \
-                }                                                                \
-                Geometry left;                                                   \
-                if (!left.TryParseFromWkb(                                       \
-                        tls_ctx, data[i].data(), data[i].size())) {              \
-                    res[i] = false;                                              \
-                    continue;                                                    \
-                }                                                                \
-                res[i] = left.method(tls_ctx);                                   \
+            if (!bitmap_input.empty() && !bitmap_input[batch_offset + i]) {      \
+                continue;                                                        \
             }                                                                    \
+            Geometry left;                                                       \
+            if (!left.TryParseFromWkb(                                           \
+                    tls_ctx, data[i].data(), data[i].size())) {                  \
+                res[i] = false;                                                  \
+                continue;                                                        \
+            }                                                                    \
+            res[i] = left.method(tls_ctx);                                       \
         }                                                                        \
     };                                                                           \
     int64_t processed_size = ProcessDataChunks<_DataType, true>(                 \
@@ -274,6 +183,7 @@ namespace exec {
 void
 PhyGISFunctionFilterExpr::DetermineExecPath() {
     if (expr_->op_ == proto::plan::GISFunctionFilterExpr_GISOp_STIsValid) {
+        decline_reason_ = DeclineReason::kCapabilityMismatch;
         exec_path_ = ExprExecPath::RawData;
         return;
     }
@@ -284,7 +194,8 @@ PhyGISFunctionFilterExpr::DetermineExecPath() {
 
 void
 PhyGISFunctionFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    WaitPrefetch();
+    auto eval_guard =
+        PrepareLeafEval(context, /*bind_offset_before_wait=*/false);
     AssertInfo(expr_->column_.data_type_ == DataType::GEOMETRY,
                "unsupported data type: {}",
                expr_->column_.data_type_);
@@ -312,6 +223,51 @@ PhyGISFunctionFilterExpr::EvalForDataSegment(
     TargetBitmapView res(res_vec->GetRawData(), real_batch_size);
     TargetBitmapView valid_res(res_vec->GetValidRawData(), real_batch_size);
     valid_res.set();
+
+    if (auto geometry_cache = segment_->GetGeometryCache(field_id_);
+        geometry_cache != nullptr) {
+        served_from_cache_ = true;
+        const auto batch_start = current_data_global_pos_;
+        TargetBitmap valid_bits =
+            ProcessDataChunksForValid<std::string>(/*record_raw_scan=*/true);
+        AssertInfo(valid_bits.size() == static_cast<size_t>(real_batch_size),
+                   "GIS validity batch has {} rows, expected {}",
+                   valid_bits.size(),
+                   real_batch_size);
+        GEOSContextHandle_t tls_ctx = GetThreadLocalGEOSContext();
+        const bool is_unary =
+            expr_->op_ == proto::plan::GISFunctionFilterExpr_GISOp_STIsValid;
+        std::optional<Geometry> query_geometry;
+        std::optional<PreparedGeometry> prepared_query;
+        if (!is_unary) {
+            query_geometry.emplace(tls_ctx, expr_->geometry_wkt_.c_str());
+            prepared_query.emplace(tls_ctx, *query_geometry);
+        }
+        for (int64_t i = 0; i < real_batch_size; ++i) {
+            if (!valid_bits[i]) {
+                res[i] = false;
+                valid_res[i] = false;
+                continue;
+            }
+            if (!bitmap_input.empty() && !bitmap_input[i]) {
+                continue;
+            }
+            const auto* cached_geometry =
+                geometry_cache->GetByOffset(batch_start + i);
+            if (cached_geometry == nullptr) {
+                res[i] = false;
+                continue;
+            }
+            res[i] = is_unary ? cached_geometry->is_valid(tls_ctx)
+                              : EvaluateGISPreparedOp(expr_->op_,
+                                                      *prepared_query,
+                                                      *query_geometry,
+                                                      *cached_geometry,
+                                                      expr_->distance_,
+                                                      tls_ctx);
+        }
+        return res_vec;
+    }
 
     if (expr_->op_ == proto::plan::GISFunctionFilterExpr_GISOp_STIsValid) {
         if (segment_->type() == SegmentType::Growing &&
@@ -605,6 +561,7 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment(
         const bool index_is_short =
             PromoteShortGISCoarseBitmap(coarse_global_, covered);
         if (index_is_short) {
+            short_index_degraded_ = true;
             static std::atomic<int64_t> last_short_index_log_us{0};
             if (ShouldLogGeometryThrottled(last_short_index_log_us)) {
                 LOG_WARN(
@@ -680,6 +637,9 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment(
     if (candidates.any()) {
         auto geometry_cache = segment_->GetGeometryCache(field_id_);
         if (geometry_cache) {
+            if (short_index_degraded_) {
+                served_from_cache_ = true;
+            }
             for (auto hit = candidates.find_first(); hit.has_value();
                  hit = candidates.find_next(*hit)) {
                 const auto* geometry =
@@ -701,6 +661,7 @@ PhyGISFunctionFilterExpr::EvalForIndexSegment(
                 // cannot materialize WKB for a later batch or a masked row.
                 auto data_array = segment_->bulk_subscript(
                     op_ctx_, field_id_, hit_offsets.data(), hit_offsets.size());
+                RecordRawScan(static_cast<int64_t>(hit_offsets.size()));
                 const auto& geometry_array =
                     data_array->scalars().geometry_data();
                 const auto& valid_data = GetFieldDataRowValidData(*data_array);

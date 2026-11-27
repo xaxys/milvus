@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1603,6 +1604,67 @@ func matchCountRule(outputs []string) bool {
 	return len(outputs) == 1 && strings.ToLower(strings.TrimSpace(outputs[0])) == "count(*)"
 }
 
+func appendExtraKVParams(dst []*commonpb.KeyValuePair, extra map[string]interface{}, reserved ...string) []*commonpb.KeyValuePair {
+	if len(extra) == 0 {
+		return dst
+	}
+	blocked := make(map[string]struct{}, len(dst)+len(reserved))
+	for _, kv := range dst {
+		blocked[kv.GetKey()] = struct{}{}
+	}
+	for _, k := range reserved {
+		blocked[k] = struct{}{}
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		val := extra[k]
+		if val == nil {
+			continue
+		}
+		mappedKey := k
+		if mappedKey == "ignoreGrowing" {
+			mappedKey = common.IgnoreGrowing
+		}
+		if _, exists := blocked[mappedKey]; exists {
+			continue
+		}
+		var strVal string
+		switch v := val.(type) {
+		case string:
+			strVal = v
+		case map[string]interface{}, []interface{}:
+			if encoded, err := json.Marshal(v); err == nil {
+				strVal = string(encoded)
+			} else {
+				strVal = fmt.Sprintf("%v", v)
+			}
+		default:
+			strVal = fmt.Sprintf("%v", v)
+		}
+		dst = append(dst, &commonpb.KeyValuePair{
+			Key:   mappedKey,
+			Value: strVal,
+		})
+	}
+	return dst
+}
+
+func attachExplainToHTTPBody(body gin.H, status *commonpb.Status, params []*commonpb.KeyValuePair) {
+	raw := status.GetExtraInfo()[HTTPReturnExplain]
+	if raw == "" {
+		return
+	}
+	if proxy.IsExplainFormatJSON(params) && json.Valid([]byte(raw)) {
+		body[HTTPReturnExplain] = json.RawMessage(raw)
+		return
+	}
+	body[HTTPReturnExplain] = raw
+}
+
 func (h *HandlersV2) query(ctx context.Context, c *gin.Context, anyReq any, dbName string) (interface{}, error) {
 	vectorEncoding, err := parseFloatVectorEncoding(c.Request.Header)
 	if err != nil {
@@ -1658,6 +1720,14 @@ func (h *HandlersV2) query(ctx context.Context, c *gin.Context, anyReq any, dbNa
 	if len(httpReq.GroupByFields) > 0 {
 		req.QueryParams = append(req.QueryParams, &commonpb.KeyValuePair{Key: proxy.GroupByFieldsKey, Value: strings.Join(httpReq.GroupByFields, ",")})
 	}
+	req.QueryParams = appendExtraKVParams(
+		req.QueryParams,
+		httpReq.QueryParams,
+		proxy.LimitKey,
+		proxy.OffsetKey,
+		proxy.OrderByFieldsKey,
+		proxy.GroupByFieldsKey,
+	)
 	resp, err := h.wrapperProxyWithLimit(ctx, c, req, h.checkAuth, false, "/milvus.proto.milvus.MilvusService/Query", true, h.proxy, func(reqCtx context.Context, req any) (interface{}, error) {
 		return h.proxy.Query(reqCtx, req.(*milvuspb.QueryRequest))
 	})
@@ -1676,22 +1746,18 @@ func (h *HandlersV2) query(ctx context.Context, c *gin.Context, anyReq any, dbNa
 			})
 		} else {
 			scannedRemoteBytes, scannedTotalBytes, cacheHitRatio, isValid := proxy.GetStorageCost(queryResp.GetStatus())
-			if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
-				HTTPReturnStream(c, http.StatusOK, gin.H{
-					HTTPReturnCode:               merr.Code(nil),
-					HTTPReturnData:               outputData,
-					HTTPReturnCost:               proxy.GetCostValue(queryResp.GetStatus()),
-					HTTPReturnScannedRemoteBytes: scannedRemoteBytes,
-					HTTPReturnScannedTotalBytes:  scannedTotalBytes,
-					HTTPReturnCacheHitRatio:      cacheHitRatio,
-				})
-			} else {
-				HTTPReturnStream(c, http.StatusOK, gin.H{
-					HTTPReturnCode: merr.Code(nil),
-					HTTPReturnData: outputData,
-					HTTPReturnCost: proxy.GetCostValue(queryResp.GetStatus()),
-				})
+			respBody := gin.H{
+				HTTPReturnCode: merr.Code(nil),
+				HTTPReturnData: outputData,
+				HTTPReturnCost: proxy.GetCostValue(queryResp.GetStatus()),
 			}
+			if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
+				respBody[HTTPReturnScannedRemoteBytes] = scannedRemoteBytes
+				respBody[HTTPReturnScannedTotalBytes] = scannedTotalBytes
+				respBody[HTTPReturnCacheHitRatio] = cacheHitRatio
+			}
+			attachExplainToHTTPBody(respBody, queryResp.GetStatus(), req.GetQueryParams())
+			HTTPReturnStream(c, http.StatusOK, respBody)
 		}
 	}
 	return resp, err
@@ -1724,6 +1790,14 @@ func (h *HandlersV2) get(ctx context.Context, c *gin.Context, anyReq any, dbName
 		PartitionNames:     httpReq.PartitionNames,
 		Expr:               filter,
 		ExprTemplateValues: idTemplateValues,
+		QueryParams: appendExtraKVParams(
+			nil,
+			httpReq.QueryParams,
+			proxy.LimitKey,
+			proxy.OffsetKey,
+			proxy.OrderByFieldsKey,
+			proxy.GroupByFieldsKey,
+		),
 	}
 	req.ConsistencyLevel, req.UseDefaultConsistency, err = convertConsistencyLevel(httpReq.ConsistencyLevel)
 	if err != nil {
@@ -1750,22 +1824,18 @@ func (h *HandlersV2) get(ctx context.Context, c *gin.Context, anyReq any, dbName
 			})
 		} else {
 			scannedRemoteBytes, scannedTotalBytes, cacheHitRatio, isValid := proxy.GetStorageCost(queryResp.GetStatus())
-			if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
-				HTTPReturnStream(c, http.StatusOK, gin.H{
-					HTTPReturnCode:               merr.Code(nil),
-					HTTPReturnData:               outputData,
-					HTTPReturnCost:               proxy.GetCostValue(queryResp.GetStatus()),
-					HTTPReturnScannedRemoteBytes: scannedRemoteBytes,
-					HTTPReturnScannedTotalBytes:  scannedTotalBytes,
-					HTTPReturnCacheHitRatio:      cacheHitRatio,
-				})
-			} else {
-				HTTPReturnStream(c, http.StatusOK, gin.H{
-					HTTPReturnCode: merr.Code(nil),
-					HTTPReturnData: outputData,
-					HTTPReturnCost: proxy.GetCostValue(queryResp.GetStatus()),
-				})
+			respBody := gin.H{
+				HTTPReturnCode: merr.Code(nil),
+				HTTPReturnData: outputData,
+				HTTPReturnCost: proxy.GetCostValue(queryResp.GetStatus()),
 			}
+			if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
+				respBody[HTTPReturnScannedRemoteBytes] = scannedRemoteBytes
+				respBody[HTTPReturnScannedTotalBytes] = scannedTotalBytes
+				respBody[HTTPReturnCacheHitRatio] = cacheHitRatio
+			}
+			attachExplainToHTTPBody(respBody, queryResp.GetStatus(), req.GetQueryParams())
+			HTTPReturnStream(c, http.StatusOK, respBody)
 		}
 	}
 	return resp, err
@@ -2417,10 +2487,13 @@ func (h *HandlersV2) search(ctx context.Context, c *gin.Context, anyReq any, dbN
 					respBody[HTTPReturnScannedTotalBytes] = scannedTotalBytes
 					respBody[HTTPReturnCacheHitRatio] = cacheHitRatio
 				}
+				attachExplainToHTTPBody(respBody, searchResp.GetStatus(), req.GetSearchParams())
 				HTTPReturnStream(c, http.StatusOK, respBody)
 			}
 		} else if searchResp.Results.TopK == int64(0) {
-			HTTPReturn(c, http.StatusOK, gin.H{HTTPReturnCode: merr.Code(nil), HTTPReturnData: []interface{}{}, HTTPReturnCost: cost})
+			respBody := gin.H{HTTPReturnCode: merr.Code(nil), HTTPReturnData: []interface{}{}, HTTPReturnCost: cost}
+			attachExplainToHTTPBody(respBody, searchResp.GetStatus(), req.GetSearchParams())
+			HTTPReturn(c, http.StatusOK, respBody)
 		} else {
 			allowJS, _ := strconv.ParseBool(c.Request.Header.Get(HTTPHeaderAllowInt64))
 			outputData, err := buildQueryRespWithEncoding(0, searchResp.Results.OutputFields, searchResp.Results.FieldsData, searchResp.Results.Ids, searchResp.Results.Scores, allowJS, collSchema, vectorEncoding)
@@ -2434,47 +2507,22 @@ func (h *HandlersV2) search(ctx context.Context, c *gin.Context, anyReq any, dbN
 					HTTPReturnMessage: resultErrMessage(err),
 				})
 			} else {
-				if len(searchResp.Results.Recalls) > 0 {
-					if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
-						HTTPReturnStream(c, http.StatusOK, gin.H{
-							HTTPReturnCode:               merr.Code(nil),
-							HTTPReturnData:               outputData,
-							HTTPReturnCost:               cost,
-							HTTPReturnRecalls:            searchResp.Results.Recalls,
-							HTTPReturnTopks:              searchResp.Results.Topks,
-							HTTPReturnScannedRemoteBytes: scannedRemoteBytes,
-							HTTPReturnScannedTotalBytes:  scannedTotalBytes,
-							HTTPReturnCacheHitRatio:      cacheHitRatio,
-						})
-					} else {
-						HTTPReturnStream(c, http.StatusOK, gin.H{
-							HTTPReturnCode:    merr.Code(nil),
-							HTTPReturnData:    outputData,
-							HTTPReturnCost:    cost,
-							HTTPReturnRecalls: searchResp.Results.Recalls,
-							HTTPReturnTopks:   searchResp.Results.Topks,
-						})
-					}
-				} else {
-					if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
-						HTTPReturnStream(c, http.StatusOK, gin.H{
-							HTTPReturnCode:               merr.Code(nil),
-							HTTPReturnData:               outputData,
-							HTTPReturnCost:               cost,
-							HTTPReturnTopks:              searchResp.Results.Topks,
-							HTTPReturnScannedRemoteBytes: scannedRemoteBytes,
-							HTTPReturnScannedTotalBytes:  scannedTotalBytes,
-							HTTPReturnCacheHitRatio:      cacheHitRatio,
-						})
-					} else {
-						HTTPReturnStream(c, http.StatusOK, gin.H{
-							HTTPReturnCode:  merr.Code(nil),
-							HTTPReturnData:  outputData,
-							HTTPReturnCost:  cost,
-							HTTPReturnTopks: searchResp.Results.Topks,
-						})
-					}
+				respBody := gin.H{
+					HTTPReturnCode:  merr.Code(nil),
+					HTTPReturnData:  outputData,
+					HTTPReturnCost:  cost,
+					HTTPReturnTopks: searchResp.Results.Topks,
 				}
+				if len(searchResp.Results.Recalls) > 0 {
+					respBody[HTTPReturnRecalls] = searchResp.Results.Recalls
+				}
+				if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
+					respBody[HTTPReturnScannedRemoteBytes] = scannedRemoteBytes
+					respBody[HTTPReturnScannedTotalBytes] = scannedTotalBytes
+					respBody[HTTPReturnCacheHitRatio] = cacheHitRatio
+				}
+				attachExplainToHTTPBody(respBody, searchResp.GetStatus(), req.GetSearchParams())
+				HTTPReturnStream(c, http.StatusOK, respBody)
 			}
 		}
 	}
@@ -2602,6 +2650,19 @@ func (h *HandlersV2) advancedSearch(ctx context.Context, c *gin.Context, anyReq 
 		HTTPAbortReturn(c, http.StatusOK, gin.H{HTTPReturnCode: merr.Code(err), HTTPReturnMessage: err.Error()})
 		return nil, err
 	}
+	req.RankParams = appendExtraKVParams(
+		req.RankParams,
+		httpReq.Params,
+		proxy.RankTypeKey,
+		proxy.ParamsKey,
+		proxy.LimitKey,
+		proxy.OffsetKey,
+		ParamRoundDecimal,
+		proxy.GroupByFieldKey,
+		proxy.GroupByFieldsKey,
+		proxy.GroupSizeKey,
+		proxy.StrictGroupSize,
+	)
 	if len(httpReq.FunctionScore.Functions) != 0 {
 		if req.FunctionScore, err = genFunctionScore(ctx, &httpReq.FunctionScore); err != nil {
 			HTTPAbortReturn(c, http.StatusOK, gin.H{HTTPReturnCode: merr.Code(merr.ErrParameterInvalid), HTTPReturnMessage: err.Error()})
@@ -2616,7 +2677,9 @@ func (h *HandlersV2) advancedSearch(ctx context.Context, c *gin.Context, anyReq 
 		cost := proxy.GetCostValue(searchResp.GetStatus())
 		scannedRemoteBytes, scannedTotalBytes, cacheHitRatio, isValid := proxy.GetStorageCost(searchResp.GetStatus())
 		if searchResp.Results.TopK == int64(0) {
-			HTTPReturn(c, http.StatusOK, gin.H{HTTPReturnCode: merr.Code(nil), HTTPReturnData: []interface{}{}, HTTPReturnCost: cost})
+			respBody := gin.H{HTTPReturnCode: merr.Code(nil), HTTPReturnData: []interface{}{}, HTTPReturnCost: cost}
+			attachExplainToHTTPBody(respBody, searchResp.GetStatus(), req.GetRankParams())
+			HTTPReturn(c, http.StatusOK, respBody)
 		} else {
 			allowJS, _ := strconv.ParseBool(c.Request.Header.Get(HTTPHeaderAllowInt64))
 			outputData, err := buildQueryRespWithEncoding(0, searchResp.Results.OutputFields, searchResp.Results.FieldsData, searchResp.Results.Ids, searchResp.Results.Scores, allowJS, collSchema, vectorEncoding)
@@ -2630,11 +2693,19 @@ func (h *HandlersV2) advancedSearch(ctx context.Context, c *gin.Context, anyReq 
 					HTTPReturnMessage: resultErrMessage(err),
 				})
 			} else {
-				if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
-					HTTPReturnStream(c, http.StatusOK, gin.H{HTTPReturnCode: merr.Code(nil), HTTPReturnData: outputData, HTTPReturnCost: cost, HTTPReturnTopks: searchResp.Results.Topks, HTTPReturnScannedRemoteBytes: scannedRemoteBytes, HTTPReturnScannedTotalBytes: scannedTotalBytes, HTTPReturnCacheHitRatio: cacheHitRatio})
-				} else {
-					HTTPReturnStream(c, http.StatusOK, gin.H{HTTPReturnCode: merr.Code(nil), HTTPReturnData: outputData, HTTPReturnCost: cost, HTTPReturnTopks: searchResp.Results.Topks})
+				respBody := gin.H{
+					HTTPReturnCode:  merr.Code(nil),
+					HTTPReturnData:  outputData,
+					HTTPReturnCost:  cost,
+					HTTPReturnTopks: searchResp.Results.Topks,
 				}
+				if proxy.Params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool() && isValid {
+					respBody[HTTPReturnScannedRemoteBytes] = scannedRemoteBytes
+					respBody[HTTPReturnScannedTotalBytes] = scannedTotalBytes
+					respBody[HTTPReturnCacheHitRatio] = cacheHitRatio
+				}
+				attachExplainToHTTPBody(respBody, searchResp.GetStatus(), req.GetRankParams())
+				HTTPReturnStream(c, http.StatusOK, respBody)
 			}
 		}
 	}

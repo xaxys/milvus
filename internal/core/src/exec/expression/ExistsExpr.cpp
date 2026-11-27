@@ -52,20 +52,21 @@ PhyExistsFilterExpr::DetermineExecPath() {
     req.value_type = DataType::NONE;
     const auto pointer = milvus::Json::pointer(expr_->column_.nested_path_);
     SelectAndCreateIndexReader(req, [&]() {
-        return json_reader_ != nullptr &&
-               !json_reader_->CastTypesOf(pointer).empty();
+        if (json_reader_ == nullptr ||
+            json_reader_->CastTypesOf(pointer).empty()) {
+            decline_reason_ = DeclineReason::kJsonPathNotCovered;
+            return false;
+        }
+        return true;
     });
 }
 
 void
 PhyExistsFilterExpr::Eval(EvalCtx& context, VectorPtr& result) {
-    WaitPrefetch();
+    auto eval_guard = PrepareLeafEval(context);
     tracer::AutoSpan span(
         "PhyExistsFilterExpr::Eval", tracer::GetRootSpan(), true);
     span.SetAttribute("data_type", static_cast<int>(expr_->column_.data_type_));
-
-    auto input = context.get_offset_input();
-    SetHasOffsetInput((input != nullptr));
     auto data_type = expr_->column_.data_type_;
     if (expr_->column_.element_level_) {
         data_type = expr_->column_.element_type_;
@@ -113,6 +114,9 @@ PhyExistsFilterExpr::EvalJsonExistsForIndex() {
             /*enable_cache_write=*/true,
             feature_recorder_);
         cached_index_chunk_res_ = cached.result;
+        if (cached.from_cache) {
+            served_from_cache_ = true;
+        }
     }
     auto res = MoveOrSliceBitmap(
         *cached_index_chunk_res_, current_index_chunk_pos_, real_batch_size);
@@ -229,6 +233,8 @@ PhyExistsFilterExpr::EvalJsonExistsForDataSegmentByStats() {
 
                 TargetBitmap res(active_count_);
                 TargetBitmapView res_view(res);
+                int64_t shredded_scanned = 0;
+                int64_t shared_scanned = 0;
 
                 // process shredding data
                 {
@@ -241,8 +247,9 @@ PhyExistsFilterExpr::EvalJsonExistsForDataSegmentByStats() {
                     for (const auto& field : shredding_fields) {
                         TargetBitmap temp_valid(active_count_, true);
                         TargetBitmapView temp_valid_view(temp_valid);
-                        index->ExecutorForGettingValid(
+                        const auto scanned = index->ExecutorForGettingValid(
                             op_ctx_, field, temp_valid_view);
+                        shredded_scanned = std::max(shredded_scanned, scanned);
                         res_view |= temp_valid_view;
                     }
                 }
@@ -253,7 +260,7 @@ PhyExistsFilterExpr::EvalJsonExistsForDataSegmentByStats() {
                         "exists_json_stats_shared_data", [this](double us) {
                             json_stats_shared_latency_us_ += us;
                         });
-                    index->ExecuteForSharedData(
+                    shared_scanned = index->ExecuteForSharedData(
                         op_ctx_,
                         bson_index_,
                         pointer,
@@ -262,12 +269,17 @@ PhyExistsFilterExpr::EvalJsonExistsForDataSegmentByStats() {
                         });
                 }
 
+                RecordRawScan(std::min<int64_t>(
+                    active_count_, shredded_scanned + shared_scanned));
                 TargetBitmap valid(active_count_, true);
                 return {std::move(res), std::move(valid)};
             },
             /*enable_cache_write=*/true,
             feature_recorder_);
         cached_index_chunk_res_ = cached.result;
+        if (cached.from_cache) {
+            served_from_cache_ = true;
+        }
     }
 
     auto res = MoveOrSliceBitmap(

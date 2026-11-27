@@ -2776,8 +2776,18 @@ func (node *Proxy) search(ctx context.Context, request *milvuspb.SearchRequest, 
 	}
 	// If all IDs have null vectors (Nq == 0), return empty results without executing search
 	if len(validData) > 0 && request.GetNq() == 0 {
+		status := merr.Success()
+		var schemaHelper *typeutil.SchemaHelper
+		var collSchema *schemapb.CollectionSchema
+		if searchByPK != nil && searchByPK.collectionInfo != nil && searchByPK.collectionInfo.Schema != nil {
+			schemaHelper = searchByPK.collectionInfo.Schema.SchemaHelper
+			collSchema = searchByPK.collectionInfo.Schema.CollectionSchema
+		}
+		if err := AttachZeroSegmentExplain(&status, request.GetSearchParams(), request.GetDsl(), request.GetExprTemplateValues(), schemaHelper, collSchema); err != nil {
+			return &milvuspb.SearchResults{Status: merr.Status(err)}, false, false, false, err
+		}
 		return &milvuspb.SearchResults{
-			Status: merr.Success(),
+			Status: status,
 			Results: &schemapb.SearchResultData{
 				NumQueries: int64(len(validData)),
 				TopK:       0,
@@ -3239,6 +3249,9 @@ func (node *Proxy) preflightSearchByPK(ctx context.Context, request *milvuspb.Se
 	}
 	if len(request.GetSubReqs()) > 0 {
 		return nil, merr.WrapErrParameterInvalidMsg("search by IDs is not supported for hybrid search")
+	}
+	if err := ValidateExplainParams(request.GetSearchParams()); err != nil {
+		return nil, err
 	}
 
 	// Pin collection identity before validating request-sized ID input.

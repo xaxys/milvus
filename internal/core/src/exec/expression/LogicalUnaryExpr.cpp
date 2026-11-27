@@ -16,6 +16,8 @@
 
 #include "LogicalUnaryExpr.h"
 
+#include <algorithm>
+
 #include "common/EasyAssert.h"
 #include "common/Tracer.h"
 #include "common/ValueOp.h"
@@ -32,7 +34,35 @@ PhyLogicalUnaryExpr::Eval(EvalCtx& context, VectorPtr& result) {
                "logical unary expr must has one input, but now {}",
                inputs_.size());
 
+    auto* exec_ctx = context.get_exec_context();
+    auto* explain = exec_ctx != nullptr ? exec_ctx->explain() : nullptr;
+    TargetBitmap mask_copy;
+    if (explain != nullptr && inputs_[0] != nullptr &&
+        inputs_[0]->expr_id() != 0) {
+        const auto& incoming_mask = context.get_bitmap_input();
+        if (!incoming_mask.empty()) {
+            mask_copy.append(incoming_mask, 0, incoming_mask.size());
+        }
+    }
+
     inputs_[0]->Eval(context, result);
+    if (result == nullptr) {
+        return;
+    }
+    // The proxy tags the operand of NOT, not the NOT node; without this the
+    // condition would carry a decision group but no row counts.
+    auto child_bitmap = GetColumnVector(result);
+    if (explain != nullptr && child_bitmap != nullptr &&
+        inputs_[0] != nullptr && inputs_[0]->expr_id() != 0 &&
+        child_bitmap->IsBitmap()) {
+        const int64_t rows_in = mask_copy.empty()
+                                    ? static_cast<int64_t>(child_bitmap->size())
+                                    : static_cast<int64_t>(mask_copy.count());
+        const int64_t rows_out =
+            CountExplainBitmapMatches(child_bitmap.get(), mask_copy.view());
+        ExecutionExplainRecorder::AddSlotRows(
+            inputs_[0]->explain_slot(), rows_in, rows_out);
+    }
     if (expr_->op_type_ == milvus::expr::LogicalUnaryExpr::OpType::LogicalNot) {
         common::ThreeValuedLogicOp::Not(GetColumnVector(result));
     }

@@ -470,6 +470,24 @@ func (sd *shardDelegator) executeSearchSubTasks(
 	growing []SegmentEntry,
 	sealedRowCount map[int64]int64,
 ) ([]*internalpb.SearchResults, error) {
+	items, err := sd.executeSearchSubTasksWithMeta(ctx, req, sealed, growing, sealedRowCount)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]*internalpb.SearchResults, len(items))
+	for i, item := range items {
+		results[i] = item.result
+	}
+	return results, nil
+}
+
+func (sd *shardDelegator) executeSearchSubTasksWithMeta(
+	ctx context.Context,
+	req *querypb.SearchRequest,
+	sealed []SnapshotItem,
+	growing []SegmentEntry,
+	sealedRowCount map[int64]int64,
+) ([]subTaskExecResult[*internalpb.SearchResults], error) {
 	log := sd.getLogger(ctx)
 	tasks, err := organizeSubTask(ctx, req, sealed, growing, sd, true, sd.modifySearchRequest)
 	if err != nil {
@@ -477,7 +495,7 @@ func (sd *shardDelegator) executeSearchSubTasks(
 		return nil, err
 	}
 
-	results, err := executeSubTasks(ctx, tasks, NewRowCountBasedEvaluator(sealedRowCount),
+	results, err := executeSubTasksWithMeta(ctx, tasks, NewRowCountBasedEvaluator(sealedRowCount),
 		func(ctx context.Context, req *querypb.SearchRequest, worker cluster.Worker) (*internalpb.SearchResults, error) {
 			ctx = workerReadContext(ctx)
 			resp, err := worker.SearchSegments(ctx, req)
@@ -1107,7 +1125,14 @@ func (sd *shardDelegator) GetDeleteBufferSize() (entryNum int64, memorySize int6
 type subTask[T any] struct {
 	req      T
 	targetID int64
+	scope    querypb.DataScope
 	worker   cluster.Worker
+}
+
+type subTaskExecResult[R any] struct {
+	nodeID int64
+	scope  querypb.DataScope
+	result R
 }
 
 func organizeSubTask[T any](ctx context.Context,
@@ -1144,6 +1169,7 @@ func organizeSubTask[T any](ctx context.Context,
 		result = append(result, subTask[T]{
 			req:      req,
 			targetID: workerID,
+			scope:    scope,
 			worker:   worker,
 		})
 		return nil
@@ -1165,6 +1191,21 @@ func executeSubTasks[T any, R interface {
 	GetStatus() *commonpb.Status
 }](ctx context.Context, tasks []subTask[T], evaluator PartialResultEvaluator, execute func(context.Context, T, cluster.Worker) (R, error), taskType string, log *mlog.Logger,
 ) ([]R, error) {
+	items, err := executeSubTasksWithMeta(ctx, tasks, evaluator, execute, taskType, log)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]R, len(items))
+	for i, item := range items {
+		results[i] = item.result
+	}
+	return results, nil
+}
+
+func executeSubTasksWithMeta[T any, R interface {
+	GetStatus() *commonpb.Status
+}](ctx context.Context, tasks []subTask[T], evaluator PartialResultEvaluator, execute func(context.Context, T, cluster.Worker) (R, error), taskType string, log *mlog.Logger,
+) ([]subTaskExecResult[R], error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -1178,6 +1219,7 @@ func executeSubTasks[T any, R interface {
 	wg, ctx := errgroup.WithContext(ctx)
 	type channelResult struct {
 		nodeID   int64
+		scope    querypb.DataScope
 		segments []int64
 		result   R
 		err      error
@@ -1218,6 +1260,7 @@ func executeSubTasks[T any, R interface {
 
 			taskResult := channelResult{
 				nodeID: task.targetID,
+				scope:  task.scope,
 				result: result,
 				err:    err,
 			}
@@ -1244,11 +1287,15 @@ func executeSubTasks[T any, R interface {
 	var errors []error
 
 	// Collect results
-	results := make([]R, 0, len(tasks))
+	results := make([]subTaskExecResult[R], 0, len(tasks))
 	for item := range resultCh {
 		if item.err == nil {
 			successSegmentList.Insert(item.segments...)
-			results = append(results, item.result)
+			results = append(results, subTaskExecResult[R]{
+				nodeID: item.nodeID,
+				scope:  item.scope,
+				result: item.result,
+			})
 		} else {
 			failureSegmentList = append(failureSegmentList, item.segments...)
 			errors = append(errors, item.err)
